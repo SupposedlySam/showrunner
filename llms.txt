@@ -1,0 +1,37 @@
+# showrunner
+
+> A multi-agent orchestrator for Claude Code. It decomposes a quest into a dependency graph, sends a party of "Crawler" agents into separate git worktrees in parallel, enforces the party-wide rules no single agent can see (above all: a cross-process lock over shared single-consumer resources), and keeps the campaign coherent across sessions. It is the horizontal counterpart to game_loop's vertical, single-session survival rails.
+
+showrunner depends on two lower layers and neither knows it exists: **game_loop** (per-agent autonomy/safety/honesty rails, enforced by Claude Code hooks) and **br** (a local SQLite dependency graph where `br ready` returns unblocked work). Theme: Dungeon Crawler Carl — Crawlers run the rooms, game_loop keeps each alive, br is the quest log, showrunner runs the production.
+
+## Core concepts
+
+- **Crawler**: one Claude Code agent in its own git worktree + tmux session, running under game_loop.
+- **The loop**: `br ready` (unblocked leaves) → claim → route to a lane → Crawler works → close only through the proof-of-done gate → integrate → repeat until dry.
+- **Lanes**: `headless` (tests/backend/pure-logic/analyze — parallelizable, one worktree Crawler per ready leaf); `serialized` (anything touching a single-consumer resource like a device, deploy target, or bound port — one at a time behind the shared lock); `orchestration` (showrunner itself — single).
+- **The one hard rule**: shared single-consumer resources need a serialization point no single Crawler can see. showrunner owns the cross-process lock that makes "one at a time" physically true, not a prompt wish.
+- **Proof-of-done gate**: a leaf cannot close unless it cites a real, non-empty artifact (passing test, live endpoint, committed file). "Cite the file" applied to *done*. Practical refinement from dogfooding: gate on "no *new* failures vs baseline," not "all green."
+- **Dependency-gated fan-out**: br hides blocked work, so a shared prerequisite gates everything behind it; closing it releases the dependents to fan out.
+- **Generic, not project-specific**: which verbs are "serialized," which resources are single-consumer, and the graph location are config, not code.
+
+## Files
+
+- [README.md](README.md): what showrunner is, the cast (showrunner/game_loop/br/Crawler), why it's separate from game_loop, the loop, lanes, and what's been proven by dogfooding.
+- [docs/DESIGN.md](docs/DESIGN.md): design notes — the two axes, the enforcement seam (showrunner owns the lock; a game_loop-shaped PreToolUse hook checks it before a risky verb), validated primitives, open questions, and the proof-first sequence.
+- [prototype/README.md](prototype/README.md): what the validated proof-of-concept scripts demonstrate.
+- [prototype/device_lane.sh](prototype/device_lane.sh): cross-process single-consumer lock (atomic mkdir + live-PID holder + stale reclaim + acquire/exec/release `run` wrapper + a `guard` verb).
+- [prototype/br_gate.sh](prototype/br_gate.sh): `close-gate` (proof-of-done) and `stop-gate` (refuse turn-end while a claimed leaf is open; epics/containers excluded).
+- [prototype/demo.sh](prototype/demo.sh): assertion harness (run `bash prototype/demo.sh` — 12/12).
+
+## Dependencies
+
+- [game_loop](https://github.com/SupposedlySam/game_loop): per-session autonomy + safety + honesty rails for a single Claude Code agent, enforced in tools/hooks rather than instructions.
+- br: local SQLite work-graph; `br ready` = unblocked leaves; survives across sessions.
+
+## How to orchestrate with showrunner
+
+1. Model the work in br as a dependency graph; put a shared prerequisite (environment setup) ahead of the fan-out so it gates the dependents.
+2. Poll `br ready` for unblocked leaves. Claim each with an actor before touching files.
+3. Route each leaf to a lane: headless leaves fan out as parallel Crawlers in fresh worktrees; anything touching a single-consumer resource takes the shared lock first and runs alone.
+4. Each Crawler runs under game_loop and may only close its leaf through the proof-of-done gate (name a real artifact).
+5. Integrate results and repeat until `br ready` is dry. Prefer non-overlapping file sets across concurrent Crawlers so integration is conflict-free.
