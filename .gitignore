@@ -1,0 +1,6 @@
+# runtime lock state (created by the device-lane mutex)
+**/device.lock/
+# scratch
+/tmp/
+*.log
+.DS_Store
