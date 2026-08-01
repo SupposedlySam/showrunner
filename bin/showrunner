@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""showrunner entrypoint.
+
+Resolves the library beside itself, so this file works from a clone, from an installed
+`.showrunner/` payload, and through a symlink — with no PYTHONPATH and nothing to install.
+"""
+
+import os
+import sys
+
+_here = os.path.dirname(os.path.abspath(os.path.realpath(__file__)))
+for _candidate in (os.path.join(os.path.dirname(_here), "lib"), os.path.join(_here, "lib")):
+    if os.path.isdir(os.path.join(_candidate, "showrunner")):
+        sys.path.insert(0, _candidate)
+        break
+else:
+    sys.stderr.write("showrunner: cannot find lib/showrunner next to %s\n" % _here)
+    raise SystemExit(70)
+
+if sys.version_info < (3, 7):
+    sys.stderr.write("showrunner needs Python 3.7+ (found %s)\n" % sys.version.split()[0])
+    raise SystemExit(70)
+
+from showrunner.cli import main  # noqa: E402
+
+if __name__ == "__main__":
+    raise SystemExit(main())

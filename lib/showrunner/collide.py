@@ -1,0 +1,201 @@
+"""Blast-radius estimation and wave planning. Issue #5.
+
+The graph answers "what is unblocked?" — a question about *dependencies*. It models
+nothing about what two agents will *touch*. Two leaves can be mutually unblocked and
+still be the same edit, so "prefer non-overlapping file sets" is a preference expressed
+in prose, checked by nobody, at exactly the moment it matters.
+
+This estimates each ready leaf's blast radius before dispatch and refuses to fan out two
+leaves whose estimates intersect, routing the second into the next wave.
+
+**The estimate does not need to be good, only conservative.** A false collision costs one
+wave of latency; a missed one costs a merge conflict in an unattended run with nobody
+watching. So a leaf whose radius cannot be estimated at all is treated as colliding with
+everything, and said out loud rather than optimistically parallelised.
+
+**Shared surfaces are the expected case, not an anomaly.** Nearly every project has one
+file every change touches — a test file, a dispatch table, a config schema. Letting that
+force a fully serial run would make the check look like the reason the run is slow, and a
+check that looks like an unexplained slowdown invites someone to remove it. Paths matching
+`collision.always_serialize` are therefore excluded from the parallel-blocking decision
+and recorded as shared surfaces that *integration* must serialise instead (issue #9).
+"""
+
+import fnmatch
+import os
+import re
+
+from .util import run
+
+# Tokens common enough in prose that grepping them would match the whole repo.
+_STOPWORDS = {
+    "the", "and", "that", "this", "with", "from", "when", "then", "into", "have", "does",
+    "issue", "file", "files", "path", "paths", "test", "tests", "code", "line", "lines",
+    "should", "would", "could", "which", "there", "their", "because", "every", "never",
+    "always", "instead", "rather", "before", "after", "check", "checks", "agent", "agents",
+    "work", "run", "runs", "make", "made", "same", "each", "onto", "over", "under", "what",
+    "will", "were", "been", "than", "them", "they", "some", "only", "also", "more", "most",
+    "case", "cases", "thing", "things", "shape", "state", "value", "values", "true", "false",
+}
+
+_PATHISH = re.compile(r"[A-Za-z0-9_.\-/]*[/][A-Za-z0-9_.\-/]*\.[A-Za-z0-9]{1,6}")
+_BACKTICKED = re.compile(r"`([^`\n]{2,80})`")
+_IDENT = re.compile(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+|[A-Z][a-zA-Z0-9]*[a-z][A-Z][a-zA-Z0-9]*)\b")
+
+MAX_GREP_BYTES = 400_000
+
+
+def tracked_files(root):
+    rc, out, _ = run(["git", "ls-files"], cwd=root)
+    if rc != 0:
+        return []
+    return [line for line in out.splitlines() if line.strip()]
+
+
+def _text_of(leaf):
+    return "\n".join([str(leaf.get("title") or ""), str(leaf.get("body") or "")])
+
+
+def _declared_paths(leaf, root, files):
+    """Paths the leaf names outright, kept only when they exist in the repo."""
+    found = set()
+    fileset = set(files)
+    text = _text_of(leaf)
+    candidates = set(_PATHISH.findall(text))
+    for m in _BACKTICKED.findall(text):
+        candidates.add(m.strip())
+    for p in (leaf.paths_list if hasattr(leaf, "paths_list") else []):
+        candidates.add(p)
+    for cand in candidates:
+        cand = cand.strip().strip("`'\"(),;:")
+        if not cand:
+            continue
+        if cand in fileset:
+            found.add(cand)
+            continue
+        # A directory named in the issue implicates everything under it.
+        if os.path.isdir(os.path.join(root, cand)):
+            prefix = cand.rstrip("/") + "/"
+            found.update(f for f in files if f.startswith(prefix))
+    return found
+
+
+def _symbols(leaf):
+    text = _text_of(leaf)
+    syms = set()
+    for m in _BACKTICKED.findall(text):
+        token = m.strip()
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.\-]{2,60}", token) and "/" not in token:
+            syms.add(token)
+    for m in _IDENT.findall(text):
+        if m.lower() not in _STOPWORDS and len(m) >= 5:
+            syms.add(m)
+    return {s for s in syms if s.lower() not in _STOPWORDS}
+
+
+def _grep_symbols(root, files, symbols, limit_files=4000):
+    """Files mentioning any of the symbols. Cheap, conservative, and bounded."""
+    if not symbols:
+        return set()
+    pattern = re.compile("|".join(re.escape(s) for s in sorted(symbols)))
+    hits = set()
+    for rel in files[:limit_files]:
+        path = os.path.join(root, rel)
+        try:
+            if os.path.getsize(path) > MAX_GREP_BYTES:
+                continue
+            with open(path, "r", errors="ignore") as fh:
+                if pattern.search(fh.read()):
+                    hits.add(rel)
+        except OSError:
+            continue
+    return hits
+
+
+def estimate(cfg, leaf, files=None):
+    """Return {'paths': set, 'shared': set, 'symbols': set, 'basis': str}."""
+    root = cfg.root
+    files = tracked_files(root) if files is None else files
+    declared = _declared_paths(leaf, root, files)
+    symbols = _symbols(leaf)
+    grepped = _grep_symbols(root, files, symbols) if symbols else set()
+    extra = set()
+    for glob in (cfg.get("collision") or {}).get("extra_globs") or []:
+        extra.update(f for f in files if fnmatch.fnmatch(f, glob))
+
+    all_paths = declared | grepped | extra
+    shared_globs = (cfg.get("collision") or {}).get("always_serialize") or []
+    shared = {f for f in all_paths if any(fnmatch.fnmatch(f, g) for g in shared_globs)}
+
+    if declared and grepped:
+        basis = "%d path(s) named in the issue + %d file(s) mentioning %d symbol(s)" % (
+            len(declared), len(grepped), len(symbols))
+    elif declared:
+        basis = "%d path(s) named in the issue" % len(declared)
+    elif grepped:
+        basis = "%d file(s) mentioning %d symbol(s)" % (len(grepped), len(symbols))
+    else:
+        basis = "NOTHING ESTIMABLE — the issue names no real path and no findable symbol"
+
+    return {
+        "leaf": leaf["id"],
+        "paths": all_paths,
+        "exclusive": all_paths - shared,
+        "shared": shared,
+        "symbols": symbols,
+        "basis": basis,
+        "estimable": bool(all_paths),
+    }
+
+
+def plan_waves(cfg, leaves, files=None):
+    """Greedy wave assignment. Returns (waves, estimates, notes).
+
+    `waves` is a list of lists of leaf ids; every leaf in one wave is pairwise
+    non-overlapping on its *exclusive* paths. Non-estimable leaves get a wave to
+    themselves — an unknown radius cannot be shown disjoint from anything.
+    """
+    files = tracked_files(cfg.root) if files is None else files
+    estimates = {leaf["id"]: estimate(cfg, leaf, files) for leaf in leaves}
+    notes = []
+    waves, wave_paths = [], []
+    solo = []
+
+    for leaf in leaves:
+        est = estimates[leaf["id"]]
+        if not est["estimable"]:
+            solo.append(leaf["id"])
+            notes.append(
+                "%s cannot be parallelised: %s. Treating an unknown blast radius as "
+                "colliding with everything — a false collision costs one wave, a missed "
+                "one costs a merge conflict nobody is watching."
+                % (leaf["id"], est["basis"]))
+            continue
+        placed = False
+        for i, taken in enumerate(wave_paths):
+            clash = taken & est["exclusive"]
+            if not clash:
+                waves[i].append(leaf["id"])
+                taken |= est["exclusive"]
+                placed = True
+                break
+            if i == 0:
+                sample = ", ".join(sorted(clash)[:3])
+                notes.append(
+                    "%s held back from wave 1: its estimated files overlap work already in "
+                    "that wave (%s%s)." % (leaf["id"], sample,
+                                           ", …" if len(clash) > 3 else ""))
+        if not placed:
+            waves.append([leaf["id"]])
+            wave_paths.append(set(est["exclusive"]))
+
+    for leaf_id in solo:
+        waves.append([leaf_id])
+        wave_paths.append(set())
+
+    shared_all = sorted({p for e in estimates.values() for p in e["shared"]})
+    if shared_all:
+        notes.append(
+            "shared surface(s) excluded from the parallel decision and owed to serialised "
+            "integration instead: %s" % ", ".join(shared_all[:8]))
+    return waves, estimates, notes
