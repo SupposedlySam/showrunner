@@ -1,0 +1,9 @@
+# showrunner runtime state — not source
+graph.db
+graph.db-*
+locks/
+scratch/
+campaign.json
+routing.jsonl
+baseline.json
+integration-commit.json

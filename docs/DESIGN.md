@@ -1,6 +1,7 @@
 # showrunner — design notes
 
-Working notes, not a spec. Captures decisions made while prototyping against the Drops monorepo.
+Working notes, not a spec. Records the decisions and the reasons, including the ones that only
+became obvious by running the thing.
 
 ## Two axes (why showrunner ≠ game_loop)
 
@@ -11,48 +12,122 @@ Working notes, not a spec. Captures decisions made while prototyping against the
 
 Dependency direction: **showrunner → game_loop + br.** The primitives never learn showrunner exists.
 
+## Decision: the work-graph is vendored, with a br adapter
+
+`br ready` was originally described as the only work-discovery entrypoint, which made a Rust
+toolchain and a separate tracker load-bearing for every loop iteration. The layer below reaches as
+far as it does substantially because it has **no install step worth the name**, and showrunner
+inherits that audience; every dependency is a place adoption stops, and this one sat in front of the
+*first* command.
+
+So: a minimal graph over Python's built-in `sqlite3`, and a `br` adapter that is preferred when br is
+genuinely present. Both sit behind one `Graph` interface, and nothing else in showrunner learns which
+backend it got (`lib/showrunner/graph.py`).
+
+Two capabilities the vendored backend has that a general tracker does not, because an orchestrator
+needs them:
+
+- **Claims carry liveness** (pid + boot token + worktree + session).
+- **`refuted` is a terminal state** distinct from `closed`.
+
+The br adapter cannot answer `stale_claims()` — br records no liveness on a claim — so it **raises
+rather than returning an empty list**. Returning `[]` would read as "nothing is stale", which is the
+one answer that must never be produced by not knowing.
+
 ## The boundary (the seam)
 
 The interesting edge is enforcement of shared resources:
 
 - The **lock** (shared cross-process state) is showrunner's.
 - The **guard** that checks it before a risky verb is a game_loop-shaped **PreToolUse hook** running
-  inside each Crawler.
+  inside each Crawler — `showrunner lock guard` exits 2, which is the deny code.
 - So game_loop's write-guard grows a generic "check this external lock before these verbs" seam, and
   **showrunner supplies the lock path.** game_loop stays generic — it never learns the word "device."
 
 Likewise: game_loop provides the *hook mechanism* for a Stop gate / a done gate; showrunner provides
-the *graph + policy* those gates read.
+the *graph + policy* those gates read (`showrunner stop-gate`, also exit 2).
 
-## Validated primitives (see `prototype/`, 12/12 passing against real `br` + worktrees)
+## The rule the whole design keeps rediscovering
 
-1. **Cross-process device/serialized-resource lock** (`device_lane.sh`): atomic `mkdir` lock whose
-   holder is a **live PID** (the long-running consumer itself, via the `run` wrapper). Blocks a second
-   consumer while the holder is alive; auto-reclaims when the holder is dead. This is what makes
-   "one at a time" physically true across separate processes/worktrees.
-2. **Proof-of-done close gate** (`br_gate.sh close-gate`): `br close` refused unless a real, non-empty
-   artifact is named (test / golden / commit). game_loop's "cite the file" applied to "done."
-3. **Leaf-scoped Stop gate** (`br_gate.sh stop-gate`): refuse turn-end with claimed-open **leaf** work;
-   epics are containers and are excluded.
+**A degraded guard must fail loud, never quiet.** Every failure mode that actually hurt in a real run
+had the same shape: not an error, but *silence*.
 
-## Open questions (to resolve by running a real multi-Crawler campaign first)
+| The mechanism | How it goes quiet | What now happens |
+|---|---|---|
+| the resource lock | a worktree-relative lock root gives N trees N locks | refused at config load |
+| the stop gate | `sed`/`grep` over JSON stops matching after a field-order change | parsed as JSON; unrecognised shape refuses |
+| the br adapter | an unparseable response reads as an empty graph | refuses, naming the command and the output |
+| a claim | its owner dies and the leaf never returns to `ready` | pid + boot token; `reap` reclaims loudly |
+| the close gate | any non-empty file satisfies `[ -s "$proof" ]` | proof must postdate the claim, and is recorded |
+| a check comparison | a failure with no parseable lines looks like no failure | marked `exit-code-only` and reported as degraded |
+| the collision estimate | an unestimable leaf looks like a leaf that collides with nothing | treated as colliding with everything, with the reason printed |
+| lane routing | an unmatched leaf silently takes the default | defaults conservatively **and says the rule is missing** |
+
+## Isolation is per-resource; a worktree is not a boundary
+
+A worktree isolates **tracked files** and nothing else. Everything resolved from an absolute path or
+from a hook's own script location stays shared — verified in this repo: the PreToolUse hook is
+registered as `"$CLAUDE_PROJECT_DIR"/.game_loop/bin/guard-writes.sh` and its impl resolves from
+`dirname "${BASH_SOURCE[0]}"`, i.e. the main checkout, so a commit made inside a worktree is gated on
+the **main checkout's** verification record.
+
+Consequences, and the second is the serious one:
+
+1. **Throughput** — every worktree serializes on the state of a tree it does not own, and it degrades
+   exactly when the orchestrator is busiest integrating.
+2. **Correctness** — the mirror case: a Crawler can commit a gated change while the shared record is
+   green from an entirely unrelated run. The gate's premise (a green check predating a change is
+   evidence about code that no longer exists) is defeated, because the evidence describes a different
+   tree altogether.
+
+showrunner's answer is not to fix game_loop from the outside but to **enumerate what is shared at
+spawn and say so**, and to tell the Crawler in its brief to wait or escalate rather than reach for
+`--no-verify`. Where the underlying harness supports per-tree state, configure it; where it does not,
+that is a bug to file against the harness, and until it is fixed the orchestrator should know it is
+serializing rather than looking mysteriously slow.
+
+## Premise verification is the highest-leverage line in a brief
+
+Over one real run of 14 issues, three had premises that did not survive contact with the codebase: a
+failure that was not live in that repo, tooling that was asserted to exist and did not, and a command
+from an entirely different harness. That is not a criticism of the issues — a good bug report is
+written from the incident, and the incident happened somewhere.
+
+Why it is a *showrunner* problem specifically: a Crawler that quietly implements a fix for a bug that
+is not there is **indistinguishable** from one that did the work, and the proof-of-done gate is
+satisfied because a real artifact really was produced. The gate checks that work happened, not that it
+was needed. And fan-out makes it worse rather than better — a single agent working a queue serially
+starts noticing that issue 9 contradicts what it read for issue 3; N isolated agents each see one
+issue and cannot notice anything.
+
+Hence: `--premise` and `--premise-read` are **required arguments of the close**, and `--refuted` is a
+first-class successful outcome. If the only shapes available are done/failed, the incentive is to
+build something.
+
+## Validated primitives
+
+`test/run.py` — 117 assertions, Python 3 + git, no other setup. The `br`/`tmux` assertions skip
+loudly. `prototype/` holds the original shell POC (7 assertions run anywhere, 5 skip).
+
+## Still open
 
 - **Lock completeness / rung.** The PreToolUse guard is only as good as its verb classifier; a rogue
-  raw command escapes it. To reach rung-1 IMPOSSIBLE, the lock likely belongs *inside* the consumer
-  tool (e.g. the deploy tool) **and** the guard — belt + suspenders.
-- **Shared lock path across worktrees.** Proven cross-process; cross-worktree needs the lock at one
-  absolute shared path (env-configured), not per-tree.
-- **Failure modes not yet exercised:** a Crawler dying mid-claim, lock fairness/starvation, merge
-  ordering across N branches, dev-server port collisions.
-- **PID reuse** in stale detection (tighten with a boot token).
-
-## Sequence
-
-Prove the multi-Crawler loop by hand on a headless-heavy task → collect the real gap list → *then*
-crystallize the orchestration loop here. game_loop earned its shape by being battle-tested; showrunner
-should too.
+  raw command escapes it. To reach rung-1 IMPOSSIBLE the lock belongs *inside* the consumer tool
+  **and** in the guard — belt + suspenders. `lock run` is the belt; the guard is the suspenders.
+- **Lock fairness.** `acquire --wait` polls; there is no queue, so a starved waiter can lose
+  repeatedly. Said out loud in `locks.py` because a fairness property nobody stated is one somebody
+  will assume.
+- **Blast-radius estimation is a heuristic.** It reads paths named in the issue plus files mentioning
+  the issue's symbols. It is deliberately conservative, and it will over-serialize on prose-heavy
+  issues (it does exactly that on this repo's own issue list). The fix for that is configuring shared
+  surfaces, not loosening the estimate.
+- **Relevance of a proof artifact is unknowable by a string check.** The gate checks existence and
+  freshness and records the proof for a reviewer. The boundary is stated in the gate itself.
+- **`br` adapter is written against br's documented CLI shape and exercised only through its refusal
+  paths here** — `br` is not installed on the machine this was built on. It is strict on purpose: it
+  will fail loudly rather than quietly report an empty graph.
 
 ## Theme
 
 Dungeon Crawler Carl. The crawl is a produced show: **Crawlers** run the rooms, `game_loop` keeps each
-one alive, `br` is the quest log, and the **showrunner** runs the whole production.
+one alive, the graph is the quest log, and the **showrunner** runs the whole production.

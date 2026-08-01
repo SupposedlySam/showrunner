@@ -1,0 +1,71 @@
+{
+  "project_name": "showrunner",
+  "graph": {
+    "backend": "auto",
+    "db": ".showrunner/graph.db",
+    "br_db": null
+  },
+  "lock_root": null,
+  "resources": [
+    {
+      "name": "git-index",
+      "match": [
+        "\\bgit\\s+(merge|rebase|cherry-pick)\\b",
+        "showrunner\\s+integrate\\b"
+      ],
+      "note": "the main checkout's index and HEAD. Integration rewinds a failed merge with `git reset --hard`; two integrations at once would rewind each other's work."
+    },
+    {
+      "name": "gh-issues",
+      "match": [
+        "\\bgh\\s+issue\\s+(close|edit|comment)\\b"
+      ],
+      "note": "the GitHub issue tracker — one upstream that two Crawlers would interleave writes to."
+    }
+  ],
+  "lanes": [
+    {
+      "name": "integration",
+      "lane": "serialized",
+      "resource": "git-index",
+      "match": {
+        "labels": ["integration", "release"],
+        "title": "integrat|merge|release"
+      }
+    },
+    {
+      "name": "implementation",
+      "lane": "headless",
+      "match": {
+        "labels": ["impl", "docs", "test", "design"]
+      }
+    }
+  ],
+  "default_lane": "serialized",
+  "worktree_root": ".worktrees",
+  "scratch_root": ".showrunner/scratch",
+  "inject": [],
+  "checks": [
+    {
+      "name": "suite",
+      "cmd": "python3 test/run.py",
+      "failure_pattern": "^\\s*FAIL\\s+.*$"
+    },
+    {
+      "name": "prototype",
+      "cmd": "bash prototype/demo.sh",
+      "failure_pattern": "^\\s*FAIL\\s+.*$"
+    }
+  ],
+  "collision": {
+    "extra_globs": [],
+    "always_serialize": [
+      "test/run.py",
+      "README.md",
+      "llms.txt",
+      "docs/*",
+      "prototype/README.md"
+    ]
+  },
+  "shared_state": []
+}

@@ -1,6 +1,15 @@
 # runtime lock state (created by the device-lane mutex)
 **/device.lock/
+# Crawler worktrees live INSIDE the repo (see issue #4) — showrunner creates this and
+# writes .worktrees/.gitignore itself; belt and suspenders.
+/.worktrees/
 # scratch
 /tmp/
 *.log
 .DS_Store
+__pycache__/
+*.pyc
+# The per-agent harness this repo is DEVELOPED under. Installed tooling, not source —
+# reinstallable in one line from the game_loop repo, so it is not vendored in here.
+/.game_loop/
+/.claude/
