@@ -9,9 +9,28 @@
 #   stop-gate  : refuse a turn-end while any br issue is claimed (in_progress) —
 #                the game_loop Stop gate, but reading the br graph instead of a
 #                single mandate string.
+#
+# KEPT FOR THE RECORD. The maintained implementation is ../lib/showrunner/gates.py, which
+# parses the graph as JSON rather than with sed and grep — the version below splits records
+# on a literal `},{`, so any change to field order or whitespace turns the stop gate into a
+# no-op that reports success (issue #6).
 set -euo pipefail
-export PATH="$HOME/.cargo/bin:$PATH"; export RUST_LOG=error
-BR_DB="${BR_DB:-$HOME/development/drops/.beads/beads.db}"
+export RUST_LOG=error
+[ -d "$HOME/.cargo/bin" ] && export PATH="$HOME/.cargo/bin:$PATH"
+BR_DB="${BR_DB:-}"
+if ! command -v br >/dev/null 2>&1; then
+  echo "br_gate.sh: \`br\` is not on PATH. This script needs it; ../lib/showrunner/gates.py does not." >&2
+  exit 3
+fi
+if [ -z "$BR_DB" ]; then
+  echo "br_gate.sh: set \$BR_DB to a beads database path. There is no sensible default — the "\
+       "previous one pointed into one specific developer's monorepo (issue #1)." >&2
+  exit 3
+fi
+if [ ! -f "$BR_DB" ]; then
+  echo "br_gate.sh: \$BR_DB=$BR_DB does not exist." >&2
+  exit 3
+fi
 br() { command br --db "$BR_DB" "$@"; }
 
 case "${1:-}" in

@@ -7,8 +7,20 @@
 # (the deploy process itself). A dead holder = stale = reclaimable. This is what
 # makes it work across separate processes / worktrees, not just across turns in
 # one session.
+#
+# KEPT FOR THE RECORD. The maintained implementation is ../lib/showrunner/locks.py, which
+# adds named resources (so unrelated work does not queue behind unrelated work), one
+# absolute lock root validated at config load, and a boot token beside the PID.
+#
+# The default LOCKDIR below is the known hazard (issue #3): it resolves relative to THIS
+# SCRIPT, so N worktrees get N sibling lock directories and the mutex silently does
+# nothing. Set DEVICE_LANE_LOCK to one absolute shared path if you run this directly.
 set -euo pipefail
 LOCKDIR="${DEVICE_LANE_LOCK:-$(cd "$(dirname "$0")" && pwd)/device.lock}"
+case "$LOCKDIR" in
+  /*) ;;
+  *) echo "device_lane.sh: LOCKDIR must be absolute (got '$LOCKDIR') — a relative lock root is a mutex that quietly is not one." >&2; exit 64 ;;
+esac
 DEVICE_VERB_RE='frontend_(deploy|build)|frontend[ _]deploy|drops[ _]tizen[ _]deploy|flutter(-tizen)?[ _]run'
 
 _holder_pid() { cat "$LOCKDIR/pid" 2>/dev/null || echo ""; }
