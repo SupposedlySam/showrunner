@@ -26,6 +26,16 @@ Exit 2 never shares a code with anything that was actually compared, so "could n
 cannot be mistaken for "clean" — which is the whole reason to ask the harness rather than
 guess.
 
+**What this verifies is the RULES, not the code** (INV6 — a guard that overstates its reach
+buys false confidence). The harness's owned set is its config, its invariants, its check
+manifest and its notes; `bin/` is not in it. So two trees can be byte-identical on every rule
+and still be running different harness *code* — which is exactly what happens when a project
+runs its harness from a pinned checkout, since both the pinned code and its wiring are
+gitignored and a `git worktree add` carries tracked files only. showrunner deliberately does
+not reach into that: knowing where a harness keeps its code is modelling internals, and it
+would rot the same way the hardcoded rule-file list did. The honest report is "same rules",
+and that is what this says.
+
 A harness that does not answer those verbs gets a refusal naming them, not a substitute
 comparison invented here — guessing which files are rules is the hardcoded list this module
 was rewritten to delete, and it would rot the same way. `harness.require=false` is the escape
@@ -275,7 +285,9 @@ def provision(cfg, worktree_path):
             continue
         detail = (payload or {}).get("detail", "")
         if rc == CLEAN:
-            actions.append("%s verified by the harness itself: %s" % (dirname, detail))
+            actions.append("%s: same RULES as the main checkout, verified by the harness "
+                           "itself (%s). Not checked: that both trees run the same harness "
+                           "CODE — bin/ is not in the owned set." % (dirname, detail))
         elif rc == RULES_DRIFTED:
             problems.append(
                 "%s: %s\nThe Crawler would enforce different things than the orchestrator, and "

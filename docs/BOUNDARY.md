@@ -25,6 +25,7 @@ Dependency arrow points one way: **showrunner → game_loop.** game_loop never l
 | Whether **the resulting tree is verified** | game_loop | Amended — after per-tree commit gates this is already answered per tree. showrunner decides *when* to merge; game_loop decides whether what came out is verified. |
 | Where a Crawler may **write**, and what it gets | showrunner | Worktree placement, injection, scratch. |
 | What is **runtime state** vs. a **rule** inside the harness | game_loop | It is the thing that knows: `.game_loop/.gitignore` and `game_loop owned`. |
+| What a **new tree** must carry to run the harness as the parent runs it | game_loop, unanswered | `owned` answers for *home*, not *code*. With a pinned checkout the code lives in a gitignored dir wired through a gitignored settings file, so neither crosses a worktree. Raised in `#game_loop_owner`. |
 
 ## The three rules this boundary keeps producing
 
@@ -87,6 +88,25 @@ propagates it N ways in parallel, and none of the N can notice.
 (#28) was strictly correct and created showrunner's harness-provisioning problem in the same
 stroke. Correct changes below produce new obligations above; that is normal, and worth looking
 for on purpose rather than discovering at spawn time.
+
+## What "same harness" does and does not mean
+
+`worktree --porcelain` compares the **owned set** — config, invariants, the check manifest,
+notes. **`bin/` is not in it.** So two trees can be byte-identical on every rule and still be
+running different harness *code*, and showrunner's spawn report says "same RULES" rather than
+"same harness" for exactly that reason.
+
+This stopped being hypothetical when game_loop added pinned checkouts: the pinned code lives in
+a gitignored directory, wired through a gitignored `settings.local.json`, and `git worktree add`
+carries tracked files only. So in a pinned project the orchestrator runs the pinned harness and
+every Crawler runs the repo's own — and the failure pinning exists to prevent (editing a gate
+breaks the session guarding the edit) returns through fan-out, since a Crawler sent to edit a
+gate is running the copy it is editing.
+
+showrunner deliberately does **not** fix this by learning where a harness keeps its code. That
+is modelling internals, which is what deleting `DEFAULT_RULE_FILES` was meant to end, and it
+would rot the same way. The ask belongs below: a pin-aware answer to *what must a new tree carry
+to run this harness the way I am running it now*.
 
 ## The interface showrunner consumes
 
