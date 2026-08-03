@@ -221,7 +221,28 @@ Like `game_loop`, showrunner is generic; a project's specifics (which resources 
 which verbs are "serialized," the graph location, the owed checks) are **config, not code** — see
 [`.showrunner/config.json`](.showrunner/config.json) for this repo's own.
 
+## What a Crawler's harness gets
+
+A harness that resolves its commit gate **per tree** — the correct design, since what a change
+owes is a fact about a tree — must refuse when the tree being committed carries no record. That
+lands on the orchestrator, because `git worktree add` copies **tracked files only**: an untracked
+harness never crosses, and the Crawler is denied its first commit.
+
+The loud failure is the easy one. The quiet one is why `showrunner spawn` provisions the harness
+itself rather than running its installer: an installer seeds user-owned files **only if absent**,
+so a fresh install in a worktree yields a blank `verify.yaml` — **a commit gate that owes nothing
+and reports success** — plus default invariants and default write roots. Nothing errors. The party
+simply plays by two rule sets, and the weaker one is the one running unattended in N worktrees.
+
+So showrunner copies the harness minus whatever it declares as runtime state (read from the
+harness's *own* ignore file, because session state belongs to a session and must never be handed
+to a Crawler), copies the hook registration so the Crawler actually has rails, and compares every
+rule file **byte-for-byte** against the main checkout. A mismatch aborts the spawn.
+
 ## Docs
 
 - [`docs/DESIGN.md`](docs/DESIGN.md) — the design notes and what remains open.
+- [`docs/BOUNDARY.md`](docs/BOUNDARY.md) — who owns what across showrunner and `game_loop`, the
+  standing direction for cross-repo fixes, and what showrunner currently assumes about the layer
+  below (with the line numbers it was verified against).
 - [`llms.txt`](llms.txt) — the operational brief, if you are an agent.
