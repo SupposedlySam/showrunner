@@ -175,18 +175,28 @@ def test_locks():
         ok("the block names the resource and the holder",
            "device" in msg and str(holder.pid) in msg, msg)
 
+        # An "allowed" assertion that only checks the verdict passes identically against a
+        # guard that never ran. Assert the REASON too, so the test can tell a guard that
+        # evaluated and permitted from one that is absent. (Mutation-tested: neutering
+        # LockSet.guard to `return True, ""` must fail these.)
         allow, msg = ls.guard("python3 -m pytest test/foo.py")
         ok("guard ALLOWS a command matching no resource", allow is True, msg)
+        ok("...and SAYS it evaluated the command, so a dead guard cannot pass this",
+           "matches no single-consumer resource" in msg, msg)
 
         # Named resources are independent: unrelated work must not queue behind unrelated work.
         allow, msg = ls.guard("pg_ctl start")
         ok("holding 'device' does not block the unrelated 'pg-port' resource", allow is True, msg)
+        ok("...and names the resource it checked and found free, not merely 'allowed'",
+           "pg-port" in msg and "free" in msg, msg)
 
         # INV5: a guard that blocks its own holder is a guard that gets switched off.
         with open(os.path.join(device.dir, "session"), "w") as fh:
             fh.write("sess-A\n")
         allow, msg = ls.guard("frontend deploy", session="sess-A")
         ok("guard ALLOWS the session that already holds the lock", allow is True, msg)
+        ok("...and names the resource, so 'the holder may proceed' is distinguishable from "
+           "'nothing was checked'", "device" in msg, msg)
         allow, msg = ls.guard("frontend deploy", session="sess-B")
         ok("guard still BLOCKS a different session", allow is False, msg)
     finally:
@@ -1166,6 +1176,8 @@ def test_cli():
         p = subprocess.run([sys.executable, exe, "lock", "guard", "--", "echo hello"],
                            cwd=cfg.root, capture_output=True, text=True, env=env)
         eq("`lock guard` exits 0 for a command matching no resource", p.returncode, 0)
+        ok("...and prints WHY it allowed — exit 0 alone is what an absent guard also returns",
+           "matches no single-consumer resource" in p.stdout, p.stdout)
     finally:
         holder.terminate()
         holder.wait()
