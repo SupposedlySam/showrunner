@@ -1,5 +1,7 @@
 """Small shared helpers. Standard library only."""
 
+import contextlib
+import json
 import os
 import re
 import subprocess
@@ -123,6 +125,87 @@ def slug(text, maxlen=48):
 
 def truthy_env(name):
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+try:
+    import fcntl
+    _HAVE_FLOCK = True
+except ImportError:                                   # pragma: no cover - non-POSIX
+    _HAVE_FLOCK = False
+
+
+@contextlib.contextmanager
+def file_lock(path):
+    """Exclusive cross-process lock around a state file.
+
+    Deliberately `flock`, not the atomic-mkdir+live-PID primitive in locks.py. Those guard a
+    long-running *consumer* of a real single-consumer resource, where the holder is the
+    consuming process and a dead holder must be reclaimable. This guards a read-modify-write
+    that lasts microseconds, and flock's kernel-backed release-on-death is exactly right for
+    that: there is no stale lock to reason about, because there is no window in which a
+    holder can die and leave one.
+
+    Degrades to a no-op where flock is unavailable, which is honest rather than silently
+    pretending: the caller is told by `concurrency_note()`.
+    """
+    if not _HAVE_FLOCK:
+        yield
+        return
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fd = os.open(path + ".lock", os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+@contextlib.contextmanager
+def try_file_lock(path):
+    """Non-blocking exclusive lock. Yields True if taken, False if someone else holds it.
+
+    Used where blocking would look like a hang. An unattended orchestrator that silently
+    waits several minutes on another one's merge is indistinguishable from a wedged run,
+    and "mysteriously slow" is how a rail gets investigated and then removed.
+    """
+    if not _HAVE_FLOCK:
+        yield True
+        return
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    fd = os.open(path + ".lock", os.O_CREAT | os.O_RDWR, 0o644)
+    got = False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            got = True
+        except OSError:
+            got = False
+        yield got
+    finally:
+        if got:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def concurrency_note():
+    return None if _HAVE_FLOCK else (
+        "flock is unavailable on this platform, so showrunner's shared state files are NOT "
+        "protected against concurrent orchestrators. Run one orchestrator at a time.")
+
+
+def atomic_write_json(path, data):
+    """Write-then-rename, so a reader never sees a half-written state file."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    with open(tmp, "w") as fh:
+        json.dump(data, fh, indent=2, sort_keys=True)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+    return path
 
 
 def rel(path, base):

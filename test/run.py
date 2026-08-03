@@ -852,6 +852,62 @@ def test_waiting():
        is_waiting is True and detail["parked_crawlers"], detail)
 
 
+def test_concurrency():
+    group("More than one orchestrator may share this state (real races, not theoretical)")
+    if not have("git"):
+        skip("the concurrency group", "git is not installed")
+        return
+    note = __import__("showrunner.util", fromlist=["x"]).concurrency_note()
+    if note:
+        skip("cross-process state protection", note)
+
+    cfg = make_repo()
+    g = new_graph(cfg)
+    g.add("contested", leaf_id="race1")
+    lib = os.path.join(ROOT, "lib")
+
+    worker = os.path.join(tmpdir("race"), "claim.py")
+    with open(worker, "w") as fh:
+        fh.write("import sys, os\n"
+                 "sys.path.insert(0, %r)\n"
+                 "from showrunner import graph as G\n"
+                 "from showrunner.util import Refused\n"
+                 "g = G.SqliteGraph(%r)\n"
+                 "try:\n"
+                 "    g.claim('race1', 'a'+sys.argv[1], pid=os.getpid()); print('WON')\n"
+                 "except Refused: print('lost')\n"
+                 "except Exception as e: print('ERR', type(e).__name__)\n"
+                 % (lib, cfg.graph_db))
+    procs = [subprocess.Popen([sys.executable, worker, str(i)], stdout=subprocess.PIPE, text=True)
+             for i in range(12)]
+    outs = [p.communicate()[0].strip() for p in procs]
+    eq("exactly ONE of 12 concurrent claims wins the same leaf (check-then-write gave six)",
+       outs.count("WON"), 1)
+    ok("...and nobody crashes racing for it", "ERR" not in " ".join(outs), outs)
+
+    spawner = os.path.join(tmpdir("race2"), "spawn.py")
+    with open(spawner, "w") as fh:
+        fh.write("import sys, os\n"
+                 "sys.path.insert(0, %r)\n"
+                 "from showrunner import config, campaign\n"
+                 "cfg = config.load(start=%r)\n"
+                 "campaign.record_spawn(cfg, {'crawler':'c'+sys.argv[1],'leaf':'l'+sys.argv[1],"
+                 "'branch':'b','worktree':'w','scratch':'s','created_ts':0}, pid=os.getpid())\n"
+                 % (lib, cfg.root))
+    procs = [subprocess.Popen([sys.executable, spawner, str(i)]) for i in range(10)]
+    [p.wait() for p in procs]
+    eq("every concurrent spawn survives in the campaign record (read-modify-write lost 7 of 10)",
+       len(campaign.load(cfg).get("crawlers", [])), 10)
+
+    from showrunner.util import try_file_lock
+    lockp = os.path.join(cfg.state_dir, "integrate")
+    with try_file_lock(lockp) as first:
+        with try_file_lock(lockp) as second:
+            ok("integration is exclusive: a second attempt is REFUSED, not queued silently — "
+               "two would rewind each other's work", first is True and second is False,
+               (first, second))
+
+
 def test_integration():
     group("Integration: checks on the MERGED result, and resume (issues #9, #14)")
     if not have("git"):
@@ -952,6 +1008,55 @@ def test_integration():
 
 
 # ======================================================== CORE: the CLI
+def test_publishable():
+    group("What a stranger gets when they clone this repo")
+    if not have("git"):
+        skip("the publishable group", "git is not installed")
+        return
+
+    tracked = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
+                             text=True).stdout.split()
+    ok("the repo has tracked files to check", bool(tracked))
+
+    # A tracked config carrying the author's absolute paths is not a cosmetic leak: an
+    # allow_write_roots entry is a RULE, and a stranger inherits a write permission they
+    # never chose, aimed at a path that does not exist on their machine.
+    offenders = []
+    for rel_path in tracked:
+        full = os.path.join(ROOT, rel_path)
+        try:
+            if os.path.getsize(full) > 400_000:
+                continue
+            with open(full, errors="ignore") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        # Assembled rather than written literally, so this scan still covers its own file
+        # instead of quietly exempting the one place the patterns are guaranteed to appear.
+        for pat in ("/" + "Users/", "/" + "home/", "/private/" + "tmp/claude-"):
+            for line in text.splitlines():
+                if pat in line and "example" not in line.lower():
+                    offenders.append("%s: %s" % (rel_path, line.strip()[:100]))
+    ok("no tracked file hardcodes an absolute home or session path — this repo is public and "
+       "a stranger inherits every tracked rule", not offenders, offenders[:6])
+
+    harness_cfg = os.path.join(ROOT, ".game_loop", "config.json")
+    if os.path.exists(harness_cfg):
+        with open(harness_cfg) as fh:
+            hc = json.load(fh)
+        ok("the tracked harness config grants no write root outside the repo",
+           not hc.get("allow_write_roots"), hc.get("allow_write_roots"))
+
+    sr_cfg = os.path.join(ROOT, ".showrunner", "config.json")
+    with open(sr_cfg) as fh:
+        sc = json.load(fh)
+    ok("showrunner's own config uses no absolute lock_root, so a clone resolves it locally",
+       sc.get("lock_root") in (None, ""), sc.get("lock_root"))
+    ok("...and its checks are commands a clone can actually run",
+       all(not c.get("cmd", "").startswith("/") for c in sc.get("checks", [])),
+       sc.get("checks"))
+
+
 def test_cli():
     group("CLI surface")
     exe = os.path.join(ROOT, "bin", "showrunner")
@@ -1027,8 +1132,8 @@ def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
     for fn in (test_locks, test_config_refusals, test_graph, test_lifecycle, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
-               test_harness_provisioning, test_waiting,
-               test_integration, test_cli, test_optional):
+               test_harness_provisioning, test_waiting, test_concurrency,
+               test_integration, test_publishable, test_cli, test_optional):
         try:
             fn()
         except Exception as exc:  # noqa: BLE001

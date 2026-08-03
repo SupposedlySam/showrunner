@@ -1,11 +1,7 @@
 {
   "project_name": "showrunner",
-  "read_roots": [
-    "/Users/supposedlysam/dev/game_loop"
-  ],
-  "allow_write_roots": [
-    "/private/tmp/claude-501/-Users-supposedlysam-dev-showrunner"
-  ],
+  "read_roots": [],
+  "allow_write_roots": [],
   "deploy_verbs": [
     "gh release create",
     "npm publish",

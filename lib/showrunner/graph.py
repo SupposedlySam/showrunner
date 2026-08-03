@@ -102,8 +102,13 @@ class SqliteGraph:
     def __init__(self, path):
         self.path = path
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        self.db = sqlite3.connect(path, timeout=15)
+        self.db = sqlite3.connect(path, timeout=30, isolation_level="IMMEDIATE")
         self.db.row_factory = sqlite3.Row
+        # WAL lets readers and one writer proceed concurrently; busy_timeout makes a
+        # contended writer wait rather than raising. Both matter because more than one
+        # orchestrator may share this graph.
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA busy_timeout=30000")
         self.db.executescript(SCHEMA)
         self.db.commit()
 
@@ -226,26 +231,44 @@ class SqliteGraph:
         return False
 
     def claim(self, leaf_id, actor, pid=None, tree=None, session=None):
+        """Take a leaf. Exactly one caller can win, even across processes.
+
+        The check-then-write shape this replaced was a real race, not a theoretical one:
+        twelve concurrent claims on one leaf produced **six winners**. More than one
+        orchestrator may share a graph — that is the point of a graph that survives
+        sessions — and six Crawlers dispatched onto the same leaf is six branches that
+        will conflict, discovered at integration with nobody watching.
+
+        The transition is therefore a single conditional UPDATE guarded on the status it
+        expects. SQLite makes that atomic, so the winner is whoever's UPDATE matched a row;
+        everyone else sees rowcount 0 and is told why, re-read *after* the fact.
+        """
         leaf = self.show(leaf_id)
-        if leaf["status"] == IN_PROGRESS:
-            if pid_alive(leaf.get("claim_pid")) or leaf.get("parked"):
-                die("%s is already claimed by %s (pid %s)%s"
-                    % (leaf_id, leaf.get("actor"), leaf.get("claim_pid"),
-                       " [parked]" if leaf.get("parked") else ""), code=2)
-            die("%s holds a stale claim by %s — run `showrunner reap` first, so the "
-                "abandonment is recorded rather than papered over"
-                % (leaf_id, leaf.get("actor")), code=2)
         if leaf["status"] in TERMINAL:
             die("%s is already %s" % (leaf_id, leaf["status"]), code=2)
         blockers = self.blockers(leaf_id)
         if blockers:
             die("%s is blocked by: %s" % (leaf_id, ", ".join(blockers)), code=2)
-        self.db.execute(
+
+        cur = self.db.execute(
             "UPDATE leaves SET status=?, actor=?, claim_pid=?, claim_boot=?, claim_host=?, "
             "claim_tree=?, claim_session=?, claim_ts=?, heartbeat_ts=?, parked=0, park_reason=NULL "
-            "WHERE id=?",
+            "WHERE id=? AND status=?",
             (IN_PROGRESS, actor, pid or os.getpid(), boot_token(), os.uname().nodename,
-             tree, session, now(), now(), leaf_id))
+             tree, session, now(), now(), leaf_id, OPEN))
+        if cur.rowcount != 1:
+            self.db.rollback()
+            current = self.show(leaf_id)
+            if current["status"] == IN_PROGRESS:
+                if pid_alive(current.get("claim_pid")) or current.get("parked"):
+                    die("%s is already claimed by %s (pid %s)%s"
+                        % (leaf_id, current.get("actor"), current.get("claim_pid"),
+                           " [parked]" if current.get("parked") else ""), code=2)
+                die("%s holds a stale claim by %s — run `showrunner reap` first, so the "
+                    "abandonment is recorded rather than papered over"
+                    % (leaf_id, current.get("actor")), code=2)
+            die("%s could not be claimed (status is %s)" % (leaf_id, current["status"]), code=2)
+
         self._event(leaf_id, "claim", "%s pid=%s tree=%s" % (actor, pid or os.getpid(), tree))
         self.db.commit()
         return self.show(leaf_id)

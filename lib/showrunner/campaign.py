@@ -35,10 +35,12 @@ trunk. So: merge serially, re-run the owed checks after each merge, and stop on 
 failure rather than stacking branches onto a broken trunk.
 """
 
+import contextlib
 import json
 import os
 
-from .util import boot_token, die, eprint, git, now, pid_alive, rel, run
+from .util import (atomic_write_json, boot_token, die, eprint, file_lock, git, now,
+                   pid_alive, rel, run, try_file_lock)
 from . import gates, locks, worktree
 
 RECORD = "campaign.json"
@@ -58,14 +60,29 @@ def load(cfg):
 
 
 def save(cfg, data):
-    p = path_for(cfg)
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    with open(p, "w") as fh:
-        json.dump(data, fh, indent=2, sort_keys=True)
-    return p
+    return atomic_write_json(path_for(cfg), data)
+
+
+@contextlib.contextmanager
+def _exclusive(cfg):
+    """Serialize a read-modify-write of the campaign record across orchestrators.
+
+    Without this the record silently loses entries: ten concurrent spawns left **three**
+    surviving Crawlers. That is not a cosmetic loss — a Crawler missing from the record is
+    one `reconcile` cannot find, `reap` cannot reclaim and `integrate` will not merge. The
+    work would sit finished on a branch nobody looks at, which is this project's signature
+    failure (an outcome that looks like completion and is not) arriving through a new door.
+    """
+    with file_lock(path_for(cfg)):
+        yield
 
 
 def record_spawn(cfg, spawn_record, pid=None, session=None):
+    with _exclusive(cfg):
+        return _record_spawn_locked(cfg, spawn_record, pid, session)
+
+
+def _record_spawn_locked(cfg, spawn_record, pid=None, session=None):
     data = load(cfg)
     entry = dict(spawn_record)
     entry.update({
@@ -84,13 +101,14 @@ def record_spawn(cfg, spawn_record, pid=None, session=None):
 
 
 def set_state(cfg, crawler, state, **extra):
-    data = load(cfg)
-    for c in data.get("crawlers", []):
-        if c.get("crawler") == crawler:
-            c["state"] = state
-            c.update(extra)
-    save(cfg, data)
-    return data
+    with _exclusive(cfg):
+        data = load(cfg)
+        for c in data.get("crawlers", []):
+            if c.get("crawler") == crawler:
+                c["state"] = state
+                c.update(extra)
+        save(cfg, data)
+        return data
 
 
 # ----------------------------------------------------------- reconciliation
@@ -309,8 +327,24 @@ def integrate(cfg, graph, base=None, only=None, dry_run=False):
     """Merge Crawler branches serially, re-running the owed checks after each merge.
 
     Stops on the first failure. Returns (results, ok).
+
+    Exclusive across orchestrators. Integration mutates the ONE main checkout — it merges,
+    runs checks, and on failure rewinds with `git reset --hard`. Two of these interleaved
+    would rewind each other's work, and the second one's `reset` would discard a merge the
+    first had already validated. This is the same "one consumer at a time" rule the device
+    lane exists for, applied to the checkout itself; it refuses rather than queueing,
+    because a silent multi-minute wait is indistinguishable from a hang.
     """
     cfg.require_valid()
+    with try_file_lock(os.path.join(cfg.state_dir, "integrate")) as got:
+        if not got:
+            die("another integration is already running in this checkout. Integration merges, "
+                "runs checks, and rewinds on failure — two at once would rewind each other's "
+                "work. Wait for it to finish.", code=2)
+        return _integrate_locked(cfg, graph, base, only, dry_run)
+
+
+def _integrate_locked(cfg, graph, base=None, only=None, dry_run=False):
     rc, out, _ = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=cfg.root)
     current = out.strip()
     base = base or current
