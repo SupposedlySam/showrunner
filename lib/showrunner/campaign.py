@@ -198,6 +198,12 @@ def reconcile(cfg, graph, base="HEAD"):
         if scratch and os.path.isdir(scratch):
             f["scratch_files"] = [x for x in sorted(os.listdir(scratch)) if x != "README.txt"]
 
+        if f["worktree_exists"]:
+            from . import harness
+            f["harness"], f["harness_detail"] = harness.check_tree(cfg, wt)
+        else:
+            f["harness"], f["harness_detail"] = None, ""
+
         leaf = None
         try:
             leaf = graph.show(entry["leaf"]) if entry.get("leaf") else None
@@ -206,7 +212,14 @@ def reconcile(cfg, graph, base="HEAD"):
         f["leaf_status"] = leaf.get("status") if leaf else "unknown"
         f["parked"] = bool(leaf.get("parked")) if leaf else False
 
-        if f["alive"]:
+        if f["harness"] == "rules-drifted":
+            # Louder than LIVE: this tree's gate is answering a different question than the
+            # orchestrator's, so anything it certifies means less than it appears to.
+            f["verdict"] = ("RULES DRIFTED — this Crawler's harness no longer matches the "
+                            "project's; its commit gate owes something else")
+        elif f["harness"] == "undetermined":
+            f["verdict"] = "HARNESS UNDETERMINED — cannot tell whether its rules match"
+        elif f["alive"]:
             f["verdict"] = "LIVE — do not disturb"
         elif f["parked"]:
             f["verdict"] = "PARKED — paused at a usage limit, claim intentionally survives"
@@ -380,6 +393,15 @@ def _integrate_locked(cfg, graph, base=None, only=None, dry_run=False):
             pass
         if leaf_status not in ("closed", "refuted"):
             continue
+        # Do not merge work certified by a gate that was answering a different question.
+        wt = cfg.abspath(entry.get("worktree"))
+        if wt and os.path.isdir(wt):
+            from . import harness
+            status, detail = harness.check_tree(cfg, wt)
+            if status in ("rules-drifted", "undetermined"):
+                entry = dict(entry)
+                entry["_harness_block"] = status
+                entry["_harness_detail"] = detail
         candidates.append(entry)
 
     # Deterministic order: oldest spawn first. Order has to be *owned* by something.
@@ -388,6 +410,16 @@ def _integrate_locked(cfg, graph, base=None, only=None, dry_run=False):
     results = []
     for entry in candidates:
         branch = entry["branch"]
+        if entry.get("_harness_block"):
+            results.append({
+                "crawler": entry["crawler"], "branch": branch,
+                "status": "harness-%s" % entry["_harness_block"],
+                "report": [entry.get("_harness_detail") or "",
+                           "Refusing to merge: this Crawler's tree no longer carries the "
+                           "project's rules, so whatever its commit gate certified was a "
+                           "different question. Restore its harness, or re-run the checks on "
+                           "the merged result yourself and say so."]})
+            return results, False
         rc, before, _ = git(["rev-parse", "HEAD"], cwd=cfg.root)
         before = before.strip()
         if dry_run:

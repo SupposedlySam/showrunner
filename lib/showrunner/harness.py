@@ -185,6 +185,34 @@ def _verify_with_harness(worktree_path, dirname):
     return rc, payload
 
 
+def check_tree(cfg, worktree_path):
+    """Re-ask the harness whether a worktree still matches its parent. Read-only.
+
+    Spawn-time verification is not enough: a Crawler can edit its own rule files after it
+    starts, and a weakened `verify.yaml` means its commit gate stops owing what the
+    orchestrator's owes. The whole point of the byte-compare is that the party plays by one
+    rule set, and checking only at t=0 verifies that for exactly one instant.
+
+    Returns (status, detail) where status is one of 'clean', 'rules-drifted',
+    'notes-drifted', 'undetermined', or None when no harness applies here.
+    """
+    names = {CLEAN: "clean", RULES_DRIFTED: "rules-drifted",
+             NOTES_DRIFTED: "notes-drifted", UNDETERMINED: "undetermined"}
+    worst = None
+    detail = ""
+    for dirname in spec(cfg)["dirs"]:
+        rc, payload = _verify_with_harness(worktree_path, dirname)
+        if rc is None:
+            continue
+        if worst is None or rc in (RULES_DRIFTED, UNDETERMINED) and worst == CLEAN:
+            worst = rc
+            detail = (payload or {}).get("detail", "")
+        elif rc != CLEAN and worst == NOTES_DRIFTED:
+            worst = rc
+            detail = (payload or {}).get("detail", "")
+    return (names.get(worst), detail) if worst is not None else (None, "")
+
+
 def provision(cfg, worktree_path):
     """Make the worktree carry the SAME harness. Returns (actions, problems, warnings)."""
     sp = spec(cfg)

@@ -818,6 +818,28 @@ def test_harness_provisioning():
     ok("...with require=false as the escape hatch, and the unverified state stated on the record",
        any("NOT ENFORCED" in a for a in rec7["provisioned"]), rec7["provisioned"])
 
+    # A Crawler can weaken its OWN rules after it starts. Verifying only at spawn verifies
+    # that for exactly one instant.
+    post = make_repo()
+    _seed_harness(post.root)
+    gp = new_graph(post)
+    gp.add("tamper", leaf_id="h8", labels=["backend"])
+    rec8 = worktree.spawn(post, gp.show("h8"), actor="tamperer")
+    campaign.record_spawn(post, rec8, pid=os.getpid())
+    status, _ = H.check_tree(post, rec8["worktree"])
+    eq("a freshly spawned tree checks clean", status, "clean")
+
+    with open(os.path.join(rec8["worktree"], ".game_loop", "TESTMODE"), "w") as fh:
+        fh.write("drifted\n")
+    status, _ = H.check_tree(post, rec8["worktree"])
+    eq("post-spawn rule drift is caught by RE-asking the harness, not assumed away",
+       status, "rules-drifted")
+    finding = next(f for f in campaign.reconcile(post, gp)
+                   if f["crawler"] == rec8["crawler"])
+    ok("...and reconcile reports it above every other verdict — a gate answering a different "
+       "question makes everything it certified mean less",
+       finding["verdict"].startswith("RULES DRIFTED"), finding["verdict"])
+
     off = make_repo(extra_config={"harness": {"provision": "off", "require": False}})
     _seed_harness(off.root)
     a, p, w = H.provision(off, off.root)
