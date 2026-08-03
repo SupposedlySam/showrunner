@@ -1,97 +1,113 @@
 """Provisioning the per-agent harness into a Crawler's worktree.
 
-A harness that gets its commit gate right resolves it **per tree** — what a change owes, and
-whether the evidence is newer than the change, are facts about a tree, so reading another
-tree's record would answer a question about files the commit does not contain. game_loop
-does exactly this and *denies* when the target tree carries no harness.
+A harness that resolves its commit gate **per tree** must refuse when the tree being
+committed carries no record. That lands on the orchestrator, because `git worktree add`
+copies tracked files only: an untracked harness never crosses.
 
-That correctness lands squarely on the orchestrator, because **`git worktree add` copies
-tracked files only.** A harness directory the parent does not track never crosses, and the
-Crawler is denied its first commit. That much is loud, and loud is survivable.
+The quiet failure is worse than the loud one. An installer seeds user-owned files only
+when absent, so a naive install into a fresh worktree yields the template's rules — a
+`verify.yaml` that owes nothing and reports success, default invariants, an emptied write
+allowlist. Nothing errors; the party simply plays by two rule sets, and the weaker one is
+running unattended in N worktrees.
 
-The failure that is *not* loud is the reason this module exists.
+**showrunner does not decide what "the same harness" means — the harness does.** An earlier
+version of this module hardcoded which files were rules and compared them itself. That was
+the wrong layer, and it was already drifting: it knew nothing of the harness's notes tier,
+so a diverged ledger was invisible to it. The harness now answers both questions itself:
 
-**A freshly-installed harness is not the same harness.** Running the harness's own installer
-against a worktree seeds the user-owned files only *if absent* — so a worktree gets a blank
-`verify.yaml`, a default `INVARIANTS.md`, and a default `config.json`. Every one of those is
-a rule, and now the Crawler is operating under different ones than the orchestrator:
+    <harness>/bin/<name> owned --porcelain      # the owned set, each flagged rule or not
+    <harness>/bin/<name> worktree --porcelain   # this tree vs its parent
+        exit 0  clean          every owned file is byte-identical
+        exit 1  rules drifted  the trees enforce different things  -> ABORT the spawn
+        exit 2  undetermined   unreadable / not a worktree / no parent harness -> ABORT
+        exit 3  notes drifted  ordinary for per-tree notes  -> warn, carry on
 
-* a blank `verify.yaml` means **the commit gate owes nothing** — it stops gating, and reports
-  success while doing it;
-* a default `INVARIANTS.md` means the project's north star is silently the template's;
-* a default `config.json` means different read roots, write roots and deploy verbs — the
-  Crawler may be denied reads the orchestrator relies on, or *permitted* writes it should not
-  have.
+Exit 2 never shares a code with anything that was actually compared, so "could not tell"
+cannot be mistaken for "clean" — which is the whole reason to ask the harness rather than
+guess.
 
-None of that produces an error. The party is simply playing by two rule sets, and the one
-with fewer rules is the one running unattended in N parallel worktrees.
+A harness that does not answer those verbs gets a refusal naming them, not a substitute
+comparison invented here — guessing which files are rules is the hardcoded list this module
+was rewritten to delete, and it would rot the same way. `harness.require=false` is the escape
+hatch for anyone who accepts an unverified Crawler.
 
-So provisioning here is not "make sure a harness is present." It is **make sure the harness
-present is the same harness, and prove it byte-for-byte.** Presence is checkable and
-sameness is checkable, so both are checked; a spawn that cannot establish either aborts
-rather than handing over a Crawler with quietly weaker rails.
+Two things showrunner must NOT do, both learned by getting them wrong:
 
-What is deliberately *not* copied is the harness's per-session runtime state — its state
-file, its session directories, its edited-file set, its logs. Those belong to a session, not
-to a tree, and copying them would hand a Crawler another session's claims and
-authorizations. The exclusion list is not hardcoded: it is read from the harness's **own**
-`.gitignore`, because the harness is the thing that knows which of its files are runtime.
+* **Never copy the hook-registration file.** The harness's installer *merges* its hooks into
+  it, preserving the project's own statusLine, permissions and unrelated hooks — and warning
+  about pre-existing non-harness hooks on the events it manages, because a stray Stop hook
+  from an older harness fights it over turn-ends and presents as "the orchestrator is
+  mysteriously flaky." A wholesale copy discards the settings and silently drops the warning.
+* **Never hand over another session's runtime state.** The exclusion list is read from the
+  harness's own `.gitignore`, which is the authoritative declaration.
 """
 
-import filecmp
 import fnmatch
+import json
 import os
 import shutil
 
-from .util import die, rel, run
+from .util import run
 
-# Only used when a harness ships no .gitignore of its own to declare what is runtime state.
+KNOWN_HARNESS_DIRS = (".game_loop", ".loop")
+HOOK_REGISTRATION = ".claude/settings.json"
+
+CLEAN, RULES_DRIFTED, UNDETERMINED, NOTES_DRIFTED = 0, 1, 2, 3
+
 FALLBACK_RUNTIME = [
     "state.json", "sessions/", "edited.txt", "log.jsonl", "verified.json", "probe/",
     "*.pid", ".state.*.tmp", "notify.json", "limits.json",
 ]
 
-# Files whose *content is a rule*. These must match the parent exactly, or the Crawler is
-# playing by different rules than the orchestrator.
-DEFAULT_RULE_FILES = ["config.json", "INVARIANTS.md", "verify.yaml"]
-
-# Outside the harness dir, but without it none of the hooks are registered at all — which
-# would mean showrunner promising a guarded Crawler and delivering an unguarded one.
-DEFAULT_COMPANIONS = [".claude/settings.json"]
-
-KNOWN_HARNESS_DIRS = (".game_loop", ".loop")
-
 
 def spec(cfg):
-    """The resolved harness config, with detection filling in what is not declared."""
     raw = dict(cfg.get("harness") or {})
     dirs = raw.get("dirs")
     if dirs is None:
         dirs = [d for d in KNOWN_HARNESS_DIRS if os.path.isdir(os.path.join(cfg.root, d))]
-    companions = raw.get("companions")
-    if companions is None:
-        companions = [c for c in DEFAULT_COMPANIONS if os.path.exists(os.path.join(cfg.root, c))]
     return {
         "dirs": dirs,
-        "companions": companions,
-        "rule_files": raw.get("rule_files", DEFAULT_RULE_FILES),
         "provision": raw.get("provision", "auto"),   # auto | off
         "require": raw.get("require", True),
+        "installer": raw.get("installer"),           # path to the harness's install script
+        "install_args": raw.get("install_args", ["--same-as", "{parent}", "{worktree}"]),
     }
 
 
+def bin_for(tree, dirname):
+    """The harness's project-local binary, by its own convention: .game_loop/bin/game_loop."""
+    return os.path.join(tree, dirname, "bin", dirname.lstrip("."))
+
+
+def _porcelain(binary, verb):
+    """Run a harness verb. Returns (exit_code, payload_or_None)."""
+    if not os.access(binary, os.X_OK):
+        return None, None
+    rc, out, _ = run([binary, verb, "--porcelain"], cwd=os.path.dirname(binary), timeout=60)
+    try:
+        return rc, json.loads(out)
+    except (ValueError, TypeError):
+        return rc, None
+
+
+def owned(cfg, dirname):
+    """What the harness declares it owns. None when it exposes no such verb."""
+    rc, payload = _porcelain(bin_for(cfg.root, dirname), "owned")
+    return payload if isinstance(payload, dict) else None
+
+
+# ---------------------------------------------------------------- runtime state
 def runtime_globs(harness_root):
-    """What the harness itself declares is runtime state, from its own .gitignore."""
-    gi = os.path.join(harness_root, ".gitignore")
+    """What the harness itself declares is runtime, from its own .gitignore."""
     globs = []
     try:
-        with open(gi) as fh:
+        with open(os.path.join(harness_root, ".gitignore")) as fh:
             for line in fh:
                 line = line.strip()
-                if line and not line.startswith("#") and not line.startswith("!"):
+                if line and not line.startswith(("#", "!")):
                     globs.append(line)
     except OSError:
-        globs = list(FALLBACK_RUNTIME)
+        pass
     return globs or list(FALLBACK_RUNTIME)
 
 
@@ -99,9 +115,8 @@ def _is_runtime(relpath, globs):
     parts = relpath.split(os.sep)
     for g in globs:
         bare = g.rstrip("/")
-        if g.endswith("/"):
-            if bare in parts[:-1] or parts[0] == bare:
-                return True
+        if g.endswith("/") and (bare in parts[:-1] or parts[0] == bare):
+            return True
         if fnmatch.fnmatch(relpath, g) or fnmatch.fnmatch(parts[-1], bare):
             return True
         if relpath.startswith(bare + os.sep):
@@ -109,26 +124,16 @@ def _is_runtime(relpath, globs):
     return False
 
 
-def tracked_top_levels(cfg):
-    rc, out, _ = run(["git", "ls-files"], cwd=cfg.root)
-    if rc != 0:
-        return set()
-    return {line.split("/")[0] for line in out.splitlines() if line.strip()}
-
-
-def _copy_tree_excluding_runtime(src, dst, globs):
-    """Copy a harness dir, skipping whatever it declares as runtime state."""
+def _copy_excluding_runtime(src, dst, globs):
     copied, skipped = [], []
     for dirpath, dirnames, filenames in os.walk(src):
         relroot = os.path.relpath(dirpath, src)
         relroot = "" if relroot == "." else relroot
-        pruned = []
         for d in list(dirnames):
             rp = os.path.join(relroot, d) if relroot else d
             if _is_runtime(rp + "/", globs) or _is_runtime(rp, globs):
                 dirnames.remove(d)
-                pruned.append(rp)
-        skipped += pruned
+                skipped.append(rp)
         for f in filenames:
             rp = os.path.join(relroot, f) if relroot else f
             if _is_runtime(rp, globs):
@@ -141,105 +146,168 @@ def _copy_tree_excluding_runtime(src, dst, globs):
     return copied, skipped
 
 
-def provision(cfg, worktree_path):
-    """Make the worktree carry the SAME harness as the main checkout.
+def tracked_top_levels(cfg):
+    rc, out, _ = run(["git", "ls-files"], cwd=cfg.root)
+    return {l.split("/")[0] for l in out.splitlines() if l.strip()} if rc == 0 else set()
 
-    Returns (actions, problems). Problems are fatal to a spawn when `require` is on.
+
+# ------------------------------------------------------------------- provisioning
+def _install(cfg, sp, worktree_path):
+    installer = sp["installer"]
+    if not installer:
+        return None
+    path = installer if os.path.isabs(installer) else os.path.join(cfg.root, installer)
+    if not os.access(path, os.X_OK):
+        return "configured harness installer is not executable: %s" % path
+    args = [a.format(parent=cfg.root, worktree=worktree_path) for a in sp["install_args"]]
+    rc, out, err = run([path] + args, cwd=os.path.dirname(path), timeout=300)
+    if rc != 0:
+        return "harness installer failed (%s): %s" % (rc, (err or out).strip()[:500])
+    return None
+
+
+CONTRACT_CODES = (CLEAN, RULES_DRIFTED, UNDETERMINED, NOTES_DRIFTED)
+
+
+def _verify_with_harness(worktree_path, dirname):
+    """Ask the harness whether this tree matches its parent. Authoritative when available.
+
+    Returns (None, None) when the harness is not answering this contract at all — a missing
+    verb, a usage error, unparseable output. That is a different thing from the harness
+    *answering* "undetermined" (exit 2), and conflating the two would let a harness that
+    does not implement the verb look like one reporting a real problem. The signal for
+    "answering the contract" is a JSON payload, not the exit code alone.
     """
+    binary = bin_for(worktree_path, dirname)
+    rc, payload = _porcelain(binary, "worktree")
+    if rc is None or not isinstance(payload, dict) or rc not in CONTRACT_CODES:
+        return None, None
+    return rc, payload
+
+
+def provision(cfg, worktree_path):
+    """Make the worktree carry the SAME harness. Returns (actions, problems, warnings)."""
     sp = spec(cfg)
-    actions, problems = [], []
-    if sp["provision"] == "off" or not (sp["dirs"] or sp["companions"]):
-        return actions, problems
+    actions, problems, warnings = [], [], []
+    if sp["provision"] == "off" or not sp["dirs"]:
+        return actions, problems, warnings
 
     tracked = tracked_top_levels(cfg)
 
-    for d in sp["dirs"]:
-        src = os.path.join(cfg.root, d)
-        dst = os.path.join(worktree_path, d)
+    for dirname in sp["dirs"]:
+        src = os.path.join(cfg.root, dirname)
+        dst = os.path.join(worktree_path, dirname)
         if not os.path.isdir(src):
-            problems.append("configured harness dir %s does not exist in the main checkout" % d)
+            problems.append("configured harness dir %s does not exist in the main checkout" % dirname)
             continue
-        globs = runtime_globs(src)
 
-        if d in tracked and os.path.isdir(dst):
-            actions.append("%s is tracked by git and crossed with the worktree" % d)
+        installed = False
+        if not os.path.isdir(dst):
+            err = _install(cfg, sp, worktree_path)
+            if err is None and sp["installer"]:
+                actions.append("%s installed by the harness's own installer (which MERGES hook "
+                               "registration rather than overwriting it)" % dirname)
+                installed = True
+            elif err:
+                problems.append(err)
+                continue
+            else:
+                copied, skipped = _copy_excluding_runtime(src, dst, runtime_globs(src))
+                actions.append("%s copied (%d file(s); %d runtime path(s) excluded per the "
+                               "harness's own .gitignore)" % (dirname, len(copied), len(skipped)))
+        elif dirname in tracked:
+            actions.append("%s is tracked by git and crossed with the worktree" % dirname)
         else:
-            if os.path.isdir(dst):
-                actions.append("%s already present in the worktree — left alone" % d)
-            else:
-                copied, skipped = _copy_tree_excluding_runtime(src, dst, globs)
-                actions.append("%s provisioned (%d file(s); %d runtime path(s) deliberately NOT "
-                               "copied — session state belongs to a session, not a tree)"
-                               % (d, len(copied), len(skipped)))
-            # An untracked harness must not become stageable inside the worktree either:
-            # the parent does not track it, so `git add -A` here would commit the harness.
-            if d not in tracked:
-                _exclude(worktree_path, [d])
-                actions.append("%s added to the worktree's exclude file (the parent does not "
-                               "track it, so `git add -A` must not stage it)" % d)
+            actions.append("%s already present in the worktree — left alone" % dirname)
 
-        # The rules must be the SAME rules. Presence is not sameness.
-        for rf in sp["rule_files"]:
-            a, b = os.path.join(src, rf), os.path.join(dst, rf)
-            if not os.path.exists(a):
-                continue
-            if not os.path.exists(b):
+        if dirname not in tracked:
+            from .worktree import unignored
+            if unignored(worktree_path, [dirname]):
                 problems.append(
-                    "%s/%s is missing from the worktree. It is a RULE file: without it the "
-                    "Crawler runs under different rules than the orchestrator, and nothing "
-                    "reports that." % (d, rf))
-                continue
-            if not filecmp.cmp(a, b, shallow=False):
-                problems.append(
-                    "%s/%s in the worktree DIFFERS from the main checkout's. This is the silent "
-                    "failure: an installer seeds user-owned files only when absent, so a fresh "
-                    "install yields a blank verify.yaml (a commit gate that owes nothing and "
-                    "reports success), default INVARIANTS, and default read/write roots. Copy "
-                    "the parent's file over it." % (d, rf))
-            else:
-                actions.append("%s/%s matches the main checkout byte-for-byte" % (d, rf))
+                    "%s is neither tracked nor ignored, so `git add -A` in the worktree would "
+                    "commit the whole harness onto the Crawler's branch. Either track it (which "
+                    "also makes it cross into every worktree by itself) or add it to the repo's "
+                    ".gitignore. showrunner will not write git's shared exclude file — it is not "
+                    "per-worktree, so that would change the main checkout's ignores too."
+                    % dirname)
 
-    for c in sp["companions"]:
-        src = os.path.join(cfg.root, c)
-        dst = os.path.join(worktree_path, c)
-        if not os.path.exists(src):
-            continue
-        if not os.path.exists(dst):
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copy2(src, dst)
-            actions.append("%s provisioned (without it the harness's hooks are not registered "
-                           "in the Crawler's project at all)" % c)
-        if not filecmp.cmp(src, dst, shallow=False):
+        # Authoritative check: the harness compares its own trees.
+        rc, payload = _verify_with_harness(worktree_path, dirname)
+        if rc is None:
+            # Not answering the contract. showrunner does NOT substitute a comparison of
+            # its own here: guessing which files are rules is exactly the hardcoded list
+            # this module was rewritten to delete, and it would rot the same way.
             problems.append(
-                "%s differs from the main checkout's. The hooks a Crawler runs under would not "
-                "be the hooks the orchestrator runs under." % c)
-        if c.split("/")[0] not in tracked:
-            _exclude(worktree_path, [c])
+                "%s does not answer `%s worktree --porcelain` (exit 0 clean / 1 rules drifted / "
+                "2 undetermined / 3 notes drifted). showrunner will not guess which of its files "
+                "are rules — that list belongs to the harness and drifts silently anywhere else.\n"
+                "See the harness's embedding contract, or set harness.require=false to accept a "
+                "Crawler whose rules are unverified."
+                % (dirname, os.path.basename(bin_for(cfg.root, dirname))))
+            continue
+        detail = (payload or {}).get("detail", "")
+        if rc == CLEAN:
+            actions.append("%s verified by the harness itself: %s" % (dirname, detail))
+        elif rc == RULES_DRIFTED:
+            problems.append(
+                "%s: %s\nThe Crawler would enforce different things than the orchestrator, and "
+                "nothing downstream would report it." % (dirname, detail))
+        elif rc == NOTES_DRIFTED:
+            warnings.append("%s: %s" % (dirname, detail))
+        else:
+            problems.append(
+                "%s: the harness could not determine whether this tree matches (%s). Refusing "
+                "rather than reading it as clean — 'could not tell' and 'matched' must never be "
+                "the same answer." % (dirname, detail or "exit %s" % rc))
 
-    return actions, problems
+        if not installed and not _hooks_present(worktree_path):
+            problems.append(
+                "%s is present but %s is not, so NONE of its hooks are registered in the "
+                "Crawler's project — showrunner would be promising a guarded agent and "
+                "delivering an unguarded one.\nDo not copy that file: the harness's installer "
+                "MERGES its hooks, preserving the project's own settings and warning about "
+                "pre-existing non-harness hooks on the events it manages. Set "
+                "harness.installer in .showrunner/config.json, or track %s in git so it "
+                "crosses with the worktree." % (dirname, HOOK_REGISTRATION, HOOK_REGISTRATION))
+
+    return actions, problems, warnings
 
 
-def _exclude(worktree_path, paths):
-    from .worktree import _add_exclude
-    return _add_exclude(worktree_path, paths)
+def _hooks_present(worktree_path):
+    return os.path.exists(os.path.join(worktree_path, HOOK_REGISTRATION))
 
 
-def report(cfg, worktree_path=None):
-    """Doctor-facing summary: what a Crawler would get, and what is missing."""
+def report(cfg):
+    """Doctor-facing summary of what a Crawler would get."""
     sp = spec(cfg)
     if sp["provision"] == "off":
-        return ["harness provisioning is OFF — a Crawler's worktree will carry whatever git "
-                "happens to bring across, and its commit gate may owe nothing."]
+        return ["harness provisioning is OFF — a Crawler's worktree carries whatever git brings "
+                "across, and its commit gate may owe nothing."]
     if not sp["dirs"]:
         return []
     tracked = tracked_top_levels(cfg)
     lines = []
-    for d in sp["dirs"]:
-        how = "tracked by git (crosses automatically)" if d in tracked else \
-              "untracked — showrunner copies it at spawn, minus its declared runtime state"
-        rules = [rf for rf in sp["rule_files"] if os.path.exists(os.path.join(cfg.root, d, rf))]
-        lines.append("harness %s: %s; rule files verified byte-for-byte at spawn: %s"
-                     % (d, how, ", ".join(rules) or "none found"))
-    for c in sp["companions"]:
-        lines.append("companion %s: copied so the Crawler's hooks are actually registered" % c)
+    for dirname in sp["dirs"]:
+        info = owned(cfg, dirname)
+        if info:
+            lines.append("harness %s declares its own owned set: %d rule file(s) (%s), %d notes "
+                         "file(s) (%s) — showrunner keeps no list of its own"
+                         % (dirname, len(info.get("rule_files") or []),
+                            ", ".join(info.get("rule_files") or []) or "none",
+                            len(info.get("notes_files") or []),
+                            ", ".join(info.get("notes_files") or []) or "none"))
+        else:
+            lines.append("harness %s exposes no `owned` verb — falling back to 'everything not "
+                         "declared runtime must match', which is conservative and noisier"
+                         % dirname)
+        if dirname in tracked:
+            lines.append("  %s is tracked by git, so it and %s cross with every worktree"
+                         % (dirname, HOOK_REGISTRATION))
+        elif sp["installer"]:
+            lines.append("  %s is untracked; the configured installer provisions it per worktree"
+                         % dirname)
+        else:
+            lines.append("  %s is untracked and no harness.installer is configured — spawn will "
+                         "refuse rather than hand over a Crawler with no registered hooks"
+                         % dirname)
     return lines

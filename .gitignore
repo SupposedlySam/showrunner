@@ -9,7 +9,9 @@
 .DS_Store
 __pycache__/
 *.pyc
-# The per-agent harness this repo is DEVELOPED under. Installed tooling, not source —
-# reinstallable in one line from the game_loop repo, so it is not vendored in here.
-/.game_loop/
-/.claude/
+# The per-agent harness IS tracked, deliberately. game_loop resolves its commit gate per
+# tree and denies when the target tree carries no record, and `git worktree add` copies
+# tracked files only — so tracking it is what makes every Crawler worktree carry the same
+# rules with no per-spawn copying. Its runtime state stays ignored via .game_loop/.gitignore.
+!/.game_loop/
+!/.claude/

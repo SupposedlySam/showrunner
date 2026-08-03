@@ -1,0 +1,27 @@
+{
+  "project_name": "showrunner",
+  "read_roots": [
+    "/Users/supposedlysam/dev/game_loop"
+  ],
+  "allow_write_roots": [
+    "/private/tmp/claude-501/-Users-supposedlysam-dev-showrunner"
+  ],
+  "deploy_verbs": [
+    "gh release create",
+    "npm publish",
+    "cargo publish",
+    "git push --force"
+  ],
+  "mcp_read_only_tools": [],
+  "trans_nudge_every": 12,
+  "watchdog": {
+    "idle_sec": 30,
+    "settle_sec": 5,
+    "ring_cap": 3
+  },
+  "flair": {
+    "enabled": true,
+    "support_name": "SupposedlySam",
+    "support_url": "https://github.com/sponsors/SupposedlySam"
+  }
+}

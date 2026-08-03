@@ -551,6 +551,10 @@ def cmd_integrate(args):
         eprint("\nSTOPPED on the first failure rather than stacking branches onto a broken trunk. "
                "A branch is integrated only when the checks pass on the MERGED result.")
         return 2
+    if any(r["status"] == "integrated" for r in results):
+        print("%sThese merges auto-committed, so no provenance declaration was needed: the "
+              "harness's commit gate matches `git commit`, which a clean merge never runs. "
+              "Declare only when you commit a resolution yourself.%s" % (DIM, OFF))
     return 0
 
 
@@ -584,6 +588,14 @@ def cmd_integration_commit(args):
         return 2
     print("  %sok — every staged file is accounted for by a named Crawler%s" % (GRN, OFF))
     print("  trailer: %s" % gates.trailer(decl))
+
+    att = gates.attribution(cfg, entries)
+    if att:
+        print("\n%sDeclare it to the harness so its provenance check asks the better question:%s"
+              % (BOLD, OFF))
+        print("  %s" % att["command"])
+        print("  %sWHEN: %s%s" % (DIM, att["when"], OFF))
+        print("  %sORDER: %s%s" % (DIM, att["order"], OFF))
     return 0
 
 

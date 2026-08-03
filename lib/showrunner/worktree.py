@@ -142,30 +142,34 @@ def shared_drop(cfg):
 
 
 # ---------------------------------------------------------------- injection
-def _exclude_file(worktree):
-    rc, out, _ = git(["rev-parse", "--git-path", "info/exclude"], cwd=worktree)
-    if rc != 0:
-        return None
-    p = out.strip()
-    return p if os.path.isabs(p) else os.path.join(worktree, p)
+def unignored(worktree, paths):
+    """Which of these paths `git add -A` would actually stage inside the worktree.
 
+    An earlier version *wrote* the paths into `info/exclude` instead of checking them. That
+    was wrong in a way worth recording, because it is this project's own lesson landing on
+    its own code: **`info/exclude` is not per-worktree.** `git rev-parse --git-path
+    info/exclude` resolves to the shared git dir from inside a linked worktree, and git
+    honours no per-worktree equivalent (`$GIT_DIR/info/exclude` under `.git/worktrees/<n>/`
+    is simply not read). So excluding a path "for one Crawler" silently changed the ignore
+    rules of the main checkout and every sibling — a shared single-consumer resource that
+    nobody had named, mutated at every spawn.
 
-def _add_exclude(worktree, paths):
-    """Never let an injected path reach the index. Agents run `git add -A` constantly."""
-    excl = _exclude_file(worktree)
-    if not excl:
-        return None
-    os.makedirs(os.path.dirname(excl), exist_ok=True)
-    existing = ""
-    if os.path.exists(excl):
-        with open(excl) as fh:
-            existing = fh.read()
-    lines = [l for l in ("/" + p.lstrip("/") for p in paths) if l not in existing.split("\n")]
-    if lines:
-        with open(excl, "a") as fh:
-            fh.write("\n# %s — injected, must never be staged\n" % MARKER)
-            fh.write("\n".join(lines) + "\n")
-    return excl
+    Verifying instead of mutating also puts the fix in the right place: a path that would be
+    staged belongs in the repo's own tracked `.gitignore`, which crosses into every worktree
+    by itself and needs no per-spawn action at all.
+    """
+    if not paths:
+        return []
+    rc, out, _ = git(["check-ignore", "--no-index"] + list(paths), cwd=worktree)
+    ignored = {l.strip() for l in out.splitlines() if l.strip()} if rc in (0, 1) else set()
+    missing = []
+    for p in paths:
+        if p in ignored:
+            continue
+        if not os.path.lexists(os.path.join(worktree, p)):
+            continue           # not there at all; nothing to stage
+        missing.append(p)
+    return missing
 
 
 def inject(cfg, worktree):
@@ -222,11 +226,20 @@ def inject(cfg, worktree):
             continue
         results.append("%s → %s (%s)" % (src_rel, rel(dst, cfg.root), mode))
 
-    excl = _add_exclude(worktree, [
-        (e if isinstance(e, str) else e.get("path")) for e in declared
-        if (e if isinstance(e, str) else e.get("path"))])
-    if declared and excl:
-        results.append("excluded from the index via %s" % rel(excl, cfg.root))
+    # Verify, never mutate: see unignored().
+    paths = [(e if isinstance(e, str) else e.get("path")) for e in declared]
+    stageable = unignored(worktree, [p for p in paths if p])
+    if stageable:
+        problems.append(
+            "these injected path(s) are NOT ignored by the repo, so an agent running "
+            "`git add -A` would commit them onto its branch: %s\n"
+            "Add them to the repo's tracked .gitignore — that crosses into every worktree by "
+            "itself. showrunner will not write git's shared exclude file: it is not "
+            "per-worktree, so doing so would change the ignore rules of the main checkout and "
+            "every sibling Crawler." % ", ".join(stageable))
+    elif paths:
+        results.append("all injected paths are ignored by the repo, so `git add -A` cannot "
+                       "stage them")
     return results, problems
 
 
@@ -341,7 +354,8 @@ def spawn(cfg, leaf, actor="crawler", base="HEAD", branch=None):
     # compared byte-for-byte against the parent's. A Crawler whose rails are quietly weaker
     # than the orchestrator's is worse than one with no rails, because the run looks guarded.
     from . import harness
-    provisioned, harness_problems = harness.provision(cfg, path)
+    provisioned, harness_problems, harness_warnings = harness.provision(cfg, path)
+    provisioned += ["NOTE: %s" % w for w in harness_warnings]
     if harness_problems and harness.spec(cfg)["require"]:
         problems += harness_problems
     elif harness_problems:

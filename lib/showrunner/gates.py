@@ -344,3 +344,49 @@ def trailer(decl):
     """A commit trailer so the provenance is in git, not only in a sidecar file."""
     names = ", ".join(sorted(decl.get("crawlers") or {}))
     return "Showrunner-Integration: %s" % (names or "none")
+
+
+def attribution(cfg, entries, harness_bin=None):
+    """The harness command that declares this commit's provenance, plus when NOT to run it.
+
+    Two rules, both found by running the verb rather than reading it, and both cheap to get
+    wrong in a way that wastes a single-use declaration:
+
+    1. **A clean merge never invokes the gate.** The commit gate matches `git commit …`; a
+       clean `git merge` auto-commits without one. So declare only on the path where you
+       commit yourself — a conflict resolution, or a `--no-commit` merge you finish by hand.
+       Declaring for a clean merge burns the declaration on a commit that was never going to
+       be checked, and the *next* commit — the one that needed it — goes bare.
+    2. **Declare after the branch has its commit.** Attribution is recomputed from
+       `merge-base HEAD <ref>..<ref>`, so declaring before the branch's work is committed
+       resolves to zero files: a correct answer, and a useless one.
+    """
+    refs = [e["branch"] for e in entries if e.get("branch")]
+    if not refs:
+        return None
+    binary = harness_bin or _harness_bin(cfg)
+    if not binary:
+        return None
+    cmd = "%s attribute %s --reason %s" % (
+        binary,
+        " ".join("--merge %s" % r for r in refs),
+        '"integration commit: work produced by %s"' % ", ".join(
+            sorted({e.get("crawler") or e["branch"] for e in entries})))
+    return {
+        "command": cmd,
+        "refs": refs,
+        "when": "ONLY if you are running `git commit` yourself (a conflict resolution, or a "
+                "--no-commit merge). A clean `git merge` auto-commits and never invokes the "
+                "gate, so a declaration spent there is wasted and the next commit goes bare.",
+        "order": "Run it AFTER the branch has its commit — attribution is recomputed from the "
+                 "ref, so declaring early resolves to zero files.",
+    }
+
+
+def _harness_bin(cfg):
+    from . import harness
+    for d in harness.spec(cfg)["dirs"]:
+        b = harness.bin_for(cfg.root, d)
+        if os.access(b, os.X_OK):
+            return os.path.join(".", os.path.relpath(b, cfg.root))
+    return None
