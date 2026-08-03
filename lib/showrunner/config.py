@@ -30,6 +30,9 @@ DEFAULTS = {
     "baseline": ".showrunner/baseline.json",
     "shared_state": [],
     "collision": {"extra_globs": [], "always_serialize": []},
+    # dirs/companions default to detection; rule_files are compared byte-for-byte so a
+    # Crawler cannot end up running under quietly weaker rules than the orchestrator.
+    "harness": {"provision": "auto", "require": True},
 }
 
 

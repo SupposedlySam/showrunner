@@ -337,12 +337,24 @@ def spawn(cfg, leaf, actor="crawler", base="HEAD", branch=None):
     scratch = scratch_for(cfg, name)
     injected, problems = inject(cfg, path)
 
+    # The harness is provisioned before anything else can go wrong, and its rule files are
+    # compared byte-for-byte against the parent's. A Crawler whose rails are quietly weaker
+    # than the orchestrator's is worse than one with no rails, because the run looks guarded.
+    from . import harness
+    provisioned, harness_problems = harness.provision(cfg, path)
+    if harness_problems and harness.spec(cfg)["require"]:
+        problems += harness_problems
+    elif harness_problems:
+        provisioned += ["NOT ENFORCED (harness.require is false): %s" % p for p in harness_problems]
+
     if problems:
         # Fail the spawn loudly rather than handing over a half-built environment.
         remove(cfg, name, force=True)
         die("spawn aborted — the Crawler's environment is incomplete:\n  - %s\n"
-            "A Crawler that cannot reach a service will write the service up as broken, "
-            "in the same confident tone as a real finding." % "\n  - ".join(problems), code=2)
+            "A Crawler that cannot reach a service will write the service up as broken, in the "
+            "same confident tone as a real finding — and a Crawler running under different rules "
+            "than the orchestrator will do it while every gate stays green."
+            % "\n  - ".join(problems), code=2)
 
     record = {
         "crawler": name,
@@ -356,6 +368,7 @@ def spawn(cfg, leaf, actor="crawler", base="HEAD", branch=None):
         "base": base,
         "base_sha": base_sha,
         "injected": injected,
+        "provisioned": provisioned,
         "shares": audit_shared(cfg),
         "harness_gap": harness_gap(cfg, path),
         "created_ts": now(),

@@ -9,7 +9,8 @@ import json
 import os
 import sys
 
-from . import __version__, brief, campaign, collide, config, gates, graph as G, lanes, locks, worktree
+from . import (__version__, brief, campaign, collide, config, gates, graph as G, harness,
+               lanes, locks, worktree)
 from .util import Refused, die, eprint, rel, run, slug
 
 BOLD, DIM, RED, GRN, YEL, OFF = "\033[1m", "\033[2m", "\033[31m", "\033[32m", "\033[33m", "\033[0m"
@@ -54,7 +55,15 @@ EXAMPLE = {
         "extra_globs": [],
         "always_serialize": ["test/**", "tests/**"]
     },
-    "shared_state": []
+    "shared_state": [],
+    "harness": {
+        "provision": "auto",
+        "require": True,
+        "_note": "dirs and companions are auto-detected. rule_files are compared byte-for-byte "
+                 "against the main checkout at spawn: an installer seeds user-owned files only "
+                 "when absent, so a fresh install in a worktree yields a blank verify.yaml — a "
+                 "commit gate that owes nothing and reports success."
+    }
 }
 
 
@@ -123,8 +132,10 @@ def cmd_doctor(args):
         print("  %s no resources configured — nothing is serialized, so `default_lane: "
               "serialized` has no lock to take." % (YEL + "warn " + OFF))
 
+    for line in harness.report(cfg):
+        print("  %s %s" % (GRN + "ok   " + OFF, line))
     gap = worktree.harness_gap(cfg)
-    if gap:
+    if gap and not harness.spec(cfg)["dirs"]:
         print("  %s %s" % (YEL + "warn " + OFF, gap))
 
     if gates.load_baseline(cfg) is None:
@@ -419,6 +430,8 @@ def cmd_spawn(args):
     print("  scratch  %s" % rel(record["scratch"], cfg.root))
     for line in record["injected"]:
         print("  inject   %s" % line)
+    for line in record.get("provisioned") or []:
+        print("  harness  %s" % line)
     print("  brief    %s" % rel(brief_path, cfg.root))
     print("\n%sShares with siblings (a worktree isolates tracked files and nothing else):%s" % (BOLD, OFF))
     for item in record["shares"]:

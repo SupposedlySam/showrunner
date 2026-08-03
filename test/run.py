@@ -18,6 +18,7 @@ So this harness is split in two:
 Run:  python3 test/run.py [-v]
 """
 
+import filecmp
 import json
 import os
 import shutil
@@ -605,6 +606,128 @@ def test_spawn():
 
 
 # ============================================ CORE: integration (git)
+def test_harness_provisioning():
+    group("The Crawler's harness must be the SAME harness (per-tree commit gates)")
+    if not have("git"):
+        skip("the harness provisioning group", "git is not installed")
+        return
+
+    def seed_harness(root, verify_body="rules:\n  - name: suite\n", invariants="INV1 real\n"):
+        d = os.path.join(root, ".game_loop")
+        os.makedirs(os.path.join(d, "bin"), exist_ok=True)
+        with open(os.path.join(d, "bin", "verify"), "w") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+        os.chmod(os.path.join(d, "bin", "verify"), 0o755)
+        with open(os.path.join(d, "verify.yaml"), "w") as fh:
+            fh.write(verify_body)
+        with open(os.path.join(d, "INVARIANTS.md"), "w") as fh:
+            fh.write(invariants)
+        with open(os.path.join(d, "config.json"), "w") as fh:
+            fh.write('{"read_roots": ["/somewhere"]}\n')
+        # What the harness itself declares is runtime state.
+        with open(os.path.join(d, ".gitignore"), "w") as fh:
+            fh.write("state.json\nsessions/\nedited.txt\nlog.jsonl\n")
+        # ...and some actual runtime state, which must NOT be handed to a Crawler.
+        os.makedirs(os.path.join(d, "sessions", "abc123"), exist_ok=True)
+        with open(os.path.join(d, "sessions", "abc123", "state.json"), "w") as fh:
+            fh.write('{"mandate": "somebody else\'s work"}\n')
+        with open(os.path.join(d, "edited.txt"), "w") as fh:
+            fh.write("some/other/file.py\n")
+        os.makedirs(os.path.join(root, ".claude"), exist_ok=True)
+        with open(os.path.join(root, ".claude", "settings.json"), "w") as fh:
+            fh.write('{"hooks": {"PreToolUse": []}}\n')
+        return d
+
+    cfg = make_repo()
+    seed_harness(cfg.root)
+    g = new_graph(cfg)
+    g.add("work", leaf_id="h1", labels=["backend"])
+    rec = worktree.spawn(cfg, g.show("h1"), actor="crawler-h")
+    wt = rec["worktree"]
+
+    ok("an UNTRACKED harness is provisioned into the worktree (git worktree add copies "
+       "tracked files only, so it would otherwise be absent)",
+       os.path.exists(os.path.join(wt, ".game_loop", "bin", "verify")))
+    ok("...with the executable bit preserved",
+       os.access(os.path.join(wt, ".game_loop", "bin", "verify"), os.X_OK))
+    ok("the hook registration is provisioned too, or the Crawler runs with NO rails at all",
+       os.path.exists(os.path.join(wt, ".claude", "settings.json")))
+
+    ok("another session's state is NOT copied into the Crawler",
+       not os.path.exists(os.path.join(wt, ".game_loop", "sessions", "abc123", "state.json")))
+    ok("...nor another session's edited-file set",
+       not os.path.exists(os.path.join(wt, ".game_loop", "edited.txt")))
+    ok("the exclusion list comes from the harness's OWN .gitignore, not a hardcoded guess",
+       ".gitignore" in os.listdir(os.path.join(wt, ".game_loop")))
+
+    for rf in ("verify.yaml", "INVARIANTS.md", "config.json"):
+        ok("the rule file %s matches the main checkout byte-for-byte" % rf,
+           filecmp.cmp(os.path.join(cfg.root, ".game_loop", rf),
+                       os.path.join(wt, ".game_loop", rf), shallow=False))
+
+    sh(["git", "add", "-A"], wt)
+    staged = sh(["git", "diff", "--cached", "--name-only"], wt).stdout
+    ok("`git add -A` in the worktree cannot stage the provisioned harness "
+       "(the parent does not track it)", ".game_loop/" not in staged, staged)
+
+    # THE failure this module exists for: a harness that is PRESENT but says something
+    # different. An installer seeds user-owned files only when absent, so a fresh install
+    # yields a blank verify.yaml — a commit gate that owes nothing and reports success.
+    drift = make_repo()
+    seed_harness(drift.root)
+    gd = new_graph(drift)
+    gd.add("work", leaf_id="h2", labels=["backend"])
+    name = worktree.crawler_name("h2", "crawler")
+    wt2 = worktree.create(drift, name, "showrunner/h2", "HEAD")
+    os.makedirs(os.path.join(wt2, ".game_loop"), exist_ok=True)
+    for f in (".gitignore", "INVARIANTS.md", "config.json"):
+        shutil.copy2(os.path.join(drift.root, ".game_loop", f),
+                     os.path.join(wt2, ".game_loop", f))
+    with open(os.path.join(wt2, ".game_loop", "verify.yaml"), "w") as fh:
+        fh.write("rules: []\n")          # what a fresh install seeds: EMPTY
+    from showrunner import harness as H
+    actions, problems = H.provision(drift, wt2)
+    ok("a PRESENT but blank verify.yaml is caught — a commit gate that owes nothing is a "
+       "gate that stopped gating and reported success",
+       any("verify.yaml" in p and "DIFFERS" in p for p in problems), problems)
+    ok("...and the message names WHY it happens (installers seed only when absent)",
+       any("only when absent" in p for p in problems), problems)
+    worktree.remove(drift, name, force=True)
+
+    # And that difference must abort the spawn, not merely be noted.
+    drift2 = make_repo()
+    seed_harness(drift2.root)
+    gd2 = new_graph(drift2)
+    gd2.add("work", leaf_id="h3", labels=["backend"])
+    real_provision = H.provision
+    H.provision = lambda c, w: ([], ["INVARIANTS.md in the worktree DIFFERS from the main checkout's"])
+    try:
+        raises("a Crawler whose rules differ from the orchestrator's ABORTS the spawn",
+               lambda: worktree.spawn(drift2, gd2.show("h3")), "environment is incomplete")
+    finally:
+        H.provision = real_provision
+
+    # A tracked harness crosses by itself; provisioning must not fight it.
+    tracked = make_repo()
+    seed_harness(tracked.root)
+    sh(["git", "add", "-f", ".game_loop", ".claude"], tracked.root)
+    sh(["git", "commit", "-q", "-m", "track harness"], tracked.root)
+    gt = new_graph(tracked)
+    gt.add("work", leaf_id="h4", labels=["backend"])
+    rec_t = worktree.spawn(tracked, gt.show("h4"), actor="crawler-t")
+    ok("a TRACKED harness is recognised as crossing with the worktree, not re-copied",
+       any("tracked by git" in a for a in rec_t["provisioned"]), rec_t["provisioned"])
+    ok("...and its rule files are still verified rather than assumed",
+       any("byte-for-byte" in a for a in rec_t["provisioned"]), rec_t["provisioned"])
+
+    off = make_repo(extra_config={"harness": {"provision": "off", "require": False}})
+    seed_harness(off.root)
+    actions, problems = H.provision(off, off.root)
+    ok("provisioning can be turned OFF explicitly, and then does nothing silently",
+       not actions and not problems, (actions, problems))
+    ok("...but doctor still says so out loud", any("OFF" in l for l in H.report(off)), H.report(off))
+
+
 def test_integration():
     group("Integration: checks on the MERGED result, and resume (issues #9, #14)")
     if not have("git"):
@@ -780,6 +903,7 @@ def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
     for fn in (test_locks, test_config_refusals, test_graph, test_lifecycle, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
+               test_harness_provisioning,
                test_integration, test_cli, test_optional):
         try:
             fn()
