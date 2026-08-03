@@ -221,6 +221,37 @@ Like `game_loop`, showrunner is generic; a project's specifics (which resources 
 which verbs are "serialized," the graph location, the owed checks) are **config, not code** — see
 [`.showrunner/config.json`](.showrunner/config.json) for this repo's own.
 
+## Running more than one orchestrator
+
+A graph that survives sessions is a graph more than one agent will open — several Claude Code
+sessions driving one build is a supported shape, not an accident. The state showrunner shares
+between them is protected, and it was measured before it was fixed:
+
+| Shared state | The race | Now |
+|---|---|---|
+| a leaf claim | check-then-write: **6 of 12** concurrent claims won the same leaf | one conditional `UPDATE`; measured 1 of 12 |
+| the campaign record | read-modify-write: **3 of 10** spawns survived | `flock` + write-then-rename; 10 of 10 |
+| the main checkout | two `integrate` runs rewinding each other | exclusive, and it **refuses** rather than queueing |
+
+Take work with the primitive built for it, not by reading `ready` and claiming the first entry —
+`ready` hands the same list to everyone who asks:
+
+```bash
+showrunner claim --next --actor crawler-a     # atomically take ANY free leaf; exit 1 when dry
+```
+
+Losing a race there is not an error: it means a sibling got there first, which is the system
+working. Eight concurrent orchestrators against eight leaves claim eight distinct leaves and none
+of them fails — asserted in the suite.
+
+Two things stay deliberately single: **integration** (it merges, runs checks, and rewinds with
+`git reset --hard`, so two at once would rewind each other's work) and any **single-consumer
+resource** you have configured. Both refuse loudly instead of waiting silently, because a
+multi-minute silent wait is indistinguishable from a hang.
+
+`showrunner waiting` exits 0 while dispatched work has a live owner or an explicit park — the
+recomputable fact an idle watchdog needs, since it cannot see a subagent.
+
 ## What a Crawler's harness gets
 
 A harness that resolves its commit gate **per tree** — the correct design, since what a change

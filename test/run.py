@@ -369,11 +369,17 @@ def test_close_gate():
 
     g.add("premise did not hold", leaf_id="p3")
     g.claim("p3", "crawler")
+    # README.md is the SEED file: older than the claim, on purpose. Refuting a premise means
+    # reading pre-existing source, so this is the realistic shape and it must not be refused.
     leaf, notes = gates.close_gate(cfg, g, "p3", None, "the described failure is not live here",
                                    refuted=True, evidence="README.md", premise="refuted",
                                    premise_read="README.md")
     eq("a refuted premise closes as REFUTED, a first-class successful outcome",
        leaf["status"], G.REFUTED)
+    ok("...and evidence that PREDATES the claim is accepted for a refutation — it is the "
+       "pre-existing source you read, and demanding freshness would make the honest outcome "
+       "the hard one to record",
+       leaf.get("proof") == "README.md", leaf.get("proof"))
     ok("refuting is reported as a success, not a failure",
        any("first-class" in n for n in notes), notes)
 
@@ -898,6 +904,33 @@ def test_concurrency():
     [p.wait() for p in procs]
     eq("every concurrent spawn survives in the campaign record (read-modify-write lost 7 of 10)",
        len(campaign.load(cfg).get("crawlers", [])), 10)
+
+    # A fleet dividing work is the actual multi-orchestrator use case: `ready` hands the
+    # same list to everyone, so claiming the first entry has everyone fighting over one leaf.
+    fleet_cfg = make_repo()
+    fg = new_graph(fleet_cfg)
+    for i in range(8):
+        fg.add("leaf %d" % i, leaf_id="L%d" % i)
+    nxt = os.path.join(tmpdir("fleet"), "next.py")
+    with open(nxt, "w") as fh:
+        fh.write("import sys, os\n"
+                 "sys.path.insert(0, %r)\n"
+                 "from showrunner import graph as G\n"
+                 "g = G.SqliteGraph(%r)\n"
+                 "l = g.claim_next('a'+sys.argv[1], pid=os.getpid())\n"
+                 "print(l['id'] if l else 'NONE')\n" % (lib, fleet_cfg.graph_db))
+    procs = [subprocess.Popen([sys.executable, nxt, str(i)], stdout=subprocess.PIPE, text=True)
+             for i in range(8)]
+    got = [p.communicate()[0].strip() for p in procs]
+    claimed = [x for x in got if x != "NONE"]
+    eq("8 concurrent orchestrators claim 8 DISTINCT leaves via claim --next", len(set(claimed)), 8)
+    ok("...and none of them fails: losing a race means a sibling got there first, which is "
+       "the system working", "NONE" not in got, got)
+    ok("...and the graph agrees every leaf is spoken for",
+       len(fg.ready()) == 0, [l["id"] for l in fg.ready()])
+
+    empty = fg.claim_next("latecomer", pid=os.getpid())
+    ok("a latecomer to a dry graph gets None, not an error", empty is None, empty)
 
     from showrunner.util import try_file_lock
     lockp = os.path.join(cfg.state_dir, "integrate")

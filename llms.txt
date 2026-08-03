@@ -55,6 +55,19 @@ independent confirmation with line numbers is worth strictly more than either re
 **On resume, reconcile before doing anything.** An abandoned worktree may hold the only copy of real
 work: surface it, do not silently reuse it and do not silently delete it.
 
+## If several orchestrators are running at once
+
+Supported. Do NOT read `ready` and claim its first entry — everyone gets the same list:
+
+```
+showrunner claim --next --actor <you>    # atomically take any free leaf; exit 1 when dry
+showrunner waiting                       # exit 0 while dispatched work has a live owner
+```
+
+Losing a claim race is not an error; a sibling got there first. Integration and single-consumer
+resources stay exclusive and **refuse** rather than queue, so a refusal there means "someone else
+is mid-merge", not "something broke".
+
 ## If you are a CRAWLER
 
 Your brief is in your scratch dir (`BRIEF.md`). The short version:

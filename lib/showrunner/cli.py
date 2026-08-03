@@ -59,10 +59,15 @@ EXAMPLE = {
     "harness": {
         "provision": "auto",
         "require": True,
-        "_note": "dirs and companions are auto-detected. rule_files are compared byte-for-byte "
-                 "against the main checkout at spawn: an installer seeds user-owned files only "
-                 "when absent, so a fresh install in a worktree yields a blank verify.yaml — a "
-                 "commit gate that owes nothing and reports success."
+        "installer": None,
+        "_note": "The per-agent harness is auto-detected. showrunner ASKS it which files are "
+                 "rules and whether a worktree matches its parent — it keeps no list of its "
+                 "own. Track the harness dir in git (simplest: it then crosses into every "
+                 "worktree by itself), or set \"installer\" to the path of its install script "
+                 "so each worktree is provisioned with the PARENT's rules. Never let a worktree "
+                 "get freshly-seeded rules: an installer seeds user-owned files only when "
+                 "absent, so a blank verify.yaml means a commit gate that owes nothing and "
+                 "reports success."
     }
 }
 
@@ -228,7 +233,17 @@ def cmd_ready(args):
 
 def cmd_claim(args):
     cfg = _cfg(args)
-    leaf = _graph(cfg).claim(args.id, args.actor, pid=args.pid, tree=args.tree, session=args.session)
+    g = _graph(cfg)
+    if args.next:
+        leaf = g.claim_next(args.actor, pid=args.pid, tree=args.tree, session=args.session,
+                            prefer=[args.id] if args.id else None)
+        if not leaf:
+            print("no ready leaf available — either the graph is dry or siblings hold them all")
+            return 1
+    else:
+        if not args.id:
+            die("name a leaf, or use --next to take whichever one is free", code=64)
+        leaf = g.claim(args.id, args.actor, pid=args.pid, tree=args.tree, session=args.session)
     print("claimed %s as %s (pid %s)" % (leaf["id"], leaf.get("actor"), leaf.get("claim_pid")))
     return 0
 
@@ -664,7 +679,11 @@ def build_parser():
     s.set_defaults(func=cmd_ready)
 
     s = sub.add_parser("claim", help="claim a leaf (records owner liveness)")
-    s.add_argument("id")
+    s.add_argument("id", nargs="?")
+    s.add_argument("--next", action="store_true",
+                   help="atomically take ANY ready leaf; exit 1 when none is free. Safe for "
+                        "several orchestrators at once — losing a race means a sibling got "
+                        "there first, which is the system working")
     s.add_argument("--actor", default="crawler")
     s.add_argument("--pid", type=int)
     s.add_argument("--tree")

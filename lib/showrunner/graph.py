@@ -273,6 +273,29 @@ class SqliteGraph:
         self.db.commit()
         return self.show(leaf_id)
 
+    def claim_next(self, actor, pid=None, tree=None, session=None, prefer=None):
+        """Atomically take ANY ready leaf. Returns the leaf, or None if none is available.
+
+        The primitive several orchestrators actually need. `ready` hands the same list to
+        everyone who asks, so a fleet that reads it and claims the first entry has every
+        member fighting over one leaf and most of them failing — and the naive fix (retry
+        the whole list) is a race written by hand, differently, in every caller.
+
+        Losing a race here is not an error: it means a sibling got there first, which is
+        the system working. So contention is absorbed, and only "nothing left" is reported.
+        """
+        candidates = list(prefer or []) + [l["id"] for l in self.ready()]
+        seen = set()
+        for leaf_id in candidates:
+            if leaf_id in seen:
+                continue
+            seen.add(leaf_id)
+            try:
+                return self.claim(leaf_id, actor, pid=pid, tree=tree, session=session)
+            except Refused:
+                continue          # somebody else won it, or it stopped being ready
+        return None
+
     def heartbeat(self, leaf_id):
         self.db.execute("UPDATE leaves SET heartbeat_ts=? WHERE id=?", (now(), leaf_id))
         self.db.commit()

@@ -100,7 +100,13 @@ def close_gate(cfg, graph, leaf_id, proof, reason, refuted=False, evidence=None,
         raise Refused("REFUSED to close %s: %s names an empty file: %s" % (leaf_id, label, artifact))
 
     notes = []
-    claim_ts = leaf.get("claim_ts") or 0
+    # Freshness applies to a PROOF and only to a proof. A proof is an artifact the work
+    # produced, so one older than the claim is evidence about something else. Evidence for a
+    # REFUTATION is the opposite kind of thing: it is the pre-existing source you read to
+    # discover the premise does not hold, and it is *supposed* to predate the work. Demanding
+    # it be newer would make the honest outcome the hard one to record — which is exactly
+    # backwards, since "premise refuted" is the outcome this design wants to be cheap.
+    claim_ts = 0 if refuted else (leaf.get("claim_ts") or 0)
     if claim_ts:
         try:
             mtime = int(os.path.getmtime(path))
