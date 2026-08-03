@@ -93,6 +93,17 @@ def remove(cfg, name, force=False):
     return rc == 0, err.strip()
 
 
+def _branch_has_commits(cfg, branch, base_sha):
+    """Did this branch receive work? Never delete a branch that did, even on an aborted spawn."""
+    if not base_sha:
+        return True          # cannot prove it is empty; keep it
+    rc, out, _ = git(["rev-list", "--count", "%s..%s" % (base_sha, branch)], cwd=cfg.root)
+    try:
+        return int(out.strip()) > 0
+    except ValueError:
+        return True
+
+
 def dirty(path, tracked_only=False):
     """Uncommitted work in a worktree — the reason a dead Crawler's tree is not garbage.
 
@@ -362,8 +373,14 @@ def spawn(cfg, leaf, actor="crawler", base="HEAD", branch=None):
         provisioned += ["NOT ENFORCED (harness.require is false): %s" % p for p in harness_problems]
 
     if problems:
-        # Fail the spawn loudly rather than handing over a half-built environment.
+        # Fail the spawn loudly rather than handing over a half-built environment — and undo
+        # the branch as well as the worktree. Leaving the branch behind means the retry, after
+        # the operator has fixed the actual problem, fails with a *different* and misleading
+        # error ("a branch named X already exists"), which is how a fixable spawn turns into a
+        # wedged one at 3am.
         remove(cfg, name, force=True)
+        if not _branch_has_commits(cfg, branch, base_sha):
+            git(["branch", "-D", branch], cwd=cfg.root)
         die("spawn aborted — the Crawler's environment is incomplete:\n  - %s\n"
             "A Crawler that cannot reach a service will write the service up as broken, in the "
             "same confident tone as a real finding — and a Crawler running under different rules "

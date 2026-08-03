@@ -609,7 +609,8 @@ def test_spawn():
        "--no-verify" in text and "never bypass" in text.lower(), )
 
     # A declared inject path that is missing must fail the SPAWN, loudly.
-    bad = make_repo(extra_config={"inject": [{"path": "service-account.json"}]})
+    bad = make_repo(files={"README.md": "seed\n", ".gitignore": "service-account.json\n"},
+                    extra_config={"inject": [{"path": "service-account.json"}]})
     gb = new_graph(bad)
     gb.add("needs a secret", leaf_id="x1")
     raises("a MISSING declared inject path aborts the spawn instead of surfacing later as a "
@@ -617,6 +618,14 @@ def test_spawn():
            lambda: worktree.spawn(bad, gb.show("x1")), "environment is incomplete")
     ok("...and the aborted spawn leaves no half-built worktree behind",
        not os.path.isdir(os.path.join(bad.worktree_root, worktree.crawler_name("x1", "crawler"))))
+    branches = sh(["git", "branch", "--list", "showrunner/*"], bad.root).stdout
+    ok("...nor an orphaned branch, so the retry after fixing the environment does not fail "
+       "with a different, misleading error", "showrunner/x1" not in branches, branches)
+    with open(os.path.join(bad.root, "service-account.json"), "w") as fh:
+        fh.write("{}\n")
+    rec_retry = worktree.spawn(bad, gb.show("x1"))
+    ok("...so the retry actually succeeds once the real problem is fixed",
+       os.path.isdir(rec_retry["worktree"]), rec_retry)
 
     opt = make_repo(extra_config={"inject": [{"path": "maybe.json", "optional": True}]})
     go = new_graph(opt)
@@ -810,6 +819,39 @@ def test_harness_provisioning():
     ok("...but doctor still says so out loud", any("OFF" in l for l in H.report(off)), H.report(off))
 
 
+def test_waiting():
+    group("An orchestrator waiting on dispatched work is a FACT, not a heuristic (game_loop#32)")
+    if not have("git"):
+        skip("the waiting group", "git is not installed")
+        return
+    cfg = make_repo()
+    g = new_graph(cfg)
+    is_waiting, detail = campaign.waiting(cfg, g)
+    ok("with nothing dispatched, the orchestrator is NOT waiting", is_waiting is False, detail)
+
+    g.add("dispatched", leaf_id="wq1", labels=["backend"])
+    rec = worktree.spawn(cfg, g.show("wq1"), actor="live-one")
+    campaign.record_spawn(cfg, rec, pid=os.getpid())
+    is_waiting, detail = campaign.waiting(cfg, g)
+    ok("a LIVE owning pid means waiting — the signal is a real process, not activity",
+       is_waiting is True and detail["live_crawlers"], detail)
+
+    dead = make_repo()
+    gd = new_graph(dead)
+    gd.add("abandoned", leaf_id="wq2", labels=["backend"])
+    rec_d = worktree.spawn(dead, gd.show("wq2"), actor="ghost")
+    campaign.record_spawn(dead, rec_d, pid=DeadPid().pid)
+    is_waiting, detail = campaign.waiting(dead, gd)
+    ok("a DEAD Crawler does not count as waiting — a false 'waiting' would silence the "
+       "watchdog on exactly the wedged run it exists to catch", is_waiting is False, detail)
+
+    gd.claim("wq2", "ghost", pid=DeadPid().pid)
+    gd.park("wq2", "usage limit")
+    is_waiting, detail = campaign.waiting(dead, gd)
+    ok("an explicitly PARKED Crawler does count — parked is accounted-for, not stalled",
+       is_waiting is True and detail["parked_crawlers"], detail)
+
+
 def test_integration():
     group("Integration: checks on the MERGED result, and resume (issues #9, #14)")
     if not have("git"):
@@ -985,7 +1027,7 @@ def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
     for fn in (test_locks, test_config_refusals, test_graph, test_lifecycle, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
-               test_harness_provisioning,
+               test_harness_provisioning, test_waiting,
                test_integration, test_cli, test_optional):
         try:
             fn()

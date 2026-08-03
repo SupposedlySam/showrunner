@@ -270,6 +270,40 @@ def reap(cfg, graph, base="HEAD", apply=False):
     return actions, warnings
 
 
+def waiting(cfg, graph, base="HEAD"):
+    """Is this orchestrator legitimately waiting on work it dispatched? (game_loop#32)
+
+    An idle-watchdog whose only signal is transcript growth cannot see a subagent: an
+    orchestrator that has fanned out and is waiting looks exactly like one that has stalled.
+    Ringing it back to work is wrong, and at the ring cap it pages a human for a run that is
+    healthy.
+
+    The fix is not a better heuristic — it is a **recomputable fact**, the same rule this
+    boundary follows everywhere else. Liveness here is a live PID or an explicit park, both
+    of which the campaign record already carries, and neither of which an agent can assert
+    into existence.
+
+    Returns (is_waiting, detail). Deliberately conservative in the *opposite* direction to
+    most of showrunner: when in doubt it reports NOT waiting, because a false "waiting"
+    silences a watchdog that exists to catch a genuinely wedged run.
+    """
+    live, parked = [], []
+    for f in reconcile(cfg, graph, base):
+        if f["alive"]:
+            live.append({"crawler": f["crawler"], "leaf": f["leaf"], "branch": f["branch"]})
+        elif f["parked"]:
+            parked.append({"crawler": f["crawler"], "leaf": f["leaf"],
+                           "why": "parked at a usage limit — not dead, and its claim survives"})
+    detail = {
+        "waiting": bool(live or parked),
+        "live_crawlers": live,
+        "parked_crawlers": parked,
+        "basis": "a live owning PID recorded at spawn, or an explicit park — never a guess "
+                 "about activity",
+    }
+    return bool(live or parked), detail
+
+
 # ------------------------------------------------------------- integration
 def integrate(cfg, graph, base=None, only=None, dry_run=False):
     """Merge Crawler branches serially, re-running the owed checks after each merge.

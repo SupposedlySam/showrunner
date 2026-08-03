@@ -17,10 +17,13 @@ Dependency arrow points one way: **showrunner → game_loop.** game_loop never l
 | The **guard** that checks a lock before a risky verb | game_loop | It owns PreToolUse. showrunner supplies the lock path. |
 | Whether a **turn** may end | game_loop | Its Stop gate. showrunner supplies the graph the gate reads. |
 | Whether a **leaf** may close | showrunner | Proof-of-done and the premise verdict. |
+| A commit's **provenance** under fan-out | game_loop | `attribute --merge <ref>`, recomputed from the ref. |
+| Whether an orchestrator is **waiting on dispatched work** | showrunner | `showrunner waiting` — a live PID or an explicit park; game_loop's watchdog cannot see a subagent. |
 | What a change **owes**, and whether evidence postdates it | game_loop | A fact about a tree. |
-| Whether **checks pass on the merged result** | showrunner | A fact about a trunk that exists only after integration. |
+| **Merge order and timing** | showrunner | Which branch lands when, and whether to stop. |
+| Whether **the resulting tree is verified** | game_loop | Amended — after per-tree commit gates this is already answered per tree. showrunner decides *when* to merge; game_loop decides whether what came out is verified. |
 | Where a Crawler may **write**, and what it gets | showrunner | Worktree placement, injection, scratch. |
-| What is **runtime state** vs. a **rule** inside the harness | game_loop | It is the thing that knows. See the open ask below. |
+| What is **runtime state** vs. a **rule** inside the harness | game_loop | It is the thing that knows: `.game_loop/.gitignore` and `game_loop owned`. |
 
 ## The three rules this boundary keeps producing
 
@@ -43,17 +46,27 @@ are compared **byte-for-byte** at spawn and a mismatch aborts, rather than being
 Applied in this order when something breaks across the boundary:
 
 **Ask which layer owns the concept, and put the check there.** If showrunner is modelling
-game_loop's internals, that is a missing verb in game_loop, not a feature in showrunner. Today
-`harness.DEFAULT_RULE_FILES` hardcodes `["config.json", "INVARIANTS.md", "verify.yaml"]` —
-showrunner asserting which of game_loop's files are rules. It works and it will be wrong the
-moment game_loop adds one. That is tracked as game_loop#30.
+game_loop's internals, that is a missing verb in game_loop, not a feature in showrunner. The
+worked example: `harness.DEFAULT_RULE_FILES` hardcoded which of game_loop's files were rules.
+It worked, and it was *already* wrong — it knew nothing of the notes tier, so a diverged ledger
+was invisible to it. Filed as game_loop#30, answered with `owned`/`worktree`, list deleted.
 
-**Prefer a different question over silence.** When a lower-layer check fires wrongly because
-orchestration broke an assumption it was built on, the fix is never to suppress it. A warning
-that fires every time is one people learn to scroll past, and then it stops working for the
-case it was built for. Ask the question that *is* answerable: not "did you edit these?" (an
-orchestrator never does) but "does the staged set match the union of what the merged agents
-edited?" That is game_loop#29.
+The test to apply is not "is this file getting bigger" but **does showrunner still contain a
+claim about the other layer that only the other layer can validate?**
+
+**Prefer a different question over silence — but check first whether it is a false positive.**
+game_loop's sharper form of this, worth stealing verbatim: when a check fires wrongly under
+orchestration, ask *is there something recomputable that would make the warning wrong?*
+
+- **Yes → false positive**, and the check is missing an input. The blast-radius warning names
+  files the session never wrote; under fan-out they arrive by merge and git can *prove* where
+  from. Hence `attribute --merge <ref>` (game_loop#29).
+- **No → true positive**, and the layer above owes real work. The unproved-fix warning fires on
+  an integrating run too, and nothing is recomputable there: a proof performed against one
+  branch genuinely says nothing about the merged result. **Branch-green is not trunk-green.**
+
+Same symptom, opposite diagnoses. Fan-out does not only break assumptions — sometimes it makes
+an existing gap visible for the first time, and then the fix belongs *here*, not below.
 
 **Make the declaration cite something checkable.** Any escape hatch across this boundary must
 name a real ref, a real path, a real file — never a list the caller could have invented.
@@ -74,12 +87,66 @@ propagates it N ways in parallel, and none of the N can notice.
 stroke. Correct changes below produce new obligations above; that is normal, and worth looking
 for on purpose rather than discovering at spawn time.
 
-## Open asks on game_loop
+## The interface showrunner consumes
 
-| # | Ask | Unblocks |
-|---|---|---|
-| [#29](https://github.com/SupposedlySam/game_loop/issues/29) | Let a commit declare provenance (`attribute --merge <branch>`), recomputed from the ref rather than trusted | Moves `showrunner integration-commit` from a command someone must remember to run, to a check that fires at commit time |
-| [#30](https://github.com/SupposedlySam/game_loop/issues/30) | A first-class "make this tree carry the SAME harness" verb, plus drift being loud on its own | Lets showrunner stop modelling game_loop's file layout in `harness.py` |
+game_loop's side is documented in its `docs/embedding.md`; that page and these verbs are the
+interface, and internals are explicitly not. showrunner must never parse `state.json`, guess
+which files are rules, or reimplement the hooks merge.
+
+| Verb | Used for |
+|---|---|
+| `game_loop owned --porcelain` | the owned set and the rule/notes split — showrunner keeps **no list of its own** |
+| `game_loop worktree --porcelain` | is this tree the same harness as its parent |
+| `install.sh --same-as <parent> <target>` | provision a tree with the parent's rules, not blank templates |
+| `game_loop attribute --merge <ref>` | declare an integration commit's provenance |
+| `.game_loop/.gitignore` | the authoritative declaration of what is runtime state |
+
+Exit codes from `worktree`, consumed exactly as defined: **0** clean · **1** rule files drifted
+(abort the spawn) · **2** undetermined (abort — "could not tell" must never read as "clean") ·
+**3** notes drifted (warn). Nothing undetermined shares a code with anything compared, which is
+the property that makes asking better than guessing.
+
+## Closed asks
+
+| # | Outcome |
+|---|---|
+| [#29](https://github.com/SupposedlySam/game_loop/issues/29) | Built as designed. Two operational rules encoded in `gates.attribution()`: a clean merge auto-commits and never invokes the gate (a declaration spent there is wasted and the *next* commit goes bare), and attribution must be declared **after** the branch has its commit or it resolves to zero files. |
+| [#30](https://github.com/SupposedlySam/game_loop/issues/30) | Mechanism confirmed, **precondition refuted** — only `verify.yaml` seeds from `templates/`; `config.json` and `INVARIANTS.md` seed from game_loop's own `.game_loop/`. And showrunner's rule-file list was already incomplete: `install.sh` owns four files, and the notes tier (`LEDGER.md`) was invisible to it. `DEFAULT_RULE_FILES` is deleted. |
+| [#32](https://github.com/SupposedlySam/game_loop/issues/32) | Filed against game_loop, answered from here: `showrunner waiting` exits 0 on a live Crawler PID or an explicit park. Conservative in the opposite direction to the rest of showrunner — when in doubt it reports **not** waiting, because a false "waiting" silences a watchdog on exactly the wedged run it exists to catch. |
+
+## Two corrections showrunner had to make to itself
+
+**Never copy the hook-registration file.** `install.sh` *merges* its hooks into
+`.claude/settings.json`, preserving the project's `statusLine`, permissions and unrelated
+hooks — and it warns about pre-existing **non-game_loop** hooks on the events it manages,
+because a stray `Stop` hook from an older harness runs alongside and the two fight over
+turn-ends. That presents as "the orchestrator is mysteriously flaky." A wholesale copy
+discarded the settings and silently dropped the warning.
+
+**Never write git's shared exclude file.** `git rev-parse --git-path info/exclude` resolves to
+the **common** git dir from inside a linked worktree, and git honours no per-worktree
+equivalent. So excluding a path "for one Crawler" silently changed the ignore rules of the main
+checkout and every sibling — this project's own INV9 landing on its own code: a shared
+single-consumer resource nobody had named, mutated at every spawn. Replaced with verification:
+a path that would be staged is a refusal telling you to put it in the repo's tracked
+`.gitignore`, which crosses into every worktree by itself.
+
+## On the shrink test
+
+The handoff for #30 said: *when this lands, `harness.py` should shrink, not grow — if it grows,
+the fix went to the wrong layer.* Reporting it honestly: the file **grew**, 200 → 253 code
+lines, even after deleting a speculative fallback that INV4 did not justify.
+
+The test was measuring the wrong thing. What went to zero is the part that mattered:
+`DEFAULT_RULE_FILES`, the byte-comparison, the notes-tier blindness, and the settings-merge
+reimplementation — every place showrunner modelled game_loop's internals. What grew is
+*plumbing to call the other layer*: invoking an installer, mapping four exit codes, and refusing
+when hook registration would be absent. Calling a boundary costs more lines than guessing at it,
+and is still right.
+
+The sharper test for next time, and the one to use: **does showrunner still contain a claim
+about the other layer that only the other layer can validate?** Line count is a proxy that
+fails; that question does not.
 
 ## What showrunner assumes about game_loop today
 

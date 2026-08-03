@@ -505,6 +505,24 @@ def cmd_reconcile(args):
     return 0
 
 
+def cmd_waiting(args):
+    cfg = _cfg(args)
+    is_waiting, detail = campaign.waiting(cfg, _graph(cfg), base=args.base)
+    if args.porcelain:
+        print(json.dumps(detail, indent=2, sort_keys=True))
+    else:
+        if is_waiting:
+            print("WAITING on %d live and %d parked Crawler(s):"
+                  % (len(detail["live_crawlers"]), len(detail["parked_crawlers"])))
+            for c in detail["live_crawlers"]:
+                print("  live   %s (%s)" % (c["crawler"], c["leaf"]))
+            for c in detail["parked_crawlers"]:
+                print("  parked %s (%s) — %s" % (c["crawler"], c["leaf"], c["why"]))
+        else:
+            print("not waiting — no dispatched work has a live owner or an explicit park")
+    return 0 if is_waiting else 1
+
+
 def cmd_baseline(args):
     cfg = _cfg(args)
     if not (cfg.get("checks") or []):
@@ -751,6 +769,14 @@ def build_parser():
     s.add_argument("--base", default="HEAD")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_reconcile)
+
+    s = sub.add_parser("waiting",
+                       help="exit 0 when this orchestrator is legitimately waiting on dispatched "
+                            "work (a live Crawler PID or an explicit park), exit 1 otherwise — a "
+                            "recomputable fact for an idle watchdog that cannot see subagents")
+    s.add_argument("--base", default="HEAD")
+    s.add_argument("--porcelain", action="store_true")
+    s.set_defaults(func=cmd_waiting)
 
     s = sub.add_parser("baseline", help="record the current check results as the comparison point")
     s.set_defaults(func=cmd_baseline)
