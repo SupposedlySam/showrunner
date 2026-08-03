@@ -108,6 +108,30 @@ is modelling internals, which is what deleting `DEFAULT_RULE_FILES` was meant to
 would rot the same way. The ask belongs below: a pin-aware answer to *what must a new tree carry
 to run this harness the way I am running it now*.
 
+## A gate escape that fan-out makes the default
+
+Measured with a control, same tree, same failing checks, same session — differing only in
+whether the worktree path is written literally or held in a shell variable:
+
+| how the tree is reached | commit gate |
+|---|---|
+| literal path | **denied**, correctly |
+| variable-built path | **allowed, silently** |
+
+game_loop documents "a path built from a shell variable" as a blind spot, so its existence is
+known. What is not obvious is the blast radius here: **an orchestrator reaches every worktree
+through a variable.** Loops over Crawlers, generated scripts, anything parameterised. So in an
+orchestrated run the commit gate is not occasionally escaped — it is escaped by default, and
+silently, which is the worst direction because it is indistinguishable from passing.
+
+The fix belongs below (the gate is game_loop's), and it is raised there. What belongs here is
+the mitigation showrunner owns: every Crawler brief now says to commit from the tree it is
+already in rather than `cd`-ing to it through a variable.
+
+Worth recording alongside it, because it is the same shape one level out: the write guard
+refused a *chat message* whose quoted example text contained shell-looking commands. Right
+rule, wrong subject — the mirror of the provenance check firing on merges.
+
 ## The interface showrunner consumes
 
 game_loop's side is documented in its `docs/embedding.md`; that page and these verbs are the

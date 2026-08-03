@@ -614,6 +614,10 @@ def test_spawn():
     ok("the brief names the ABSOLUTE tree to run verify in — the harness's refusal cannot say "
        "which tree, and with several Crawlers there is more than one candidate",
        os.path.realpath(rec["worktree"]) in text or rec["worktree"] in text, )
+    ok("the brief warns against reaching the tree through a shell variable — measured: the "
+       "gate DENIES a literal path and silently ALLOWS a variable-built one, and orchestration "
+       "uses variables by default",
+       "shell variable" in text and "silently" in text, )
     ok("the brief warns about the shared-state refusal without offering a bypass",
        "--no-verify" in text and "never bypass" in text.lower(), )
 

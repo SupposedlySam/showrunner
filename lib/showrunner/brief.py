@@ -93,6 +93,14 @@ instinct is then to retry just the commit, which silently commits nothing of wha
 message describes. Same reason `verify && git commit` cannot work: your verify line has not
 executed when the gate reads the record.
 
+**Commit from the tree you are already in — never `cd` to it through a shell variable.**
+Measured, same tree and same failing checks, differing only in that respect: a literal path
+was correctly DENIED, and a variable-built path was ALLOWED silently. The gate reads the
+command line to work out which tree a commit lands in, and a path it cannot resolve makes it
+go quiet rather than guess. That is the *worst* direction for you, because it looks exactly
+like passing. Orchestration reaches worktrees through variables by default, so this is the
+normal shape and not an edge case — which is why it is worth breaking the habit here.
+
 **Put every non-repo file in your own scratch dir above** — commit messages, captured
 output, before/after artifacts, fixtures. Not in a shared temp dir. Two Crawlers in a real
 run both reached for `commitmsg.txt` in one shared directory; the second noticed the first
