@@ -123,6 +123,10 @@ def cmd_doctor(args):
         print("  %s no resources configured — nothing is serialized, so `default_lane: "
               "serialized` has no lock to take." % (YEL + "warn " + OFF))
 
+    gap = worktree.harness_gap(cfg)
+    if gap:
+        print("  %s %s" % (YEL + "warn " + OFF, gap))
+
     if gates.load_baseline(cfg) is None:
         print("  %s no baseline recorded — `showrunner baseline` on a known-good tree, or "
               "integration cannot tell a new failure from a pre-existing one." % (YEL + "warn " + OFF))
@@ -419,6 +423,8 @@ def cmd_spawn(args):
     print("\n%sShares with siblings (a worktree isolates tracked files and nothing else):%s" % (BOLD, OFF))
     for item in record["shares"]:
         print("  - %s" % item["what"])
+    if record.get("harness_gap"):
+        eprint("\n%sHARNESS GAP: %s%s" % (YEL, record["harness_gap"], OFF))
     return 0
 
 

@@ -233,17 +233,32 @@ def inject(cfg, worktree):
 # ------------------------------------------------------- shared-state audit
 DEFAULT_SHARED_STATE = [
     {
-        "what": "the per-agent harness's state directory",
+        "what": "the per-agent harness's session state (edited-file set, claims, authorizations)",
         "detect": [".game_loop", ".loop"],
-        "why": "hooks are registered as \"$CLAUDE_PROJECT_DIR\"/<harness>/bin/... and a harness "
-               "resolves its root from its own script location, so a commit made inside a "
-               "worktree can be gated on the MAIN checkout's verification record — which "
-               "describes a different tree altogether.",
-        "consequence": "throughput (you serialize on a tree you do not own) AND correctness "
-                       "(a green record from an unrelated run can wave your change through).",
-        "instead": "poll read-only and wait, or ask the orchestrator to integrate. Do NOT reach "
-                   "for --no-verify: a stuck agent under a mandate to finish is exactly the "
-                   "situation where bypassing the gate starts looking reasonable.",
+        "why": "a harness scopes this to the SESSION, not the tree — one session is one session "
+               "however many trees it touches. So the set of files 'you' edited spans every "
+               "worktree you have worked in, and an orchestrator's set will not contain what its "
+               "Crawlers wrote at all.",
+        "consequence": "a provenance check keyed to 'did YOU edit this?' answers no for work a "
+                       "sibling did, and no for every file a merge brought in.",
+        "instead": "for an integration commit, declare the provenance: "
+                   "`showrunner integration-commit --crawler <name>` answers the better question "
+                   "— does the staged set match the union of what the merged Crawlers edited?",
+    },
+    {
+        "what": "the harness's COMMIT gate, which is resolved per-tree and needs one HERE",
+        "detect": [".game_loop", ".loop"],
+        "why": "what a change owes, and whether the evidence is newer than the change, are facts "
+               "about a TREE. A harness that gets this right resolves the record from the tree the "
+               "commit targets and REFUSES when that tree carries no harness, rather than "
+               "reporting confidence about files the commit does not contain.",
+        "consequence": "your first `git commit` in this worktree is DENIED outright if the harness "
+                       "is absent here — and `git worktree add` copies tracked files only, so a "
+                       "gitignored harness directory does not come across.",
+        "instead": "install the harness into this worktree (its own installer, pointed here), or "
+                   "ask the orchestrator to. Do NOT reach for --no-verify: a stuck agent under a "
+                   "mandate to finish is exactly the situation where bypassing starts looking "
+                   "reasonable, and this denial is telling you something true.",
     },
     {
         "what": "the single-consumer resource locks",
@@ -266,6 +281,44 @@ def audit_shared(cfg):
             continue
         findings.append(item)
     return findings
+
+
+HARNESS_DIRS = (".game_loop", ".loop")
+
+
+def harness_gap(cfg, worktree_path=None):
+    """Will the Crawler land in a worktree with no per-agent harness? Returns a note or None.
+
+    A harness that resolves its commit gate per-tree — the correct design, since what a change
+    owes is a fact about a tree — must refuse when the tree being committed carries no record,
+    rather than answer from a tree whose files the commit does not contain. That refusal is
+    right, and it lands on the orchestrator: **`git worktree add` copies tracked files only**,
+    so a gitignored harness directory never crosses into the worktree and the Crawler is denied
+    its first commit.
+
+    This is the sibling of the secret-injection problem (#10) with the harness as the missing
+    file, and it is exactly as invisible at spawn time.
+    """
+    present = [d for d in HARNESS_DIRS if os.path.isdir(os.path.join(cfg.root, d))]
+    if not present:
+        return None
+    tracked = set()
+    rc, out, _ = run(["git", "ls-files"], cwd=cfg.root)
+    if rc == 0:
+        tracked = {line.split("/")[0] for line in out.splitlines() if line.strip()}
+    missing = [d for d in present if d not in tracked]
+    if not missing:
+        return None
+    if worktree_path:
+        missing = [d for d in missing if not os.path.exists(os.path.join(worktree_path, d))]
+        if not missing:
+            return None
+    return (
+        "%s is present in the main checkout but NOT tracked by git, so it does not cross into a "
+        "worktree. If its commit gate resolves per-tree it will DENY the Crawler's first commit; "
+        "if it resolves from the main checkout instead, it will answer about files the commit "
+        "does not contain. Install the harness into the worktree at spawn, or commit it."
+        % ", ".join(missing))
 
 
 # -------------------------------------------------------------- the spawn
@@ -304,6 +357,7 @@ def spawn(cfg, leaf, actor="crawler", base="HEAD", branch=None):
         "base_sha": base_sha,
         "injected": injected,
         "shares": audit_shared(cfg),
+        "harness_gap": harness_gap(cfg, path),
         "created_ts": now(),
     }
     return record

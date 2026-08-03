@@ -66,25 +66,34 @@ had the same shape: not an error, but *silence*.
 ## Isolation is per-resource; a worktree is not a boundary
 
 A worktree isolates **tracked files** and nothing else. Everything resolved from an absolute path or
-from a hook's own script location stays shared — verified in this repo: the PreToolUse hook is
-registered as `"$CLAUDE_PROJECT_DIR"/.game_loop/bin/guard-writes.sh` and its impl resolves from
-`dirname "${BASH_SOURCE[0]}"`, i.e. the main checkout, so a commit made inside a worktree is gated on
-the **main checkout's** verification record.
+from a hook's own script location stays shared, so the audit at spawn enumerates what a Crawler
+actually gets rather than letting "it has its own worktree" stand in for independence.
 
-Consequences, and the second is the serious one:
+**Corrected on re-reading the harness (2026-08).** showrunner originally recorded, from issue #13,
+that a commit made inside a worktree is gated on the **main checkout's** verification record. That is
+no longer true of current game_loop and the claim is retracted. `guard-writes-impl.sh` resolves the
+commit gate from the **tree the commit targets**: it reads the `git commit`'s `-C`/cwd, and when that
+resolves to a different tree nested inside the project it uses *that* tree's `.game_loop`. If the
+target tree carries no harness it **denies**, on the stated grounds that reading another tree's record
+would answer a question about files this commit does not contain. `TARGET_TREE` scopes the
+blast-radius check's index the same way. Both of issue #13's consequences — the throughput one and the
+serious correctness one — are handled there.
 
-1. **Throughput** — every worktree serializes on the state of a tree it does not own, and it degrades
-   exactly when the orchestrator is busiest integrating.
-2. **Correctness** — the mirror case: a Crawler can commit a gated change while the shared record is
-   green from an entirely unrelated run. The gate's premise (a green check predating a change is
-   evidence about code that no longer exists) is defeated, because the evidence describes a different
-   tree altogether.
+This is worth recording as more than a footnote, because it is the whole premise-verification argument
+turned on its author: showrunner shipped a paragraph asserting a harness behaviour that the harness had
+already fixed, and only re-reading the source caught it. An orchestrator carrying a stale model of the
+layer below will brief every Crawler with it.
 
-showrunner's answer is not to fix game_loop from the outside but to **enumerate what is shared at
-spawn and say so**, and to tell the Crawler in its brief to wait or escalate rather than reach for
-`--no-verify`. Where the underlying harness supports per-tree state, configure it; where it does not,
-that is a bug to file against the harness, and until it is fixed the orchestrator should know it is
-serializing rather than looking mysteriously slow.
+**What the fix hands back to showrunner** is a new, concrete constraint: each Crawler worktree must
+carry its own harness, or its first commit is denied — and **`git worktree add` copies tracked files
+only**, so a gitignored harness directory never crosses. That is the secret-injection problem (#10)
+with the harness as the missing file, equally invisible at spawn. `worktree.harness_gap()` detects it
+at `spawn` and in `doctor`.
+
+The general lesson stands unchanged: **isolation has to be reasoned about per-resource, not granted
+wholesale by the worktree** — and the per-resource answers can differ, since a harness may deliberately
+scope one thing to the session (the edited-file set: one session is one session however many trees it
+touches) and another to the tree (what a change owes).
 
 ## Premise verification is the highest-leverage line in a brief
 

@@ -560,6 +560,18 @@ def test_spawn():
     ok("both scratch dirs sit under one scratch root, so they are findable on reap",
        os.path.dirname(rec["scratch"]) == os.path.dirname(rec_b["scratch"]))
 
+    # `git worktree add` copies TRACKED files only, so an untracked harness never crosses.
+    hcfg = make_repo(files={"README.md": "seed\n"})
+    os.makedirs(os.path.join(hcfg.root, ".game_loop", "bin"), exist_ok=True)
+    with open(os.path.join(hcfg.root, ".game_loop", "bin", "verify"), "w") as fh:
+        fh.write("#!/bin/sh\nexit 0\n")
+    ok("an UNTRACKED harness dir is flagged as a gap before the Crawler hits a denied commit",
+       worktree.harness_gap(hcfg) is not None, worktree.harness_gap(hcfg))
+    sh(["git", "add", "-f", ".game_loop"], hcfg.root)
+    sh(["git", "commit", "-q", "-m", "track harness"], hcfg.root)
+    ok("...and NOT flagged once the harness is tracked and so crosses into worktrees",
+       worktree.harness_gap(hcfg) is None, worktree.harness_gap(hcfg))
+
     shares = rec["shares"]
     ok("spawn enumerates what the Crawler still SHARES with its siblings", bool(shares), shares)
     ok("...and each entry says what to do instead of bypassing the gate",
