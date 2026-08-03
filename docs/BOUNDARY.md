@@ -158,11 +158,15 @@ game_loop and reported back:
 - **The commit gate denies in a linked worktree, using THAT tree's rules.** A worktree whose
   `verify.yaml` owed an impossible check was denied; the main checkout's clean manifest was
   never consulted. #28 holds under a real drive.
-- **The provenance check's third bucket is exact.** With an attribution live, a file touched by
-  no merged ref and by no session edit was named alone: *"COMMIT INCLUDES 1 FILE NOTHING
-  ACCOUNTS FOR — NOT THIS SESSION, NOT ANY ATTRIBUTED MERGE"*. The stronger wording an
-  orchestrator wants already exists and is gated on an attribution being live; the generic
-  formatter advice is the *no-attribution* message.
+- **The provenance check's third bucket is exact** — with a caveat game_loop volunteered and
+  which is worth keeping precise. A file touched by no merged ref and by no session edit was
+  named alone: *"COMMIT INCLUDES 1 FILE NOTHING ACCOUNTS FOR — NOT THIS SESSION, NOT ANY
+  ATTRIBUTED MERGE"*. The stronger wording an orchestrator wants already exists and is gated on
+  an attribution being live; the generic formatter advice is the *no-attribution* message.
+  **That result came from driving the hook with a constructed payload, not from a live
+  invocation** — it rides on the same mechanism the worktree run above proves is really called,
+  but it is one inch short of the standard the first bullet meets. Recorded at its real
+  standing rather than rounded up.
 
 Two gaps came out of it, both filed on game_loop: its refusal says "run verify" without naming
 **which tree**, which is ambiguous with N Crawlers, and the stale-check line prints twice.

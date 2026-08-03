@@ -82,6 +82,17 @@ The refusal says "run verify" without saying where, and with several Crawlers ru
 is more than one candidate — but only this tree's record can clear this tree's gate. Do not
 run it in the main checkout, and do not reach for `--no-verify`.
 
+**Do not chain staging with committing.** Run them as separate calls:
+
+    git add -A
+    git commit -m "..."
+
+The gate runs *before* the command body, so `git add -A && git commit -m "..."` can never
+pass on a first attempt — and when it is refused, **the `add` did not run either**. The
+instinct is then to retry just the commit, which silently commits nothing of what the
+message describes. Same reason `verify && git commit` cannot work: your verify line has not
+executed when the gate reads the record.
+
 **Put every non-repo file in your own scratch dir above** — commit messages, captured
 output, before/after artifacts, fixtures. Not in a shared temp dir. Two Crawlers in a real
 run both reached for `commitmsg.txt` in one shared directory; the second noticed the first
