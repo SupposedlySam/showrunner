@@ -954,6 +954,13 @@ def test_concurrency():
     ok("...and the graph agrees every leaf is spoken for",
        len(fg.ready()) == 0, [l["id"] for l in fg.ready()])
 
+    # Every verdict is logged, because "did this ever silence a watchdog, and for how long"
+    # must be a fact before anyone adopts it as a gate.
+    wpath = os.path.join(fleet_cfg.state_dir, "waiting.jsonl")
+    campaign.waiting(fleet_cfg, fg)
+    ok("every waiting verdict is logged, so the evidence a consumer needs accumulates rather "
+       "than being asserted", os.path.exists(wpath), wpath)
+
     empty = fg.claim_next("latecomer", pid=os.getpid())
     ok("a latecomer to a dry graph gets None, not an error", empty is None, empty)
 

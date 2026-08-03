@@ -332,6 +332,24 @@ def waiting(cfg, graph, base="HEAD"):
         "basis": "a live owning PID recorded at spawn, or an explicit park — never a guess "
                  "about activity",
     }
+    # Log every verdict. Whether this ever silences a watchdog, and for how long, has to be
+    # a FACT rather than a hunch — otherwise the first time someone argues the ring cap is
+    # too aggressive there is no evidence either way. It is also the evidence a consumer
+    # needs before adopting this at all: a gate wants a logged, observed failure behind it,
+    # and this is where that record accumulates.
+    try:
+        path = os.path.join(cfg.state_dir, "waiting.jsonl")
+        os.makedirs(cfg.state_dir, exist_ok=True)
+        with open(path, "a") as fh:
+            fh.write(json.dumps({
+                "ts": now(),
+                "waiting": detail["waiting"],
+                "live": len(live),
+                "parked": len(parked),
+                "leaves": [c["leaf"] for c in live + parked],
+            }, sort_keys=True) + "\n")
+    except OSError:
+        pass
     return bool(live or parked), detail
 
 
