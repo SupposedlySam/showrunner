@@ -21,6 +21,7 @@ Dependency arrow points one way: **showrunner → game_loop.** game_loop never l
 | Whether an orchestrator is **waiting on dispatched work** | showrunner | `showrunner waiting` — a live PID or an explicit park; game_loop's watchdog cannot see a subagent. |
 | What a change **owes**, and whether evidence postdates it | game_loop | A fact about a tree. |
 | **Merge order and timing** | showrunner | Which branch lands when, and whether to stop. |
+| Proving a **fix** on the merged trunk | showrunner | `fix --prove` is scoped to the session that proved it — deliberately, so a Crawler's branch-local proof can never satisfy the integrator's handback. Branch-green is not trunk-green, so the integrating session must exercise the fix's own consumer against the merge. `integrate` writes the merged-result checks out as a citable artifact. |
 | Whether **the resulting tree is verified** | game_loop | Amended — after per-tree commit gates this is already answered per tree. showrunner decides *when* to merge; game_loop decides whether what came out is verified. |
 | Where a Crawler may **write**, and what it gets | showrunner | Worktree placement, injection, scratch. |
 | What is **runtime state** vs. a **rule** inside the harness | game_loop | It is the thing that knows: `.game_loop/.gitignore` and `game_loop owned`. |
@@ -112,6 +113,7 @@ the property that makes asking better than guessing.
 |---|---|
 | [#29](https://github.com/SupposedlySam/game_loop/issues/29) | Built as designed. Two operational rules encoded in `gates.attribution()`: a clean merge auto-commits and never invokes the gate (a declaration spent there is wasted and the *next* commit goes bare), and attribution must be declared **after** the branch has its commit or it resolves to zero files. |
 | [#30](https://github.com/SupposedlySam/game_loop/issues/30) | Mechanism confirmed, **precondition refuted** — only `verify.yaml` seeds from `templates/`; `config.json` and `INVARIANTS.md` seed from game_loop's own `.game_loop/`. And showrunner's rule-file list was already incomplete: `install.sh` owns four files, and the notes tier (`LEDGER.md`) was invisible to it. `DEFAULT_RULE_FILES` is deleted. |
+| [#31/#33](https://github.com/SupposedlySam/game_loop/issues/31) | game_loop's own; no showrunner stake. |
 | [#32](https://github.com/SupposedlySam/game_loop/issues/32) | Filed against game_loop, answered from here: `showrunner waiting` exits 0 on a live Crawler PID or an explicit park. Conservative in the opposite direction to the rest of showrunner — when in doubt it reports **not** waiting, because a false "waiting" silences a watchdog on exactly the wedged run it exists to catch. |
 
 ## Two corrections showrunner had to make to itself
@@ -147,6 +149,25 @@ and is still right.
 The sharper test for next time, and the one to use: **does showrunner still contain a claim
 about the other layer that only the other layer can validate?** Line count is a proxy that
 fails; that question does not.
+
+## Verified end to end, not by inspection
+
+Both claims that used to rest on reading source have now been driven against live hooks by
+game_loop and reported back:
+
+- **The commit gate denies in a linked worktree, using THAT tree's rules.** A worktree whose
+  `verify.yaml` owed an impossible check was denied; the main checkout's clean manifest was
+  never consulted. #28 holds under a real drive.
+- **The provenance check's third bucket is exact.** With an attribution live, a file touched by
+  no merged ref and by no session edit was named alone: *"COMMIT INCLUDES 1 FILE NOTHING
+  ACCOUNTS FOR — NOT THIS SESSION, NOT ANY ATTRIBUTED MERGE"*. The stronger wording an
+  orchestrator wants already exists and is gated on an attribution being live; the generic
+  formatter advice is the *no-attribution* message.
+
+Two gaps came out of it, both filed on game_loop: its refusal says "run verify" without naming
+**which tree**, which is ambiguous with N Crawlers, and the stale-check line prints twice.
+showrunner mitigates the first where it can — every Crawler's brief now names the absolute
+path of the tree whose record can clear its own gate.
 
 ## What showrunner assumes about game_loop today
 

@@ -74,6 +74,14 @@ as evidence the hazard exists.
 Your worktree is **inside** the repo on purpose: your own write guard treats everything
 outside the project as read-only, so a sibling directory would deny your first edit.
 
+**If a commit is refused because checks are stale, run them IN THIS TREE:**
+
+    cd {worktree_abs} && ./.game_loop/bin/verify
+
+The refusal says "run verify" without saying where, and with several Crawlers running there
+is more than one candidate — but only this tree's record can clear this tree's gate. Do not
+run it in the main checkout, and do not reach for `--no-verify`.
+
 **Put every non-repo file in your own scratch dir above** — commit messages, captured
 output, before/after artifacts, fixtures. Not in a shared temp dir. Two Crawlers in a real
 run both reached for `commitmsg.txt` in one shared directory; the second noticed the first
@@ -172,6 +180,7 @@ def build(cfg, leaf, spawn_record, decision=None, orchestrator_findings=None):
         orchestrator_block=orchestrator_block,
         shared_block=shared_block,
         worktree=rel(spawn_record["worktree"], cfg.root),
+        worktree_abs=spawn_record["worktree"],
         branch=spawn_record["branch"],
         scratch=rel(spawn_record["scratch"], cfg.root),
     )

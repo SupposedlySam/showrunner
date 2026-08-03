@@ -584,10 +584,21 @@ def cmd_integrate(args):
         eprint("\nSTOPPED on the first failure rather than stacking branches onto a broken trunk. "
                "A branch is integrated only when the checks pass on the MERGED result.")
         return 2
-    if any(r["status"] == "integrated" for r in results):
+    integrated = [r for r in results if r["status"] == "integrated"]
+    if integrated:
         print("%sThese merges auto-committed, so no provenance declaration was needed: the "
               "harness's commit gate matches `git commit`, which a clean merge never runs. "
               "Declare only when you commit a resolution yourself.%s" % (DIM, OFF))
+        proofs = [r["merged_proof"] for r in integrated if r.get("merged_proof")]
+        if proofs:
+            print("\n%sChecks on the MERGED result, written out so they can be cited:%s" % (BOLD, OFF))
+            for p_ in proofs:
+                print("  %s" % rel(p_, cfg.root))
+            print("%sA fix proved on a branch does NOT transfer: the harness scopes a proved fix "
+                  "to the session that proved it, so a Crawler's proof cannot satisfy your "
+                  "handback — by design. Branch-green is not trunk-green. If a leaf claimed a "
+                  "fix, exercise that fix's own consumer against the merged trunk and prove it "
+                  "here.%s" % (DIM, OFF))
     return 0
 
 

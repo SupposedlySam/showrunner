@@ -611,6 +611,9 @@ def test_spawn():
     ok("the brief names 'premise refuted' as a successful outcome", "--refuted" in text)
     ok("the brief points the Crawler at its own scratch dir",
        os.path.basename(rec["scratch"]) in text)
+    ok("the brief names the ABSOLUTE tree to run verify in — the harness's refusal cannot say "
+       "which tree, and with several Crawlers there is more than one candidate",
+       os.path.realpath(rec["worktree"]) in text or rec["worktree"] in text, )
     ok("the brief warns about the shared-state refusal without offering a bypass",
        "--no-verify" in text and "never bypass" in text.lower(), )
 
@@ -1006,6 +1009,10 @@ def test_integration():
     rec_a = crawler("m1", "src/a.py", "# a\ndef f():\n    pass\n")
     results, ok_ = campaign.integrate(cfg, g, base="main")
     ok("a closed Crawler branch is merged", ok_ and results[0]["status"] == "integrated", results)
+    mp = results[0].get("merged_proof")
+    ok("...and the checks on the MERGED result are written out as a citable artifact, because "
+       "a fix proved on a branch cannot transfer to the integrating session",
+       mp and os.path.exists(mp), mp)
     ok("the merged trunk carries the Crawler's work",
        "def f()" in open(os.path.join(cfg.root, "src/a.py")).read())
 

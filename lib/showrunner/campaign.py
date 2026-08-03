@@ -441,8 +441,26 @@ def _integrate_locked(cfg, graph, base=None, only=None, dry_run=False):
                             "status": "checks-failed-on-merged-result", "report": report})
             return results, False
 
+        # A branch-local proof cannot transfer: the harness scopes a proved fix to the
+        # SESSION that proved it, deliberately, so a Crawler's proof can never satisfy the
+        # integrator's handback. That is the right shape — branch-green is not trunk-green —
+        # and it means the integrating session owes a proof against the MERGED artifact.
+        # Write that artifact out so there is a real file to cite rather than a claim.
+        proof_path = os.path.join(cfg.state_dir, "merged-proof-%s.txt" % branch.replace("/", "-"))
+        try:
+            os.makedirs(cfg.state_dir, exist_ok=True)
+            with open(proof_path, "w") as fh:
+                fh.write("merged %s into %s at %s\n\n" % (branch, base, now()))
+                for c in current_checks.get("checks", []):
+                    fh.write("check %s: rc=%s (%d failure line(s))\n"
+                             % (c["name"], c["rc"], len(c["failures"])))
+                fh.write("\n" + "\n".join(report) + "\n")
+        except OSError:
+            proof_path = None
+
         results.append({
             "crawler": entry["crawler"], "branch": branch, "status": "integrated",
+            "merged_proof": proof_path,
             "report": report,
             "note": None if ok else "no baseline — merged without a no-new-failures comparison",
         })
