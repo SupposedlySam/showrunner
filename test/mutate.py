@@ -37,6 +37,10 @@ target gets optimised rather than understood:
 * **A kill count is not coverage.** Ten assertions reading one line of output all flip
   together and count ten. A high number can mean one well-tested behaviour or ten; the
   number cannot tell you which, and neither can it be made to.
+* **Nothing here reads shell.** `install.sh` and `prototype/*.sh` have no AST and no
+  mutation harness, so they are outside this entirely — stated as a limit rather than left
+  to be discovered, because a denominator that silently excludes a language is the same
+  false green as one that silently excludes a file.
 * **It only covers the producers NAMED BELOW — 11 of 165 public functions in `lib/`.** They
   were chosen as the things that *gate or decide*: guards, validators, detectors, routers.
   The rest are accessors, CLI handlers and pure transforms — but that classification is mine
@@ -176,15 +180,42 @@ def _qualified(module, tree):
     return out
 
 
+def python_sources():
+    """Every Python file in the product, found by CONTENT rather than by extension.
+
+    The scan used to read `lib/showrunner/*.py` and nothing else, so `bin/showrunner` — Python
+    with no extension — was ABSENT rather than unaccounted-for, and absent is the state that
+    produces no report. It happens to define no functions today, which is precisely the
+    trap: the set was complete by accident and would have shrunk silently the first time
+    somebody added one. Discovery is a predicate now, so a new file cannot fall outside it.
+    """
+    out = []
+    for rel in ("lib/showrunner", "bin"):
+        d = os.path.join(ROOT, rel)
+        if not os.path.isdir(d):
+            continue
+        for f in sorted(os.listdir(d)):
+            full = os.path.join(d, f)
+            if not os.path.isfile(full):
+                continue
+            if f.endswith(".py"):
+                out.append((f[:-3], full))
+                continue
+            try:
+                with open(full) as fh:
+                    if "python" in fh.readline():
+                        out.append((f, full))
+            except (OSError, UnicodeDecodeError):
+                continue
+    return out
+
+
 def candidates():
     """Every function that can answer 'nothing' as well as 'something'. Derived, not declared."""
     found = []
-    libdir = os.path.join(ROOT, "lib", "showrunner")
-    for f in sorted(os.listdir(libdir)):
-        if not f.endswith(".py"):
-            continue
-        tree = ast.parse(open(os.path.join(libdir, f)).read())
-        for qname, node in _qualified(f[:-3], tree):
+    for module, path in python_sources():
+        tree = ast.parse(open(path).read())
+        for qname, node in _qualified(module, tree):
             rets = [n for n in ast.walk(node) if isinstance(n, ast.Return)]
             if not rets:
                 continue
@@ -269,12 +300,8 @@ SWEPT_KEYS = {t[1] for t in TARGETS}
 def all_functions():
     """Every module.function that exists, so a declaration naming a vanished one is caught."""
     names = set()
-    libdir = os.path.join(ROOT, "lib", "showrunner")
-    for f in sorted(os.listdir(libdir)):
-        if not f.endswith(".py"):
-            continue
-        tree = ast.parse(open(os.path.join(libdir, f)).read())
-        names.update(q for q, _ in _qualified(f[:-3], tree))
+    for module, path in python_sources():
+        names.update(q for q, _ in _qualified(module, ast.parse(open(path).read())))
     return names
 
 
