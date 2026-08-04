@@ -77,6 +77,12 @@ TARGETS = [
     ("harness drift check", "lib/showrunner/harness.py",
      r"(def check_tree\(cfg, worktree_path\):\n)",
      "    return 'clean', ''\ndef _neutered_check_tree(cfg, worktree_path):\n"),
+    # Added by applying the RECENCY lens: the most recently argued producer is the one with
+    # the least behind it, because the argument is fresh and feels like evidence.
+    ("waiting (orchestrator liveness)", "lib/showrunner/campaign.py",
+     r'(def waiting\(cfg, graph, base="HEAD"\):\n)',
+     "    return False, {'waiting': False, 'live_crawlers': [], 'parked_crawlers': [],\n"
+     "                   'basis': ''}\ndef _neutered_waiting(cfg, graph, base='HEAD'):\n"),
     ("shared-state audit", "lib/showrunner/worktree.py",
      r"(def audit_shared\(cfg\):\n)",
      "    return []\ndef _neutered_audit(cfg):\n"),
