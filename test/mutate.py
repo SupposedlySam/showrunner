@@ -18,12 +18,29 @@ and each is asserted by observing that nothing happened — which is exactly wha
 implementation also produces. Restraint is expensive to design and free to break.
 
 This is a question to re-ask whenever a producer is added, so it is committed as a script
-rather than as a one-time result. The counts below are the baseline to beat.
+rather than as a one-time result.
 
     python3 test/mutate.py [--target NAME]
 
 Not part of `test/run.py`: it runs the whole suite once per target and is far too slow to
 owe on every change. Run it when adding a producer, or when a restraint behaviour changes.
+
+WHAT THIS CANNOT SEE — stated here because a number in a docstring becomes a target, and a
+target gets optimised rather than understood:
+
+* It measures whether an assertion NOTICES a producer that stopped producing. It says
+  nothing about whether the producer is RIGHT. A wrong message and a correct one are killed
+  identically, because both are non-empty.
+* It only tests the broken form written down here — silence. It cannot see a validator that
+  wrongly ACCEPTS, a detector that fires on EVERYTHING, or a threshold that drifted. Those
+  are different mutations and this file does not contain them.
+* **A kill count is not coverage.** Ten assertions reading one line of output all flip
+  together and count ten. A high number can mean one well-tested behaviour or ten; the
+  number cannot tell you which, and neither can it be made to.
+
+So treat a count as a floor with a reason attached, never as a score. The honest use is the
+ORDERING — strengthen in ascending kill order — because that is the one thing the numbers
+genuinely rank.
 """
 
 import os
@@ -98,9 +115,15 @@ def run_suite(cwd):
     return int(m.group(1)), int(m.group(2)), proc.stdout
 
 
-def survivors(output):
-    """Assertions that still PASS while the producer does nothing."""
-    return [l.strip()[6:] for l in output.splitlines() if l.startswith("  PASS  ")]
+def failing(output):
+    """The SET OF ASSERTION NAMES that failed. Names, not a count.
+
+    A count moves for reasons that have nothing to do with the mutation — one flaky
+    failure in the mutated run reads as coverage the suite does not have. What proves an
+    assertion noticed is that it FLIPPED: passing unmutated, failing mutated. So the kill
+    set is a set difference over names, and the baseline is subtracted from every run.
+    """
+    return {l[8:].strip() for l in output.splitlines() if l.startswith("  FAIL  ")}
 
 
 def main():
@@ -111,13 +134,14 @@ def main():
     base_dir = tempfile.mkdtemp(prefix="mutate-base-")
     shutil.copytree(ROOT, os.path.join(base_dir, "s"), symlinks=True,
                     ignore=shutil.ignore_patterns(".worktrees", "*.db", "scratch"))
-    b_pass, b_fail, _ = run_suite(os.path.join(base_dir, "s"))
+    b_pass, b_fail, b_out = run_suite(os.path.join(base_dir, "s"))
     shutil.rmtree(base_dir, ignore_errors=True)
     if b_pass is None:
         print("baseline suite did not report a RESULT line; fix that first")
         return 2
+    baseline_failures = failing(b_out)
     print("baseline: %d passed, %d failed\n" % (b_pass, b_fail))
-    print("%-34s %8s %8s   %s" % ("producer neutered", "passed", "failed", "verdict"))
+    print("%-34s %8s   %s" % ("producer neutered", "killed", "verdict"))
     print("-" * 78)
 
     weak = []
@@ -133,7 +157,12 @@ def main():
             src = fh.read()
         new, n = re.subn(pattern, lambda m: m.group(1) + stub, src, count=1)
         if n != 1:
-            print("%-34s %8s %8s   PATTERN DID NOT MATCH — fix this entry" % (name, "-", "-"))
+            # A named producer that no longer exists is UNPROTECTED, not a skip. A sweep that
+            # shrugs at a rename is a check that cannot fail — which is precisely the defect
+            # the sweep exists to find, arriving inside the sweep itself.
+            print("%-34s %8s   UNPROTECTED — producer not found (renamed? removed?)"
+                  % (name, "-"))
+            weak.append((name, 0))
             shutil.rmtree(work, ignore_errors=True)
             continue
         with open(target, "w") as fh:
@@ -141,8 +170,12 @@ def main():
         p, f, out = run_suite(tree)
         shutil.rmtree(work, ignore_errors=True)
         if p is None:
-            print("%-34s %8s %8s   SUITE CRASHED (stub may not parse)" % (name, "-", "-"))
+            print("%-34s %8s   SUITE CRASHED (stub may not parse)" % (name, "-"))
+            weak.append((name, 0))
             continue
+        # Only assertions that FLIPPED count. Anything already failing unmutated is noise.
+        killed = failing(out) - baseline_failures
+        f = len(killed)
         # 3+ is comfortable; 1-2 is thin and worth naming rather than rounding up to "ok";
         # 0 is the real defect. Reporting thin as ok would be the same rounding-up this whole
         # exercise exists to refuse.
@@ -154,7 +187,7 @@ def main():
             verdict = "ok"
         if f <= 2:
             weak.append((name, f))
-        print("%-34s %8d %8d   %s" % (name, p, f, verdict))
+        print("%-34s %8d   %s" % (name, f, verdict))
 
     print()
     unprotected = [w for w in weak if w[1] == 0]
