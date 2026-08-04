@@ -76,6 +76,26 @@ Crawler can observe the collision.
 The failure: `prototype/device_lane.sh:11` defaults `LOCKDIR` to a path relative to the *script's own
 directory* — so each worktree gets its own lock and the mutex silently does nothing (issue #3).
 
+**Corollary — a check that cannot fail is not a weak check; it was never a check.** And which
+way that goes is decided by which side of the decision the predicate sits on:
+
+| an unfailable predicate gating a… | outcome | how it is found |
+|---|---|---|
+| **refusal** | refuses everything | LOUD — the first test written kills it |
+| **acceptance** | accepts everything | SILENT — green for months |
+
+Validators live in the accepting position, which is why this hides there. `isabs()` applied to
+a value already through `abspath()` is true for every string; that predicate sat in the
+lock_root validator — written to prevent a per-caller mutex — returning an empty error list,
+which reads as *validated*. The mutation sweep cannot find it either: neutering a validator
+that already has no opinion changes nothing.
+
+Auditing for it is not a grep. Ask **which predicates gate an ACCEPT, and for each, whether any
+input reaches the false branch.** A validator whose error list is empty for every input it has
+ever seen looks identical to one with nothing to complain about. Enforced by the
+reachable-rules group in `test/run.py`: every error branch must have a case proving it fires,
+and the branch count is pinned so a new rule must arrive with one.
+
 ## INV9 — Isolation is per-resource; a worktree is not a boundary
 
 A git worktree isolates **tracked files** and nothing else. The scratch dir, the harness state dir,

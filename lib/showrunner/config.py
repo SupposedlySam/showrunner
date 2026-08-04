@@ -115,22 +115,28 @@ class Config:
         out = []
         root = os.path.realpath(self.root)
 
+        # There is deliberately NO "lock_root must be absolute" branch here any more. It used
+        # to test `isabs()` on a value that had already been through `abspath()`, which makes
+        # any string absolute — a predicate with no failing input, sitting in the validator
+        # written to prevent exactly this failure, returning an empty error list that reads as
+        # "validated". A check that cannot fail is not a weak check; it was never a check.
+        # The real hazards are covered by things that CAN fail: path_problem() below refuses an
+        # unexpanded variable, and lock_root now resolves against the repo root rather than the
+        # caller's cwd, so absoluteness is a property of the resolution and not of the input.
         lock_root = os.path.realpath(self.lock_root) if self.lock_root else None
-        if not lock_root or not os.path.isabs(lock_root):
-            out.append(("error", "lock_root must be an absolute path; got %r" % self.lock_root))
-        else:
-            # The failure this exists to prevent: N worktrees, N sibling lock dirs, a
-            # mutex that silently does nothing. If the lock root sits under a *linked*
-            # worktree it is per-tree and therefore not a mutex at all.
-            wt_root = os.path.realpath(self.worktree_root) if self.worktree_root else None
-            if wt_root and (lock_root == wt_root or lock_root.startswith(wt_root + os.sep)):
-                out.append((
-                    "error",
-                    "lock_root (%s) is inside worktree_root (%s) — every Crawler would get its "
-                    "own lock and the mutex would silently be a no-op." % (lock_root, wt_root),
-                ))
-            else:
-                out.append(("ok", "lock_root is one absolute shared path: %s" % lock_root))
+        # The failure this exists to prevent: N worktrees, N sibling lock dirs, a mutex that
+        # silently does nothing. If the lock root sits under a *linked* worktree it is per-tree
+        # and therefore not a mutex at all.
+        wt_root = os.path.realpath(self.worktree_root) if self.worktree_root else None
+        if lock_root and wt_root and (lock_root == wt_root
+                                      or lock_root.startswith(wt_root + os.sep)):
+            out.append((
+                "error",
+                "lock_root (%s) is inside worktree_root (%s) — every Crawler would get its "
+                "own lock and the mutex would silently be a no-op." % (lock_root, wt_root),
+            ))
+        elif lock_root:
+            out.append(("ok", "lock_root is one absolute shared path: %s" % lock_root))
 
         # Worktrees must live INSIDE the repo, or each Crawler's own game_loop
         # write-guard (INV3: everything outside this repo is READ-ONLY) denies its very

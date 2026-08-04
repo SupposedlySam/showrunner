@@ -286,6 +286,70 @@ def test_config_refusals():
 
 
 # =========================================================== CORE: graph
+def test_every_rule_can_fail():
+    group("Every validation rule must have a reachable failing input")
+    if not have("git"):
+        skip("the reachable-rules group", "git is not installed")
+        return
+
+    # The lesson that produced this: `isabs(abspath(x))` is True for EVERY string, so the
+    # lock_root rule was a predicate with no failing input at all — sitting in the validator
+    # written to prevent exactly that failure, returning an empty error list, which reads as
+    # "validated". A check that cannot fail is not a weak check; it was never a check.
+    #
+    # The mutation sweep cannot find this. Neutering a validator that already has no opinion
+    # changes nothing, so the suite notices no difference. The property this asserts is
+    # different: for every error branch the validator can emit, SOME input reaches it.
+    def cfg_with(**over):
+        c = make_repo()
+        for k, v in over.items():
+            c.data[k] = v
+        return c
+
+    def errors(c):
+        return [m for lvl, m in c.validate() if lvl == "error"]
+
+    outside_root = tmpdir("outside")
+    cases = [
+        ("lock_root inside worktree_root", cfg_with(lock_root=".worktrees/locks"), "no-op"),
+        ("worktree_root outside the repo", cfg_with(worktree_root=outside_root), "outside the repo"),
+        ("worktree_root unset", cfg_with(worktree_root=None), "unset"),
+        ("worktree_root is the repo itself", cfg_with(worktree_root="."), "repo root itself"),
+        ("a resource with no name", cfg_with(resources=[{"match": ["x"]}]), "no name"),
+        ("serialized lane naming no resource",
+         cfg_with(lanes=[{"name": "l", "lane": "serialized", "match": {"labels": ["a"]}}]),
+         "names no resource"),
+        ("lane naming an unknown resource",
+         cfg_with(resources=[], lanes=[{"name": "l", "lane": "serialized", "resource": "ghost",
+                                        "match": {"labels": ["a"]}}]),
+         "unknown resource"),
+        ("default_lane that is neither", cfg_with(default_lane="sideways"), "default_lane must be"),
+        ("an unexpanded variable in a path", cfg_with(lock_root="$HOME/locks"), "NOT expanded"),
+        ("an unexpanded variable in an inject path",
+         cfg_with(inject=[{"path": "$HOME/.env"}]), "NOT expanded"),
+    ]
+    reached = set()
+    for label, c, needle in cases:
+        found = [m for m in errors(c) if needle in m]
+        if ok("reachable: %s" % label, bool(found), errors(c)):
+            reached.add(needle)
+
+    # A tripwire, not a coverage ratio. Comparing "distinct messages reached" against a raw
+    # branch count cannot balance — two branches here legitimately emit the same message — and
+    # a metric that can never be satisfied is its own kind of dead check. So: pin the number
+    # of error branches. Adding one trips this, and the fix is to add a case above proving the
+    # new rule can fire, or to say here why it cannot.
+    EXPECTED_ERROR_BRANCHES = 10
+    with open(os.path.join(ROOT, "lib", "showrunner", "config.py")) as fh:
+        branches = fh.read().count('"error"') - 1        # -1: the require_valid() filter
+    eq("the validator has exactly the error branches this group accounts for — a new one must "
+       "arrive with a case proving it can fire", branches, EXPECTED_ERROR_BRANCHES)
+
+    clean = make_repo()
+    ok("...and a sane config still produces none of them, so these are not firing on everything",
+       not errors(clean), errors(clean))
+
+
 def test_graph():
     group("Work graph: dependency-gated fan-out (issue #2)")
     cfg = make_repo()
@@ -1318,7 +1382,7 @@ def test_optional():
 # ==========================================================================
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_config_refusals, test_graph, test_lifecycle, test_close_gate,
+    for fn in (test_locks, test_config_refusals, test_every_rule_can_fail, test_graph, test_lifecycle, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_waiting, test_concurrency,
                test_integration, test_publishable, test_cli, test_optional):
