@@ -175,6 +175,40 @@ nothing at all; and `integrate` refusing to merge a rules-drifted tree was imple
 committed, described, and never tested. Costs one extra capture at write time and cannot be
 retrofitted cheaply, which is the worst combination to discover late.
 
+## INV16 — Ask the scoping questions before building, not after being asked
+
+Two questions found real defects in this repo, both times because a human asked them and not
+because I did: **"is this for anyone cloning it, or just me?"** and **"how many agents run this
+at once?"**
+
+The first surfaced my absolute paths — including an `allow_write_roots` entry, which is a
+*rule* a stranger inherits — sitting in a public repo. The second surfaced that `claim` let
+**6 of 12** concurrent claims win the same leaf and the campaign record lost **7 of 10**
+spawns, after I had already written "supports several orchestrators" in the docs.
+
+Both were invisible from inside the work, because the work looked correct *for the case I had
+in my head*. So before building, name the audience and the concurrency out loud, and write the
+answer down where it can be checked: `test/run.py` asserts the publishable case, the
+concurrency group asserts the multi-orchestrator one.
+
+Rung 5 and not higher, deliberately: an artifact can check a scope once it is named, but
+nothing can force the question to be asked. That is why it is re-injected every session
+instead of being left to occur to me.
+
+## INV17 — Record what a conclusion RESTS ON, and when it stops holding
+
+A design conclusion outlives the reasoning that produced it, and it gets quoted long after the
+premise has moved. Two votes against a design were cast here resting on a property that was
+**false when they were cast** and true only after a specific commit landed. Recorded as "two
+votes against", they would have been inherited. Recorded with the expiry — *if that property is
+ever weakened, the against-case collapses and the for-case survives* — they can be re-derived
+by someone who was not here.
+
+So a recorded conclusion carries its basis and its expiry: the file, the line range, the
+version it was verified against. `docs/BOUNDARY.md` does this for every assumption showrunner
+makes about the layer below, which is what let a stale one be caught by re-reading rather than
+by being bitten.
+
 ---
 
 **The outside view outranks my attachment.** The human and fresh review subagents are the real
