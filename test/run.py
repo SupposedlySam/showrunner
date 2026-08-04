@@ -231,7 +231,13 @@ def test_locks():
 def test_config_refusals():
     group("Config refuses what would degrade silently (INV8, issues #3, #4)")
     cfg = make_repo()
-    errs = [m for lvl, m in cfg.validate() if lvl == "error"]
+    findings = cfg.validate()
+    errs = [m for lvl, m in findings if lvl == "error"]
+    # "No errors" is satisfied by a validator with no opinions at all, so require that it
+    # actually reached its conclusions. Same shape as an absence assertion over an empty
+    # observation: the verdict alone is also what a broken producer returns.
+    ok("the validator actually evaluated the config, so 'no errors' is not vacuous",
+       any(lvl == "ok" for lvl, _ in findings), findings)
     ok("a sane config produces no errors", not errs, errs)
 
     bad = make_repo({"lock_root": None, "worktree_root": ".worktrees"})
@@ -318,12 +324,22 @@ def test_lifecycle():
     g.add("parked work", leaf_id="w2")
     g.claim("w2", "limited-crawler", pid=dead.pid)
     g.park("w2", "usage limit — window resets at 14:00")
-    ok("a PARKED claim is not stale (a Crawler at a usage limit is not dead)",
-       not any(l["id"] == "w2" for l, _ in g.stale_claims()))
 
     live_claim = g.add("live work", leaf_id="w3")
     g.claim(live_claim, "live-crawler", pid=os.getpid())
-    ok("a live claim is never reaped", not any(l["id"] == "w3" for l, _ in g.stale_claims()))
+
+    # A control in the SAME observation: a genuinely abandoned claim the detector must still
+    # find. Without it, "w2 is not stale" and "w3 is not stale" are both satisfied by a
+    # detector that finds nothing at all — which is exactly the state `reap` would be in
+    # while reporting a clean campaign.
+    g.add("genuinely abandoned", leaf_id="w4")
+    g.claim("w4", "ghost", pid=DeadPid().pid)
+    stale_ids = [l["id"] for l, _ in g.stale_claims()]
+    ok("the stale detector is still finding real abandonment, so the exclusions below are "
+       "not vacuous", "w4" in stale_ids, stale_ids)
+    ok("a PARKED claim is not stale (a Crawler at a usage limit is not dead)",
+       "w2" not in stale_ids, stale_ids)
+    ok("a live claim is never reaped", "w3" not in stale_ids, stale_ids)
 
 
 # =========================================================== CORE: gates
