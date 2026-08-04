@@ -180,6 +180,21 @@ def _qualified(module, tree):
     return out
 
 
+def _is_python_source(path):
+    """Parses as Python AND declares something. game_loop's refinement, and it fixes a flaw in
+    BOTH obvious tests: `ast.parse` alone accepts JSON and YAML (they are valid Python
+    expressions), while an extension-or-shebang gate silently skips a Python file that has
+    neither. Requiring a def, class or import keeps config out and cannot miss real source."""
+    try:
+        tree = ast.parse(open(path).read())
+    except (OSError, UnicodeDecodeError, SyntaxError, ValueError):
+        return None
+    if any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                          ast.Import, ast.ImportFrom)) for n in tree.body):
+        return tree
+    return None
+
+
 def python_sources():
     """Every Python file in the product, found by CONTENT rather than by extension.
 
@@ -198,15 +213,8 @@ def python_sources():
             dirnames[:] = [x for x in dirnames if x != "__pycache__"]
             for f in sorted(files):
                 full = os.path.join(dirpath, f)
-                if f.endswith(".py"):
-                    out.append((f[:-3], full))
-                    continue
-                try:
-                    with open(full) as fh:
-                        if "python" in fh.readline():
-                            out.append((f, full))
-                except (OSError, UnicodeDecodeError):
-                    continue
+                if _is_python_source(full) is not None:
+                    out.append((f[:-3] if f.endswith(".py") else f, full))
     return out
 
 
@@ -243,11 +251,7 @@ def unscanned_python():
         full = os.path.join(ROOT, rel)
         if not os.path.isfile(full):
             continue
-        try:
-            if not (rel.endswith(".py") or "python" in open(full).readline()):
-                continue
-            ast.parse(open(full).read())
-        except (OSError, UnicodeDecodeError, SyntaxError):
+        if _is_python_source(full) is None:
             continue
         if os.path.realpath(full) not in scanned:
             missed.append(rel)
