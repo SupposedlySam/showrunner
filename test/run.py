@@ -267,7 +267,10 @@ def test_graph():
     ok("epics are never handed out as ready work", "epic-1" not in ready, ready)
 
     g.claim("setup", "crawler-1")
-    ok("a claimed leaf leaves ready", "setup" not in [x["id"] for x in g.ready()])
+    still_ready = [x["id"] for x in g.ready()]
+    ok("a claimed leaf leaves ready", "setup" not in still_ready)
+    ok("...and ready() is still answering, so that absence is not just an empty list",
+       g.list(status=G.IN_PROGRESS), still_ready)
     raises("a second claim on the same leaf is refused",
            lambda: g.claim("setup", "crawler-2"), "already claimed")
 
@@ -570,8 +573,16 @@ def test_spawn():
     with open(injected) as fh:
         ok("...and it resolves to the real content", "super-secret" in fh.read())
 
+    # A decoy the Crawler legitimately created. Without it `git add -A` stages NOTHING —
+    # a pristine worktree has no changes — and "the secret is not staged" is then trivially
+    # true while demonstrating nothing about the ignore mechanism. The decoy makes the
+    # absence evidence: add DID stage something, and the secret was not it.
+    with open(os.path.join(wt, "crawler-work.txt"), "w") as fh:
+        fh.write("work the Crawler actually did\n")
     sh(["git", "add", "-A"], wt)
     staged = sh(["git", "diff", "--cached", "--name-only"], wt).stdout.split()
+    ok("`git add -A` really does stage the Crawler's own new file, so the next assertion is "
+       "not vacuous", "crawler-work.txt" in staged, staged)
     ok("`git add -A` in the worktree CANNOT stage the injected secret", secret not in staged, staged)
     ok("...because the repo's own tracked .gitignore covers it — showrunner does NOT write "
        "git's shared exclude file, which is not per-worktree and would change the main "
@@ -768,9 +779,13 @@ def test_harness_provisioning():
        not os.path.exists(os.path.join(wt, ".game_loop", "sessions", "abc123", "state.json")))
     ok("...nor its edited-file set", not os.path.exists(os.path.join(wt, ".game_loop", "edited.txt")))
 
+    with open(os.path.join(wt, "crawler-work.txt"), "w") as fh:
+        fh.write("work\n")
     sh(["git", "add", "-A"], wt)
-    ok("`git add -A` cannot stage the provisioned harness",
-       ".game_loop/" not in sh(["git", "diff", "--cached", "--name-only"], wt).stdout)
+    staged_h = sh(["git", "diff", "--cached", "--name-only"], wt).stdout
+    ok("add stages the Crawler's own file here too, so the next assertion is not vacuous",
+       "crawler-work.txt" in staged_h, staged_h)
+    ok("`git add -A` cannot stage the provisioned harness", ".game_loop/" not in staged_h)
 
     # --- exit-code contract --------------------------------------------------
     def spawn_with(mode, leaf, installer=None):
