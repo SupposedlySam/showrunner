@@ -49,6 +49,7 @@ ORDERING — strengthen in ascending kill order — because that is the one thin
 genuinely rank.
 """
 
+import ast
 import os
 import re
 import shutil
@@ -106,10 +107,149 @@ TARGETS = [
      r'(def waiting\(cfg, graph, base="HEAD"\):\n)',
      "    return False, {'waiting': False, 'live_crawlers': [], 'parked_crawlers': [],\n"
      "                   'basis': ''}\ndef _neutered_waiting(cfg, graph, base='HEAD'):\n"),
+    # Both added by the derived candidate scan rather than by me noticing them.
+    ("claim --next (fleet work division)", "lib/showrunner/graph.py",
+     r"(    def claim_next\(self, actor, pid=None, tree=None, session=None, prefer=None\):\n)",
+     "        return None\n    def _neutered_claim_next(self, actor, pid=None, tree=None,\n"
+     "                                 session=None, prefer=None):\n"),
+    ("campaign reconcile (resume)", "lib/showrunner/campaign.py",
+     r'(def reconcile\(cfg, graph, base="HEAD"\):\n)',
+     "    return []\ndef _neutered_reconcile(cfg, graph, base='HEAD'):\n"),
     ("shared-state audit", "lib/showrunner/worktree.py",
      r"(def audit_shared\(cfg\):\n)",
      "    return []\ndef _neutered_audit(cfg):\n"),
 ]
+
+
+# ---------------------------------------------------------------- candidates
+# The list below is a DENYLIST unless something derives the set it should cover. A tool built
+# to find unprotected producers, whose own scope is a hand-written list nobody audits, has the
+# exact defect it exists to catch: a producer nobody added is uncovered AND does not appear as
+# a gap. So the candidate set is derived from the source, and every candidate must be either
+# swept or explicitly excluded with a reason.
+#
+# Two signatures, because one is not enough. game_loop proposed the first; applied here it
+# missed `Config.validate` — the site of the worst defect this project has had — because that
+# function accumulates into a local and returns the variable, so it has no literal empty
+# return to spot. The accumulator pattern is how most real producers are written.
+EMPTY_LITERALS = (ast.List, ast.Dict, ast.Set, ast.Tuple)
+
+
+def _is_nothing(ret):
+    v = ret.value
+    if v is None:
+        return True
+    if isinstance(v, ast.Constant) and v.value in (None, False, ""):
+        return True
+    if isinstance(v, EMPTY_LITERALS) and not (getattr(v, "elts", None) or getattr(v, "keys", None)):
+        return True
+    return False
+
+
+def _returns_empty_accumulator(fn):
+    """`out = []` ... `return out` — a producer that reports nothing by returning an empty
+    collection it built. Invisible to a scan for literal empty returns, and it is the shape
+    `Config.validate` had when its only real check turned out to be unfailable."""
+    empties = {t.id for n in ast.walk(fn) if isinstance(n, ast.Assign)
+               for t in n.targets if isinstance(t, ast.Name)
+               and isinstance(n.value, EMPTY_LITERALS)
+               and not (getattr(n.value, "elts", None) or getattr(n.value, "keys", None))}
+    return any(isinstance(r.value, ast.Name) and r.value.id in empties
+               for r in ast.walk(fn) if isinstance(r, ast.Return) and r.value is not None)
+
+
+def candidates():
+    """Every function that can answer 'nothing' as well as 'something'. Derived, not declared."""
+    found = []
+    libdir = os.path.join(ROOT, "lib", "showrunner")
+    for f in sorted(os.listdir(libdir)):
+        if not f.endswith(".py"):
+            continue
+        tree = ast.parse(open(os.path.join(libdir, f)).read())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            rets = [n for n in ast.walk(node) if isinstance(n, ast.Return)]
+            if not rets:
+                continue
+            nothings = [r for r in rets if _is_nothing(r)]
+            somethings = [r for r in rets if not _is_nothing(r)]
+            if (nothings and somethings) or _returns_empty_accumulator(node):
+                found.append("%s.%s" % (f[:-3], node.name))
+    return found
+
+
+# Every candidate must be SWEPT or excluded HERE with a reason. An unaccounted-for one fails
+# the run, same as UNPROTECTED, because a producer nobody decided about is exactly the case
+# this file exists for.
+#
+# The reasons have to be real. Writing "not a real producer" about one that is, to clear the
+# list, is the gaming this whole family is about — so where the honest answer is "should be
+# swept, is not yet", it says that and stays visible instead of being excused.
+NOT_SWEPT = {
+    # Exercised entirely through a swept caller; a wrong answer surfaces there, and sweeping
+    # each costs a full suite run for a signal already carried.
+    "campaign.commits_ahead": "read only by is_merged/is_empty, both reached via reconcile",
+    "campaign.is_merged": "reached through reconcile, which the integration group asserts",
+    "campaign.is_empty": "reached through reconcile; the abandoned-branch verdict asserts it",
+    "campaign.live": "liveness of one record; the waiting and reap groups assert its effect",
+    "graph.blockers": "the ready/dependency assertions fail directly if it answers wrongly",
+    "graph.ready": "asserted by name in the graph group, not via a producer stub",
+    "graph._would_cycle": "private; the cycle refusal asserts it",
+    "graph.available": "static probe for the br binary; the OPTIONAL group skips loudly on it",
+    "lanes._rule_matches": "private; route's own assertions cover both match and no-match",
+    "locks._read": "private file read; lock state assertions cover it",
+    "locks._live": "private; the STALE/HELD assertions cover both answers",
+    "locks.holder": "reflects _read; covered by the same assertions",
+    "locks.matching": "reached by guard, which IS swept",
+    "harness._is_runtime": "private; the runtime-exclusion assertions cover both answers",
+    "harness._install": "private; the installer path is asserted end to end in the harness group",
+    "gates._harness_bin": "private lookup for attribution's command string",
+    "config.abspath": "one-line join; every path property asserts its result",
+    "config.resource": "lookup; the lock group fails if it answers wrongly",
+    "util.pid_alive": "the claim-liveness and lock-staleness assertions cover both answers",
+    "util.repo_root": "every fixture would fail to build if it answered wrongly",
+    "collide.tracked_files": "git listing; plan_waves is swept and consumes it",
+
+    # Return an exit code rather than a finding. Their behaviour is asserted through the CLI
+    # group by exit code, which is the contract callers actually depend on.
+    "cli.main": "dispatch; asserted by every CLI-group exit code",
+    "cli.cmd_claim": "CLI wrapper over graph.claim; exit code asserted",
+    "cli.cmd_lock_acquire": "CLI wrapper; lock state asserted directly",
+    "cli.cmd_lock_guard": "CLI wrapper; exit 2/0 asserted in the CLI group",
+    "cli.cmd_integrate": "CLI wrapper over campaign.integrate, which is asserted directly",
+    "cli.cmd_integration_commit": "CLI wrapper over declare_integration, asserted directly",
+
+    # Honest gaps. Named rather than excused, because a false exclusion is the failure this
+    # file is about and an admitted hole is worth more than a tidy list.
+    "config.path_problem": "SHOULD BE SWEPT, IS NOT YET — it gates an accept and a silent "
+                           "always-None would let every unexpanded variable through, which is "
+                           "the exact defect that produced this file. Its reachability is "
+                           "asserted by the reachable-rules group, so it is covered but not "
+                           "by this tool.",
+    "gates.load_baseline": "SHOULD BE SWEPT, IS NOT YET — returning None always would make "
+                           "every comparison report 'no baseline', which the baseline group "
+                           "asserts, but not through a stub.",
+    "gates.attribution": "SHOULD BE SWEPT, IS NOT YET — returning None always would silently "
+                         "drop the provenance command from integration output.",
+    "harness.report": "SHOULD BE SWEPT, IS NOT YET — doctor's harness lines would vanish and "
+                      "no assertion currently requires them.",
+    "worktree.dirty": "SHOULD BE SWEPT, IS NOT YET — an always-empty answer would report every "
+                      "abandoned worktree as clean, which is a real loss-of-work path.",
+    "worktree.harness_gap": "SHOULD BE SWEPT, IS NOT YET — an always-None would remove the "
+                            "doctor warning about an untracked harness.",
+    "locks.acquire": "SHOULD BE SWEPT, IS NOT YET — always-False is loud (nothing acquires), "
+                     "but always-True would hand two callers the same resource.",
+    "locks.release": "SHOULD BE SWEPT, IS NOT YET — always-False would leave locks held.",
+}
+
+
+SWEPT_KEYS = {
+    "locks.guard", "worktree.unignored", "config.validate", "graph.stale_claims",
+    "gates.stop_gate", "gates.compare_to_baseline", "lanes.route", "collide.plan_waves",
+    "harness.check_tree", "campaign.waiting", "worktree.audit_shared",
+    "graph.claim_next", "campaign.reconcile",
+}
 
 
 def run_suite(cwd):
@@ -146,6 +286,19 @@ def main():
         print("baseline suite did not report a RESULT line; fix that first")
         return 2
     baseline_failures = failing(b_out)
+    # Default-deny: a candidate nobody decided about fails the run. Without this the target
+    # list is a denylist that nobody audits, which is this tool having the very defect it
+    # exists to find — a producer nobody added is uncovered AND invisible as a gap.
+    cands = set(candidates())
+    unaccounted = sorted(cands - SWEPT_KEYS - set(NOT_SWEPT))
+    print("candidates derived from source: %d  ·  swept: %d  ·  excluded with a reason: %d"
+          % (len(cands), len(SWEPT_KEYS & cands), len(set(NOT_SWEPT) & cands)))
+    if unaccounted:
+        print("\nUNACCOUNTED CANDIDATES — sweep them, or exclude them in NOT_SWEPT with a "
+              "reason:")
+        for c in unaccounted:
+            print("  %s" % c)
+        return 1
     print("baseline: %d passed, %d failed\n" % (b_pass, b_fail))
     print("%-34s %8s   %s" % ("producer neutered", "killed", "verdict"))
     print("-" * 78)
