@@ -254,6 +254,36 @@ def test_config_refusals():
        "first edit)", any("outside the repo" in m for m in errs), errs)
     raises("require_valid() raises on an unsafe config", outside.require_valid, "not safe")
 
+    # `expanduser` handles a leading ~ and NOTHING else, so "$HOME/x" stays a literal string
+    # and resolves against whatever directory the caller is in. For a lock root that is a
+    # different directory per caller — a mutex that is quietly a no-op — and it passed an
+    # isabs() check, because abspath makes anything absolute.
+    var = make_repo()
+    var.data["lock_root"] = "$HOME/sr-locks"
+    errs = [m for lvl, m in var.validate() if lvl == "error"]
+    ok("an unexpanded shell variable in a path is REFUSED — only a leading ~ expands, so it "
+       "would silently resolve against the caller's cwd",
+       any("NOT expanded" in m for m in errs), errs)
+    cwd_before = os.getcwd()
+    try:
+        os.chdir("/tmp")
+        a = var.lock_root
+        os.chdir(ROOT)
+        b = var.lock_root
+    finally:
+        os.chdir(cwd_before)
+    eq("...and every configured path now resolves against the REPO ROOT, never the process "
+       "cwd, so it cannot differ per caller", a, b)
+
+    # The companion: the check must PASS the forms that are actually fine, or it is a rule
+    # nobody can satisfy and it gets switched off (INV5).
+    for good in ("~/sr-locks", "/tmp/sr-locks", "relative/locks"):
+        fine = make_repo()
+        fine.data["lock_root"] = good
+        bad = [m for lvl, m in fine.validate() if lvl == "error" and "NOT expanded" in m]
+        ok("...and %r is accepted, so the check is not simply refusing everything" % good,
+           not bad, bad)
+
 
 # =========================================================== CORE: graph
 def test_graph():

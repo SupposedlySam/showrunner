@@ -71,12 +71,16 @@ class Config:
     @property
     def lock_root(self):
         v = self.get("lock_root")
-        if not v:
-            # Default: inside the MAIN checkout's state dir. Absolute by construction,
-            # and identical from every linked worktree because state_dir is derived
-            # from --git-common-dir, not from the cwd.
-            return os.path.join(self.state_dir, "locks")
-        return os.path.abspath(os.path.expanduser(v))
+        if v:
+            # Resolve a relative entry against the REPO ROOT, like every other configured
+            # path here — never against the process cwd. `os.path.abspath` resolves against
+            # cwd, which made the lock root differ per caller while still passing an
+            # `isabs()` check, because abspath makes anything absolute.
+            return self.abspath(v)
+        # Default: inside the MAIN checkout's state dir. Absolute by construction, and
+        # identical from every linked worktree because state_dir derives from
+        # --git-common-dir, not from the cwd.
+        return os.path.join(self.state_dir, "locks")
 
     @property
     def worktree_root(self):
@@ -174,6 +178,22 @@ class Config:
                         "The costs are not symmetric: a wrong headless route collides on a "
                         "single-consumer resource, a wrong serialized route is just slower."))
 
+        for label, raw in (("lock_root", self.get("lock_root")),
+                           ("worktree_root", self.get("worktree_root")),
+                           ("scratch_root", self.get("scratch_root")),
+                           ("baseline", self.get("baseline")),
+                           ("graph.db", (self.get("graph") or {}).get("db")),
+                           ("graph.br_db", (self.get("graph") or {}).get("br_db")),
+                           ("harness.installer", (self.get("harness") or {}).get("installer"))):
+            problem = path_problem(label, raw)
+            if problem:
+                out.append(("error", problem))
+        for entry in self.get("inject") or []:
+            raw = entry if isinstance(entry, str) else (entry or {}).get("path")
+            problem = path_problem("inject path %r" % raw, raw)
+            if problem:
+                out.append(("error", problem))
+
         if not self.get("checks"):
             out.append(("warn",
                         "no checks configured — integration cannot tell a merged trunk that "
@@ -190,6 +210,28 @@ class Config:
                 hint="run `showrunner doctor` for the full report; fix %s" % self.path,
             )
         return findings
+
+
+UNEXPANDED = "$"
+
+
+def path_problem(label, raw):
+    """A configured path that will not mean what its author thinks. Returns a message or None.
+
+    `os.path.expanduser` handles a leading `~` and NOTHING else — `$HOME/x` comes back
+    verbatim. So the most obvious portable-looking entry is silently a literal string that
+    resolves against the process cwd, and the caller is left holding a belief the config does
+    not support. That is invisible in the worst direction here: for a lock root it means a
+    different directory per caller, which is a mutex that is quietly a no-op (INV8) — and it
+    survived an `isabs()` check, because `abspath` makes anything absolute.
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+    if UNEXPANDED in raw:
+        return ("%s contains %r, which is NOT expanded: only a leading `~` is. The entry stays "
+                "a literal string and resolves against whatever directory the caller happens "
+                "to be in. Write `~/...` or a real absolute path." % (label, UNEXPANDED))
+    return None
 
 
 def find_root(start=None):
