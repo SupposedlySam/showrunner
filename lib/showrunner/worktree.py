@@ -38,6 +38,7 @@ cheap, and it is exactly the "state what this does not cover" discipline the res
 design already follows.
 """
 
+import collections
 import fnmatch
 import json
 import os
@@ -153,8 +154,23 @@ def shared_drop(cfg):
 
 
 # ---------------------------------------------------------------- injection
+IgnoreCheck = collections.namedtuple("IgnoreCheck", "stageable checked")
+
+
 def unignored(worktree, paths):
     """Which of these paths `git add -A` would actually stage inside the worktree.
+
+    Returns an `IgnoreCheck`: `.stageable` is the verdict, `.checked` is the evidence that
+    the check ran at all. That second field exists because of an asymmetry worth naming —
+    **a refusal cannot be produced by absence, but a permission can.** "Nothing would be
+    staged" and "nothing was examined" are the same observation from outside, so a test
+    asserting only the empty verdict passes identically against a guard that does nothing.
+    Measured: neutering this function to return no findings left 172 of 173 assertions green,
+    and the one failure was the refusal case.
+
+    A guard that *speaks* when it permits can be tested on its reason. This one is silent by
+    nature, so it carries the mark instead — the same trick a Stop gate uses when it records
+    every invocation so that the mark's absence proves the hook never fired.
 
     An earlier version *wrote* the paths into `info/exclude` instead of checking them. That
     was wrong in a way worth recording, because it is this project's own lesson landing on
@@ -169,9 +185,10 @@ def unignored(worktree, paths):
     staged belongs in the repo's own tracked `.gitignore`, which crosses into every worktree
     by itself and needs no per-spawn action at all.
     """
+    paths = list(paths)
     if not paths:
-        return []
-    rc, out, _ = git(["check-ignore", "--no-index"] + list(paths), cwd=worktree)
+        return IgnoreCheck([], [])
+    rc, out, _ = git(["check-ignore", "--no-index"] + paths, cwd=worktree)
     ignored = {l.strip() for l in out.splitlines() if l.strip()} if rc in (0, 1) else set()
     missing = []
     for p in paths:
@@ -180,7 +197,7 @@ def unignored(worktree, paths):
         if not os.path.lexists(os.path.join(worktree, p)):
             continue           # not there at all; nothing to stage
         missing.append(p)
-    return missing
+    return IgnoreCheck(missing, paths)
 
 
 def inject(cfg, worktree):
@@ -239,7 +256,7 @@ def inject(cfg, worktree):
 
     # Verify, never mutate: see unignored().
     paths = [(e if isinstance(e, str) else e.get("path")) for e in declared]
-    stageable = unignored(worktree, [p for p in paths if p])
+    stageable = unignored(worktree, [p for p in paths if p]).stageable
     if stageable:
         problems.append(
             "these injected path(s) are NOT ignored by the repo, so an agent running "

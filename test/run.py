@@ -576,7 +576,11 @@ def test_spawn():
     ok("...because the repo's own tracked .gitignore covers it — showrunner does NOT write "
        "git's shared exclude file, which is not per-worktree and would change the main "
        "checkout's ignores too",
-       not worktree.unignored(wt, [secret]), worktree.unignored(wt, [secret]))
+       not worktree.unignored(wt, [secret]).stageable, worktree.unignored(wt, [secret]))
+    ok("...and the check proves it RAN, not merely that it found nothing — a silent guard's "
+       "'nothing to report' is indistinguishable from 'never looked'",
+       worktree.unignored(wt, [secret]).checked == [secret],
+       worktree.unignored(wt, [secret]))
 
     loose = make_repo(files={"README.md": "seed\n"},
                       extra_config={"inject": [{"path": "creds.txt"}]})

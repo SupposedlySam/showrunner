@@ -260,7 +260,7 @@ def provision(cfg, worktree_path):
 
         if dirname not in tracked:
             from .worktree import unignored
-            if unignored(worktree_path, [dirname]):
+            if unignored(worktree_path, [dirname]).stageable:
                 problems.append(
                     "%s is neither tracked nor ignored, so `git add -A` in the worktree would "
                     "commit the whole harness onto the Crawler's branch. Either track it (which "
