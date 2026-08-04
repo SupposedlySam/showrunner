@@ -91,10 +91,21 @@ for on purpose rather than discovering at spawn time.
 
 ## What "same harness" does and does not mean
 
-`worktree --porcelain` compares the **owned set** — config, invariants, the check manifest,
-notes. **`bin/` is not in it.** So two trees can be byte-identical on every rule and still be
-running different harness *code*, and showrunner's spawn report says "same RULES" rather than
-"same harness" for exactly that reason.
+**Updated 2026-08-04, and the update is the point.** `worktree --porcelain` once compared only
+the owned set — config, invariants, check manifest, notes — with `bin/` outside it, so two trees
+could match on every rule and run different code. showrunner's spawn report said "same RULES"
+and appended that caveat. game_loop has since extended the comparison to its scripts: the
+`harness` set now carries 13 entries including `bin/`, and a drifted script is caught.
+
+The caveat survived the upgrade and was being printed to every Crawler as fact. That is a stale
+claim about the layer below — INV14 — and the second time this project has shipped one, both
+times about the same dependency. The lesson is not "check more carefully"; it is that a limit
+recorded as prose ages exactly like a premise does, and re-reading the source is the only thing
+that catches either.
+
+The limit that IS real: the hook-registration file lives outside the harness directory, so the
+harness cannot compare it. showrunner refuses a spawn when it would be absent — a different
+check, by a different party.
 
 This stopped being hypothetical when game_loop added pinned checkouts: the pinned code lives in
 a gitignored directory, wired through a gitignored `settings.local.json`, and `git worktree add`

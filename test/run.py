@@ -884,10 +884,10 @@ def test_harness_provisioning():
        os.access(os.path.join(wt, ".game_loop", "bin", "game_loop"), os.X_OK))
     ok("the harness's OWN verdict is what showrunner records, not showrunner's comparison",
        any("verified by the harness" in a for a in rec["provisioned"]), rec["provisioned"])
-    ok("...and the report says RULES, not 'harness' — bin/ is not in the owned set, so two "
-       "trees can match on every rule and run different code (a pinned checkout does exactly "
-       "that, and its code is gitignored so it never crosses a worktree)",
-       any("same RULES" in a and "not checked" in a.lower() for a in rec["provisioned"]),
+    ok("...and the report names the limit that is REAL — the hook-registration file is outside "
+       "the harness directory, so the harness cannot compare it and showrunner checks it "
+       "separately",
+       any("NOT checked by it" in a and "hook-registration" in a for a in rec["provisioned"]),
        rec["provisioned"])
     ok("another session's state is NOT copied into the Crawler",
        not os.path.exists(os.path.join(wt, ".game_loop", "sessions", "abc123", "state.json")))

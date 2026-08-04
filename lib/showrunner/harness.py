@@ -26,15 +26,17 @@ Exit 2 never shares a code with anything that was actually compared, so "could n
 cannot be mistaken for "clean" — which is the whole reason to ask the harness rather than
 guess.
 
-**What this verifies is the RULES, not the code** (INV6 — a guard that overstates its reach
-buys false confidence). The harness's owned set is its config, its invariants, its check
-manifest and its notes; `bin/` is not in it. So two trees can be byte-identical on every rule
-and still be running different harness *code* — which is exactly what happens when a project
-runs its harness from a pinned checkout, since both the pinned code and its wiring are
-gitignored and a `git worktree add` carries tracked files only. showrunner deliberately does
-not reach into that: knowing where a harness keeps its code is modelling internals, and it
-would rot the same way the hardcoded rule-file list did. The honest report is "same rules",
-and that is what this says.
+**What it verifies grew, and this module used to overstate the limit rather than the reach.**
+It once appended "not checked: that both trees run the same harness CODE — bin/ is not in the
+owned set", which was true when written and is now false: the harness's `worktree` comparison
+covers its scripts as well as its owned files, so a drifted `bin/` is caught. The caveat
+survived the upgrade and was being printed to every Crawler — a stale claim about the layer
+below, which is the failure INV14 exists for and the second time this project has shipped one.
+
+The limit that IS real: the hook-registration file lives outside the harness directory, so the
+harness cannot compare it. showrunner refuses a spawn when it would be absent — a different
+check, by a different party, and worth naming as such rather than folding into the harness's
+verdict.
 
 A harness that does not answer those verbs gets a refusal naming them, not a substitute
 comparison invented here — guessing which files are rules is the hardcoded list this module
@@ -285,9 +287,10 @@ def provision(cfg, worktree_path):
             continue
         detail = (payload or {}).get("detail", "")
         if rc == CLEAN:
-            actions.append("%s: same RULES as the main checkout, verified by the harness "
-                           "itself (%s). Not checked: that both trees run the same harness "
-                           "CODE — bin/ is not in the owned set." % (dirname, detail))
+            actions.append("%s verified by the harness itself: %s. NOT checked by it: the "
+                           "hook-registration file, which lives outside the harness directory "
+                           "— showrunner refuses a spawn without one, which is a different "
+                           "check by a different party." % (dirname, detail))
         elif rc == RULES_DRIFTED:
             problems.append(
                 "%s: %s\nThe Crawler would enforce different things than the orchestrator, and "
