@@ -150,6 +150,31 @@ Cite the file, in the sibling repo, at the version you read. `docs/BOUNDARY.md` 
 what showrunner currently assumes about game_loop and the line numbers it was verified against, so
 the next reader re-checks instead of re-deriving.
 
+## INV15 — Pair every non-event assertion with the case where it happens
+
+An assertion whose evidence is that something did **not** occur cannot tell being satisfied
+from never having run. "No errors", "not in the list", "nothing was staged", "the guard
+allowed it" — every one is also what a broken producer returns.
+
+So when you assert an absence, capture the positive case in the **same observation**: the run
+that is quiet for a clean input must be seen speaking for a dirty one. The remedy is chosen by
+what the check has on its happy path — a **reason** if it speaks, a **mark** if it is silent
+(written before the first early return, or the cheapest allows stay unprovable), a **positive
+control** if it is a pure observation. Add a companion, never a replacement: the original is
+not false, only unsupported, and rewriting it loses the restraint claim it encodes.
+
+These cluster on **restraint** — the behaviours a project argued itself into (reap is dry-run,
+an abandoned worktree is surfaced not deleted, notes-drift warns instead of aborting). Each is
+a deliberate decision to *not* act, each was defended, and each is proved by a non-event.
+Restraint is expensive to design and free to break.
+
+Enforced by `test/mutate.py`, not by this paragraph. The failures: an assertion that
+`git add -A` could not stage an injected secret — quoted as evidence in an issue close, the
+README and to the human — was vacuous, because the worktree was pristine and `add` staged
+nothing at all; and `integrate` refusing to merge a rules-drifted tree was implemented,
+committed, described, and never tested. Costs one extra capture at write time and cannot be
+retrofitted cheaply, which is the worst combination to discover late.
+
 ---
 
 **The outside view outranks my attachment.** The human and fresh review subagents are the real
