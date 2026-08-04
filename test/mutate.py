@@ -64,30 +64,30 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
-    ("lock guard", "lib/showrunner/locks.py",
+    ("lock guard", "locks.guard", "lib/showrunner/locks.py",
      r"(    def guard\(self, command, session=None\):\n)",
      "        return True, ''\n    def _neutered_guard(self, command, session=None):\n"),
-    ("unignored (silent on allow)", "lib/showrunner/worktree.py",
+    ("unignored (silent on allow)", "worktree.unignored", "lib/showrunner/worktree.py",
      r"(def unignored\(worktree, paths\):\n)",
      "    return IgnoreCheck([], [])\ndef _neutered_unignored(worktree, paths):\n"),
-    ("config validate", "lib/showrunner/config.py",
+    ("config validate", "config.validate", "lib/showrunner/config.py",
      r"(    def validate\(self\):\n)",
      "        return []\n    def _neutered_validate(self):\n"),
-    ("stale_claims (reap's evidence)", "lib/showrunner/graph.py",
+    ("stale_claims (reap's evidence)", "graph.stale_claims", "lib/showrunner/graph.py",
      r"(    def stale_claims\(self\):\n)",
      "        return []\n    def _neutered_stale(self):\n"),
-    ("stop gate", "lib/showrunner/gates.py",
+    ("stop gate", "gates.stop_gate", "lib/showrunner/gates.py",
      r"(def stop_gate\(cfg, graph\):\n)",
      "    return True, 'stop OK'\ndef _neutered_stop_gate(cfg, graph):\n"),
-    ("no-new-failures comparison", "lib/showrunner/gates.py",
+    ("no-new-failures comparison", "gates.compare_to_baseline", "lib/showrunner/gates.py",
      r"(def compare_to_baseline\(cfg, current, baseline\):\n)",
      "    return True, []\ndef _neutered_compare(cfg, current, baseline):\n"),
-    ("lane routing", "lib/showrunner/lanes.py",
+    ("lane routing", "lanes.route", "lib/showrunner/lanes.py",
      r"(def route\(cfg, leaf\):\n)",
      "    return Decision({'leaf': leaf['id'], 'title': '', 'lane': 'headless',\n"
      "                     'resource': None, 'rule': None, 'why': '', 'matched': True,\n"
      "                     'ts': 0})\ndef _neutered_route(cfg, leaf):\n"),
-    ("collision prediction", "lib/showrunner/collide.py",
+    ("collision prediction", "collide.plan_waves", "lib/showrunner/collide.py",
      r"(def plan_waves\(cfg, leaves, files=None\):\n)",
      "    return [[l['id'] for l in leaves]], {l['id']: {'paths': set(), 'exclusive': set(),\n"
      "            'shared': set(), 'symbols': set(), 'basis': '', 'estimable': True}\n"
@@ -98,24 +98,24 @@ TARGETS = [
     # the real function against a fixture harness. Padding this number by un-stubbing a test
     # that is right to stub would be gaming the metric, which is the same rounding-up the
     # sweep exists to catch.
-    ("harness drift check", "lib/showrunner/harness.py",
+    ("harness drift check", "harness.check_tree", "lib/showrunner/harness.py",
      r"(def check_tree\(cfg, worktree_path\):\n)",
      "    return 'clean', ''\ndef _neutered_check_tree(cfg, worktree_path):\n"),
     # Added by applying the RECENCY lens: the most recently argued producer is the one with
     # the least behind it, because the argument is fresh and feels like evidence.
-    ("waiting (orchestrator liveness)", "lib/showrunner/campaign.py",
+    ("waiting (orchestrator liveness)", "campaign.waiting", "lib/showrunner/campaign.py",
      r'(def waiting\(cfg, graph, base="HEAD"\):\n)',
      "    return False, {'waiting': False, 'live_crawlers': [], 'parked_crawlers': [],\n"
      "                   'basis': ''}\ndef _neutered_waiting(cfg, graph, base='HEAD'):\n"),
     # Both added by the derived candidate scan rather than by me noticing them.
-    ("claim --next (fleet work division)", "lib/showrunner/graph.py",
+    ("claim --next (fleet work division)", "graph.claim_next", "lib/showrunner/graph.py",
      r"(    def claim_next\(self, actor, pid=None, tree=None, session=None, prefer=None\):\n)",
      "        return None\n    def _neutered_claim_next(self, actor, pid=None, tree=None,\n"
      "                                 session=None, prefer=None):\n"),
-    ("campaign reconcile (resume)", "lib/showrunner/campaign.py",
+    ("campaign reconcile (resume)", "campaign.reconcile", "lib/showrunner/campaign.py",
      r'(def reconcile\(cfg, graph, base="HEAD"\):\n)',
      "    return []\ndef _neutered_reconcile(cfg, graph, base='HEAD'):\n"),
-    ("shared-state audit", "lib/showrunner/worktree.py",
+    ("shared-state audit", "worktree.audit_shared", "lib/showrunner/worktree.py",
      r"(def audit_shared\(cfg\):\n)",
      "    return []\ndef _neutered_audit(cfg):\n"),
 ]
@@ -244,12 +244,24 @@ NOT_SWEPT = {
 }
 
 
-SWEPT_KEYS = {
-    "locks.guard", "worktree.unignored", "config.validate", "graph.stale_claims",
-    "gates.stop_gate", "gates.compare_to_baseline", "lanes.route", "collide.plan_waves",
-    "harness.check_tree", "campaign.waiting", "worktree.audit_shared",
-    "graph.claim_next", "campaign.reconcile",
-}
+# DERIVED from TARGETS, never mirrored. A hand-kept parallel set drifts in the silent
+# direction: delete a target, leave its key, and a candidate reads as covered while nothing
+# sweeps it.
+SWEPT_KEYS = {t[1] for t in TARGETS}
+
+
+def all_functions():
+    """Every module.function that exists, so a declaration naming a vanished one is caught."""
+    names = set()
+    libdir = os.path.join(ROOT, "lib", "showrunner")
+    for f in sorted(os.listdir(libdir)):
+        if not f.endswith(".py"):
+            continue
+        tree = ast.parse(open(os.path.join(libdir, f)).read())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef):
+                names.add("%s.%s" % (f[:-3], node.name))
+    return names
 
 
 def run_suite(cwd):
@@ -290,6 +302,16 @@ def main():
     # list is a denylist that nobody audits, which is this tool having the very defect it
     # exists to find — a producer nobody added is uncovered AND invisible as a gap.
     cands = set(candidates())
+    # A stale declaration is the same defect pointing the other way: an exclusion whose
+    # function is gone silently shrinks nothing today and silently covers a FUTURE function
+    # that happens to reuse the name.
+    exists = all_functions()
+    stale = sorted((SWEPT_KEYS | set(NOT_SWEPT)) - exists)
+    if stale:
+        print("STALE DECLARATIONS — these name functions that no longer exist:")
+        for k in stale:
+            print("  %s" % k)
+        return 1
     unaccounted = sorted(cands - SWEPT_KEYS - set(NOT_SWEPT))
     print("candidates derived from source: %d  ·  swept: %d  ·  excluded with a reason: %d"
           % (len(cands), len(SWEPT_KEYS & cands), len(set(NOT_SWEPT) & cands)))
@@ -304,7 +326,7 @@ def main():
     print("-" * 78)
 
     weak = []
-    for name, relpath, pattern, stub in TARGETS:
+    for name, _key, relpath, pattern, stub in TARGETS:
         if only and only.lower() not in name.lower():
             continue
         work = tempfile.mkdtemp(prefix="mutate-")
