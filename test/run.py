@@ -20,6 +20,7 @@ Run:  python3 test/run.py [-v]
 
 import filecmp
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -1299,6 +1300,31 @@ def main():
             print("  FAIL  %s crashed: %s" % (fn.__name__, exc))
             if VERBOSE:
                 traceback.print_exc()
+
+    # LAST, so the total it compares against is final. A count quoted in a README is a
+    # claim about this suite, and claims about reality are exactly what this project refuses
+    # to take on trust — issue #1 was the README asserting a number a stranger could not
+    # verify. Making the suite runnable fixed that and then the number rotted anyway: four
+    # tracked files said 117 while the suite reported 182. Stale in the repo's own headline
+    # credibility line, which is the one place nobody re-derives.
+    group("The counts this repo claims about itself")
+    claimed = {}
+    for rel_path in ("README.md", "llms.txt", "docs/DESIGN.md"):
+        full = os.path.join(ROOT, rel_path)
+        if not os.path.exists(full):
+            continue
+        with open(full) as fh:
+            for n in re.findall(r"(\d{2,4})\s+(?:CORE\s+)?assertions?", fh.read()):
+                claimed.setdefault(rel_path, set()).add(int(n))
+    ok("the docs actually claim an assertion count, so this check is not vacuous",
+       bool(claimed), claimed)
+    # Computed AFTER the vacuity check has run and BEFORE the last one, so +1 counts exactly
+    # the assertion still to come. Computing it earlier made `total` one short of the RESULT
+    # line — a check about stale numbers publishing a stale number.
+    total = len(PASS) + len(FAIL) + 1
+    wrong = {f: sorted(v) for f, v in claimed.items() if v != {total}}
+    ok("every assertion count claimed in tracked docs matches what the suite reports (%d)"
+       % total, not wrong, wrong)
 
     print("\n" + "=" * 72)
     print("RESULT: %d passed, %d failed, %d skipped" % (len(PASS), len(FAIL), len(SKIP)))
