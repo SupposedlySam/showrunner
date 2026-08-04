@@ -64,16 +64,16 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
-    ("lock guard", "locks.guard", "lib/showrunner/locks.py",
+    ("lock guard", "locks.LockSet.guard", "lib/showrunner/locks.py",
      r"(    def guard\(self, command, session=None\):\n)",
      "        return True, ''\n    def _neutered_guard(self, command, session=None):\n"),
     ("unignored (silent on allow)", "worktree.unignored", "lib/showrunner/worktree.py",
      r"(def unignored\(worktree, paths\):\n)",
      "    return IgnoreCheck([], [])\ndef _neutered_unignored(worktree, paths):\n"),
-    ("config validate", "config.validate", "lib/showrunner/config.py",
+    ("config validate", "config.Config.validate", "lib/showrunner/config.py",
      r"(    def validate\(self\):\n)",
      "        return []\n    def _neutered_validate(self):\n"),
-    ("stale_claims (reap's evidence)", "graph.stale_claims", "lib/showrunner/graph.py",
+    ("stale_claims (reap's evidence)", "graph.SqliteGraph.stale_claims", "lib/showrunner/graph.py",
      r"(    def stale_claims\(self\):\n)",
      "        return []\n    def _neutered_stale(self):\n"),
     ("stop gate", "gates.stop_gate", "lib/showrunner/gates.py",
@@ -108,7 +108,7 @@ TARGETS = [
      "    return False, {'waiting': False, 'live_crawlers': [], 'parked_crawlers': [],\n"
      "                   'basis': ''}\ndef _neutered_waiting(cfg, graph, base='HEAD'):\n"),
     # Both added by the derived candidate scan rather than by me noticing them.
-    ("claim --next (fleet work division)", "graph.claim_next", "lib/showrunner/graph.py",
+    ("claim --next (fleet work division)", "graph.SqliteGraph.claim_next", "lib/showrunner/graph.py",
      r"(    def claim_next\(self, actor, pid=None, tree=None, session=None, prefer=None\):\n)",
      "        return None\n    def _neutered_claim_next(self, actor, pid=None, tree=None,\n"
      "                                 session=None, prefer=None):\n"),
@@ -158,6 +158,24 @@ def _returns_empty_accumulator(fn):
                for r in ast.walk(fn) if isinstance(r, ast.Return) and r.value is not None)
 
 
+def _qualified(module, tree):
+    """(name, node) for every function, methods qualified by their class.
+
+    Unqualified names collide: `graph.stale_claims` is a method on TWO backends, and the
+    sweep's regex mutates only the first match — so the second read as accounted-for while
+    nothing swept it. Seventeen names in this library collide that way.
+    """
+    out = []
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef):
+            out.append(("%s.%s" % (module, node.name), node))
+        elif isinstance(node, ast.ClassDef):
+            for sub in node.body:
+                if isinstance(sub, ast.FunctionDef):
+                    out.append(("%s.%s.%s" % (module, node.name, sub.name), sub))
+    return out
+
+
 def candidates():
     """Every function that can answer 'nothing' as well as 'something'. Derived, not declared."""
     found = []
@@ -166,16 +184,14 @@ def candidates():
         if not f.endswith(".py"):
             continue
         tree = ast.parse(open(os.path.join(libdir, f)).read())
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.FunctionDef):
-                continue
+        for qname, node in _qualified(f[:-3], tree):
             rets = [n for n in ast.walk(node) if isinstance(n, ast.Return)]
             if not rets:
                 continue
             nothings = [r for r in rets if _is_nothing(r)]
             somethings = [r for r in rets if not _is_nothing(r)]
             if (nothings and somethings) or _returns_empty_accumulator(node):
-                found.append("%s.%s" % (f[:-3], node.name))
+                found.append(qname)
     return found
 
 
@@ -193,20 +209,20 @@ NOT_SWEPT = {
     "campaign.is_merged": "reached through reconcile, which the integration group asserts",
     "campaign.is_empty": "reached through reconcile; the abandoned-branch verdict asserts it",
     "campaign.live": "liveness of one record; the waiting and reap groups assert its effect",
-    "graph.blockers": "the ready/dependency assertions fail directly if it answers wrongly",
-    "graph.ready": "asserted by name in the graph group, not via a producer stub",
-    "graph._would_cycle": "private; the cycle refusal asserts it",
-    "graph.available": "static probe for the br binary; the OPTIONAL group skips loudly on it",
+    "graph.SqliteGraph.blockers": "the ready/dependency assertions fail directly if it answers wrongly. NOTE: this reason was written unqualified and silently also excused BrGraph.blockers, which returned [] unconditionally until it was made to refuse — an unfailable accept hidden by an ambiguous key",
+    "graph.SqliteGraph.ready": "asserted by name in the graph group, not via a producer stub",
+    "graph.SqliteGraph._would_cycle": "private; the cycle refusal asserts it",
+    "graph.BrGraph.available": "static probe for the br binary; the OPTIONAL group skips loudly on it",
     "lanes._rule_matches": "private; route's own assertions cover both match and no-match",
-    "locks._read": "private file read; lock state assertions cover it",
-    "locks._live": "private; the STALE/HELD assertions cover both answers",
-    "locks.holder": "reflects _read; covered by the same assertions",
-    "locks.matching": "reached by guard, which IS swept",
+    "locks.Lock._read": "private file read; lock state assertions cover it",
+    "locks.Lock._live": "private; the STALE/HELD assertions cover both answers",
+    "locks.Lock.holder": "reflects _read; covered by the same assertions",
+    "locks.LockSet.matching": "reached by guard, which IS swept",
     "harness._is_runtime": "private; the runtime-exclusion assertions cover both answers",
     "harness._install": "private; the installer path is asserted end to end in the harness group",
     "gates._harness_bin": "private lookup for attribution's command string",
-    "config.abspath": "one-line join; every path property asserts its result",
-    "config.resource": "lookup; the lock group fails if it answers wrongly",
+    "config.Config.abspath": "one-line join; every path property asserts its result",
+    "config.Config.resource": "lookup; the lock group fails if it answers wrongly",
     "util.pid_alive": "the claim-liveness and lock-staleness assertions cover both answers",
     "util.repo_root": "every fixture would fail to build if it answered wrongly",
     "collide.tracked_files": "git listing; plan_waves is swept and consumes it",
@@ -238,9 +254,9 @@ NOT_SWEPT = {
                       "abandoned worktree as clean, which is a real loss-of-work path.",
     "worktree.harness_gap": "SHOULD BE SWEPT, IS NOT YET — an always-None would remove the "
                             "doctor warning about an untracked harness.",
-    "locks.acquire": "SHOULD BE SWEPT, IS NOT YET — always-False is loud (nothing acquires), "
+    "locks.Lock.acquire": "SHOULD BE SWEPT, IS NOT YET — always-False is loud (nothing acquires), "
                      "but always-True would hand two callers the same resource.",
-    "locks.release": "SHOULD BE SWEPT, IS NOT YET — always-False would leave locks held.",
+    "locks.Lock.release": "SHOULD BE SWEPT, IS NOT YET — always-False would leave locks held.",
 }
 
 
@@ -258,9 +274,7 @@ def all_functions():
         if not f.endswith(".py"):
             continue
         tree = ast.parse(open(os.path.join(libdir, f)).read())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef):
-                names.add("%s.%s" % (f[:-3], node.name))
+        names.update(q for q, _ in _qualified(f[:-3], tree))
     return names
 
 

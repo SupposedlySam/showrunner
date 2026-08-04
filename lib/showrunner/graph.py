@@ -436,10 +436,21 @@ class BrGraph:
                 if not x.is_epic]
 
     def blockers(self, leaf_id):
-        return []
+        # NOT []. br owns dependency resolution and this adapter does not read its graph, so
+        # an empty list here would assert "nothing blocks this leaf" on no evidence — the same
+        # answer a working check returns, which is exactly why stale_claims() raises rather
+        # than returning empty. An unfailable accept in a method that gates work is the shape
+        # this project keeps finding; refusing is the honest form.
+        raise Refused(
+            "the br backend does not expose a leaf's blockers to this adapter, so 'nothing "
+            "blocks it' cannot be asserted here. Use `br ready`, which resolves dependencies "
+            "itself and is what this adapter's ready() calls.", code=3)
 
     def deps_of(self, leaf_id):
-        return []
+        raise Refused(
+            "the br backend does not expose a leaf's dependencies to this adapter. Returning "
+            "an empty list would read as 'this leaf depends on nothing', which is a claim "
+            "about the graph rather than an admission of not knowing.", code=3)
 
     def stale_claims(self):
         # br records no liveness on a claim, so this adapter cannot answer the question.
