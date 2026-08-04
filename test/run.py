@@ -647,6 +647,9 @@ def test_spawn():
        all(s.get("instead") for s in shares), shares)
 
     text = brief.build(cfg, g.show("w1"), rec)
+    ok("the brief actually carries the shared-state section — an empty audit would silently "
+       "drop it and the Crawler would never be told what its worktree fails to isolate",
+       "does NOT isolate" in text, text[:200])
     ok("the brief demands a premise verdict before any code is written",
        "verify the premise" in text.lower(), text[:200])
     ok("the brief names 'premise refuted' as a successful outcome", "--refuted" in text)
@@ -1093,6 +1096,35 @@ def test_integration():
     head_b = open(os.path.join(cfg.root, "src/b.py")).read()
     ok("...and rewinds the failing merge instead of stacking onto a broken trunk",
        not ("register(\"x\")" in head_a and "register(\"x\")" in head_b), (head_a, head_b))
+
+    # A drifted tree must not be merged: whatever its gate certified was answering a
+    # different question. This is the most consequential thing check_tree drives and it was
+    # untested — found by the mutation sweep, not by reading.
+    g.add("drifts after closing", leaf_id="m5", labels=["backend"])
+    rec_drift = worktree.spawn(cfg, g.show("m5"), actor="drifter")
+    campaign.record_spawn(cfg, rec_drift, pid=DeadPid().pid)
+    with open(os.path.join(rec_drift["worktree"], "src/c.py"), "w") as fh:
+        fh.write("# c\n")
+    sh(["git", "add", "-A"], rec_drift["worktree"])
+    sh(["git", "commit", "-q", "-m", "drifter work"], rec_drift["worktree"])
+    g.claim("m5", "drifter")
+    proof5 = os.path.join(cfg.root, "proof-m5.txt")
+    with open(proof5, "w") as fh:
+        fh.write("done\n")
+    gates.close_gate(cfg, g, "m5", "proof-m5.txt", "done", premise="holds",
+                     premise_read="README.md")
+    real_check = campaign.harness.check_tree if hasattr(campaign, "harness") else None
+    from showrunner import harness as _H
+    _orig = _H.check_tree
+    _H.check_tree = lambda c, w: ("rules-drifted", "test: this tree enforces different things")
+    try:
+        res_d, ok_d = campaign.integrate(cfg, g, base="main", only=["m5"])
+    finally:
+        _H.check_tree = _orig
+    ok("integrate REFUSES to merge a tree whose rules drifted — whatever its gate certified "
+       "was answering a different question", ok_d is False, res_d)
+    ok("...and says so by name rather than failing obscurely",
+       any(r["status"].startswith("harness-") for r in res_d), res_d)
 
     # Provenance of an integration commit (#14).
     merged_branch = results[0]["branch"]
