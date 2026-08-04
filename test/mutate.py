@@ -37,6 +37,12 @@ target gets optimised rather than understood:
 * **A kill count is not coverage.** Ten assertions reading one line of output all flip
   together and count ten. A high number can mean one well-tested behaviour or ten; the
   number cannot tell you which, and neither can it be made to.
+* **It only covers the producers NAMED BELOW — 11 of 165 public functions in `lib/`.** They
+  were chosen as the things that *gate or decide*: guards, validators, detectors, routers.
+  The rest are accessors, CLI handlers and pure transforms — but that classification is mine
+  and unaudited, so "0 unprotected" is a statement about these eleven and not about
+  showrunner. A producer nobody added here is not covered and does not appear as a gap,
+  which is this file's own version of the failure it exists to find.
 
 So treat a count as a floor with a reason attached, never as a score. The honest use is the
 ORDERING — strengthen in ascending kill order — because that is the one thing the numbers

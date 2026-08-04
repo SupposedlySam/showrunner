@@ -229,6 +229,29 @@ version it was verified against. `docs/BOUNDARY.md` does this for every assumpti
 makes about the layer below, which is what let a stale one be caught by re-reading rather than
 by being bitten.
 
+## INV18 — A guess about intent is not a reason not to look
+
+I reported an anomaly in another tool and dismissed it in the same breath: *"the closed test
+rooms cluttering the output is **presumably** your own scaffolding mid-development."* It was
+scaffolding, and it was also a real defect — nineteen rooms, fifteen dead, burying the four
+joinable ones, in a list nothing ever prunes and which offers an agent rooms it will be
+refused from joining. I had the observation and traded it for a hypothesis about someone
+else's intent.
+
+The tell is verbal and easy to catch in my own text, which is what makes it worth naming:
+**"presumably", "probably just", "that's likely intentional", "I assume that's deliberate".**
+Every one is a guess about intent standing in for a check that would cost a minute. Writing
+one about another system is the moment to look, not the moment to move on.
+
+The related failure is the charitable reading that *explains the evidence completely*: a
+mangled chat message read as sloppy writing, and it was a transport fault that reports
+success. Fitting the evidence is not the same as being true, and the comfortable explanation
+is the one that stops the search.
+
+Rung 5, and 1-4 genuinely do not apply: this is a decision *not* to investigate, and an
+absent investigation leaves no artifact for a check to find. What can be enforced is that the
+words are distinctive and this is re-injected every session.
+
 ---
 
 **The outside view outranks my attachment.** The human and fresh review subagents are the real
