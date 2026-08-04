@@ -21,3 +21,6 @@ __pycache__/
 
 # machine-local hook config (absolute paths)
 .claude/settings.local.json
+
+# Vendored by lamp; rebuild with `lamp sync`.
+.lamp/

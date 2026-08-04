@@ -1,0 +1,12 @@
+{
+  "lockfileVersion": 1,
+  "geanies": {
+    "game_loop": {
+      "wish": 4,
+      "sha": "39ea575bd9c408bf666eef27dd93b7fa8b6a5863",
+      "boundAt": "2026-08-04T18:57:28.493284",
+      "installedSha": "39ea575bd9c408bf666eef27dd93b7fa8b6a5863",
+      "installedAt": "2026-08-04T18:57:49.542042"
+    }
+  }
+}

@@ -458,6 +458,12 @@ TRIGGERS_F = os.path.join(ROOT, "triggers.json")
 TRIGGER_EVENTS = {
     "harden": "a learning was just encoded into an artifact — the moment to GENERALISE and share it",
     "stepback": "a retro just began — the moment to LEARN from what others have shared",
+    # `confidence --mark` is the exact instant "ready for consumers" stops being an intention and
+    # becomes a fact about a sha. Anything downstream that distributes this project -- a package
+    # manager, a mirror, an announcement -- wants to happen HERE and nowhere else. Left to memory it
+    # does not happen: the first stable mark was published by a downstream maintainer who happened
+    # to be watching, not by the person who marked it.
+    "confidence": "a commit was just marked — the moment to publish it wherever consumers take it",
 }
 
 
@@ -4144,6 +4150,9 @@ def cmd_confidence(s, a):
         *["  " + l for l in lines],
         "",
         "→ push it, or nobody else can see it:  git push origin " + tag)
+    out(*fire_triggers(s, "confidence", {
+        "event": "confidence", "level": a.mark, "sha": sha, "tag": tag, "notes": a.notes,
+        "project": config().get("project_name"), "session": SESSION}))
 
 
 def pinned_sha():
@@ -4166,6 +4175,29 @@ def run_verify_check():
     except Exception:  # noqa: BLE001 — cannot check is not the same as clean, but it must not crash
         return "verify --check could not run"
     return "" if r.returncode == 0 else (r.stdout or r.stderr or "stale").strip()[:400]
+
+
+def installed_confidence_report():
+    """What level the installed harness came from. Silent when nothing recorded it (an older install).
+
+    ALPHA is stated OUT LOUD rather than left blank, because the whole scheme fails if absence reads
+    as reassurance -- which is the failure every other gate in this file exists to prevent.
+    """
+    try:
+        with open(os.path.join(ROOT, "CONFIDENCE")) as f:
+            lvl = f.read().strip()
+    except OSError:
+        return []
+    if lvl == "alpha":
+        return ["⚠ INSTALLED FROM AN ALPHA COMMIT — nothing marked it, which is the DEFAULT rather "
+                "than a judgement.",
+                "  The author pushes while features are half-landed, so treat this copy as "
+                "mid-flight.",
+                "  → For a commit they stand behind: `git tag -l 'beta-*' 'stable-*'` in the source "
+                "clone, then re-install."]
+    return [f"confidence: installed from a {lvl.upper()} commit — "
+            + ("a suite passed on it" if lvl == "beta"
+               else "the author's own agent was running on it") + "."]
 
 
 def update_notice():
@@ -5128,6 +5160,7 @@ def cmd_status(s, a):
     if (w := hooks_live_warning()):
         out(w)
     out(*session_start_warning())
+    out(*installed_confidence_report())
     if (w := legacy_mandate_warning()):
         out(w)
     try:
