@@ -21,7 +21,7 @@ THE ONE DESIGN RULE (everything follows from it)
     native skill. "Point at a file on disk" is the one check prose cannot satisfy.
 
 LINEAGE
-    Extracted from two systems that already ran unattended for real: an on-device firmware loop where
+    Extracted from two projects that already ran unattended for real: an on-device firmware loop where
     the expensive gated action was a human button-press, and a trading loop where it was a real-money
     order. Same arm->gate->consume primitive, same VERIFIED/RULED-OUT/OPEN ledger vocabulary, two
     unrelated domains. game_loop is that pattern with the domain specifics removed. See docs/.
@@ -177,6 +177,10 @@ DEFAULT_CONFIG = {
     "deploy_verbs": [],        # extra irreversible verbs the guard blocks anywhere
     "generated_globs": [],     # extra generated/vendored paths the commit blast-radius warning skips
     "trans_nudge_every": 12,   # phase transitions between retro nudges
+    # Evidence work (claims, hardens, fix proofs) between retro nudges. The transitions counter above
+    # cannot fire on its own: it counts an OPTIONAL verb, and in this repo's whole history `trans`
+    # ran once against twelve hardens and zero retros. This one counts work that logs itself.
+    "work_nudge_every": 8,
     "watchdog": {"idle_sec": 30, "settle_sec": 5, "ring_cap": 3},
     # Usage-limit survival (statusline tap + limitgate + watchdog park). threshold_pct is where the
     # handoff gate closes; exhausted_pct is where the watchdog treats the session as rate-limited
@@ -400,12 +404,151 @@ def render_banner(s, frm=None):
 
 
 def retro_nudge(s):
-    n = s.get("trans_since_stepback", 0)
-    every = config().get("trans_nudge_every", 12)
-    if n >= every:
-        return (f"⚠ {n} transitions since the last retro — `game_loop stepback --notes ..` is due "
+    """Due-for-a-retro, measured on work that ACTUALLY HAPPENS.
+
+    This nudge was unreachable for the whole life of the project, and the arithmetic says why: it
+    counted `trans` only, `trans` had run ONCE in the log's entire history, and the threshold was 12.
+    Nothing was broken — the counter simply never moved, so the check could not fire, and its
+    silence read exactly like "no retro is due". Meanwhile `harden` had run twelve times and
+    `stepback` zero, which is the retro not happening at all.
+
+    A trigger fed by an OPTIONAL bookkeeping verb is enforcement resting on the thing it is meant to
+    enforce (INV1). So the second counter is fed by work that leaves a log line whether or not
+    anyone remembers this feature exists: claims sourced, learnings hardened, fixes proved.
+    Either counter can fire it — `trans` stays honoured for anyone who does drive phases.
+    """
+    cfg = config()
+    t, w = s.get("trans_since_stepback", 0), s.get("work_since_stepback", 0)
+    t_every, w_every = cfg.get("trans_nudge_every", 12), cfg.get("work_nudge_every", 8)
+    if t >= t_every:
+        return (f"⚠ {t} transitions since the last retro — `game_loop stepback --notes ..` is due "
                 "(reflect, harden the chapter's learnings, reset the count).")
+    if w >= w_every:
+        return (f"⚠ {w} pieces of evidence work (claims, hardens, fix proofs) since the last retro — "
+                "`game_loop stepback --notes ..` is due. This counter exists because the "
+                "transitions one counted a verb nobody runs, and so never fired.")
     return None
+
+
+# ── triggers ──────────────────────────────────────────────────────────────────────────────────
+#
+# A place for a project to attach ITS OWN action to a moment in the loop. game_loop cannot ship the
+# actions themselves: the one that prompted this is broadcasting a generalised learning to a channel
+# other agents read, and most installs have no such channel, no other agents, and no wish to talk to
+# anyone at all. A rule that cannot apply to everyone must not be wired in for everyone — so the
+# harness owns the MOMENT, and the project owns what happens there.
+#
+# Config lives in triggers.json, which is GITIGNORED, exactly like notify.json and for the same
+# reason: it is site wiring, not product. config.json is tracked and would ship one machine's paths
+# and room names to every cloner.
+#
+# Three rules, each a scar:
+#   * NEVER BLOCKS. A trigger that fails must not stop a learning from being hardened — the work
+#     outranks the announcement, and a broadcast that can veto the thing it reports on is a guard
+#     blocking its own fix (INV5).
+#   * NEVER SILENT. Failure, timeout and a command that cannot be found all SAY so. A missing
+#     trigger is the usage-limit tap over again: three gates fed by one file nobody noticed was
+#     never written (INV8).
+#   * ALWAYS ACCOUNTED. Every configured trigger carries its last outcome in state, so `status`
+#     can name one that has never fired. "Configured" and "working" are different claims.
+TRIGGERS_F = os.path.join(ROOT, "triggers.json")
+
+# The moments the loop publishes. Adding one is a deliberate act: a moment nobody attaches to is
+# dead weight, and a moment that fires on a hot path turns a helpful hook into a tax.
+TRIGGER_EVENTS = {
+    "harden": "a learning was just encoded into an artifact — the moment to GENERALISE and share it",
+    "stepback": "a retro just began — the moment to LEARN from what others have shared",
+}
+
+
+def load_triggers():
+    try:
+        with open(TRIGGERS_F) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def triggers_for(event):
+    e = load_triggers().get(event)
+    return [t for t in e if isinstance(t, dict) and t.get("command")] if isinstance(e, list) else []
+
+
+def fire_triggers(s, event, payload):
+    """Run this project's attachments for `event`. Returns lines to print; raises nothing, ever.
+
+    The payload goes in as JSON on stdin — the same shape Claude Code hands its own hooks, so anyone
+    who has written one of those already knows this contract. stdout comes BACK to the agent on
+    purpose: a trigger that reads a channel is useless if what it read is thrown away.
+    """
+    fired = []
+    for t in triggers_for(event):
+        name = str(t.get("name") or "(unnamed)")
+        try:
+            timeout = max(1.0, float(t.get("timeout_sec") or 20))
+        except (TypeError, ValueError):
+            timeout = 20.0
+        env = dict(os.environ, GAME_LOOP_EVENT=event, GAME_LOOP_ROOT=ROOT, GAME_LOOP_REPO=REPO_ROOT)
+        try:
+            r = subprocess.run(["bash", "-c", t["command"]], input=json.dumps(payload),
+                               capture_output=True, text=True, timeout=timeout, env=env)
+            ok, body, err = r.returncode == 0, (r.stdout or "").strip(), (r.stderr or "").strip()
+            if not ok and not err:
+                err = f"exited {r.returncode} with nothing on stderr"
+        except subprocess.TimeoutExpired:
+            ok, body, err = False, "", f"timed out after {timeout:.0f}s"
+        except OSError as exc:                       # command unrunnable — still an ANSWER, not a crash
+            ok, body, err = False, "", str(exc)
+        rec = s.setdefault("triggers", {}).setdefault(name, {})
+        rec.update({"event": event, "at": now(), "ok": ok, "detail": (err or body)[:200]})
+        logline({"kind": "trigger", "name": name, "event": event, "ok": ok,
+                 "detail": (err or "")[:200]})
+        fired.append((name, ok, body, err))
+    if not fired:
+        return []
+    save(s)
+    lines = [f"— triggers · {event} ——————————————————————————"]
+    for name, ok, body, err in fired:
+        if ok:
+            lines.append(f"  ✓ {name}")
+            lines.extend("     " + l for l in (body.splitlines() or ["(no output)"]))
+        else:
+            # Loud, and it says the verb still stands — otherwise the next reader assumes it didn't.
+            lines.append(f"  ✗ {name} FAILED — {err or 'no detail'}")
+            if body:
+                lines.extend("     " + l for l in body.splitlines())
+            lines.append(f"     (the {event} itself stands; a trigger never blocks the work)")
+    return lines
+
+
+def triggers_report():
+    """Silent when a project has attached nothing — most installs want no part of this.
+
+    Once something IS attached, silence becomes the failure mode worth naming: a trigger that has
+    never fired looks identical, from outside, to one that fires perfectly every time.
+    """
+    cfg = load_triggers()
+    entries = [(ev, t) for ev in cfg for t in triggers_for(ev)]
+    if not entries:
+        return []
+    s = load()
+    seen = s.get("triggers") or {}
+    lines = ["TRIGGERS — this project's own attachments to the loop:"]
+    for ev, t in entries:
+        name = str(t.get("name") or "(unnamed)")
+        rec = seen.get(name)
+        if not rec:
+            lines.append(f"  ⚠ [{ev}] {name} — CONFIGURED BUT NEVER FIRED in this tree. Either the "
+                         f"moment has not come round yet, or it is not wired to anything.")
+        else:
+            mark = "✓" if rec.get("ok") else "✗"
+            lines.append(f"  {mark} [{ev}] {name} — last {rec.get('at')}"
+                         + ("" if rec.get("ok") else f" · FAILING: {rec.get('detail') or '?'}"))
+    unused = [e for e in TRIGGER_EVENTS if not triggers_for(e)]
+    if unused:
+        lines.append("  → moments with nothing attached: " + ", ".join(sorted(unused)))
+    return lines
 
 
 # ── source resolution ───────────────────────────────────────────────────────────────────────────
@@ -642,7 +785,15 @@ def _limitgate_verdict(s, payload, now_epoch):
     crossed = min((w.get("crossed_at") or snap.get("captured_at") or now_epoch) for _, w in over)
     try:
         if os.path.getsize(hp) > 0 and os.path.getmtime(hp) >= float(crossed):
-            return True, None
+            with open(hp) as f:
+                head = f.read(200)
+            # THE AUTO HANDOFF DOES NOT SATISFY THIS GATE (#45). It is refreshed at every turn-end,
+            # so accepting it would make this check pass forever without the agent doing anything —
+            # a gate quietly turned vacuous by a safety net added to help it. The generated file is
+            # the FLOOR (a limit death costs at most one turn); the agent's own account of where it
+            # got to is still owed, and only `checkpoint --notes` or a hand-written file provides it.
+            if AUTO_HANDOFF_MARK not in head:
+                return True, None
     except OSError:
         pass
     tool = payload.get("tool_name") or ""
@@ -1034,6 +1185,7 @@ def cmd_claim(s, a):
             inst["recheck_n"] = len(inst.get("readings") or [])
     logline(rec)
     s["claim_count"] = s.get("claim_count", 0) + 1
+    s["work_since_stepback"] = s.get("work_since_stepback", 0) + 1   # feeds the retro nudge
     save(s)
     msg = [CLAIM_OUTCOMES[outcome],
            f"  assert    : {a.assert_}",
@@ -1550,16 +1702,66 @@ def pin_state(pin):
     return "✗", f"DRIFTED — no longer contains {exp!r}; the pin has been undone"
 
 
+def shared_pins():
+    """Every live pin in this CHECKOUT, read from the shared log — not from one session's state.
+
+    #18 shipped these session-scoped, and the incident it was built from says why that was wrong.
+    The failure was "later, cleaning up loose ends, it was restored to its default branch": a
+    DIFFERENT moment, very often a different session — after a restart, after compaction, after a
+    handback. The tidying instinct that does the damage is precisely the one that arrives fresh,
+    with no memory of why the state was unusual. Session-scoped, the guard protected the only run
+    that did not need protecting.
+
+    #17 answered the identical question for refuted claims and answered it the other way, on stated
+    reasoning: a negative result is knowledge about the CHECKOUT, and the run that must not re-walk
+    it is a later session holding none of this one's state. That argument is stronger here, not
+    weaker — a refutation is knowledge about a codebase, while a pin is knowledge about the
+    ENVIRONMENT ON THIS MACHINE, which two sessions genuinely share. The fact is true for both of
+    them whether or not either one recorded it.
+
+    Each pin carries the session that registered it, so it is clear who established it and can be
+    asked. WHAT THIS STILL MISSES (INV6): a pin whose session ended and whose fact was reverted by
+    hand outside game_loop reads as live until its --expect notices, and a pin with no --expect
+    cannot notice at all.
+
+    The whole log is scanned rather than its tail: a pin scrolling out of a window is exactly the
+    silent revert this exists to prevent. Cheap because the JSON parse is gated on a substring.
+    """
+    live, released = [], set()
+    try:
+        with open(LOG_F) as f:
+            for ln in f:
+                if '"pin' not in ln:
+                    continue
+                try:
+                    r = json.loads(ln)
+                except ValueError:
+                    continue
+                kind, pid = r.get("kind"), r.get("id")
+                if kind == "pin_release" and pid:
+                    released.add(pid)
+                elif kind == "pin" and pid:
+                    live.append(r)
+    except OSError:
+        return []
+    return [p for p in live if p.get("id") not in released]
+
+
 def pins_report(s):
     """The pins block for `status` — surviving compaction is the entire point of putting it here."""
-    pins = s.get("pins") or []
+    pins = shared_pins()          # the checkout's, not this session's (#31)
     if not pins:
         return ['pins: none registered — `game_loop pin --fact ".." --reason ".." --path <real path>` '
                 "the moment local state becomes load-bearing"]
     lines = ["", "PINS — load-bearing environment facts. Do NOT tidy these away:"]
     for p in pins:
         sym, note = pin_state(p)
-        lines.append(f"  {sym} [{p.get('id')}] {p.get('fact')}")
+        who = p.get("sid")
+        # SESSION[:8] is what logline stamps, so compare like with like: SESSION.startswith(who)
+        # called any two sessions sharing a prefix the same session, and silently dropped the
+        # attribution in exactly the case it exists for.
+        mine = "" if not who or (SESSION and SESSION[:8] == who) else f"   (pinned by {who})"
+        lines.append(f"  {sym} [{p.get('id')}] {p.get('fact')}{mine}")
         lines.append(f"      why    : {p.get('reason')}")
         lines.append(f"      anchor : {p.get('path')} — {note}")
         if p.get("restore"):
@@ -1575,7 +1777,7 @@ def cmd_pin(s, a):
     "dep is on abc123 because the merge API does not exist on the default branch" stops one. The
     anchor is the keystone, and --expect is what turns a displayed pin into a checked one.
     """
-    pins = list(s.get("pins") or [])   # copy: never mutate the module-level DEFAULT_STATE list
+    pins = shared_pins()               # the checkout's pins, whoever registered them (#31)
 
     if a.list:
         if not pins:
@@ -1587,20 +1789,24 @@ def cmd_pin(s, a):
     if a.release:
         hit = next((p for p in pins if p.get("id") == a.release), None)
         if not hit:
-            die(f"no pin with id {a.release!r} in this session. `game_loop pin --list` shows the live "
-                "ones.")
+            die(f"no live pin with id {a.release!r} in this checkout. `game_loop pin --list` shows "
+                "them.")
         if not a.notes:
             die("pin --release needs --notes: say why this fact is no longer load-bearing.\n"
                 f"  releasing: [{hit['id']}] {hit['fact']}\n"
                 f"  it was kept because: {hit['reason']}\n"
                 "Making the revert a STATED decision is the only job this verb has. An unexplained "
                 "release is the invisible revert all over again.")
-        pins.remove(hit)
-        s["pins"] = pins
-        save(s)
         logline({"kind": "pin_release", "id": hit["id"], "fact": hit["fact"],
                  "path": hit.get("path"), "notes": a.notes})
+        # Releasing somebody ELSE's pin is the moment the human's judgement is worth spending: the
+        # run tidying up is, by construction, the one that does not know why the state was unusual.
+        foreign = hit.get("sid") and not (SESSION and SESSION[:8] == hit["sid"])
         out("✓ PIN RELEASED — the revert is on the record.",
+            *([f"  ⚠ registered by ANOTHER session ({hit['sid']}) — that run established this "
+               "state and is the one that knew why.",
+               "    You are releasing it on its behalf."]
+              if foreign else []),
             f"  was  : [{hit['id']}] {hit['fact']}",
             f"  kept because: {hit['reason']}",
             f"  notes: {a.notes}",
@@ -1622,21 +1828,28 @@ def cmd_pin(s, a):
         die(f"--path does not name anything on disk: {a.path}\n"
             "Name the checkout, file, or install dir the fact actually lives at (absolute, or "
             "relative to the repo / a read_root). If it isn't there, the pin is already broken.")
-    pin = {"id": f"p{s.get('pin_seq', 0) + 1}", "fact": a.fact, "reason": a.reason, "path": real,
-           "expect": a.expect, "restore": a.restore, "at": now()}
+    # Sequence off the CHECKOUT's history, not this session's: two sessions each numbering from 1
+    # would collide the moment the list became shared, and `pin --release p1` would be ambiguous.
+    seq = 0
+    try:
+        with open(LOG_F) as f:
+            seq = sum(1 for ln in f if '"kind": "pin"' in ln)
+    except OSError:
+        pass
+    pin = {"id": f"p{max(seq, s.get('pin_seq', 0)) + 1}", "fact": a.fact, "reason": a.reason,
+           "path": real, "expect": a.expect, "restore": a.restore, "at": now()}
     if a.expect:
         sym, note = pin_state(pin)
         if sym != "✓":
             die(f"--expect does not hold right now: {note}\n"
                 "A pin records state you have ALREADY established, so its check must be green at "
                 "registration. A check born red is a check nobody will believe later.")
-    pins.append(pin)
-    s["pins"] = pins
     s["pin_seq"] = s.get("pin_seq", 0) + 1
     save(s)
     logline({"kind": "pin", **{k: pin[k] for k in ("id", "fact", "reason", "path", "expect",
                                                    "restore")}})
-    out(f"✓ PIN registered [{pin['id']}] — carried in resume state, re-shown by every `status`.",
+    out(f"✓ PIN registered [{pin['id']}] — carried in the CHECKOUT's log, re-shown by every "
+        "`status`, in every session.",
         f"  fact   : {pin['fact']}",
         f"  why    : {pin['reason']}",
         f"  anchor : {real}" + (f"  (expect {a.expect!r} — CHECKED)" if a.expect else
@@ -2720,6 +2933,8 @@ def cmd_fix(s, a):
                                      ("name", "promises", "produces", "diagnosis", "before",
                                       "observed", "produces_digest", "diagnosis_digest",
                                       "before_digest", "observed_digest", "expect")}})
+    s["work_since_stepback"] = s.get("work_since_stepback", 0) + 1
+    save(s)          # this verb had no other reason to persist state; without it the count is lost
     sym, note = fix_state(proof)
     out(f"{sym} FIX PROVED — {a.prove} was exercised through what it produces.",
         f"  promises : {a.promises}",
@@ -3129,6 +3344,11 @@ def cmd_stopgate(s, a, payload):
             f.write("\n")
     except OSError:
         pass  # a probe that fails must never take the gate down with it
+    # #45: the handoff is maintained HERE, at every turn-end, rather than demanded at the cliff.
+    # A limit death then costs at most one turn, in any host, with no number to invent.
+    refresh_handoff(s)
+    if (_u := trailing_usage(payload.get("transcript_path"))):
+        logline({"kind": "usage_window", **_u})   # evidence for a future gate; gates nothing today
 
     # Remember where the live transcript is. The gate fires every turn-end, so this is the reliable
     # way `status` can later count the harness's own tool-denials; the watchdog records the same key.
@@ -3195,6 +3415,60 @@ def cmd_trans(s, a):
         out(n)
 
 
+def _hooks_stale_warning(probe_f):
+    """The probe EXISTS — but existence is a fact about history, and the question is present tense.
+
+    REGISTERED, FIRED and LISTENING NOW are three different claims (#43). The check tested `isfile`
+    and nothing else, so a Stop hook that fired an hour ago and has since died read exactly like a
+    healthy one, for the rest of the session. The mtime was sitting right there, unused.
+
+    Judged against THIS RUN'S OWN activity rather than an invented constant: a Stop hook fires at
+    every turn-end, so a probe much older than the work this session is doing is evidence of a hook
+    that stopped, not of a quiet run. An idle session moves neither marker and correctly triggers
+    nothing. The slack is there because one long turn is the honest false positive — activity with
+    no turn-end yet is not a dead hook.
+
+    Nothing re-arms a long-lived hook while a session is idle: only a turn-end or a session start
+    does, and an idle agent produces neither. So the window this covers is exactly the one an
+    unattended run spends most of its time in.
+
+    WHAT IT STILL CANNOT PROVE (INV6): a probe shows the hook ran AT THAT MOMENT, never that it will
+    run at the next one. No check makes a live process a guarantee. The goal is "you would find
+    out", not "it cannot happen" — which is why this reports and never blocks.
+    """
+    try:
+        probe_age = time.time() - os.path.getmtime(probe_f)
+    except OSError:
+        return None
+    acts = []
+    for f in (STATE_F, LOG_F):          # both are written by ordinary work, so they track the RUN
+        try:
+            acts.append(time.time() - os.path.getmtime(f))
+        except OSError:
+            pass
+    if not acts:
+        return None
+    activity_age = min(acts)
+    slack = float(config().get("hooks_probe_slack_sec", 1800))
+    if probe_age <= activity_age + slack:
+        return None
+    return (
+        "\u26a0 THE STOP GATE MAY HAVE STOPPED FIRING \u2014 its probe is "
+        f"{probe_age / 60:.0f} min old, while this\n"
+        f"  session was working {activity_age / 60:.0f} min ago. A Stop hook fires at EVERY "
+        "turn-end, so a probe much\n"
+        "  older than the work is evidence of a hook that died, not of a quiet run. Nothing "
+        "re-arms a\n"
+        "  long-lived hook while a session is idle \u2014 only a turn-end or a session start does "
+        "\u2014 so this is\n"
+        "  the window an unattended run spends most of its time in.\n"
+        "  \u2192 Reload the window (VSCode) or start a new session to re-register, then re-read "
+        "this line.\n"
+        "  (It proves the hook ran AT THAT MOMENT, never that it will run at the next one. One long "
+        "turn\n"
+        "   with no turn-end yet is the honest false positive: widen hooks_probe_slack_sec.)")
+
+
 def hooks_live_warning():
     """Are the hooks actually WIRED IN to the running session, not merely on disk?
 
@@ -3225,7 +3499,11 @@ def hooks_live_warning():
     remedy really IS a restart, and it is unset here entirely — so keying off it does not merely
     misdirect, it detects nothing and falls through, which is the silent failure again.
     """
-    if not os.path.isfile(os.path.join(ROOT, "probe", "stop-payload.json")):
+    probe_f = os.path.join(ROOT, "probe", "stop-payload.json")
+    if os.path.isfile(probe_f):
+        # It fired at least once. That answers "registered" and "has fired" — never "listening now".
+        return _hooks_stale_warning(probe_f)
+    if True:
         vscode = os.environ.get("CLAUDE_CODE_ENTRYPOINT") == "claude-vscode"
         remedy = ("Reload the VSCode window — the extension registers hooks at window load, so a\n"
                   "  hook written mid-session stays inert until then (a restart also works, and "
@@ -3241,6 +3519,47 @@ def hooks_live_warning():
                 "  (This tracks the PROBE's lifetime, not the hook's: a checkout that fired before\n"
                 "   probing shipped reads the same way until its next Stop.)")
     return None
+
+
+def limits_inert_warning(snap):
+    """The usage-limit family has exactly ONE source of truth, and it can go missing in silence.
+
+    `rate_limits` is carried by the statusline payload and nothing else — verified against the
+    shipped CLI binary, where the field is built as `(v.five_hour||v.seven_day)&&{rate_limits:v}`
+    beside `context_window` and `vim.mode`, and appears nowhere near `hook_event_name`. So when no
+    snapshot exists, THREE gates fail open at once and none of them says a word: `limitgate` never
+    demands a handoff, the watchdog never parks, and nothing rings the run awake when the window
+    resets. A run can burn to its limit and stop dead while every check reports fine.
+
+    That is the whole reason this speaks. Absence of the snapshot is absence of SIGNAL, never
+    evidence of headroom, and the old status line ("the tap hasn't fired ... it fills on the first
+    API response") read as a benign not-yet — the failure it describes is indistinguishable from
+    success until the limit arrives, which is the one moment nothing can be done about it.
+
+    Returns None only when a snapshot actually carries a window; both "no file" and "file with no
+    windows" are inert and say so, because for the human waiting on a page they are the same thing.
+    """
+    if snap and (snap.get("windows") or {}):
+        return None
+    cost = ("  While this is true: no page at the threshold, no park at exhaustion, and no ring "
+            "when the\n  window resets — a limit will stop the run silently.")
+    if os.environ.get("CLAUDE_CODE_ENTRYPOINT") == "claude-vscode":
+        return ("⚠ USAGE-LIMIT PROTECTION IS INERT — no limits snapshot, and this host is the "
+                "VSCode\n  extension (CLAUDE_CODE_ENTRYPOINT=claude-vscode), whose UI renders no "
+                "terminal statusline.\n" + cost + "\n"
+                "  → Treat it as UNAVAILABLE here rather than pending. A session run from a "
+                "terminal\n    (`claude` in a shell) does fire the tap; in this window, hand off "
+                "on your own clock.")
+    if snap is None:
+        return ("⚠ USAGE-LIMIT PROTECTION IS INERT — the statusline tap has never fired in this "
+                "checkout,\n  so no snapshot exists.\n" + cost + "\n"
+                "  → Check that `statusLine` is registered in .claude/settings.json (install.sh "
+                "wires it)\n    and that this host renders one. It fills on the first statusline "
+                "refresh.")
+    return ("⚠ USAGE-LIMIT PROTECTION IS INERT — the tap fired, but the payload carried no usage "
+            "windows.\n  That is what API-key auth looks like: limits are exposed to subscription "
+            "sessions only.\n" + cost + "\n"
+            "  → Nothing to fix if this account is API-key based; the gates simply cannot arm.")
 
 
 SESSION_TTL_DAYS = 30
@@ -3397,6 +3716,458 @@ def _latest_version(repo, api_base):
     return cache.get("latest")   # stale-but-better-than-nothing, or None
 
 
+BEHAVIOUR_F = os.path.join(ROOT, "behaviour.json")
+
+
+def behaviour_changes(blob):
+    """The entries in a behaviour record, ordered by seq. Tolerant by design: a malformed or
+    truncated record is NO INFORMATION — never a crash, and never a confident 'nothing changed'."""
+    try:
+        d = json.loads(blob) if isinstance(blob, str) else blob
+        entries = d.get("changes") if isinstance(d, dict) else None
+        return sorted((e for e in (entries or [])
+                       if isinstance(e, dict) and isinstance(e.get("seq"), int)),
+                      key=lambda e: e["seq"])
+    except (ValueError, AttributeError, TypeError):
+        return []
+
+
+def installed_behaviour_seq():
+    """The highest seq this install SHIPPED with. A missing file means an install from before the
+    record existed, which is 0 — it has seen none of them, and that is the honest reading."""
+    try:
+        with open(BEHAVIOUR_F) as f:
+            return max((e["seq"] for e in behaviour_changes(f.read())), default=0)
+    except OSError:
+        return 0
+
+
+def _remote_behaviour(repo, raw_base):
+    """The record on main, or None. Best effort and bounded, exactly like the sha check: a status
+    line must never stall on the network, and 'could not fetch' must not read as 'nothing changed'.
+    """
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            f"{raw_base.rstrip('/')}/{repo}/main/.game_loop/behaviour.json",
+            headers={"User-Agent": "game_loop-update-check"})
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            return resp.read().decode()
+    except Exception:  # noqa: BLE001 — offline, 404, parse error: no information, never a crash
+        return None
+
+
+def _compare_versions(repo, api_base, base, head):
+    """Where `head` sits relative to `base` upstream: 'identical' / 'ahead' / 'behind' / 'diverged',
+    or None when it cannot be determined.
+
+    Ancestry is the question the update notice is actually asking, and INEQUALITY IS NOT IT (#49):
+    installed != latest is true both when the install is behind (a real update) and when it is ahead
+    (a false alarm), and those are opposite conditions. An install that runs ahead of a cached check
+    reported backwards, and the suggested remedy was a no-op that left the notice in place.
+
+    Best effort and bounded, like every other network call here: an answer nobody could fetch must
+    not become a confident one in either direction.
+    """
+    try:
+        import urllib.request
+        req = urllib.request.Request(
+            f"{api_base.rstrip('/')}/repos/{repo}/compare/{base}...{head}",
+            headers={"User-Agent": "game_loop-update-check",
+                     "Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            return (json.loads(resp.read().decode() or "{}") or {}).get("status")
+    except Exception:  # noqa: BLE001 — offline, rate-limited, unknown sha: no information
+        return None
+
+
+def waiting_report():
+    """What the watchdog last concluded about a declared wait. Silent unless a probe is configured.
+
+    "What is this run blocked on" is the first question a resumed session asks, and before #32 there
+    was nowhere to read it. Shown from the LOG rather than by re-running the probe: status must stay
+    cheap, and the interesting fact is what the watchdog acted on, not what a fresh run would decide.
+    """
+    if not str(((config().get("watchdog") or {}).get("waiting_probe") or "")).strip():
+        return []
+    last = None
+    try:
+        with open(LOG_F) as f:
+            for ln in f:
+                if '"watchdog_wait' not in ln:
+                    continue
+                try:
+                    r = json.loads(ln)
+                except ValueError:
+                    continue
+                if r.get("kind") in ("watchdog_waiting", "watchdog_wait_held"):
+                    last = r
+    except OSError:
+        return []
+    if not last:
+        return ["waiting: a probe is configured, but the watchdog has not run it yet — its verdict "
+                "appears here once it does."]
+    verdict = "WAITING on dispatched work" if last.get("waiting") or \
+              last.get("kind") == "watchdog_wait_held" else "not waiting"
+    detail = last.get("detail") or ""
+    return [f"waiting: {verdict} — as of {last.get('t', '?')}" + (f" · {detail}" if detail else ""),
+            "  (the watchdog's own last verdict, not a fresh one; it is conservative toward NOT "
+            "waiting)"]
+
+
+SESSION_START_PROBE = os.path.join(ROOT, "probe", "session-start.json")
+
+
+def cmd_sessionstart(s, a, payload):
+    """Run `status` at session start (and after a compaction), and inject it into the session.
+
+    THE GAP THIS CLOSES is discoverability, not enforcement. The PreToolUse guards already fire
+    without being asked, so the write guard and the MCP guard were never subject to this. What was
+    subject to it is everything behind a VERB -- the claim gate, harden, the mandate machinery, the
+    retro, and `status` itself. A tree could carry a perfectly provisioned harness and still run
+    completely bare, because nothing made the entry point run.
+
+    A BANNER WOULD HAVE BEEN THE WRONG FIX. "The harness is here, run status" holds only while the
+    agent chooses to act on it, which is rung 6 of the ladder applied to the gap that decides whether
+    any other rung runs at all (INV1). So this runs the verb, not an advertisement for it.
+
+    PostCompact matters as much as SessionStart: compaction is exactly when a run loses the mandate,
+    the pins and the invariants, and this repo's own instruction has always been "run status every
+    session AND after any compaction". Now the harness does it.
+
+    THREE THINGS IT HAS TO GET RIGHT, or it becomes the defect it fixes:
+      * NEVER BLOCKS. A first impression that bricks a session is one nobody gives a second chance,
+        so every failure path exits 0 with no output.
+      * IT MUST BE OBSERVABLE THAT IT FIRED, or this is the statusline tap (#45) and the Stop probe
+        (#43) again -- a check whose silence is indistinguishable from never having run.
+      * IT DEGRADES DURING INSTALL AND UPGRADE. Mid-install, or on a branch with no .game_loop/, it
+        says nothing rather than erroring: a guard must never block its own fix (INV5).
+    """
+    if not config().get("session_start", True):
+        return                       # a project that wants silence gets silence, opt-out not opt-in
+    try:
+        os.makedirs(os.path.dirname(SESSION_START_PROBE), exist_ok=True)
+        with open(SESSION_START_PROBE, "w") as f:
+            json.dump({"at": now(), "session": SESSION,
+                       "source": payload.get("source") or payload.get("hook_event_name") or ""}, f)
+    except OSError:
+        pass                         # the probe is evidence, never a precondition
+    try:
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cmd_status(s, a)
+        text = buf.getvalue().strip()
+    except Exception:  # noqa: BLE001 — mid-install, half-written state, anything: say nothing
+        return
+    if not text:
+        return
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": payload.get("hook_event_name") or "SessionStart",
+        "additionalContext": text}}))
+
+
+def session_start_warning():
+    """Silent unless a session start SHOULD have been seen and was not (#48).
+
+    Same shape as the Stop probe's age check (#43), and for the same reason: registered, fired, and
+    firing now are three different claims. A SessionStart hook that silently stops firing takes the
+    whole entry point with it, and nothing else would notice.
+    """
+    if not config().get("session_start", True):
+        return []
+    if os.path.isfile(SESSION_START_PROBE):
+        return []
+    return ["⚠ NO SESSION START RECORDED — the SessionStart hook has not fired in this checkout, so "
+            "nothing runs",
+            "  `status` for you automatically and a fresh session learns none of this exists. It is "
+            "registered by",
+            "  install.sh; hooks are read when a session starts, so reload the window (VSCode) or "
+            "start a new",
+            "  session. (This tracks the PROBE's lifetime, not the hook's — a checkout that fired "
+            "before probing",
+            "   shipped reads the same until its next start.)"]
+
+
+AUTO_HANDOFF_MARK = "<!-- game_loop:auto -->"
+
+
+def build_handoff(s):
+    """The run's state as a handoff, assembled from what the harness already knows.
+
+    #45's real fix. The usage-limit gate's purpose was never "know the number" -- it was "do not die
+    with your state only in your head". Warning was one way to buy that, and it is the way that
+    depends on a number this host cannot have: rate_limits rides the statusline payload and nothing
+    else, so in an editor session the gauge can never arm.
+
+    So instead of predicting the cliff, never be far from the edge. A handoff refreshed at every
+    turn-end means a limit death costs at most one turn, in ANY host, with no calibration and no
+    configured budget standing for nothing.
+
+    Assembled rather than written: everything here is already recorded, so this cannot go stale the
+    way prose does, and it costs the agent nothing to maintain. WHAT IT IS NOT (INV6): it is not
+    the agent's own account of its reasoning. It says what the run was DOING, not why -- a
+    hand-written handoff is still better, and `checkpoint --notes` is what puts words in this one.
+    """
+    m = s.get("mandate") or {}
+    ph = s.get("phase") or {}
+    lines = [AUTO_HANDOFF_MARK,
+             "# HANDOFF — written automatically at every turn-end",
+             "",
+             f"_Generated {now()} by game_loop. Overwritten each turn; edit `checkpoint --notes` to",
+             "put your own words in it, not this file._",
+             "",
+             "## The job"]
+    lines.append(f"- mandate: {m.get('text') or '(none bound)'}")
+    if ph.get("milestone") or ph.get("doing"):
+        lines.append(f"- phase: {ph.get('milestone') or '?'} · {ph.get('doing') or '?'}")
+    last = None
+    kinds = {"checkpoint": "checkpoint", "mandate_set": "mandate bound",
+             "stepback": "retro", "harden": "hardened", "claim": "claim"}
+    recent = []
+    try:
+        with open(LOG_F) as f:
+            for ln in f:
+                try:
+                    r = json.loads(ln)
+                except ValueError:
+                    continue
+                if r.get("kind") in kinds:
+                    recent.append(r)
+                    if r.get("kind") == "checkpoint":
+                        last = r
+    except OSError:
+        pass
+    # STATE first, log second. A checkpoint is logged by the Stop gate when it CONSUMES it, and
+    # this runs earlier in the same invocation — so the freshest report is the one still pending in
+    # state, and reading only the log would always be one turn behind.
+    pending = s.get("stop_ok_notes")
+    lines += ["", "## Last reported progress",
+              ("- " + pending) if pending else
+              ("- " + (last.get("notes") or "(no notes)")) if last
+              else "- no checkpoint recorded yet in this checkout"]
+    if recent:
+        lines += ["", "## The last few recorded moves"]
+        for r in recent[-8:]:
+            what = r.get("notes") or r.get("learning") or r.get("assert") or r.get("text") or ""
+            lines.append(f"- {r.get('t', '?')} · {kinds[r['kind']]}: {str(what)[:110]}")
+    pins = shared_pins()
+    if pins:
+        lines += ["", "## Do NOT tidy these away"]
+        lines += [f"- [{p.get('id')}] {p.get('fact')} — {p.get('reason')}" for p in pins]
+    ahead, branch, upstream = ahead_of_upstream()
+    if ahead:
+        lines += ["", f"## Unpushed: {ahead} commit(s) on {branch} not on {upstream}"]
+    lines += ["", "## Where to pick up",
+              "- `./.game_loop/bin/game_loop status` first: it re-injects the invariants, the "
+              "mandate, the pins and the ruled-out list."]
+    return "\n".join(lines) + "\n"
+
+
+def refresh_handoff(s):
+    """Write the handoff, unless a HUMAN-authored one is sitting there.
+
+    A generated file must never overwrite somebody's own words. The marker is how it tells its own
+    output apart from a hand-written file -- absent marker, absent write.
+    """
+    p = handoff_path()
+    try:
+        if os.path.isfile(p):
+            with open(p) as f:
+                if AUTO_HANDOFF_MARK not in f.read(200):
+                    return False        # somebody wrote this by hand; it outranks anything generated
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as f:
+            f.write(build_handoff(s))
+        return True
+    except OSError:
+        return False                    # a handoff that cannot be written must not break the gate
+
+
+_USAGE_TAIL_BYTES = 2 * 1024 * 1024
+
+
+def trailing_usage(transcript_path, window_sec=5 * 3600):
+    """Output tokens recorded in the transcript's trailing window, or None.
+
+    EVIDENCE, GATING NOTHING. There is no honest threshold to compare this against: the raw counts
+    do not map to the account's real limit -- one session showed 1.59M output against 766G
+    cache-read, weighted server-side in ways nothing local can see -- and a limit being hit leaves
+    no trace in any transcript, so it cannot learn the number by watching itself get cut off.
+
+    Recording it anyway is INV4 applied to ourselves: no gate without a logged, observed failure. A
+    threshold invented today would be a number standing for nothing, which is exactly the defect the
+    landed half of #45 fixed. A threshold in a few weeks would be measured.
+
+    Bounded: only the transcript's tail is read, so a long session does not pay for its own history.
+    """
+    if not transcript_path:
+        return None
+    try:
+        with open(transcript_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            start = max(0, f.tell() - _USAGE_TAIL_BYTES)
+            f.seek(start)
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    if start and lines:
+        lines = lines[1:]               # a tail read can slice a line in half
+    cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=window_sec)
+    total, seen = 0, 0
+    for ln in lines:
+        if '"usage"' not in ln:
+            continue
+        try:
+            r = json.loads(ln)
+        except ValueError:
+            continue
+        u = (r.get("message") or {}).get("usage") or {}
+        ts = r.get("timestamp")
+        if not u or not ts:
+            continue
+        try:
+            when = datetime.datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if when < cutoff:
+            continue
+        total += int(u.get("output_tokens") or 0)
+        seen += 1
+    return {"output_tokens": total, "records": seen, "window_sec": window_sec} if seen else None
+
+
+# ── confidence ───────────────────────────────────────────────────────────────────────────────────
+#
+# A consumer cloning this repo gets whatever was on main that morning -- mid-refactor included. The
+# author pushes while a feature is half-landed, because that is what working in the open looks like,
+# and nothing in a clone distinguishes "I am partway through a refactor" from "this is the commit I
+# run my own agent on".
+#
+# A SELF-DECLARED LEVEL WOULD BE PROSE, which is the thing this project refuses everywhere else. So
+# each level is an ARTIFACT the marker cannot fabricate and the consumer can re-check:
+#
+#   alpha   the DEFAULT, applied by nobody. It is the ABSENCE of a mark, so silence can never read
+#           as confidence -- the failure mode every other gate here exists to prevent.
+#   beta    the full suite passed on this exact tree, with nothing uncommitted. Refused otherwise.
+#   stable  beta, AND the owning agent has been running its own harness on this commit. That is
+#           dogfooding as a fact rather than a promise, and it is the strongest thing this project
+#           can honestly say about a sha.
+#
+# Carried by annotated git TAGS: they travel with an ordinary clone, cost nothing, touch no file,
+# and are per-commit rather than a list that rots. The annotation carries the evidence, so a reader
+# gets the reasoning and not just the verdict.
+CONFIDENCE_LEVELS = ("alpha", "beta", "stable")
+
+
+def _tags_at(ref="HEAD"):
+    out = _git("tag", "--points-at", ref)
+    return [t.strip() for t in (out or "").split("\n") if t.strip()]
+
+
+def confidence_of(ref="HEAD"):
+    """(level, tag, evidence-text). ALPHA when nothing marks it — never an error, never a guess."""
+    best, tag = "alpha", None
+    for t in _tags_at(ref):
+        for lvl in ("stable", "beta"):
+            if t.startswith(lvl + "-") and CONFIDENCE_LEVELS.index(lvl) > \
+                    CONFIDENCE_LEVELS.index(best):
+                best, tag = lvl, t
+    body = _git("tag", "-l", tag, "--format=%(contents)") if tag else ""
+    return best, tag, (body or "").strip()
+
+
+def cmd_confidence(s, a):
+    """Report what this project is willing to say about a commit — or mark one, with the evidence.
+
+    The reader half is for CONSUMERS and answers the question a clone cannot: is this commit
+    something the author stands behind, or a Tuesday afternoon?
+    """
+    ref = a.ref or "HEAD"
+    sha = _git("rev-parse", ref) or "?"
+    if not a.mark:
+        lvl, tag, body = confidence_of(ref)
+        out(f"CONFIDENCE: {lvl.upper()} — {sha[:8]}" + (f"  ({tag})" if tag else ""))
+        if lvl == "alpha":
+            out("  Nothing marks this commit, and that is the default rather than a judgement.",
+                "  Treat it as MID-FLIGHT: the author pushes while features are half-landed, and a",
+                "  clone gives you whatever was on main that morning.",
+                "  → For something the author stands behind, check out a tag: `git tag -l 'beta-*' "
+                "'stable-*'`")
+        else:
+            out(*["  " + l for l in body.splitlines()] or ["  (no evidence recorded)"])
+            out("  → Re-check it yourself rather than trusting the tag: "
+                "`game_loop confidence --recheck`")
+        out("",
+            "  WHAT NO LEVEL MEANS (INV6): none of these say the code is correct, only what was",
+            "  CHECKED and by whom. beta says a suite passed; stable says the author's own agent ran",
+            "  on it. Neither is a promise about your project.")
+        return
+
+    if a.mark not in ("beta", "stable"):
+        die(f"--mark takes beta or stable. alpha is the ABSENCE of a mark: it is what every "
+            "unmarked commit already is, so marking one would say nothing.")
+    if _git("status", "--porcelain"):
+        die("the working tree has uncommitted changes.\n"
+            "A confidence mark describes a COMMIT, not a desk. What you would be marking is not "
+            "what anyone else can check out.")
+    stale = run_verify_check()
+    if stale:
+        die("this commit's owed checks have not run since its last change:\n  " + stale + "\n"
+            "beta means THE SUITE PASSED ON THIS TREE. Run `./.game_loop/bin/verify`, then mark.")
+    pin = pinned_sha()
+    if a.mark == "stable" and (not pin or not sha.startswith(pin[:8])):
+        die("stable means the owning agent has been RUNNING on this commit, and it is not.\n"
+            f"  pinned : {pin[:8] if pin else '(nothing pinned)'}\n"
+            f"  this   : {sha[:8]}\n"
+            "Run `game_loop self --pin " + sha[:8] + "`, work on it, then mark it stable. "
+            "Dogfooding is the evidence; there is no way to assert it without doing it.")
+    tag = f"{a.mark}-{sha[:8]}"
+    lines = [f"{a.mark} — marked {now()}",
+             "",
+             "evidence:",
+             "  tree clean at mark time (this describes the commit, not a working copy)",
+             "  verify: every owed check had run since the last change to a gated file"]
+    if a.mark == "stable":
+        lines.append("  dogfooded: the owning agent's own harness was pinned to this commit")
+    if a.notes:
+        lines += ["", "notes: " + a.notes]
+    lines += ["", "this says what was CHECKED, never that the code is correct."]
+    msg = "\n".join(lines)
+    r = subprocess.run(["git", "tag", "-a", tag, "-m", msg], cwd=REPO_ROOT,
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        die("could not create the tag: " + (r.stderr or "").strip())
+    logline({"kind": "confidence", "level": a.mark, "sha": sha, "tag": tag, "notes": a.notes})
+    out(f"✓ MARKED {a.mark.upper()} — {tag}",
+        *["  " + l for l in lines],
+        "",
+        "→ push it, or nobody else can see it:  git push origin " + tag)
+
+
+def pinned_sha():
+    """The sha the owning agent's harness is pinned to, or None."""
+    try:
+        with open(os.path.join(REPO_ROOT, PINNED_DIRNAME, ".game_loop", "VERSION")) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def run_verify_check():
+    """'' when nothing is owed, else the text of what is stale. Never raises."""
+    v = os.path.join(ROOT, "bin", "verify")
+    if not os.path.isfile(v):
+        return ""
+    try:
+        r = subprocess.run([v, "--check"], cwd=REPO_ROOT, capture_output=True, text=True,
+                           timeout=120)
+    except Exception:  # noqa: BLE001 — cannot check is not the same as clean, but it must not crash
+        return "verify --check could not run"
+    return "" if r.returncode == 0 else (r.stdout or r.stderr or "stale").strip()[:400]
+
+
 def update_notice():
     """A one-line 'a newer game_loop is on main — re-install' note, or None. Silent unless BOTH the
     installed sha (VERSION) and the latest sha are known and they differ."""
@@ -3406,14 +4177,52 @@ def update_notice():
     inst = installed_version()
     if not inst:
         return None
+    if inst.endswith("-dirty"):
+        # A dirty install has no sha that describes it, so there is nothing to compare and no
+        # honest way to say "up to date". Say what it IS instead of computing an answer about a
+        # commit whose content was never installed.
+        return (f"⚠ INSTALLED FROM AN UNCOMMITTED TREE — .game_loop/VERSION reads {inst[:8]}-dirty.\n"
+                "  The payload was copied from a working tree with changes that are in no commit, so "
+                "that sha\n"
+                "  does NOT describe these files and no update check can be meaningful against it.\n"
+                "  → Re-install from a clean checkout to get a stamp that means something.")
     latest = _latest_version(cfg.get("update_repo", "SupposedlySam/game_loop"),
                              cfg.get("update_api_base", "https://api.github.com"))
     if not latest or inst.startswith(latest) or latest.startswith(inst):
         return None
-    return (f"⬆ game_loop update available — installed {inst[:8]}, latest {latest[:8]} on main.\n"
+    repo = cfg.get("update_repo", "SupposedlySam/game_loop")
+    api = cfg.get("update_api_base", "https://api.github.com")
+    # Differing shas are not evidence of being BEHIND. Ask which way (#49).
+    rel = _compare_versions(repo, api, latest, inst)
+    if rel in ("identical", "ahead"):
+        return None                    # at or past the latest this check knows about — nothing owed
+    if rel is None:
+        # Could not determine is not the same as behind. Say what is known and no more, rather than
+        # sending somebody to re-install over a difference that may be their own copy running ahead.
+        return (f"⬆ game_loop: installed {inst[:8]} differs from the latest this check saw "
+                f"({latest[:8]}).\n"
+                f"  Which is newer could NOT be determined — no re-install is implied by this line "
+                f"alone.")
+    note = (f"⬆ game_loop update available — installed {inst[:8]}, latest {latest[:8]} on main.\n"
             f"  Re-install to update (bin/ is refreshed; no session restart):\n"
-            f"    curl -fsSL https://raw.githubusercontent.com/{cfg.get('update_repo', 'SupposedlySam/game_loop')}"
+            f"    curl -fsSL https://raw.githubusercontent.com/{repo}"
             f"/main/install.sh | bash -s -- .")
+    # WHAT changed, not merely THAT something did (#37). "An update is available" is true and
+    # useless for deciding whether to care. A new verb costs nothing until you reach for it; an
+    # existing verb that starts costing minutes, or refusing where it used to warn, changes
+    # behaviour for someone who asked for nothing — and only that earns the interruption.
+    remote = _remote_behaviour(repo, cfg.get("update_raw_base", "https://raw.githubusercontent.com"))
+    if remote is None:
+        return note                      # could not fetch: say nothing rather than 'nothing changed'
+    seen = installed_behaviour_seq()
+    fresh = [e for e in behaviour_changes(remote) if e["seq"] > seen]
+    if not fresh:
+        return note
+    lines = [note, "",
+             f"  ⚠ {len(fresh)} BEHAVIOUR CHANGE(S) to verbs you already use — not new features:"]
+    for e in fresh:
+        lines.append(f"    · {e.get('verb', '?')}: {e.get('change', '(unstated)')}")
+    return "\n".join(lines)
 
 
 RULED_OUT_SHOWN = 5          # newest N printed in full; the rest are counted and pointed at
@@ -3561,7 +4370,10 @@ def coverage_report(s):
                  f"{len(cfg.get('allow_write_roots') or [])} configured allow_write_roots may be")
     lines.append("           written. Everything else is denied WITHOUT being named, so nothing "
                  "goes unprotected for")
-    lines.append("           want of remembering it.")
+    lines.append("           want of remembering it. 'This repo' includes its LINKED WORKTREES — "
+                 "one project checked")
+    lines.append("           out twice is still one project (#47) — and nothing else that shares a "
+                 "parent directory.")
     extra = cfg.get("deploy_verbs") or []
     shown = ", ".join(DEPLOY_VERB_DEFAULTS[:2]) + f", +{len(DEPLOY_VERB_DEFAULTS) - 2} built-in"
     lines.append(f"  deploy : DENYLIST — {len(DEPLOY_VERB_DEFAULTS) + len(extra)} verb(s) blocked "
@@ -3606,6 +4418,78 @@ def main_checkout():
     return path
 
 
+def working_tree():
+    """(toplevel, git-common-dir) of the tree the CALLER is standing in — or (None, None).
+
+    Deliberately NOT `_git`, which runs with cwd=REPO_ROOT and can therefore only ever describe the
+    binary's own tree. That single detail is the whole of #47: every answer was about the checkout
+    the CODE lives in, never the checkout the agent is working in, and the two are different exactly
+    when it matters most.
+    """
+    try:
+        r = subprocess.run(["git", "rev-parse", "--show-toplevel", "--git-common-dir"],
+                           capture_output=True, text=True, timeout=GIT_TIMEOUT)
+    except Exception:  # noqa: BLE001 — no git, no repo, a hung index: all mean "nothing to say"
+        return (None, None)
+    if r.returncode != 0:
+        return (None, None)
+    parts = r.stdout.strip().splitlines()
+    if len(parts) < 2:
+        return (None, None)
+    top, common = parts[0].strip(), parts[1].strip()
+    if not os.path.isabs(common):
+        common = os.path.join(top, common)
+    try:
+        return (os.path.realpath(top), os.path.realpath(common))
+    except OSError:
+        return (None, None)
+
+
+def working_tree_report():
+    """LOUD when the tree being worked IN is not the tree this harness answers FOR (#47).
+
+    Silent in the ordinary case — the binary's tree and the caller's tree are the same — which is
+    every normal invocation, so this costs nobody a line they do not need.
+
+    It exists because the failure was silent rather than wrong-looking. An agent in a sibling
+    worktree, invoking a main checkout's binary by absolute path, got confident answers about a tree
+    it was not in: `worktree` said "not a linked worktree" while `.git` proved otherwise, state
+    landed in the other checkout's sessions/, and before the write-scope fix its writes were denied
+    outright — twelve authorizations spent on ordinary work, with nothing anywhere saying why.
+    """
+    top, common = working_tree()
+    if not top:
+        return []
+    try:
+        here = os.path.realpath(REPO_ROOT)
+    except OSError:
+        return []
+    if top == here:
+        return []
+    mine = _git("rev-parse", "--git-common-dir")
+    if mine and not os.path.isabs(mine):
+        mine = os.path.join(here, mine)
+    try:
+        mine = os.path.realpath(mine) if mine else None
+    except OSError:
+        mine = None
+    kin = "a LINKED WORKTREE of this same project" if (mine and mine == common) else \
+          "a DIFFERENT repository"
+    return [
+        f"⚠ YOU ARE NOT IN THE TREE THIS HARNESS ANSWERS FOR — the working tree is {kin}.",
+        f"    working tree : {top}",
+        f"    harness tree : {here}",
+        "  Identity, state, rules and the log all belong to the harness tree, so `status`, "
+        "`worktree`",
+        "  and the verbs describe THAT tree — not the one you are editing. The write guard does "
+        "reach a",
+        "  linked worktree of the same project (#47), so ordinary work is not blocked; everything "
+        "else",
+        "  still reports on the other tree.",
+        f"  → Give this tree its own harness:  <game_loop>/install.sh {top}",
+    ]
+
+
 def _same_bytes(a, b):
     """True / False / None — None means UNREADABLE, which is never allowed to read as 'same'."""
     try:
@@ -3639,6 +4523,52 @@ def _compare(names, pdir):
     return res
 
 
+def code_files(root):
+    """Every executable in a harness's bin/, sorted. The set is game_loop's own, so a byte
+    comparison needs no per-file semantics — same names, same bytes, same harness."""
+    d = os.path.join(root, "bin")
+    try:
+        # FILES only: __pycache__ is a directory and read as an unreadable file it made every
+        # comparison report "unreadable", which is the answer that must never be a false alarm.
+        return sorted(f for f in os.listdir(d)
+                      if not f.startswith(".") and os.path.isfile(os.path.join(d, f)))
+    except OSError:
+        return []
+
+
+def _compare_code(pdir):
+    """bin/ here against bin/ there (#38).
+
+    `harness` used to be computed over OWNED_FILES only -- config.json, INVARIANTS.md, verify.yaml,
+    LEDGER.md -- and bin/ is not in that set. So `harness.drifted == []` meant "the same RULES", and
+    the field name promised something strictly larger. A downstream orchestrator reported to its own
+    users, in good faith, that a spawn was "verified by the harness itself", which was true and
+    narrower than it read. Two trees could match on every owned file and be running different code.
+
+    Same defect class as the probe wording (#34) and the unnamed tree (#35): a report claiming more
+    reach than its evidence supports. Widened rather than renamed, because "are these two trees
+    running the same harness" is a legitimate question a caller previously had no way to ask -- and
+    widening can only ever report MORE drift, never less.
+    """
+    res = {"matched": [], "drifted": [], "unreadable": []}
+    for name in sorted(set(code_files(ROOT)) | set(code_files(pdir))):
+        same = _same_bytes(os.path.join(ROOT, "bin", name), os.path.join(pdir, "bin", name))
+        res["unreadable" if same is None else "matched" if same else "drifted"].append(name)
+    return res
+
+
+def pin_status(root):
+    """(is this tree running pinned code, the pinned sha or None) -- for the tree at `root`."""
+    marker = os.path.join(os.path.dirname(root), PINNED_DIRNAME, ".game_loop")
+    if not os.path.isdir(marker):
+        return False, None
+    try:
+        with open(os.path.join(marker, "VERSION")) as f:
+            return True, f.read().strip()
+    except OSError:
+        return True, None
+
+
 def worktree_drift():
     """Compare THIS tree's owned files against the main checkout's. Never raises.
 
@@ -3668,8 +4598,22 @@ def worktree_drift():
                 "detail": f"the main checkout ({parent}) carries no .game_loop/ — this tree's rules "
                           "are compared against nothing"}
     rules = _compare(RULE_FILES, pdir)
-    harness = _compare([o["path"] for o in OWNED_FILES], pdir)
-    base = {**base, "rules": rules, "harness": harness}
+    owned = _compare([o["path"] for o in OWNED_FILES], pdir)
+    code = _compare_code(pdir)
+    # `harness` now means what its name says: owned files AND the code. Widening only ever reports
+    # MORE drift, so a caller that trusted the old narrower answer is not newly misled by this one.
+    harness = {k: owned[k] + ["bin/" + n for n in code[k]] for k in owned}
+    here_pinned, here_sha = pin_status(ROOT)
+    there_pinned, there_sha = pin_status(pdir)
+    base = {**base, "rules": rules, "owned_files": owned, "code": code, "harness": harness,
+            # Say exactly what was compared, so a consumer never has to infer it from a field name
+            # again -- which is the whole of this issue.
+            "compares": {"rules": list(RULE_FILES),
+                         "owned_files": [o["path"] for o in OWNED_FILES],
+                         "code": ["bin/" + n for n in code["matched"] + code["drifted"]
+                                  + code["unreadable"]]},
+            "pinned": {"this_tree": here_pinned, "this_sha": here_sha,
+                       "main_checkout": there_pinned, "main_sha": there_sha}}
     if rules["drifted"]:
         return {**base, "status": "drifted",
                 "detail": f"{len(rules['drifted'])} RULE file(s) differ from the main checkout — "
@@ -3678,15 +4622,34 @@ def worktree_drift():
         return {**base, "status": "unreadable",
                 "detail": "rule file(s) could not be read, so they are NOT known to match: "
                           + ", ".join(rules["unreadable"])}
-    if harness["drifted"]:
+    # These two ask about the OWNED files specifically. Testing `harness` here once `harness`
+    # included code meant a drifted SCRIPT returned "notes-drifted" and never reached its own
+    # branch -- the widening silently swallowing the finding it was added to surface.
+    if owned["drifted"]:
         return {**base, "status": "notes-drifted",
                 "detail": "the rules match; these owned-but-not-rule file(s) differ, which is "
-                          "ordinary for per-tree notes: " + ", ".join(harness["drifted"])}
-    if harness["unreadable"]:
+                          "ordinary for per-tree notes: " + ", ".join(owned["drifted"])}
+    if owned["unreadable"]:
         return {**base, "status": "unreadable",
-                "detail": "owned file(s) could not be read: " + ", ".join(harness["unreadable"])}
-    return {**base, "status": "clean",
-            "detail": "every owned file is byte-identical to the main checkout's"}
+                "detail": "owned file(s) could not be read: " + ", ".join(owned["unreadable"])}
+    if code["drifted"]:
+        return {**base, "status": "code-drifted",
+                "detail": "the rules and notes match, but these harness SCRIPTS differ, so the two "
+                          "trees do not enforce them the same way: " + ", ".join(code["drifted"])}
+    pin_note = ""
+    if there_pinned and not here_pinned:
+        # STATED, NOT AUTO-FIXED (#38). A pin is deliberately not carried into a worktree: a
+        # worktree is where the harness gets EDITED, and pinning it would hide the change under
+        # test. But an agent editing a gate is exactly what pinning protects, and it is more exposed
+        # here than the orchestrator ever was -- so the verdict says so instead of leaving a caller
+        # to infer it from a gitignore.
+        pin_note = ("  NOTE: the main checkout runs PINNED code and this tree does not, so this "
+                    "tree runs the harness it may be editing. Deliberate, not an oversight -- "
+                    "pinning a worktree would hide the change under test. Run "
+                    "`game_loop self --pin <ref>` here if this tree is editing gates.")
+    return {**base, "status": "clean", "pin_note": pin_note,
+            "detail": "every owned file AND every harness script is byte-identical to the main "
+                      "checkout's" + (" " + pin_note if pin_note else "")}
 
 
 def worktree_report(s):
@@ -3740,13 +4703,15 @@ def worktree_report(s):
     if unreadable:
         lines.append("  ? UNREADABLE — cannot be compared, so treat them as UNKNOWN, not matching: "
                      + ", ".join(f".game_loop/{n}" for n in unreadable))
-    lines.append("  → NOT compared: bin/ · .claude/settings.json · any OTHER worktree · whether a "
-                 "matching rule is real")
-    lines.append("  → provisioning trees? `game_loop worktree --porcelain` answers BOTH questions as "
-                 "JSON —")
-    lines.append("    `rules` (differ ⇒ stop the spawn) and `harness` (differ ⇒ worth a warning), "
-                 "plus the")
-    lines.append("    owned-file set itself. Read those instead of hardcoding a list.")
+    lines.append("  → NOT compared: .claude/settings.json · any OTHER worktree · whether a matching "
+                 "rule is real")
+    lines.append("  → provisioning trees? `game_loop worktree --porcelain` answers all of it as JSON "
+                 "— `rules`")
+    lines.append("    (differ ⇒ stop the spawn), `code` (bin/, differ ⇒ the trees do not enforce the "
+                 "rules the")
+    lines.append("    same way), `harness` (both), and `compares` listing exactly what was looked at "
+                 "— so no")
+    lines.append("    caller ever has to infer reach from a field name again (#38).")
     return lines
 
 
@@ -3814,6 +4779,113 @@ def pinned_report():
               "  pinned copy — a check run against the copy would gate nothing, and state written "
               "there is",
               "  destroyed by the next re-pin. → game_loop self"]
+    return lines
+
+
+def _home_keyed(entry):
+    """(tilde form, whose home) for an absolute path living under SOME account's home — the one
+    shape a path cannot survive being committed in. None for anything else.
+
+    Two cases, and both are the same mistake seen from opposite ends. Under THIS account's home,
+    the tilde form IS the entry rewritten correctly, so it is returned. Under ANOTHER account's —
+    which is precisely what someone who cloned the repo sees — the path does not exist here at all
+    and there is no rewrite to offer, only the account name that gives the mistake away.
+    """
+    if not isinstance(entry, str) or not os.path.isabs(entry):
+        return None
+    p = os.path.normpath(entry)
+    home = os.path.expanduser("~")
+    if os.path.isabs(home) and (p == home or p.startswith(home + os.sep)):
+        return ("~" if p == home else "~/" + p[len(home) + 1:]), None
+    # Where accounts' homes sit (/Users, /home). Never os.sep itself: with home=/root that would
+    # read every absolute path on the disk as somebody's home directory.
+    holder = os.path.dirname(home)
+    if os.path.isabs(holder) and holder != os.sep and p.startswith(holder + os.sep):
+        account = p[len(holder) + 1:].split(os.sep)[0]
+        if account:
+            return None, account
+    return None
+
+
+def config_paths_report():
+    """The CONFIG PATHS block for `status` — a TRACKED config granting a write on ONE machine.
+
+    `.game_loop/config.json` is project config and belongs in git; the installer's inner .gitignore
+    lists runtime state only, so it is tracked in every target. Two of its fields take filesystem
+    paths, and the natural thing to type in them is an absolute one under the author's home. For
+    `read_roots` that is merely useless to a stranger. For `allow_write_roots` it is a permission:
+    the file is committed, so everyone who clones the repo inherits an allowlisted write root
+    OUTSIDE the repo — the exact thing INV3 says there are none of by default — aimed at a path
+    keyed to one account. That is what happened to the project that reported this.
+
+    The remedy already works and nothing said so, which is why this is a check and not a docs note
+    (INV6: take the highest rung that applies). `expanduser` is applied to every entry before it is
+    matched (bin/guard-writes-impl.sh), so the tilde form resolves to EACH user's own home and is
+    correct for all of them.
+
+    Silent unless the file is genuinely TRACKED: a project that gitignores .game_loop/ has no
+    exposure, and a warning that fires where there is no hazard is the kind that gets tuned out
+    (INV5's argument from the other side). Silent on any git failure, missing or unreadable config
+    too — it is `status` output, and it never blocks anything.
+    """
+    if not _git("ls-files", "--", CONFIG_F):   # untracked, or no git at all: nothing to leak
+        return []
+    cfg = config()
+    repo_real = os.path.realpath(REPO_ROOT)
+    found = []
+    # Each field names WHO expands it, because they are different readers and a remedy that cites the
+    # wrong file is a remedy nobody can check.
+    for field, mark, expander in (
+            ("allow_write_roots", "⚠", "the write guard, .game_loop/bin/guard-writes-impl.sh"),
+            ("read_roots", "·", "claim --read, .game_loop/bin/game_loop")):
+        entries = cfg.get(field)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            keyed = _home_keyed(entry)
+            if not keyed:
+                continue
+            real = os.path.realpath(os.path.expanduser(entry))
+            if real == repo_real or real.startswith(repo_real + os.sep):
+                continue      # inside the repo: non-portable, but it grants nothing new
+            found.append((field, mark, expander, entry, keyed))
+    if not found:
+        return []
+    lines = ["", "CONFIG PATHS — .game_loop/config.json is TRACKED, and these entries name ONE "
+             "machine:"]
+    for field, mark, expander, entry, (tilde, account) in found:
+        lines.append(f"  {mark} {field}: {entry}")
+        if field == "allow_write_roots":
+            lines.append("      This file is committed, so EVERY clone of this repo inherits it — an "
+                         "allowlisted WRITE")
+            lines.append("      ROOT outside the repo, which INV3 says there are none of by default, "
+                         "granted to people")
+            lines.append("      who never chose it.")
+        else:
+            lines.append("      Committed and keyed to one account: no permission in it, just a read "
+                         "root that is")
+            lines.append("      useless to everyone else who clones this.")
+        if tilde:
+            lines.append(f"      → write it as  {tilde}  — every entry is run through expanduser "
+                         "before use, so")
+            lines.append("        the tilde form resolves to EACH user's own home and is correct "
+                         "for all of them.")
+        else:
+            lines.append(f'      It is under the home of "{account}", which is NOT this account: it '
+                         "came from")
+            lines.append("      whoever committed the config, and names nothing that exists here.")
+            lines.append("      → if it meant \"the user's own home\", write it with a leading ~ — "
+                         "every entry is run")
+            lines.append("        through expanduser before use, so the tilde form is correct for "
+                         "every clone.")
+        lines.append(f"        expanded by: {expander}")
+    lines.append("  → a RELATIVE entry is NOT the fix: those resolve against the process's working "
+                 "directory,")
+    lines.append("    not the repo root, so the allowlist quietly differs per caller instead of "
+                 "failing.")
+    lines.append("  → NOT checked: whether this repo is published anywhere, whether an absolute path "
+                 "OUTSIDE a")
+    lines.append("    home directory is one you meant to share, or what any of these paths hold.")
     return lines
 
 
@@ -3889,31 +4961,49 @@ def cmd_self(s, a):
 
 
 def self_hooks_block(code):
-    """The wiring, generated. Printed for .claude/settings.local.json — never for settings.json."""
+    """The wiring, generated — an INLINE dispatcher for the TRACKED settings.json.
+
+    The obvious route, a second copy of every hook in settings.local.json, is wrong and was tried
+    first: Claude Code MERGES the two files rather than overriding, so every gate ran TWICE — two
+    write guards, two stop gates, two watchdogs polling. Measured, not predicted: one commit printed
+    the same blast-radius warning verbatim two times. Nothing breaks loudly, which is the problem.
+
+    Deleting the tracked hooks to compensate is worse: a guard that exists but is not wired in is
+    not a guard, and this repo's own suite refuses that state.
+
+    So one entry decides at call time, and it is safe to track because it degrades to the ordinary
+    wiring: no pin present, no behaviour change, and a fresh clone is fully guarded. It is also
+    INLINE rather than a shim script, because another script would be one more file sitting in the
+    edit zone — which is the exposure a pin exists to remove.
+    """
+    d = "$CLAUDE_PROJECT_DIR/" + PINNED_DIRNAME + "/.game_loop"
+    def wire(script):
+        return (f'    d="{d}"; [ -x "$d/bin/{script.split()[0]}" ] || '
+                f'd="$CLAUDE_PROJECT_DIR/.game_loop"; '
+                f'{HOME_ENV}="$CLAUDE_PROJECT_DIR/.game_loop" exec "$d"/bin/{script}')
     return [
-        "WIRE IT IN .claude/settings.local.json (gitignored, machine-local) — NOT in the tracked",
-        ".claude/settings.json, which ships to every install and must keep pointing at",
-        "$CLAUDE_PROJECT_DIR/.game_loop/bin/. Replace each game_loop hook command with:",
+        "WIRE IT IN THE TRACKED .claude/settings.json. Replace each game_loop hook command with the",
+        "matching line below — one entry that prefers the pin and falls back to the repo's own bin/:",
         "",
-        f'    {HOME_ENV}="$CLAUDE_PROJECT_DIR/.game_loop" "{code}"/bin/guard-writes.sh',
-        f'    {HOME_ENV}="$CLAUDE_PROJECT_DIR/.game_loop" "{code}"/bin/guard-mcp.sh',
-        f'    {HOME_ENV}="$CLAUDE_PROJECT_DIR/.game_loop" "{code}"/bin/game_loop limitgate',
-        f'    {HOME_ENV}="$CLAUDE_PROJECT_DIR/.game_loop" "{code}"/bin/game_loop stopgate',
-        f'    {HOME_ENV}="$CLAUDE_PROJECT_DIR/.game_loop" "{code}"/bin/watchdog',
+        wire("guard-writes.sh"),
+        wire("guard-mcp.sh"),
+        wire("game_loop limitgate"),
+        wire("game_loop stopgate"),
+        wire("game_loop sessionstart"),
+        wire("watchdog"),
         "",
         f"{HOME_ENV} is not optional in any of those: it is what keeps verify.yaml, the record of "
         "what",
-        "was checked, and every byte of state in the REPO.",
+        "was checked, and every byte of state in the REPO rather than in the copy, which the next",
+        "re-pin destroys.",
         "",
-        "THEN REMOVE THE GAME_LOOP HOOKS FROM .claude/settings.json — the two files MERGE, they do",
-        "not override. Leaving both wired runs EVERY gate twice: two write guards, two stop gates,",
-        "two watchdogs polling. Measured, not predicted: a commit under both printed the same",
-        "blast-radius warning verbatim two times. Nothing breaks loudly, which is the problem —",
-        "duplicate output reads as the tool repeating itself rather than as two of it running.",
-        "  In THIS repo the tracked file carries no hooks for exactly that reason; `./install.sh .`",
-        "  puts the unpinned wiring back whenever you want to stop running pinned.",
+        "DO NOT also wire these in .claude/settings.local.json. The two files MERGE, they do not",
+        "override, and leaving both wired runs every gate twice — measured: one commit printed the",
+        "same blast-radius warning verbatim two times. Duplicate output reads as the tool repeating",
+        "itself rather than as two of it running.",
         "",
-        "Then reload — hooks are read at session start, so none of this takes effect until you do.",
+        "Re-pinning takes effect immediately — the hook execs whatever the pin directory holds now.",
+        "A RELOAD is needed only when these command lines themselves change.",
     ]
 
 
@@ -4008,6 +5098,7 @@ def cmd_status(s, a):
     out(*fixes_report(s))   # which fixes were exercised through their OWN output — not their repro
     out(*coverage_report(s))   # what the rails are NOT looking at — silence from a rail is not safety
     out(*worktree_report(s))   # …and whether the rails in THIS tree are the project's at all (#30)
+    out(*config_paths_report())   # a TRACKED config handing every cloner a write root on ONE machine
     if (ro := ruled_out()):
         # The single most useful question at the start of a resumed investigation is "what has
         # already been ruled out?" — so it is answered before it is asked.
@@ -4020,20 +5111,23 @@ def cmd_status(s, a):
             out(f"  … {len(ro) - RULED_OUT_SHOWN} older — grep '\"outcome\": \"refuted\"' "
                 ".game_loop/log.jsonl")
     out(*denials_report(s))   # the referee firing, not the loop's own scoreboard
+    out(*triggers_report())  # attached ≠ working: one that never fired looks just like one that does
+    out(*working_tree_report())  # which tree is being edited vs which one this harness speaks for
+    out(*waiting_report())       # what this run is blocked on — the first question a resume asks
     snap = load_limits()
-    if snap:
-        lim = limits_summary(snap) or "snapshot present but empty (API-key auth exposes no limits)"
+    lim = limits_summary(snap) if snap else None
+    if lim:
         over = binding_windows(snap, float(limits_cfg()["threshold_pct"]), time.time())
         out("limits: " + lim + ("  ⚠ HANDOFF DUE — the limitgate is closed" if over else ""))
-    else:
-        out("limits: no snapshot — the statusline tap hasn't fired (subscribers only; "
-            "install.sh wires it, then it fills on the first API response)")
+    if (w := limits_inert_warning(snap)):   # says what is OFF, not merely that a file is missing
+        out(w)
     if notify:
         out("notify: " + ("Slack configured — replies readable (bot token)" if notify.can_read_replies()
                           else "Slack configured — send-only (webhook)" if notify.configured()
                           else "not configured (.game_loop/notify.json; see bin/notify.py)"))
     if (w := hooks_live_warning()):
         out(w)
+    out(*session_start_warning())
     if (w := legacy_mandate_warning()):
         out(w)
     try:
@@ -4060,13 +5154,13 @@ HARDEN_LADDER = [
     "2 LOUD       — assert/guard AT the point of misuse (fails in 1s, not 3h later, with the reason)",
     "3 CHECKED    — a build/CI/test check that fails on regression",
     "4 AUTOMATED  — the tool just does it (no step left to remember)",
-    "5 VISIBLE    — the system REPORTS the fact, so it's read, never guessed",
+    "5 VISIBLE    — the harness REPORTS the fact, so it's read, never guessed",
     "6 (doc/memo) — LAST resort only; you must say why 1-5 genuinely don't apply",
 ]
 
 
 def cmd_harden(s, a):
-    """Record a learning converted into an artifact the system enforces.
+    """Record a learning converted into an artifact the harness enforces.
 
     Same keystone as `claim --read`: the ungameable part is naming a REAL file. Prose is a promise to
     remember, and long sessions + compaction break promises. Docs are the INDEX; the artifact is the
@@ -4083,17 +5177,68 @@ def cmd_harden(s, a):
         die("these --artifact paths aren't real files: " + ", ".join(bad) + "\n"
             "Hardening means the artifact EXISTS (code / assert / check / tool), not a plan to write "
             "one. Write it first, then record it here.")
+    general = (getattr(a, "general", None) or "").strip()
     logline({"kind": "harden", "learning": a.learning, "artifact": list(resolved.values()),
-             "mechanism": a.mechanism, "rung": a.rung})
+             "mechanism": a.mechanism, "rung": a.rung, "general": general or None})
     s["hardened_count"] = s.get("hardened_count", 0) + 1
+    s["work_since_stepback"] = s.get("work_since_stepback", 0) + 1
     save(s)
     out("✓ HARDENED — learning → artifact.",
         f"  learning : {a.learning}",
         f"  artifact : {', '.join(paths)}",
         f"  mechanism: {a.mechanism}",
         f"  rung     : {a.rung or '(unspecified — which ladder rung?)'}",
-        f"→ enforced by the system now, not by memory. (hardened so far: {s['hardened_count']})")
+        f"→ enforced by the harness now, not by memory. (hardened so far: {s['hardened_count']})")
+    if general:
+        out(f"  general  : {general}")
+    elif triggers_for("harden"):
+        # Only nag where somebody has actually attached a sharing step. GENERALISING is a separate
+        # act of thought from hardening, and the transferable form is rarely the incident: "our tap
+        # never wrote limits.json" helps nobody, while "a check whose PASS is silence cannot tell
+        # satisfied from never-ran" is the part that travels. Never blocks — an unshared learning is
+        # still hardened, and refusing the record to extract a sentence would be the tail wagging.
+        out("  ⚠ no --general: this project has a harden trigger attached, and it has nothing to",
+            "    share. The incident form rarely transfers — say the version another agent could use",
+            "    without knowing anything about this codebase.")
+    if (n := retro_nudge(s)):
+        out("", n)
+    out(*fire_triggers(s, "harden", {
+        "event": "harden", "learning": a.learning, "general": general or None,
+        "artifact": list(resolved.values()), "mechanism": a.mechanism, "rung": a.rung,
+        "project": config().get("project_name"), "session": SESSION}))
     flair_out(s, "harden")
+
+
+def retro_outcome():
+    """What CAME of the last retro, counted from the shared log rather than remembered.
+
+    A retro that produces nothing is indistinguishable, afterwards, from one that never happened —
+    both leave a session where no learning got encoded. The act was never the point; the encoding
+    is. So each retro opens by reporting the previous one's yield, and an empty yield is stated
+    rather than passed over. Read from the log because it is the record neither optimism nor
+    compaction can edit.
+    """
+    try:
+        with open(LOG_F) as f:
+            recs = [json.loads(l) for l in f if l.strip()]
+    except (OSError, ValueError):
+        return []
+    last = max((i for i, r in enumerate(recs) if r.get("kind") == "stepback"), default=None)
+    if last is None:
+        return ["  (no previous retro in this log — this is the first)"]
+    after = recs[last + 1:]
+    counts = collections.Counter(r.get("kind") for r in after)
+    when = recs[last].get("t") or "?"
+    hardened = counts.get("harden", 0)
+    lines = [f"  since the last retro ({when}): {hardened} hardened · "
+             f"{counts.get('claim', 0)} claims · {counts.get('fix_proof', 0)} fix proofs · "
+             f"{counts.get('trigger', 0)} triggers fired"]
+    if not hardened:
+        lines.append("  ⚠ NOTHING WAS HARDENED since the last retro. Either the chapter genuinely "
+                     "taught nothing, or the")
+        lines.append("    last retro ended at the writing-it-down step. Only one of those is worth "
+                     "repeating.")
+    return lines
 
 
 def cmd_stepback(s, a):
@@ -4101,9 +5246,20 @@ def cmd_stepback(s, a):
         die("stepback needs --notes — a REAL retro: what WORKED (repeat it)? where did I DEVIATE? "
             "did I assert before reading? AND which recurring learning gets ENCODED (harden), not "
             "written down?")
+    # Others' learnings arrive BEFORE the reflection, not after it — arriving afterwards would make
+    # them a reading exercise rather than an input to the thinking they are supposed to inform.
+    incoming = fire_triggers(s, "stepback", {
+        "event": "stepback", "notes": a.notes, "project": config().get("project_name"),
+        "session": SESSION, "trans_since": s.get("trans_since_stepback", 0),
+        "work_since": s.get("work_since_stepback", 0)})
+    prior = retro_outcome()          # BEFORE the new line lands, or it finds itself and reports zero
     logline({"kind": "stepback", "notes": a.notes})
     s["trans_since_stepback"] = 0
+    s["work_since_stepback"] = 0
     save(s)
+    if incoming:
+        out(*incoming)
+    out("=== WHAT THE LAST RETRO YIELDED ===", *prior, "")
     out("=== STEP-BACK — invariants re-injected ===")
     try:
         with open(INV_F) as f:
@@ -4112,7 +5268,7 @@ def cmd_stepback(s, a):
         out(inv_oneline())
     out("",
         "RETRO — ENCODE, DON'T REMEMBER. For EACH learning this chapter, ask the only question that",
-        "matters: **how does the SYSTEM enforce this now?** A learning that lives in prose (a note,",
+        "matters: **how does the HARNESS enforce this now?** A learning that lives in prose (a note,",
         "INVARIANTS.md, CLAUDE.md, memory) is a promise to remember — and long sessions + compaction",
         "break promises. Climb to the highest rung that applies:",
         *["  " + r for r in HARDEN_LADDER],
@@ -4154,6 +5310,8 @@ def main():
     hd.add_argument("--artifact", help="real path[,path] to the code/assert/check/tool that enforces it")
     hd.add_argument("--mechanism", help="how it now fails loudly / becomes impossible")
     hd.add_argument("--rung", help="ladder rung 1..6 (1 IMPOSSIBLE .. 6 doc-last-resort)")
+    hd.add_argument("--general", help="the TRANSFERABLE form — what another agent could use without "
+                                      "knowing this codebase (fed to any `harden` trigger)")
 
     sb = sub.add_parser("stepback")
     sb.add_argument("--notes")
@@ -4273,9 +5431,16 @@ def main():
     sub.add_parser("stopgate")    # Stop-hook entrypoint; not for humans
     sub.add_parser("limitgate")   # PreToolUse entrypoint (usage-limit handoff gate); not for humans
     sub.add_parser("statusline")  # statusline entrypoint (limits tap + one-row render); not for humans
+    sub.add_parser("sessionstart")  # SessionStart/PostCompact entrypoint; not for humans
+    cf = sub.add_parser("confidence")
+    cf.add_argument("--mark", help="beta | stable — refused unless the evidence for it exists")
+    cf.add_argument("--ref", help="the commit to report on (default HEAD)")
+    cf.add_argument("--notes", help="what landed, in your words")
+    cf.add_argument("--recheck", action="store_true",
+                    help="do not trust the tag: run the gate the level claims")
 
     a = p.parse_args()
-    if a.cmd in ("stopgate", "limitgate", "statusline"):
+    if a.cmd in ("stopgate", "limitgate", "statusline", "sessionstart"):
         # The hook payload is the authoritative session source — the env is a fallback for harnesses
         # that deliver payloads without a session_id. Parsed BEFORE load(): it decides whose state.
         try:
@@ -4284,7 +5449,8 @@ def main():
             payload = {}
         set_session(payload.get("session_id") or env_session())
         {"stopgate": cmd_stopgate, "limitgate": cmd_limitgate,
-         "statusline": cmd_statusline}[a.cmd](load(), a, payload)
+         "statusline": cmd_statusline,
+         "sessionstart": cmd_sessionstart}[a.cmd](load(), a, payload)
         return
     set_session(env_session())
     s = load()
@@ -4295,7 +5461,7 @@ def main():
      "pin": cmd_pin, "effector": cmd_effector, "fix": cmd_fix,
      "checkpoint": cmd_checkpoint, "authorize": cmd_authorize, "notify": cmd_notify,
      "pin": cmd_pin, "effector": cmd_effector, "fix": cmd_fix, "owned": cmd_owned,
-     "worktree": cmd_worktree, "self": cmd_self,
+     "worktree": cmd_worktree, "self": cmd_self, "confidence": cmd_confidence,
      "instrument": cmd_instrument, "measure": cmd_measure}[a.cmd](s, a)
 
 

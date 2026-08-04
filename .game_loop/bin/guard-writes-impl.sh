@@ -163,6 +163,57 @@ fi
 # are not this session's work, exactly as a sibling's mandate is not its mandate.
 EDITED_F="$(dirname "$STATE_F")/edited.txt"
 
+# THE PROBE — a mark this guard advances on EVERY invocation, so that "it allowed the tool" and "it
+# never ran" stop being the same observation.
+#
+# WHY. A refusal cannot be produced by absence: it takes a working guard to say no, so every BLOCK
+# assertion validates itself. An ALLOW here is SILENCE — exit 0, no output — which is byte-for-byte
+# what a guard that checked nothing produces. That was measured, not supposed (#41): replacing this
+# file with a script that merely parses and exits 0 left roughly sixteen "allows…" assertions in
+# test/run.py green, and every surviving one was permissive. The generalisation is worth stating,
+# because any suite with a guard in it has this shape:
+#
+#     a guard that SPEAKS when it permits    -> assert the REASON it gave
+#     a guard that is SILENT when it permits -> make it carry a MARK, and assert the mark ADVANCED
+#
+# Both are one requirement: A PERMISSIVE ASSERTION MUST OBSERVE EVIDENCE OF WORK, because the verdict
+# alone is also what absence produces. This is the probe `cmd_stopgate` already writes
+# (probe/stop-payload.json, whose absence `hooks_live_warning` reads as "no record of the hook
+# firing") turned on the guard that never had one.
+#
+# BEFORE THE FIRST EARLY RETURN, and that is the detail the whole thing turns on. The cheapest allows
+# return SOONEST — an empty file_path, an in-repo write, an empty command, a tool this case statement
+# does not name — and those are exactly the assertions that were weak. A mark written further down
+# would leave precisely the uncovered cases uncovered while LOOKING like the pattern had been applied.
+# Everything above this line is variable assignment or a REFUSAL (a bad GAME_LOOP_HOME, a pinned
+# checkout with no home), and a refusal already validates itself.
+#
+# CHEAP AND BOUNDED. This runs on EVERY tool call, where the Stop hook runs once per turn, so it is a
+# decimal counter in one small file — never a payload dump. Bash builtins only (`read`, arithmetic,
+# `printf`, `[`): no process is forked in the steady state, against the several python3 interpreters
+# this script already starts per call. `mkdir` runs only the first time a session's directory is
+# needed. Cost is one small read plus one small write per tool call, and the file never grows past a
+# handful of bytes.
+#
+# IT MUST NEVER MAKE THE GUARD FAIL. Every step is silenced and its status discarded: a read-only
+# mount, a missing directory or a garbage counter costs THE MARK, never the guarding. A probe
+# that can break the thing it observes is worse than no probe, and a guard that dies here would be a
+# guard blocking its own repair (INV5).
+#
+# WHAT IT DOES NOT PROVE (INV6). It says this script RAN and got this far — not that any particular
+# check downstream was correct, and not that the verdict was right. Concurrent tool calls can also
+# read the same value and write the same increment, so the count is a liveness mark, not an audit
+# tally; "advanced" is what may be relied on, never "advanced by exactly one".
+PROBE_D="${STATE_F%/*}"                     # parameter expansion, not `dirname`: no fork on the hot path
+PROBE_F="$PROBE_D/write-guard-probe"
+{
+  _probe_n=0
+  [ -r "$PROBE_F" ] && read -r _probe_n < "$PROBE_F"
+  case "$_probe_n" in ''|*[!0-9]*) _probe_n=0 ;; esac      # truncated or clobbered: start over, never die
+  [ -d "$PROBE_D" ] || mkdir -p "$PROBE_D"
+  printf '%s\n' "$((_probe_n + 1))" > "$PROBE_F"
+} 2>/dev/null || true
+
 # deny() is defined ABOVE, before the home is resolved — a bad GAME_LOOP_HOME has to be able to
 # refuse, and it is the first thing this script decides.
 
@@ -255,7 +306,7 @@ case "$tool" in
     # Prints "yes" when the target is inside an allow root, else the resolved realpath — which is
     # what an authorization is matched against (authorize records real prefixes, not raw tool input).
     verdict=$(REPO_REAL="$REPO_REAL" SLUG="$SLUG" CONFIG_F="$CONFIG_F" FP="$fp" python3 <<'PY'
-import json, os
+import json, os, subprocess
 repo = os.environ["REPO_REAL"]
 home = os.path.expanduser("~")
 allow = [repo, "/tmp", "/private/tmp", "/var/folders",
@@ -266,8 +317,56 @@ try:
 except (OSError, ValueError):
     pass
 allow = [os.path.realpath(p) for p in allow]
+
+
+def _git_common(p):
+    """The shared .git dir of the tree containing p, or None. Bounded, and never raises."""
+    try:
+        r = subprocess.run(["git", "-C", p, "rev-parse", "--git-common-dir"],
+                           capture_output=True, text=True, timeout=5)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    g = r.stdout.strip()
+    if not g:
+        return None
+    if not os.path.isabs(g):
+        g = os.path.join(p, g)
+    return os.path.realpath(g)
+
+
+def same_project(real, repo):
+    """True when `real` lies in a LINKED WORKTREE of this same repository (issue #47).
+
+    A worktree is not another project; it is this project checked out twice, and an agent spawned to
+    work in one is doing this project's work. Scoping "this repo" to the directory the BINARY happens
+    to live in denied exactly that work: one reported session bought TWELVE single-use authorizations
+    to write the files it was created to change. A gate that fires on all normal work gets routed
+    around rather than respected, so this is a correctness fix, not a convenience.
+
+    Deliberately narrow. The two trees must share ONE git common dir, so a different repository
+    nested anywhere is still outside. It cannot be bootstrapped either: creating a worktree outside
+    the repo is itself a mutating command this guard denies, so nothing can mint its own permission.
+
+    Only ever reached on the path that is otherwise about to DENY, which keeps the git call off the
+    hot path -- an ordinary in-repo write never pays for it.
+    """
+    d = real
+    while not os.path.isdir(d):
+        nd = os.path.dirname(d)
+        if nd == d:
+            return False
+        d = nd
+    mine = _git_common(repo)
+    return bool(mine and _git_common(d) == mine)
+
+
 real = os.path.realpath(os.environ["FP"])
-print("yes" if any(real == a or real.startswith(a + os.sep) for a in allow) else real)
+if any(real == a or real.startswith(a + os.sep) for a in allow) or same_project(real, repo):
+    print("yes")
+else:
+    print(real)
 PY
 )
     if [ "$verdict" = "yes" ]; then
@@ -389,6 +488,14 @@ home = os.path.expanduser("~")
 found = False
 target = None
 others = []
+cwd_dynamic = False        # a `cd` into a variable — every later commit lands somewhere unnameable
+unresolved = ""            # the raw fragment that made a COMMIT's target unreadable, if any
+
+# A path we cannot resolve without EXECUTING it, which this guard must never do. $HOME is substituted
+# before this runs, so an ordinary ~ or $HOME path stays resolvable and is not caught here.
+# The class is built rather than written: a literal backtick inside python inside a $( ) breaks
+# the SHELL parse, which bricks the guard before any of its logic runs. Learned the hard way.
+_DYNAMIC = re.compile("[$" + chr(96) + "]")
 
 
 def tree_of(path):
@@ -416,14 +523,36 @@ for seg in re.split(r"&&|\|\||;|\||\n", cmd):
     verb = os.path.basename(argv[0])
     args = argv[1:]
     if verb == "cd" and args:
+        if _DYNAMIC.search(args[0].replace("$HOME", "")):
+            cwd_dynamic, cwd_raw = True, args[0]
         nxt = os.path.expanduser(args[0].replace("$HOME", home))
         cwd = nxt if os.path.isabs(nxt) else os.path.join(cwd, nxt)
         continue   # a bare cd is navigation, not lost work — track it, don't report it
     if verb == "git" and "commit" in args and "--no-verify" not in args:
-        tgt = cwd
+        # #40: FAIL CLOSED when the target cannot be READ, not merely when it is elsewhere.
+        # A variable resolves to nothing this scan can match against the repo, so the commit used to
+        # read as "targets some other project" and pass unexamined — and an orchestrator reaches
+        # every worktree through a variable, which makes the gate escaped BY DEFAULT under fan-out
+        # rather than occasionally. The guard cannot expand it and must not try; it does not need
+        # the value, only the knowledge that the target is UNKNOWN.
+        #
+        # DELIBERATELY NARROW: this fires only where a commit IS present and ITS OWN target is
+        # unreadable. Failing closed on any unparseable fragment was tried in the field and refused
+        # two legitimate messages in one afternoon — prose ABOUT a commit is not a commit, and the
+        # agents most likely to write such prose are the ones reporting guard defects. A guard that
+        # refuses too much is the one that gets switched off (INV5).
+        tgt, dyn, raw = cwd, cwd_dynamic, (cwd_raw if cwd_dynamic else "")
         if "-C" in args and args.index("-C") + 1 < len(args):
-            c = os.path.expanduser(args[args.index("-C") + 1].replace("$HOME", home))
+            raw_c = args[args.index("-C") + 1]
+            if _DYNAMIC.search(raw_c.replace("$HOME", "")):
+                dyn, raw = True, raw_c
+            c = os.path.expanduser(raw_c.replace("$HOME", home))
             tgt = c if os.path.isabs(c) else os.path.join(cwd, c)
+        if dyn:
+            found = True
+            if not unresolved:
+                unresolved = raw
+            continue
         if os.path.realpath(tgt).startswith(os.path.realpath(repo).rstrip(os.sep) + os.sep) \
                 or os.path.realpath(tgt) == os.path.realpath(repo):
             found = True
@@ -433,7 +562,9 @@ for seg in re.split(r"&&|\|\||;|\||\n", cmd):
     others.append(seg if len(seg) <= 70 else seg[:67] + "...")
 
 answerable = ""
-if found:
+if unresolved:
+    answerable = "unresolvable:" + unresolved
+elif found:
     own = "root:" + os.environ["GAMELOOP_DIR"]
     root = os.path.realpath(repo).rstrip(os.sep)
     top = tree_of(target)
@@ -456,6 +587,20 @@ PY
     chained_segs=$(printf '%s\n' "$commit_scan" | tail -n +3 | grep -v '^$' || true)
     if [ "$commit_here" = "yes" ]; then
       case "$commit_root" in
+        unresolvable:*)
+          deny "BLOCKED: this commit's target tree is built from a variable, so the gate cannot tell
+which tree it lands in — and therefore cannot read the owed checks that describe it.
+
+    the unreadable target:  ${commit_root#unresolvable:}
+
+Resolving it would mean EXECUTING it, which this guard must never do. So it fails CLOSED here rather
+than reading an unresolvable target as 'some other project, not my business' — which is how it used to
+pass, silently, with no output distinguishing 'checked and fine' from 'never looked'. An orchestrator
+reaches every worktree through a variable, so that silence was the DEFAULT under fan-out, not an edge.
+
+Commit from the tree you are already in, or name the path literally. Either is one line, and both
+leave a gate that actually ran."
+          ;;
         undetermined:*)
           deny "BLOCKED: this commit lands in a tree that carries no game_loop, so its owed checks cannot be read.
 
@@ -476,7 +621,10 @@ or commit with --no-verify to skip the gate out loud and on the record."
       # Unchanged whenever the target resolves to this script's own tree.
       TARGET_TREE="$REPO_REAL"
       [ "$GAMELOOP_TARGET" != "$GAMELOOP_DIR" ] && TARGET_TREE="$(dirname "$GAMELOOP_TARGET")"
-      if ! run_verify "$GAMELOOP_TARGET" --check >/tmp/.game_loop_verify 2>&1; then
+      # Per-repo, not a fixed name: the previous /tmp/.game_loop_verify was shared by every project
+      # on the machine, so two of them committing at once would read each other's refusal.
+      VERIFY_OUT="/tmp/.game_loop_verify.${SLUG:-default}"
+      if ! run_verify "$GAMELOOP_TARGET" --check >"$VERIFY_OUT" 2>&1; then
         # ORDERING NOTE: this hook runs at PreToolUse, BEFORE the command body executes. Bundling
         # `verify` and `git commit` in ONE call can never pass — the check runs before your verify
         # line does. Run them as two separate calls.
@@ -498,10 +646,27 @@ This gate runs BEFORE the command body, so NONE of them executed. When you retry
 WHOLE command — retrying only the commit silently loses the rest, while the commit message
 still describes it."
         fi
-        deny "$(cat /tmp/.game_loop_verify)
-
-A green check from BEFORE your change is evidence about code that no longer exists.
-Run ./.game_loop/bin/verify, or commit with --no-verify to skip it on the record.$chained_hint"
+        # `verify --check` already ends with the WHY ("a green check from before your change is
+        # evidence about code that no longer exists") and with how to re-run it. Repeating both here
+        # printed the persuading sentence twice, back to back, which reads as a formatting bug at
+        # exactly the moment the guard is asking to be taken seriously. Append ONLY what is specific
+        # to a commit: the escape hatch.
+        # WHICH tree (#35). The gate resolved the target tree in order to read its record at all,
+        # so a bare "Run: ./.game_loop/bin/verify" is withholding something it already computed.
+        # A human infers "the one I'm in"; an unattended agent with N worktrees guesses, runs verify
+        # in a tree that was already green, sees success, retries, and is refused again by the same
+        # unqualified advice — a loop with no new information in it.
+        # Silent whenever the target IS this script's own tree, which is the common path and was
+        # never ambiguous.
+        tree_hint=""
+        if [ "$GAMELOOP_TARGET" != "$GAMELOOP_DIR" ]; then
+          tree_hint="
+THIS COMMIT LANDS IN $TARGET_TREE, and that is the tree whose rules were read and whose record
+must be refreshed. Verify run in any other tree passes without touching this one:
+    $GAMELOOP_TARGET/bin/verify"
+        fi
+        deny "$(cat "$VERIFY_OUT")
+Or commit with --no-verify to skip it on the record.$tree_hint$chained_hint"
       fi
 
       # The gate above asks whether the change was VERIFIED. It never asks whether it was INTENDED,
@@ -761,7 +926,19 @@ cmd = os.environ["CMD"]
 for v in verbs:
     # The boundary class includes quote chars: a deploy verb at the start of an interpreter arg
     # (a -c script) executes just the same, and message-flag strings were already blanked upstream.
-    pat = r"(^|[\s;&|'\"])" + r"\s+".join(re.escape(w) for w in v.split())
+    #
+    # BOTH SIDES (#51). There was a boundary before the verb and none after, so the verb matched as
+    # a SUBSTRING and ordinary English refused the call: "file surgery" contains " surge", "docker
+    # pushed" contains "docker push". The refusal is loud and correct-sounding and names a verb the
+    # user never typed, so the natural response is to rephrase and move on -- never learning the
+    # guard was wrong. That is how a guard trains people to work around it.
+    #
+    # WHAT THIS STILL MATCHES, stated rather than implied (INV6): the bare verb as a WHOLE WORD in
+    # prose -- "we used docker push last year" -- still trips it. Narrowing further would mean
+    # matching only at command position, which loses a real deploy nested inside an interpreter
+    # argument, and missing a real publish is the expensive direction.
+    pat = (r"(^|[\s;&|'\"])" + r"\s+".join(re.escape(w) for w in v.split())
+           + r"($|[\s;&|'\"])")
     if re.search(pat, cmd):
         print(v)
         break
@@ -777,12 +954,13 @@ hatch, by design. (Configured in .game_loop/config.json -> deploy_verbs.)"
 
     # 2. Mutation aimed OUTSIDE the allow roots, decided by RESOLVING PATHS — not matching names.
     offender=$(REPO_REAL="$REPO_REAL" SLUG="$SLUG" CONFIG_F="$CONFIG_F" SCAN_CMD="$scan_cmd" python3 - "$payload" <<'PY'
-import json, os, re, shlex, sys
+import json, os, re, shlex, subprocess, sys
 
 payload = json.loads(sys.argv[1])
 cmd = os.environ.get("SCAN_CMD", "")          # here-doc DATA bodies already stripped (see scan_cmd)
 cwd = payload.get("cwd") or os.environ["REPO_REAL"]
 home = os.path.expanduser("~")
+repo = os.path.realpath(os.environ["REPO_REAL"])
 
 allow = [os.environ["REPO_REAL"], "/tmp", "/private/tmp", "/var/folders",
          os.path.join(home, ".claude", "projects", os.environ["SLUG"])]
@@ -799,6 +977,48 @@ GIT_WRITES = {"commit", "push", "reset", "rebase", "checkout", "clean", "apply",
 
 def under(path, root):
     return path == root or path.startswith(root + os.sep)
+
+def _git_common(p):
+    """The shared .git dir of the tree containing p, or None. Bounded, and never raises."""
+    try:
+        r = subprocess.run(["git", "-C", p, "rev-parse", "--git-common-dir"],
+                           capture_output=True, text=True, timeout=5)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    g = r.stdout.strip()
+    if not g:
+        return None
+    if not os.path.isabs(g):
+        g = os.path.join(p, g)
+    return os.path.realpath(g)
+
+
+def same_project(real, repo):
+    """True when `real` lies in a LINKED WORKTREE of this same repository (issue #47).
+
+    A worktree is not another project; it is this project checked out twice, and an agent spawned to
+    work in one is doing this project's work. Scoping "this repo" to the directory the BINARY happens
+    to live in denied exactly that work: one reported session bought TWELVE single-use authorizations
+    to write the files it was created to change. A gate that fires on all normal work gets routed
+    around rather than respected, so this is a correctness fix, not a convenience.
+
+    Deliberately narrow. The two trees must share ONE git common dir, so a different repository
+    nested anywhere is still outside. It cannot be bootstrapped either: creating a worktree outside
+    the repo is itself a mutating command this guard denies, so nothing can mint its own permission.
+
+    Only ever reached on the path that is otherwise about to DENY, which keeps the git call off the
+    hot path -- an ordinary in-repo write never pays for it.
+    """
+    d = real
+    while not os.path.isdir(d):
+        nd = os.path.dirname(d)
+        if nd == d:
+            return False
+        d = nd
+    mine = _git_common(repo)
+    return bool(mine and _git_common(d) == mine)
 
 
 # Standard character devices: discard sinks and the console/std streams. A redirect to one of these
@@ -824,7 +1044,9 @@ def offends(raw, cwd):
     if is_sink(p):
         return None
     real = os.path.realpath(p)
-    return None if any(under(real, a) for a in allow) else real
+    if any(under(real, a) for a in allow) or same_project(real, repo):
+        return None
+    return real
 
 
 def redirect_targets(seg):
@@ -860,6 +1082,19 @@ def redirect_targets(seg):
             else:
                 k = j
                 while k < n and seg[k] not in " \t;&|<>)":
+                    # An unquoted command substitution ENDS the literal word: everything after it is
+                    # a different thing entirely. Without this, prose that merely MENTIONS a redirect
+                    # (a comment inside an interpreter here-doc, which is scanned because its body
+                    # executes) yielded a target with the backtick and the following punctuation
+                    # glued on, so the sink test missed and ordinary work was refused.
+                    #
+                    # `k > j` is load-bearing, not defensive. A target that STARTS with a
+                    # substitution has no literal prefix to keep, and breaking there would append
+                    # nothing at all — turning a refusal into SILENCE and handing back a bypass.
+                    # Captured whole, it resolves to a nonexistent out-of-repo path and is denied,
+                    # which is the honest answer until #40 gives unresolvable targets a real verdict.
+                    if seg[k] == chr(96) and k > j:
+                        break
                     k += 1
                 if k > j:
                     targets.append(seg[j:k])

@@ -1,0 +1,28 @@
+{
+  "//": [
+    "BEHAVIOUR CHANGES — what an existing verb now COSTS or REFUSES differently.",
+    "",
+    "Not a changelog. A new verb costs nothing until you reach for it and can be discovered",
+    "whenever; an existing verb that starts costing minutes, or refusing where it used to warn,",
+    "changes behaviour for people who never asked for anything, in the middle of whatever they were",
+    "doing. Only the second kind earns an interruption. If everything lands here the notice becomes",
+    "noise and gets ignored exactly when it matters.",
+    "",
+    "This file SHIPS with the payload and is refreshed on every install, so the installed copy is",
+    "the record as of your install. `status` compares it against the one on main and names only the",
+    "entries you have not seen. No extra stamping, and nothing to keep in sync by hand.",
+    "",
+    "seq is monotonic and never reused — it is the ordering, since commit shas have none.",
+    "",
+    "The test for whether an entry belongs here: would somebody who changed nothing about how they",
+    "use game_loop notice this? If no, leave it out."
+  ],
+  "changes": [
+    {
+      "seq": 1,
+      "sha": "61afb2c",
+      "verb": "verify",
+      "change": "now re-runs the suite once per stale pattern. Making install.sh, test/run.py and verify.yaml gated files was correct, but a change touching several of them went from roughly one suite run to five — seconds to 2-4 minutes. Run `verify` as its own earlier step; under an autonomy mandate a verb that quietly became slow reads as an idle session."
+    }
+  ]
+}

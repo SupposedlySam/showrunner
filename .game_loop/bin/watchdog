@@ -39,6 +39,7 @@ WHAT IT DOES NOT DO (state the scope of a guard, including what it misses):
 import datetime
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -94,6 +95,7 @@ def resolve_home(code_root, prog):
 
 
 ROOT = resolve_home(CODE_ROOT, "watchdog")          # .game_loop/ — identity and state
+REPO_ROOT = os.path.dirname(ROOT)                   # the project itself — where a probe should run
 STATE_F = os.path.join(ROOT, "state.json")          # re-pointed by set_session()
 LOG_F = os.path.join(ROOT, "log.jsonl")
 CONFIG_F = os.path.join(ROOT, "config.json")
@@ -274,8 +276,21 @@ def park_until_limit_resets(state):
     quit Claude Code entirely there is no process left to wake — this survives a rate-limited
     SESSION, not a closed laptop.
     """
-    over = exhausted_windows(limits_snapshot(), time.time())
+    snap = limits_snapshot()
+    over = exhausted_windows(snap, time.time())
     if not over:
+        # "no window is exhausted" and "I have no idea" are the SAME empty list here, and the second
+        # one means this function can never fire — no park, no ring at reset. Record it once per
+        # session so a run that didn't need to park is distinguishable, afterwards, from one that
+        # could never have parked. Without this the log of a run that died at its limit is silent.
+        if not (snap and (snap.get("windows") or {})):
+            st = load_state()
+            if not st.get("limit_blind_logged"):
+                st["limit_blind_logged"] = True
+                save_state(st)
+                logline({"kind": "watchdog_limit_blind",
+                         "detail": "no usage snapshot — the limit park and its reset ring cannot arm",
+                         "entrypoint": os.environ.get("CLAUDE_CODE_ENTRYPOINT") or ""})
         return
     until = max(float(w["resets_at"]) for _, w in over)
     names = ", ".join(n for n, _ in over)
@@ -381,6 +396,52 @@ def poll_slack_replies(state):
             quiet("arm consumed while polling slack replies")
         state = st
         armed = state.get("t3_armed") or {}
+
+
+def waiting_verdict():
+    """Is this run WAITING on work it dispatched, rather than asleep? (bool, reason)
+
+    Idleness is measured from transcript growth, and a subagent's output does not grow the parent's
+    transcript. So a run that has correctly handed out every available piece of work and is waiting
+    for results it cannot hurry is byte-for-byte identical to one that has fallen asleep. The ring
+    is cheap; the ESCALATION is not -- three consecutive unproductive rings page the human, which is
+    a T3 spend, the rung the whole arm primitive exists to ration, spent on a run behaving perfectly.
+
+    The argument that settles it needs no incident at all: the ring counter resets on PRODUCTIVE
+    rings, so today's only protection against escalation is the agent finding filler while it waits.
+    A safety property that degrades as the agent gets more disciplined is broken in a way that looks
+    like working -- the better the run, the faster it reaches the cap.
+
+    FOUR CONSTRAINTS, none of them decoration:
+
+    * CONFIG-SUPPLIED COMMAND, like verify.yaml's rules and deploy_verbs. game_loop runs it and reads
+      the verdict, and must never learn what the caller's unit of work is.
+    * CONFIG-AUTHORED ONLY, never settable by the agent at runtime. A wait an agent can declare for
+      itself is an off switch for the watchdog -- and the watchdog exists precisely because the
+      agent's judgement about whether it is done is the thing not to trust.
+    * CONSERVATIVE TOWARD NOT WAITING. Exit 0 means waiting; everything else -- non-zero, timeout,
+      missing command, unreadable config -- means NOT waiting. A false "waiting" silences the
+      watchdog on exactly the wedged run it was built to catch, and fails silent. A false "not
+      waiting" costs one unnecessary ring.
+    * EVERY VERDICT LOGGED, so "how often did this silence the watchdog, and for how long" is a fact
+      rather than a hunch the next time somebody argues the cap is too aggressive.
+
+    Absent config leaves the watchdog behaving exactly as it did before.
+    """
+    cmd = str(_WD.get("waiting_probe") or "").strip()
+    if not cmd:
+        return False, ""
+    try:
+        r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=15,
+                           cwd=REPO_ROOT)
+        waiting = r.returncode == 0
+        reason = (r.stdout or "").strip().splitlines()
+        reason = reason[0][:160] if reason else ""
+        detail = reason if waiting else (r.stderr or "").strip()[:160]
+    except Exception:  # noqa: BLE001 — unrunnable, hung, anything: NOT waiting, and say why
+        waiting, detail = False, "probe did not run"
+    logline({"kind": "watchdog_waiting", "waiting": waiting, "detail": detail})
+    return waiting, detail
 
 
 def ring(state, rings):
@@ -494,6 +555,13 @@ def main():
             state["watchdog_rings"] = rings = 0
 
     if rings >= RING_CAP:
+        # Before spending the human: is this run waiting on work it dispatched? (#32)
+        _w, _why = waiting_verdict()
+        if _w:
+            logline({"kind": "watchdog_wait_held", "rings": rings, "detail": _why,
+                     "note": "cap reached but a declared wait still verifies — not paging"})
+            quiet(f"waiting on dispatched work ({_why or 'probe says still live'}) — "
+                  "cap not spent on a healthy run")
         logline({"kind": "watchdog_exhausted", "rings": rings,
                  "note": "stood down after RING_CAP consecutive unproductive rings"})
         # This is precisely the "the run is stuck and needs a body at the desk" moment — page it.
