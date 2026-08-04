@@ -373,7 +373,42 @@ def failing(output):
     return {l[8:].strip() for l in output.splitlines() if l.startswith("  FAIL  ")}
 
 
+def accounting():
+    """The denominator checks only — no mutation, no suite runs. Seconds, not minutes.
+
+    Separated so it can gate a release. The full sweep cannot: it runs the whole suite once
+    per target, and a gate that slow is a gate somebody routes around. These three checks are
+    the ones that catch a producer arriving without a decision, and they need no suite at all.
+    """
+    problems = 0
+    outside = unscanned_python()
+    if outside:
+        print("PYTHON THE SWEEP NEVER PARSES — extend PRODUCT_ROOTS or declare it not product:")
+        for f in outside:
+            print("  %s" % f)
+        problems += 1
+    stale = sorted((SWEPT_KEYS | set(NOT_SWEPT)) - all_functions())
+    if stale:
+        print("STALE DECLARATIONS — these name functions that no longer exist:")
+        for k in stale:
+            print("  %s" % k)
+        problems += 1
+    unaccounted = sorted(set(candidates()) - SWEPT_KEYS - set(NOT_SWEPT))
+    if unaccounted:
+        print("UNACCOUNTED CANDIDATES — sweep them, or exclude them in NOT_SWEPT with a reason:")
+        for c in unaccounted:
+            print("  %s" % c)
+        problems += 1
+    if not problems:
+        print("accounting ok: %d files, %d candidates, %d swept, %d excluded, 0 unaccounted, "
+              "0 stale, 0 unscanned"
+              % (len(python_sources()), len(candidates()), len(SWEPT_KEYS), len(NOT_SWEPT)))
+    return 1 if problems else 0
+
+
 def main():
+    if "--accounting" in sys.argv:
+        return accounting()
     only = None
     if "--target" in sys.argv:
         only = sys.argv[sys.argv.index("--target") + 1]
