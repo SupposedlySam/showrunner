@@ -190,24 +190,68 @@ def python_sources():
     somebody added one. Discovery is a predicate now, so a new file cannot fall outside it.
     """
     out = []
-    for rel in ("lib/showrunner", "bin"):
+    for rel in PRODUCT_ROOTS:
         d = os.path.join(ROOT, rel)
         if not os.path.isdir(d):
             continue
-        for f in sorted(os.listdir(d)):
-            full = os.path.join(d, f)
-            if not os.path.isfile(full):
-                continue
-            if f.endswith(".py"):
-                out.append((f[:-3], full))
-                continue
-            try:
-                with open(full) as fh:
-                    if "python" in fh.readline():
-                        out.append((f, full))
-            except (OSError, UnicodeDecodeError):
-                continue
+        for dirpath, dirnames, files in os.walk(d):
+            dirnames[:] = [x for x in dirnames if x != "__pycache__"]
+            for f in sorted(files):
+                full = os.path.join(dirpath, f)
+                if f.endswith(".py"):
+                    out.append((f[:-3], full))
+                    continue
+                try:
+                    with open(full) as fh:
+                        if "python" in fh.readline():
+                            out.append((f, full))
+                except (OSError, UnicodeDecodeError):
+                    continue
     return out
+
+
+# Named roots, but CHECKED — see unscanned_python(). A hardcoded list is the denylist defect
+# at the directory level, which is where it landed after being fixed at the target level, the
+# signature level, the namespace level and the file level.
+PRODUCT_ROOTS = ("lib", "bin")
+NOT_PRODUCT = (
+    "test/",        # the harness itself; mutating it would test the test
+    "prototype/",   # shell, and superseded — see the module docstring's stated limits
+    "docs/",
+    # The VENDORED HARNESS. Another project's source, tracked here only so it crosses into
+    # Crawler worktrees; it carries its own suite and its own mutation sweep upstream, and
+    # .game_loop/** is excluded from this repo's owed checks for the same reason. Declared
+    # rather than silently absorbed into PRODUCT_ROOTS, because "not mine to test" and "not
+    # noticed" are the two states this whole exercise exists to keep apart.
+    ".game_loop/",
+    ".claude/",
+)
+
+
+def unscanned_python():
+    """Python the repo tracks that the sweep never parses. Derived from git, not from guesses."""
+    rc, out, _ = None, "", ""
+    import subprocess
+    proc = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True)
+    if proc.returncode != 0:
+        return []
+    scanned = {os.path.realpath(p) for _, p in python_sources()}
+    missed = []
+    for rel in proc.stdout.splitlines():
+        if not rel.strip() or rel.startswith(NOT_PRODUCT):
+            continue
+        full = os.path.join(ROOT, rel)
+        if not os.path.isfile(full):
+            continue
+        try:
+            if not (rel.endswith(".py") or "python" in open(full).readline()):
+                continue
+            ast.parse(open(full).read())
+        except (OSError, UnicodeDecodeError, SyntaxError):
+            continue
+        if os.path.realpath(full) not in scanned:
+            missed.append(rel)
+    return sorted(missed)
 
 
 def candidates():
@@ -346,6 +390,12 @@ def main():
     # A stale declaration is the same defect pointing the other way: an exclusion whose
     # function is gone silently shrinks nothing today and silently covers a FUTURE function
     # that happens to reuse the name.
+    outside = unscanned_python()
+    if outside:
+        print("PYTHON THE SWEEP NEVER PARSES — extend PRODUCT_ROOTS or declare it not product:")
+        for f in outside:
+            print("  %s" % f)
+        return 1
     exists = all_functions()
     stale = sorted((SWEPT_KEYS | set(NOT_SWEPT)) - exists)
     if stale:
