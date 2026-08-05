@@ -41,12 +41,15 @@ target gets optimised rather than understood:
   mutation harness, so they are outside this entirely — stated as a limit rather than left
   to be discovered, because a denominator that silently excludes a language is the same
   false green as one that silently excludes a file.
-* **It only covers the producers NAMED BELOW — 11 of 165 public functions in `lib/`.** They
-  were chosen as the things that *gate or decide*: guards, validators, detectors, routers.
-  The rest are accessors, CLI handlers and pure transforms — but that classification is mine
-  and unaudited, so "0 unprotected" is a statement about these eleven and not about
-  showrunner. A producer nobody added here is not covered and does not appear as a gap,
-  which is this file's own version of the failure it exists to find.
+* **It only covers the producers in TARGETS**, chosen as the things that *gate or decide*:
+  guards, validators, detectors, routers. Everything else is either excluded in `NOT_SWEPT`
+  with a reason or fails the accounting. So "0 unprotected" is a statement about the swept
+  set, not about showrunner.
+
+  No counts are written in this docstring on purpose. One used to be, and it was wrong two
+  commits after it was typed — a stale number inside the tool whose job is finding stale
+  numbers. `--accounting` prints the real figures in a fraction of a second. A number that is
+  computed and a number that is remembered should never be the same number.
 
 So treat a count as a floor with a reason attached, never as a score. The honest use is the
 ORDERING — strengthen in ascending kill order — because that is the one thing the numbers

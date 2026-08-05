@@ -95,7 +95,9 @@ for on purpose rather than discovering at spawn time.
 the owned set — config, invariants, check manifest, notes — with `bin/` outside it, so two trees
 could match on every rule and run different code. showrunner's spawn report said "same RULES"
 and appended that caveat. game_loop has since extended the comparison to its scripts: the
-`harness` set now carries 13 entries including `bin/`, and a drifted script is caught.
+`harness` set now covers `bin/` as well as the owned files, and a drifted script is caught.
+Ask the verb rather than trusting a count written here — `worktree --porcelain` reports what
+it actually compared.
 
 The caveat survived the upgrade and was being printed to every Crawler as fact. That is a stale
 claim about the layer below — INV14 — and the second time this project has shipped one, both

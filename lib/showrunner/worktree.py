@@ -165,8 +165,8 @@ def unignored(worktree, paths):
     **a refusal cannot be produced by absence, but a permission can.** "Nothing would be
     staged" and "nothing was examined" are the same observation from outside, so a test
     asserting only the empty verdict passes identically against a guard that does nothing.
-    Measured: neutering this function to return no findings left 172 of 173 assertions green,
-    and the one failure was the refusal case.
+    Measured: neutering this function to return no findings left every assertion green
+    except the refusal case — the permissive half noticed nothing at all.
 
     A guard that *speaks* when it permits can be tested on its reason. This one is silent by
     nature, so it carries the mark instead — the same trick a Stop gate uses when it records
