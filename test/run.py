@@ -1471,9 +1471,26 @@ def test_cli():
             spans.extend(block.splitlines())
         spans.extend(re.findall(r"^ {4,}(showrunner [a-z].*)$", text, re.M))
         for span in spans:
-            m = re.match(r"\s*showrunner ([a-z][a-z-]+)", span)
+            m = re.match(r"\s*showrunner ([a-z][a-z-]+)((?: [a-z][a-z-]+)?)", span)
             if m:
-                yield m.group(1)
+                yield m.group(1), m.group(2).strip()
+
+    # Only the FIRST word was ever checked. `lock` has five subcommands and eight places print
+    # `lock run` or `lock guard`; rename `run` and all eight remedies go dead while this stays
+    # green. Same denominator as everywhere else — the check was not wrong, it stopped early.
+    # Resolved from argparse rather than parsed out of the source: llm_chat's version regexed
+    # `add_parser("literal")`, missed two verbs registered through a loop variable, and then
+    # reported two REAL commands as ghosts. A parser that misreads the source is confidently
+    # wrong in whichever direction you point it, so ask the thing that knows.
+    subverb_cache = {}
+
+    def subverbs_of(verb):
+        if verb not in subverb_cache:
+            out = subprocess.run([sys.executable, exe, verb, "--help"],
+                                 capture_output=True, text=True).stdout
+            found = re.search(r"\{([a-z0-9,\-]+)\}", out)
+            subverb_cache[verb] = set(found.group(1).split(",")) if found else set()
+        return subverb_cache[verb]
 
     scanned = ["README.md", "llms.txt"] + sorted(
         os.path.join("lib", "showrunner", f)
@@ -1485,13 +1502,19 @@ def test_cli():
                 text = fh.read()
         except OSError:
             continue
-        for word in commands_in(text):
+        for word, sub in commands_in(text):
             seen += 1
             if word not in verbs:
                 dead.append("%s: showrunner %s" % (rel_path, word))
+            elif sub and subverbs_of(word) and sub not in subverbs_of(word):
+                dead.append("%s: showrunner %s %s" % (rel_path, word, sub))
     ok("every `showrunner <verb>` this repo prints or documents is a verb the CLI actually "
        "accepts — a remedy naming a command that does not exist is worse than no remedy",
        not dead, sorted(set(dead)))
+    ok("...including the SUBcommand, for the verbs that have them — `lock run` is eight "
+       "remedies deep here and only its first word was ever checked",
+       "run" in subverbs_of("lock") and "guard" in subverbs_of("lock"),
+       sorted(subverbs_of("lock")))
     # Pure observation passes by finding nothing, which is also what a broken regex returns.
     ok("...and it found commands to check at all, so a PASS means they were verified rather "
        "than that the scan matched nothing", seen > 5, seen)
@@ -1513,7 +1536,7 @@ def test_cli():
         visible = set()
         for node in ast.walk(ast.parse(src)):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                seen_here = list(commands_in(node.value))
+                seen_here = set(w for w, _ in commands_in(node.value))
                 for m in re.finditer(r"showrunner ([a-z][a-z-]+)", node.value):
                     if m.group(1) not in verbs:
                         continue          # prose, not a command
@@ -1524,6 +1547,26 @@ def test_cli():
     ok("every real verb printed inside a source string sits in a position the scan can see — "
        "a remedy the checker cannot read is not checked, and looks identical to a passing one",
        not invisible, sorted(set(invisible)))
+
+    # BOTH FIXES ABOVE REDUCED FINDINGS, which is the direction that ends in a check that has
+    # quietly stopped discriminating — and a suite that goes green right after you tune it is
+    # the moment to trust it least. So: one fixture holding all four cases at once, asserting
+    # the rule separates them rather than that the repo happens to be clean today. (llm_chat's
+    # practice, adopted after two of its own fixes each cut the finding count.)
+    fixture = (
+        "run `showrunner campaign` to see it\n"          # ghost: no such verb
+        "run `showrunner lock guard -- cmd` first\n"     # real, with a real subcommand
+        "run `showrunner lock sprint -- cmd` first\n"    # real verb, ghost subcommand
+        "showrunner spawns a Crawler per leaf, and showrunner is generic\n")  # prose
+    flagged = set()
+    for word, sub in commands_in(fixture):
+        if word not in verbs:
+            flagged.add(word)
+        elif sub and subverbs_of(word) and sub not in subverbs_of(word):
+            flagged.add("%s %s" % (word, sub))
+    eq("the rule separates a ghost verb, a ghost subcommand, a real command and prose — "
+       "checked on one fixture, so a clean repo cannot be mistaken for a working check",
+       flagged, {"campaign", "lock sprint"})
 
 
 # ===================================================== OPTIONAL: br, tmux
