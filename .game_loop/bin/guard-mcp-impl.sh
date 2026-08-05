@@ -61,9 +61,66 @@ payload=$(cat)
 
 CODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"        # the .game_loop/ this CODE is in
 
+# ORIENTATION ON A SESSION'S FIRST REFUSAL (#60). A POINTER, NOT AN EXPLANATION.
+#
+# Reported from a checkout where work starts as user-level slash commands, so a session that never
+# loaded the project's CLAUDE.md is the NORMAL case and a guard refusal is the first contact anyone
+# has with this harness. The reporter hit a refusal, probed five global bin directories for a
+# `game_loop` on PATH, found none -- because nothing looks up-tree for a project-local binary --
+# concluded "not installed", and escalated. Naming an absolute path (#52) fixes the dead end and
+# would not have fixed the run: they went on to never run `status`, to not know `--uses N` existed
+# and so spend a fresh interruption per call on a decision their human had already made, and to
+# read the refusal as "the tool is absent" rather than "there is something here I have not read".
+# Same text, opposite conclusions.
+#
+# BOUNDED BY SESSION, NOT BY REFUSAL, which is what keeps it from being noise: each session hits its
+# first refusal exactly once, so the ceiling is one line per session lifetime -- not one per event.
+# `status` counts as orientation too and suppresses it, so a session that arrived the documented way
+# never sees this at all. It is shown only to sessions that arrived blind, which is exactly the
+# population that needs it.
+orient() {
+  [ -n "${STATE_F:-}" ] || return 0
+  GL_STATE_F="$STATE_F" GL_DIR="$GAMELOOP_DIR" GL_REPO="${REPO:-}" python3 <<'PY' 2>/dev/null || true
+import json, os
+
+f = os.environ["GL_STATE_F"]
+try:
+    with open(f) as fh:
+        st = json.load(fh)
+    if not isinstance(st, dict):
+        st = {}
+except (OSError, ValueError):
+    st = {}
+if st.get("oriented"):
+    raise SystemExit(0)
+st["oriented"] = True
+try:
+    os.makedirs(os.path.dirname(f), exist_ok=True)
+    with open(f, "w") as fh:
+        json.dump(st, fh, indent=2)
+except OSError:
+    # Unwritable state cannot remember, so this would repeat. Shown anyway: a blind agent costs a
+    # whole run, a repeated line costs a line, and an install whose session dir is unwritable is
+    # already broken in ways that outrank this.
+    pass
+d = os.environ.get("GL_DIR", "")
+gl = os.path.join(d, "bin", "game_loop")
+# NAME ONLY WHAT IS THERE. This repo's keystone is that prose cannot satisfy "point at a real file",
+# and the first version of this line pointed at the repo root's brief -- which install.sh did not
+# ship, so it named an absent file in every consumer. That is #52 exactly, committed by the fix for
+# it. The brief now ships beside the payload; an install predating that gets the verb alone rather
+# than a path that is not there.
+brief = os.path.join(d, "llms.txt")
+where = gl + " status" + (("  |  " + brief + " (the agent brief)") if os.path.exists(brief) else "")
+print("\n\n-- first refusal in this session: this repo is guarded by game_loop, and most refusals "
+      "have\n   a documented way through. " + where + ".")
+PY
+}
+
 deny() {
+  _reason="$1$(orient)"
   printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":%s}}\n' \
-    "$(printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
+    "$(printf '%s' "$_reason" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
   exit 0
 }
 

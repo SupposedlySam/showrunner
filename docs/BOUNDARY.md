@@ -232,19 +232,24 @@ path of the tree whose record can clear its own gate.
 
 ## What showrunner assumes about game_loop today
 
-Stated so it can be re-checked rather than trusted, with the version it was verified against
-(`VERSION 2f51021e`):
+Stated so it can be re-checked rather than trusted, each re-read against the harness actually
+installed here. `test/run.py` fails when that version moves, so this list cannot quietly
+describe a release nobody is running.
 
-- The commit gate resolves **per target tree** and denies when that tree carries no harness.
-  (`guard-writes-impl.sh` lines 365-408.)
+<!-- game_loop-verified: 33f08de5 -->
+
+- The commit gate resolves **per target tree** and denies in two cases: when that tree carries
+  no harness (`guard-writes-impl.sh:685`), and when the target is built from a **shell
+  variable** so the gate cannot resolve it without executing it (line 671). The second is
+  newer than the first — it used to pass silently, which is the default shape under fan-out.
 - The edited-file set is scoped to the **session**, not the tree — one session is one session
-  however many trees it touches. (`guard-writes-impl.sh:91`.)
-- The blast-radius check is a **warning, never a denial**, and is silent when the session
-  recorded no edits at all. (lines 437-543, 459-460.)
-- `install.sh` seeds user-owned files **only if absent**, and ships `verify.yaml` empty.
-  (lines 85-99.)
-- Hooks are registered in `<project>/.claude/settings.json`, so a worktree without one has no
-  rails at all. (lines 118-166.)
+  however many trees it touches. (`EDITED_F` at line 243; stated at line 780.)
+- The blast-radius check is a **warning, never a denial** — `blast_note` reaches `note` and
+  nothing else (lines 762, 1245) — and is silent when the session recorded no edits (line 777).
+- `install.sh` seeds user-owned files **only if absent** (lines 433-440), and ships
+  `templates/verify.yaml` empty — 0 non-comment lines.
+- Hooks are merged into `<project>/.claude/settings.json` (lines 508-556), so a worktree
+  without one has no rails at all.
 
 If any of these stops being true, `lib/showrunner/harness.py` and the shared-state audit in
 `lib/showrunner/worktree.py` are the two places that need re-reading.

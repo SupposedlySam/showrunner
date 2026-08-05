@@ -94,12 +94,17 @@ message describes. Same reason `verify && git commit` cannot work: your verify l
 executed when the gate reads the record.
 
 **Commit from the tree you are already in — never `cd` to it through a shell variable.**
-Measured, same tree and same failing checks, differing only in that respect: a literal path
-was correctly DENIED, and a variable-built path was ALLOWED silently. The gate reads the
-command line to work out which tree a commit lands in, and a path it cannot resolve makes it
-go quiet rather than guess. That is the *worst* direction for you, because it looks exactly
-like passing. Orchestration reaches worktrees through variables by default, so this is the
-normal shape and not an edge case — which is why it is worth breaking the habit here.
+The gate reads the command line to work out which tree a commit lands in. A path it cannot
+resolve is now DENIED outright — resolving it would mean executing it, which the guard must
+never do, so it fails closed and says so. Commit from the tree you are in, or name the path
+literally; either is one line.
+
+This used to pass *silently* instead, which is why the habit is worth breaking rather than
+working around: measured on the same tree with the same failing checks, a literal path was
+correctly denied and a variable-built path sailed through with no output distinguishing
+"checked and fine" from "never looked". Orchestration reaches worktrees through variables by
+default, so that silence was the normal shape under fan-out, not an edge case. It is fixed
+upstream, and a tree carrying an older harness still has the quiet version.
 
 **Put every non-repo file in your own scratch dir above** — commit messages, captured
 output, before/after artifacts, fixtures. Not in a shared temp dir. Two Crawlers in a real

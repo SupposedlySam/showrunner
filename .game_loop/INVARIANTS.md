@@ -252,6 +252,30 @@ Rung 5, and 1-4 genuinely do not apply: this is a decision *not* to investigate,
 absent investigation leaves no artifact for a check to find. What can be enforced is that the
 words are distinctive and this is re-injected every session.
 
+## INV20 — A stated LIMIT ages exactly like a stated PREMISE
+
+INV14 says to verify premises about our own repos. A premise is a claim I *act* on, so it gets
+re-checked the next time I act. A limitation is a claim about what something does NOT do — and
+nothing ever makes me reach for it, so it is never the thing that fails. It just sits there
+being quoted.
+
+Both rotted within one week, both about game_loop, both fluent and specific and wrong. The
+Crawler brief told every agent that a variable-built commit path passes SILENTLY, measured and
+true when written; game_loop then made it a hard denial, and the sentence went on reading like
+a finding. `docs/BOUNDARY.md` listed the gate's denials with line numbers into a file that had
+since grown by 700 lines. Neither could have been caught by re-reading them, because both were
+internally coherent — the rot was entirely outside the text.
+
+The fix is not vigilance, it is a version. Any prose stating another layer's behaviour carries
+the release it was verified against, and something fails when that release moves. Rung 4:
+`test_claims_about_the_layer_below` in `test/run.py` stamps the set and breaks on upgrade, with
+default-deny discovery so a new claim file cannot join the set silently — the first version of
+that net missed the very file whose claim had rotted.
+
+What it does NOT do — and this line is itself the kind of claim it governs — is check that any
+of the claims are TRUE. It cannot. It only removes the option of going stale quietly, and
+converts an unbounded re-reading duty into one that arrives on a specific day.
+
 ## INV19 — Surviving by elimination is not the same as being supported
 
 Three accounts of one observation were tested. Two died to measurement. I then wrote that the

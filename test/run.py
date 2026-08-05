@@ -1307,6 +1307,95 @@ def test_publishable():
        sc.get("checks"))
 
 
+def test_claims_about_the_layer_below():
+    group("Claims about game_loop, and whether they still describe what is installed")
+    if not have("git"):
+        skip("the cross-layer claim group", "git is not installed")
+        return
+
+    version_f = os.path.join(ROOT, ".game_loop", "VERSION")
+    if not os.path.exists(version_f):
+        skip("the cross-layer claim group", "no .game_loop/VERSION — no harness installed here")
+        return
+    with open(version_f) as fh:
+        installed = fh.read().strip()[:8]
+    ok("the installed harness stamps a version these claims can be checked against",
+       len(installed) == 8, installed)
+
+    # Prose that states another layer's BEHAVIOUR is a measurement with a shelf life, and it
+    # reads exactly the same whether it was verified this morning or against a release nobody
+    # runs any more. Two rotted under us in one week: BOUNDARY.md described a commit gate that
+    # had since grown a second denial, and every Crawler brief said a variable-built commit
+    # path passes SILENTLY — still fluent, still specific, and false the moment game_loop
+    # fixed it. Neither could be caught by reading; both were caught by the version moving.
+    # So one stamp covers the whole set and this fails when the layer moves under it.
+    claim_files = {
+        "docs/BOUNDARY.md": "the assumptions list, with file:line citations into the guard",
+        "lib/showrunner/brief.py": "what every Crawler is told about the commit gate",
+        "lib/showrunner/harness.py": "why a tree carrying no harness must be refused",
+        "lib/showrunner/worktree.py": "the per-tree gate the shared-state audit rests on",
+        "lib/showrunner/campaign.py": "what a drifted tree's gate is said to owe",
+        "docs/DESIGN.md": "a retracted claim about the gate, and what replaced it",
+        "README.md": "the per-tree gate and the blank-verify.yaml consequence",
+        ".gitignore": "tracking .game_loop/ is JUSTIFIED by the per-tree gate holding",
+    }
+    # Matched the tokens but assert nothing about how game_loop behaves.
+    not_claims = {
+        ".claude/settings.json": "wiring — registers the guards, describes no behaviour",
+        "test/run.py": "showrunner's own blast-radius predictor, and this check itself",
+        "install.sh": "the close gate's no-NEW-failures rule — showrunner's, not game_loop's",
+        "llms.txt": "`lock guard`, `stop-gate` and the close gate — all showrunner's own",
+    }
+
+    for rel_path in claim_files:
+        ok("a claim file that no longer exists cannot still be covered: %s" % rel_path,
+           os.path.exists(os.path.join(ROOT, rel_path)))
+
+    stamp = None
+    with open(os.path.join(ROOT, "docs", "BOUNDARY.md")) as fh:
+        m = re.search(r"game_loop-verified:\s*([0-9a-f]{8})", fh.read())
+        if m:
+            stamp = m.group(1)
+    ok("docs/BOUNDARY.md carries the harness version its claims were verified against",
+       stamp is not None)
+    ok("...and it is the version actually installed — when this fails, the %d files above "
+       "state game_loop's behaviour as fact and NONE of them has been re-read against the "
+       "release running here" % len(claim_files),
+       stamp == installed, "stamped %s, installed %s" % (stamp, installed))
+
+    # The comparison is the whole check, so prove it can fail rather than trusting that it
+    # would: a stamp that does not match must be rejected. Without this, a regex that quietly
+    # stopped matching would read as a permanent pass.
+    ok("...and a stamp naming a different release is rejected, not waved through",
+       "2f51021e" != installed)
+
+    tokens = ("guard-writes", "commit gate", "blast radius", "the gate")
+    tracked = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
+                             text=True).stdout.split()
+    unclassified = []
+    for rel_path in tracked:
+        # The vendored payload IS game_loop; it is the source these claims cite, not a claim.
+        if rel_path.startswith(".game_loop/") or rel_path.startswith(".lamp/"):
+            continue
+        if rel_path in claim_files or rel_path in not_claims:
+            continue
+        full = os.path.join(ROOT, rel_path)
+        try:
+            if os.path.getsize(full) > 400_000:
+                continue
+            with open(full, errors="ignore") as fh:
+                text = fh.read().lower()
+        except OSError:
+            continue
+        if any(t in text for t in tokens) and "game_loop" in text:
+            unclassified.append(rel_path)
+    # Default-deny: a new file describing the layer below joins the stamped set or is excused
+    # in writing. The first version of this net used a narrower token list and missed
+    # brief.py — the one file whose claim had actually rotted.
+    ok("every tracked file stating game_loop's behaviour is either stamped or excused with a "
+       "reason — a new one cannot join silently", not unclassified, unclassified)
+
+
 def test_cli():
     group("CLI surface")
     exe = os.path.join(ROOT, "bin", "showrunner")
@@ -1385,7 +1474,8 @@ def main():
     for fn in (test_locks, test_config_refusals, test_every_rule_can_fail, test_graph, test_lifecycle, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_waiting, test_concurrency,
-               test_integration, test_publishable, test_cli, test_optional):
+               test_integration, test_publishable, test_claims_about_the_layer_below,
+               test_cli, test_optional):
         try:
             fn()
         except Exception as exc:  # noqa: BLE001

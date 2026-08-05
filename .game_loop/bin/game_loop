@@ -4195,11 +4195,47 @@ def cmd_confidence(s, a):
                        capture_output=True, text=True)
     if r.returncode != 0:
         die("could not create the tag: " + (r.stderr or "").strip())
-    logline({"kind": "confidence", "level": a.mark, "sha": sha, "tag": tag, "notes": a.notes})
+    # AND MOVE THE CHANNEL POINTER (#61). `stable-<sha>` is the immutable record of one mark;
+    # `stable` is "the newest thing marked at that level", and it exists so that NOBODY DOWNSTREAM
+    # HAS TO ORDER TAGS.
+    #
+    # Ordering them is a trap, and it is not a hypothetical one. The marks are ANNOTATED, so tag
+    # order is not commit order, and the two plausible sorts disagree — `--sort=-creatordate` is
+    # right, `--sort=-committerdate` returns something much older, and both look reasonable. A
+    # consumer who picks wrong silently pins an older commit, and the installer then correctly
+    # stamps THAT commit as stable, so nothing downstream ever contradicts it.
+    #
+    # The remote sort is not an answer either: `git ls-remote --sort=-creatordate` has to READ the
+    # tag objects to sort them, so in a fresh checkout that does not have them it fails with
+    # "missing object" — it works from a clone of this repo and fails for exactly the consumer it
+    # would be for. Measured, after I shipped it and tried it from a bare directory.
+    #
+    # So the ordering happens HERE, once, by the only party that already knows the answer: the one
+    # doing the marking. A consumer asks for `stable` and gets a ref. Force-moved on purpose — a
+    # channel pointer that could not move would not be a channel.
+    ch = subprocess.run(["git", "tag", "-f", a.mark, sha], cwd=REPO_ROOT,
+                        capture_output=True, text=True)
+    moved = ch.returncode == 0
+    logline({"kind": "confidence", "level": a.mark, "sha": sha, "tag": tag,
+             "channel_moved": moved, "notes": a.notes})
     out(f"✓ MARKED {a.mark.upper()} — {tag}",
         *["  " + l for l in lines],
-        "",
-        "→ push it, or nobody else can see it:  git push origin " + tag)
+        "")
+    if moved:
+        out(f"→ push BOTH, or nobody else can see it:",
+            f"    git push origin {tag}",
+            f"    git push origin --force {a.mark}      # the channel pointer consumers install from",
+            f"  `{a.mark}` now names this commit, so `GAME_LOOP_CHANNEL={a.mark} ./install.sh <dir>`",
+            f"  installs it without anyone having to sort tags — which is the step that goes wrong "
+            f"silently.")
+    else:
+        # Stated, not swallowed: without the pointer the channel install keeps serving the PREVIOUS
+        # stable, which is a wrong answer that looks exactly like a right one.
+        out(f"⚠ the {tag} tag was created but the `{a.mark}` CHANNEL POINTER could not be moved:",
+            "    " + (ch.stderr or "").strip()[:200],
+            f"  Until it moves, GAME_LOOP_CHANNEL={a.mark} keeps installing the PREVIOUS commit —",
+            f"  a stale answer indistinguishable from a current one. Fix with: git tag -f {a.mark} "
+            f"{sha[:8]}")
     out(*fire_triggers(s, "confidence", {
         "event": "confidence", "level": a.mark, "sha": sha, "tag": tag, "notes": a.notes,
         "project": config().get("project_name"), "session": SESSION}))
@@ -4250,6 +4286,40 @@ def installed_confidence_report():
                else "the author's own agent was running on it") + "."]
 
 
+INSTALLED_BY_F = os.path.join(ROOT, "installed-by.json")
+
+
+def installed_by():
+    """{"name", "upgrade"} when a packager placed this payload — else None.
+
+    THE ALERT WAS RIGHT AND THE REMEDY WAS DESTRUCTIVE, reported by a consumer who nearly ran it.
+    `status` told every install to re-run the curl installer. For a payload placed by a package
+    manager that would overwrite a blessed, stamped release with whatever is on main at that
+    instant, drop the CONFIDENCE file, and revert the integration the consumer had just finished.
+    A correct detection wired to one remedy for two populations.
+
+    The distinguishing fact is on disk and free to read, so the notice can name the right command
+    per consumer instead of the same one for everybody. That is this repo's own rule -- the thing
+    you RECORD and the thing you ACT ON must come from the same place -- applied to a suggestion
+    rather than to a check, which is where I had not thought to apply it.
+
+    THE COMMAND IS PRINTED, NEVER RUN. A file that game_loop executed would be a code-execution
+    vector wearing a helpful face; displaying it leaves the decision and the typing with the human.
+    """
+    try:
+        with open(INSTALLED_BY_F) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict):
+        return None
+    up = str(d.get("upgrade") or "").strip()
+    if not up or "\n" in up:
+        return None            # a multi-line "command" is not a command; say nothing rather than guess
+    return {"name": str(d.get("name") or "the packager that installed this").strip()[:60],
+            "upgrade": up[:200]}
+
+
 def update_notice():
     """A one-line 'a newer game_loop is on main — re-install' note, or None. Silent unless BOTH the
     installed sha (VERSION) and the latest sha are known and they differ."""
@@ -4285,10 +4355,23 @@ def update_notice():
                 f"({latest[:8]}).\n"
                 f"  Which is newer could NOT be determined — no re-install is implied by this line "
                 f"alone.")
-    note = (f"⬆ game_loop update available — installed {inst[:8]}, latest {latest[:8]} on main.\n"
-            f"  Re-install to update (bin/ is refreshed; no session restart):\n"
-            f"    curl -fsSL https://raw.githubusercontent.com/{repo}"
-            f"/main/install.sh | bash -s -- .")
+    _by = installed_by()
+    if _by:
+        # Placed by a packager: its own upgrade is the only remedy that keeps the vendored release,
+        # its stamp and its CONFIDENCE intact.
+        note = (f"⬆ game_loop update available — installed {inst[:8]}, latest {latest[:8]} on main.\n"
+                f"  This payload was installed by {_by['name']}, so upgrade THROUGH it — the curl\n"
+                f"  installer would replace a vendored release with whatever is on main right now:\n"
+                f"    {_by['upgrade']}")
+    else:
+        note = (f"⬆ game_loop update available — installed {inst[:8]}, latest {latest[:8]} on main.\n"
+                f"  Re-install to update (bin/ is refreshed; no session restart):\n"
+                f"    curl -fsSL https://raw.githubusercontent.com/{repo}"
+                f"/main/install.sh | bash -s -- .\n"
+                f"  This installs whatever is on main AT THAT INSTANT, which may be ahead of any\n"
+                f"  released or blessed commit. If a package manager placed this payload, upgrade\n"
+                f"  through that instead and have it write .game_loop/installed-by.json so this\n"
+                f"  line names your command rather than this one.")
     # WHAT changed, not merely THAT something did (#37). "An update is available" is true and
     # useless for deciding whether to care. A new verb costs nothing until you reach for it; an
     # existing verb that starts costing minutes, or refusing where it used to warn, changes
@@ -5143,6 +5226,13 @@ def _extract_game_loop(sha, dest):
 
 def cmd_status(s, a):
     _prune_stale_sessions()
+    # RUNNING status IS ORIENTATION (#60). A guard refusal carries a one-line pointer to this
+    # command and the agent brief, once per session — and a session that arrived the documented way
+    # has already read everything that line would point at. Marking it here is what keeps the
+    # pointer aimed at sessions that arrived blind, which is the whole population it is for.
+    if not s.get("oriented"):
+        s["oriented"] = True
+        save(s)
     out(render_banner(s))
     if (n := retro_nudge(s)):
         out(n)
@@ -5407,8 +5497,25 @@ def cmd_stepback(s, a):
 # with a hole in it; a generated patch had its escapes consumed one layer early. After the first I
 # hardened "route prose through a file" as a thing to remember -- rung 6 -- and it failed twice more
 # while I was writing about checks that cannot report their own failure.
+# ENUMERATED, AND THEREFORE ALREADY ONCE INCOMPLETE. The first version of this list missed
+# `mandate --set` — the single most load-bearing sentence in the tool, the one the whole autonomy
+# loop is driven by — along with the arm's question and prediction and every descriptive field of
+# the evidence family. I found it by trying to rewrite my own mandate through a file and being told
+# the option did not exist. That is the same failure #57 removed from mcp_standing_writes, committed
+# here in the fix for it: a hand-kept list of names is complete on the day it is written.
+#
+# The entry test is CONTRACT, not length: does the field hold a sentence somebody composed? A path,
+# a name, an enum, a number and a ref all stay out — they cannot carry a backtick that means
+# anything, and bounding them would refuse legitimate values for no gain.
 PROSE_OPTS = ("--assert", "--learning", "--mechanism", "--general", "--reason", "--fact",
-              "--notes", "--text", "--because", "--confidence", "--promises", "--doing")
+              "--notes", "--text", "--because", "--confidence", "--promises", "--doing",
+              # the autonomy loop's own prose, and the most expensive to corrupt
+              "--set", "--question", "--predict", "--next",
+              # the evidence family's descriptive halves — what a thing MEANS, not where it lives
+              "--known-state", "--measures", "--connects", "--recheck",
+              # a pin's expectation and its restore command: a command carrying $ or a backtick is
+              # precisely what a shell rewrites on the way past
+              "--expect", "--restore")
 
 # MEASURED, not chosen for roundness. Over the 130 prose values in this repo's log: p50 157, p75
 # 285, p95 632, max 1011. Both corrupted values were over 700. 400 sits above the p95 of every field
