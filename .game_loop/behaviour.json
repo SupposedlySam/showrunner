@@ -15,14 +15,22 @@
     "seq is monotonic and never reused \u2014 it is the ordering, since commit shas have none.",
     "",
     "The test for whether an entry belongs here: would somebody who changed nothing about how they",
-    "use game_loop notice this? If no, leave it out."
+    "use game_loop notice this? If no, leave it out.",
+    "",
+    "AN ENTRY SHOULD NAME THE CONSEQUENCE, not only the change. A consumer of this file demonstrated",
+    "why: it checked four entries in ten minutes instead of reading 1255 lines of guard, and the one",
+    "that mattered most to it was the one whose consequence it had to work out for itself. `change`",
+    "says what moved; `consequence` says what somebody might now do WRONG. The second is the reason",
+    "anyone reads this file, and it is the half an author is worst placed to notice, because the",
+    "author already knows not to make the mistake."
   ],
   "changes": [
     {
       "seq": 1,
       "sha": "61afb2c",
       "verb": "verify",
-      "change": "now re-runs the suite once per stale pattern. Making install.sh, test/run.py and verify.yaml gated files was correct, but a change touching several of them went from roughly one suite run to five \u2014 seconds to 2-4 minutes. Run `verify` as its own earlier step; under an autonomy mandate a verb that quietly became slow reads as an idle session."
+      "change": "now re-runs the suite once per stale pattern. Making install.sh, test/run.py and verify.yaml gated files was correct, but a change touching several of them went from roughly one suite run to five \u2014 seconds to 2-4 minutes. Run `verify` as its own earlier step; under an autonomy mandate a verb that quietly became slow reads as an idle session.",
+      "consequence": "an agent that reads a slow verify as HUNG will interrupt it or route around it, and then commits into a tree whose owed checks never recorded a pass \u2014 the exact failure the instruction exists to prevent. If you brief agents to run verify, tell them to expect minutes and that it has not hung. Reported by a consumer who found this entry mattered more to it than the one written for it."
     },
     {
       "seq": 2,

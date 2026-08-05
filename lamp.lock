@@ -2,11 +2,11 @@
   "lockfileVersion": 1,
   "geanies": {
     "game_loop": {
-      "wish": 25,
-      "sha": "3ca42da8cb07bd5ccdb824ac609cbd606af2abc4",
-      "boundAt": "2026-08-05T16:51:34.404255",
-      "installedSha": "3ca42da8cb07bd5ccdb824ac609cbd606af2abc4",
-      "installedAt": "2026-08-05T16:51:34.766368",
+      "wish": 26,
+      "sha": "8173ec9cd64aff7de115f0fad76c07b430665a3d",
+      "boundAt": "2026-08-05T17:03:40.256367",
+      "installedSha": "8173ec9cd64aff7de115f0fad76c07b430665a3d",
+      "installedAt": "2026-08-05T17:03:40.612091",
       "history": [
         {
           "wish": 4,
@@ -22,6 +22,11 @@
           "wish": 19,
           "sha": "33f08de541d2075440678606aac564b4474ded65",
           "boundAt": "2026-08-05T14:28:25.692750"
+        },
+        {
+          "wish": 25,
+          "sha": "3ca42da8cb07bd5ccdb824ac609cbd606af2abc4",
+          "boundAt": "2026-08-05T16:51:34.404255"
         }
       ]
     }

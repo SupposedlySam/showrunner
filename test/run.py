@@ -21,6 +21,7 @@ Run:  python3 test/run.py [-v]
 import argparse
 import ast
 import filecmp
+import hashlib
 import json
 import re
 import os
@@ -1320,9 +1321,26 @@ def test_claims_about_the_layer_below():
         skip("the cross-layer claim group", "no .game_loop/VERSION — no harness installed here")
         return
     with open(version_f) as fh:
-        installed = fh.read().strip()[:8]
-    ok("the installed harness stamps a version these claims can be checked against",
-       len(installed) == 8, installed)
+        release = fh.read().strip()[:8]
+
+    # Keyed to the PAYLOAD, not the release. Keying on the release was measured wrong: it
+    # fired twice in one hour, and the second time game_loop had shipped a docs-and-manifest
+    # change that touched none of the files these claims cite. A stamp that mostly cries wolf
+    # is one somebody deletes — game_loop declined this very mechanism for that reason, and
+    # was right. The digest fires when the thing the claims are ABOUT moves, and not before.
+    # `.game_loop/bin/` is tracked, so a stranger's clone recomputes the same number.
+    digest = hashlib.sha256()
+    bindir = os.path.join(ROOT, ".game_loop", "bin")
+    payload = sorted(f for f in os.listdir(bindir) if os.path.isfile(os.path.join(bindir, f)))
+    for name in payload:
+        digest.update(name.encode())
+        with open(os.path.join(bindir, name), "rb") as fh:
+            digest.update(fh.read())
+    installed = digest.hexdigest()[:8]
+    ok("the installed harness payload hashes to something these claims can be pinned to",
+       len(payload) > 3 and len(installed) == 8, "%d files → %s" % (len(payload), installed))
+    ok("...and the release is recorded too, so a human can say WHICH game_loop this was",
+       len(release) == 8, release)
 
     # Prose that states another layer's BEHAVIOUR is a measurement with a shelf life, and it
     # reads exactly the same whether it was verified this morning or against a release nobody
@@ -1358,18 +1376,26 @@ def test_claims_about_the_layer_below():
         m = re.search(r"game_loop-verified:\s*([0-9a-f]{8})", fh.read())
         if m:
             stamp = m.group(1)
-    ok("docs/BOUNDARY.md carries the harness version its claims were verified against",
+    ok("docs/BOUNDARY.md carries the harness payload its claims were verified against",
        stamp is not None)
-    ok("...and it is the version actually installed — when this fails, the %d files above "
+    ok("...and it is the payload actually installed — when this fails, the %d files above "
        "state game_loop's behaviour as fact and NONE of them has been re-read against the "
-       "release running here" % len(claim_files),
+       "guards running here" % len(claim_files),
        stamp == installed, "stamped %s, installed %s" % (stamp, installed))
 
     # The comparison is the whole check, so prove it can fail rather than trusting that it
     # would: a stamp that does not match must be rejected. Without this, a regex that quietly
     # stopped matching would read as a permanent pass.
-    ok("...and a stamp naming a different release is rejected, not waved through",
+    ok("...and a stamp naming a different payload is rejected, not waved through",
        "2f51021e" != installed)
+    # What this does NOT fire on, stated with the case rather than as a category: a behaviour
+    # change that touches no file in .game_loop/bin/ — a different installer, a changed default
+    # — moves no byte here and this stays green. That channel is behaviour.json, which game_loop
+    # now gates on its own side; seq 1 (verify going from seconds to minutes) reached every
+    # Crawler here and would not have moved this digest.
+    ok("...and the payload it hashes is the one that actually enforces the claims — the guards, "
+       "not the installer that placed them",
+       any(f.startswith("guard-") for f in payload), payload)
 
     tokens = ("guard-writes", "commit gate", "blast radius", "the gate")
     tracked = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
