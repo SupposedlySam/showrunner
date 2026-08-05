@@ -18,6 +18,7 @@ So this harness is split in two:
 Run:  python3 test/run.py [-v]
 """
 
+import argparse
 import ast
 import filecmp
 import json
@@ -1579,20 +1580,41 @@ def test_cli():
     ok("...and `close`'s flag VALUES are not mistaken for subcommands, which would report a "
        "valid command as dead", not subverbs_of("close"), sorted(subverbs_of("close")))
 
-    # Pinned against argparse's RENDERINGS rather than against this CLI's current help text,
-    # which covers the bracketed form only by accident of `close` also printing a bare one.
-    # llm_chat implemented this same discriminator requiring whitespace before the flag;
-    # argparse writes an optional as `[--to {a,b}]`, so the bracket blocked the match and the
-    # guard silently never fired on the one shape it exists for.
+    # Pinned to what argparse ACTUALLY emits, by building real parsers and asking them — not
+    # to this CLI's current help text, which covered the bracketed form only by accident of
+    # `close` also printing a bare option line. llm_chat implemented this same discriminator
+    # requiring whitespace before the flag, and argparse writes an optional as `[--to {a,b}]`,
+    # so the bracket blocked the match and the guard never fired on the shape it exists for.
+    # Their first fixtures were hand-written and omitted the `options:` section and the `[-h]`
+    # that real argparse emits — a test measuring its author's memory of a format, which is
+    # right or wrong by luck and teaches nothing either way. So: no invented help text here.
     strip = lambda out: re.sub(r"--?[a-z][a-z-]* \{[a-z0-9,\-]+\}", "", out)
-    shapes = {"usage: x [--to {a,b}] [-h]\n": None,        # bracketed optional
-              "  --premise {holds,partial}\n": None,        # bare option line
-              "usage: x [-k {task,epic}]\n": None,          # short flag
-              "usage: x {status,run} ...\n": "status,run"}  # a REAL subparser group survives
-    for text, want in shapes.items():
-        left = re.search(r"\{([a-z0-9,\-]+)\}", strip(text))
-        eq("flag choices are told from subcommands in %r" % text.strip()[:34],
-           left.group(1) if left else None, want)
+
+    flag_p = argparse.ArgumentParser(prog="x")
+    flag_p.add_argument("--to", choices=["a", "b"])
+    flag_p.add_argument("-k", choices=["task", "epic"])
+    sub_p = argparse.ArgumentParser(prog="x")
+    _s = sub_p.add_subparsers()
+    _s.add_parser("status")
+    _s.add_parser("run")
+
+    flag_help, sub_help = flag_p.format_help(), sub_p.format_help()
+    ok("the flag fixture is real argparse output, carrying both renderings it emits — "
+       "`[--to {a,b}]` in usage and `--to {a,b}` in the options list",
+       "[--to {a,b}]" in flag_help and "\n  --to {a,b}" in flag_help, flag_help)
+    ok("flag choices in both renderings are stripped, so they cannot be read as subcommands",
+       not re.search(r"\{[a-z0-9,\-]+\}", strip(flag_help)), strip(flag_help))
+    # The ONLY assertion here that fails if the rule starts removing everything. Three
+    # assertions that things get stripped are all satisfied by a regex that strips the lot.
+    left = re.search(r"\{([a-z0-9,\-]+)\}", strip(sub_help))
+    eq("...and a real subparser group SURVIVES the strip",
+       left.group(1) if left else None, "status,run")
+    # A passing test and a load-bearing test are different claims: re-introduce llm_chat's
+    # exact bug and confirm this notices, rather than inferring it from a green run.
+    naive = re.sub(r"\s--?[a-z][a-z-]* \{[a-z0-9,\-]+\}", "", flag_help)
+    ok("...and the whitespace-requiring version this replaces is CAUGHT, so these assertions "
+       "are load-bearing rather than merely green",
+       bool(re.search(r"\{[a-z0-9,\-]+\}", naive)), naive)
 
     # Everything above reads ONE string literal at a time, so a remedy assembled from f-string
     # pieces or concatenation puts the verb in a different AST node from the rest and no
