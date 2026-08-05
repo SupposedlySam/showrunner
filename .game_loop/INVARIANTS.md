@@ -195,6 +195,20 @@ nothing at all; and `integrate` refusing to merge a rules-drifted tree was imple
 committed, described, and never tested. Costs one extra capture at write time and cannot be
 retrofitted cheaply, which is the worst combination to discover late.
 
+**WHEN THE PAIRING IS POSSIBLE AT ALL**, which took a second repo to see. game_loop generalised
+this as *exercise a presence, version an absence* — its own absences being facts like "no
+`claude usage` flag exists", which no run can confirm. But the secret-staging assertion above is
+an absence and is soundly exercised, because the decoy makes `git add -A` demonstrably fire and
+the secret is still missing from the same output.
+
+So the discriminator is not presence versus absence. It is **whether you control the input that
+would produce the effect**. A *conditional* absence — given this input, nothing happens — is
+exercisable, and the positive control turns it into a discrimination. An *unconditional* absence
+is not, because the case where the fact is false is precisely the one you cannot construct;
+there the version stamp of [INV20] is not the weaker instrument, it is the only one. Two of our
+git premises are conditional and exercised for that reason: a tracked file crossing into a
+worktree, an ignore that is not per-worktree.
+
 ## INV16 — Ask the scoping questions before building, not after being asked
 
 Two questions found real defects in this repo, both times because a human asked them and not
@@ -251,6 +265,34 @@ is the one that stops the search.
 Rung 5, and 1-4 genuinely do not apply: this is a decision *not* to investigate, and an
 absent investigation leaves no artifact for a check to find. What can be enforced is that the
 words are distinctive and this is re-injected every session.
+
+## INV22 — A caveat filed where the reader does not stand is a caveat they never had
+
+The one failure this week where nothing was stale, nobody was misinformed, and the author had
+already done the thinking.
+
+game_loop narrowed its deploy-verb match and recorded the change in `behaviour.json`, the file
+consumers read. Three lines below the fix, in a source comment consumers do not read, it also
+recorded the limit: the bare verb as a whole word in prose *still* trips it. Both written, both
+accurate, minutes apart. From the record, a consumer concludes the false positives are gone and
+drops a workaround they still need. The information existed the whole time and was not where the
+person acting on it stands.
+
+This is not forgetting, and it is worse than forgetting, because there is nothing to remember
+harder. Every individual step is correct — you thought it, you wrote it, you put it somewhere
+reasonable — and the defect exists only relative to a reader positioned elsewhere. No moment in
+the authoring feels like an omission.
+
+I have no mechanism and am not inventing one to round the shape off; that absence is stated so
+it does not read as an oversight somebody plans to fix. The nearest thing that works is a
+question, asked of anything written down for someone else: **what would they DO on the strength
+of this, and does the limit reach them there?** That is rung 6 in a nicer coat, and it is what
+caught this one — from the outside, by the consumer, which may be the only position it is
+visible from.
+
+Rung 4 where the subject is countable: the same instinct is why `test_claims_about_the_layer_below`
+stamps the claims a Crawler is handed rather than trusting that whoever wrote them also warned
+whoever reads them.
 
 ## INV21 — A printed remedy is a claim that a command exists
 
