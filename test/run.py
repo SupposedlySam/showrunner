@@ -1441,6 +1441,54 @@ def test_cli():
                        text=True, env=env)
     eq("`stop-gate` exits 2 while a claimed leaf is open", p.returncode, 2)
 
+    # A REMEDY IS A CLAIM THAT A COMMAND EXISTS, and nothing here was checking it. The usual
+    # docs check runs the other way — every verb the CLI defines must be documented — which
+    # cannot notice a printed instruction naming a verb that was renamed or never existed.
+    # Found live: the br backend's stale-claims refusal told the reader to run `showrunner
+    # campaign`, which argparse rejects outright. That string fires only when someone is
+    # ALREADY blocked, so the one path that reaches it is the one that hands out a dead end.
+    p = subprocess.run([sys.executable, exe, "--help"], capture_output=True, text=True)
+    m = re.search(r"\{([a-z0-9,\-]+)\}", p.stdout)
+    verbs = set(m.group(1).split(",")) if m else set()
+    ok("the CLI's own verb list is readable, so this check has something to compare against",
+       len(verbs) > 10, sorted(verbs))
+
+    # Command POSITION, not a vocabulary of prose words: a denylist of English would have to
+    # grow every time someone writes "showrunner ships" in a sentence, and a list that grows
+    # with the language is a list that will be wrong. A remedy is written in backticks or in
+    # a fenced block; ordinary prose is not. That discriminator stays fixed as the docs grow.
+    def commands_in(text):
+        spans = re.findall(r"`([^`\n]+)`", text)
+        for block in re.findall(r"```[a-z]*\n(.*?)```", text, re.S):
+            spans.extend(block.splitlines())
+        for span in spans:
+            m = re.match(r"\s*showrunner ([a-z][a-z-]+)", span)
+            if m:
+                yield m.group(1)
+
+    scanned = ["README.md", "llms.txt"] + sorted(
+        os.path.join("lib", "showrunner", f)
+        for f in os.listdir(os.path.join(ROOT, "lib", "showrunner")) if f.endswith(".py"))
+    dead, seen = [], 0
+    for rel_path in scanned:
+        try:
+            with open(os.path.join(ROOT, rel_path), errors="ignore") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        for word in commands_in(text):
+            seen += 1
+            if word not in verbs:
+                dead.append("%s: showrunner %s" % (rel_path, word))
+    ok("every `showrunner <verb>` this repo prints or documents is a verb the CLI actually "
+       "accepts — a remedy naming a command that does not exist is worse than no remedy",
+       not dead, sorted(set(dead)))
+    # Pure observation passes by finding nothing, which is also what a broken regex returns.
+    ok("...and it found commands to check at all, so a PASS means they were verified rather "
+       "than that the scan matched nothing", seen > 5, seen)
+    ok("...and a verb the CLI rejects is caught rather than waved through",
+       "campaign" not in verbs and bool(list(commands_in("run `showrunner campaign` now"))))
+
 
 # ===================================================== OPTIONAL: br, tmux
 def test_optional():

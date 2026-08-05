@@ -458,7 +458,9 @@ class BrGraph:
         raise Refused(
             "the br backend records no owner liveness on a claim, so abandoned claims "
             "cannot be detected here (issue #7). Reap against the vendored backend, or "
-            "track Crawler liveness in the campaign record (`showrunner campaign`).",
+            "spawn through `showrunner spawn`, which records a live PID in the campaign "
+            "record — `showrunner status` shows it and `showrunner reap` acts on it, "
+            "neither of which goes through the graph backend.",
             code=3)
 
     def claim(self, leaf_id, actor, pid=None, tree=None, session=None):

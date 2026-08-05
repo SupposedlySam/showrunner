@@ -252,6 +252,30 @@ Rung 5, and 1-4 genuinely do not apply: this is a decision *not* to investigate,
 absent investigation leaves no artifact for a check to find. What can be enforced is that the
 words are distinctive and this is re-injected every session.
 
+## INV21 — A printed remedy is a claim that a command exists
+
+Every refusal here ends by telling the reader what to run. That closing line is an assertion
+about the CLI, made in prose, and it was the only kind of assertion nothing checked. The br
+backend's stale-claims refusal said to run `showrunner campaign`. There is no such verb;
+argparse rejects it outright. It had never been run, because the only way to reach it is to
+already be blocked — the string exists precisely for the person least able to work around it.
+
+The usual docs check runs the other direction: every verb the CLI defines must appear in the
+docs. That check passes forever while a remedy names a verb that was renamed or never existed,
+because it is looking at the set of real verbs and asking whether they are mentioned — never at
+the set of mentioned verbs and asking whether they are real. Both directions are needed and
+only one is conventional.
+
+Rung 4, in `test_cli`: every `showrunner <verb>` written in backticks or a fenced block, across
+the docs and every module, must be a verb the CLI accepts. The discriminator is command
+POSITION rather than a vocabulary of prose words — a denylist of English would need a new entry
+every time someone writes "showrunner ships", and a list that grows with the language is a list
+that will be wrong. Position stays fixed as the docs grow.
+
+Paired with a count, because a scan that matches nothing passes exactly like a scan that
+verified everything; and proved end-to-end by reintroducing the real dead command and watching
+it fail, rather than trusting that it would.
+
 ## INV20 — A stated LIMIT ages exactly like a stated PREMISE
 
 INV14 says to verify premises about our own repos. A premise is a claim I *act* on, so it gets
