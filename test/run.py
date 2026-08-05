@@ -1579,6 +1579,21 @@ def test_cli():
     ok("...and `close`'s flag VALUES are not mistaken for subcommands, which would report a "
        "valid command as dead", not subverbs_of("close"), sorted(subverbs_of("close")))
 
+    # Pinned against argparse's RENDERINGS rather than against this CLI's current help text,
+    # which covers the bracketed form only by accident of `close` also printing a bare one.
+    # llm_chat implemented this same discriminator requiring whitespace before the flag;
+    # argparse writes an optional as `[--to {a,b}]`, so the bracket blocked the match and the
+    # guard silently never fired on the one shape it exists for.
+    strip = lambda out: re.sub(r"--?[a-z][a-z-]* \{[a-z0-9,\-]+\}", "", out)
+    shapes = {"usage: x [--to {a,b}] [-h]\n": None,        # bracketed optional
+              "  --premise {holds,partial}\n": None,        # bare option line
+              "usage: x [-k {task,epic}]\n": None,          # short flag
+              "usage: x {status,run} ...\n": "status,run"}  # a REAL subparser group survives
+    for text, want in shapes.items():
+        left = re.search(r"\{([a-z0-9,\-]+)\}", strip(text))
+        eq("flag choices are told from subcommands in %r" % text.strip()[:34],
+           left.group(1) if left else None, want)
+
     # Everything above reads ONE string literal at a time, so a remedy assembled from f-string
     # pieces or concatenation puts the verb in a different AST node from the rest and no
     # amount of reading either node matches it. llm_chat shipped exactly that and its clean
