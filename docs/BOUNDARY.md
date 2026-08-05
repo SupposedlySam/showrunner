@@ -236,7 +236,9 @@ Stated so it can be re-checked rather than trusted, each re-read against the har
 installed here. `test/run.py` fails when that version moves, so this list cannot quietly
 describe a release nobody is running.
 
-<!-- game_loop-verified: fa311367 (release 8173ec9c) -->
+<!-- game_loop-verified: fa311367 — payload digest, gated. First shipped in release 8173ec9c,
+     which is a past measurement and stays true; it is NOT a claim about what is installed now. -->
+
 
 - The commit gate resolves **per target tree** and denies in two cases: when that tree carries
   no harness (`guard-writes-impl.sh:685`), and when the target is built from a **shell

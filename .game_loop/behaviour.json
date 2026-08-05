@@ -22,7 +22,19 @@
     "that mattered most to it was the one whose consequence it had to work out for itself. `change`",
     "says what moved; `consequence` says what somebody might now do WRONG. The second is the reason",
     "anyone reads this file, and it is the half an author is worst placed to notice, because the",
-    "author already knows not to make the mistake."
+    "author already knows not to make the mistake.",
+    "",
+    "EVERY ENTRY CARRIES EVERY FIELD, and the suite refuses one that does not. Adding `consequence` to",
+    "seq 1 alone reproduced the exact defect the field was added to fix: for the other four a consumer",
+    "reading `consequence` got nothing, and nothing distinguished 'predates the field' from 'the",
+    "author judged there is no consequence'. Two causes, one indistinguishable result, and only the",
+    "author holds the difference. If an entry genuinely has no consequence, say so IN the field with a",
+    "reason -- an absence must be a decision, not a gap.",
+    "",
+    "`schema` is an integer and consumers should pin to it. This file announces changes to game_loop's",
+    "verbs and nothing announced changes to THIS FILE: adding a field is safe, but renaming `change`",
+    "or dropping `why_it_qualifies` would break a programmatic reader silently. Bump it when a field",
+    "is renamed or removed; adding one does not require a bump."
   ],
   "changes": [
     {
@@ -30,35 +42,41 @@
       "sha": "61afb2c",
       "verb": "verify",
       "change": "now re-runs the suite once per stale pattern. Making install.sh, test/run.py and verify.yaml gated files was correct, but a change touching several of them went from roughly one suite run to five \u2014 seconds to 2-4 minutes. Run `verify` as its own earlier step; under an autonomy mandate a verb that quietly became slow reads as an idle session.",
-      "consequence": "an agent that reads a slow verify as HUNG will interrupt it or route around it, and then commits into a tree whose owed checks never recorded a pass \u2014 the exact failure the instruction exists to prevent. If you brief agents to run verify, tell them to expect minutes and that it has not hung. Reported by a consumer who found this entry mattered more to it than the one written for it."
+      "consequence": "an agent that reads a slow verify as HUNG will interrupt it or route around it, and then commits into a tree whose owed checks never recorded a pass \u2014 the exact failure the instruction exists to prevent. If you brief agents to run verify, tell them to expect minutes and that it has not hung. Reported by a consumer who found this entry mattered more to it than the one written for it.",
+      "why_it_qualifies": "the first entry, written before the field existed"
     },
     {
       "seq": 2,
       "sha": "6acd0c1",
       "verb": "commit / bash",
       "change": "a configured deploy verb now matches as a WORD, not a substring. Calls that were REFUSED for containing one inside ordinary English \u2014 'file surgery' contains 'surge', 'docker pushed' contains a default verb \u2014 now run. If you had worked around a false block by rewording a command, the reword is no longer needed.",
-      "why_it_qualifies": "an existing verb stopped refusing calls it used to refuse"
+      "why_it_qualifies": "an existing verb stopped refusing calls it used to refuse",
+      "consequence": "if you worked around a FALSE block \u2014 rewording a command, or deleting a verb from deploy_verbs to get past it \u2014 the workaround is now unnecessary AND the deleted verb is no longer blocked at all. Check deploy_verbs still lists what you meant it to."
     },
     {
       "seq": 3,
       "sha": "55c9761",
       "verb": "commit",
       "change": "a commit whose TARGET TREE is built from a variable (git -C \"$TREE\" commit, or a cd through a variable) is now DENIED. It previously passed SILENTLY, because the gate could not read the path and treated unreadable as fine. Nothing about how you commit has to change for this to start blocking you.",
-      "why_it_qualifies": "silent pass became a denial \u2014 the sharpest kind of entry this file is for, and it went unrecorded for weeks while a consumer taught its agents the old behaviour as a measured finding"
+      "why_it_qualifies": "silent pass became a denial \u2014 the sharpest kind of entry this file is for, and it went unrecorded for weeks while a consumer taught its agents the old behaviour as a measured finding",
+      "consequence": "an orchestrator committing through `git -C \"$TREE\"` for weeks, changing nothing, is now BLOCKED. And any brief that told agents a variable-built target passes silently is now false \u2014 which is how this was found: a consumer had read the old behaviour correctly, written it down, and could not tell a stale reading from an absent record."
     },
     {
       "seq": 4,
       "sha": "5f8f2db",
       "verb": "every verb taking prose",
       "change": "an INLINE value over 400 characters is now REFUSED, and must come from the option's --<name>-file twin. A long --notes, --learning or --assert that worked yesterday stops working today. The bound exists because a quoted shell argument is code to the shell first and mangled prose is indistinguishable from short prose.",
-      "why_it_qualifies": "an existing verb refuses input it used to accept"
+      "why_it_qualifies": "an existing verb refuses input it used to accept",
+      "consequence": "a script or an agent that composes a long --notes/--learning/--assert inline fails at the point of the call. In an unattended run that costs the turn, so move composed prose to the --<name>-file twin BEFORE you rely on it rather than after it refuses."
     },
     {
       "seq": 5,
       "sha": "523de54",
       "verb": "MCP calls",
       "change": "a state-changing verb that nobody enumerated now reaches the standing-writes / authorize POLICY instead of failing closed before it. Calls that were refused as unclassifiable \u2014 resolve, merge-adjacent review verbs on first-party servers \u2014 are now governed by your mcp_writes and mcp_standing_writes settings rather than blocked outright. It does not make them free; it makes them decidable.",
-      "why_it_qualifies": "an existing verb stopped refusing outright and started deferring to policy, which changes what an unattended run can complete"
+      "why_it_qualifies": "an existing verb stopped refusing outright and started deferring to policy, which changes what an unattended run can complete",
+      "consequence": "if you were relying on unclassifiable-verbs-fail-closed as your safety margin, that margin is now your mcp_writes and mcp_standing_writes settings instead. Read them and confirm they say what you meant; the default is still `gated`, so an unconfigured project is unchanged."
     }
-  ]
+  ],
+  "schema": 1
 }
