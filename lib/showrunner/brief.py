@@ -82,6 +82,12 @@ The refusal says "run verify" without saying where, and with several Crawlers ru
 is more than one candidate — but only this tree's record can clear this tree's gate. Do not
 run it in the main checkout, and do not reach for `--no-verify`.
 
+**Expect `verify` to take minutes, not seconds**, and run it as its own earlier step rather
+than in front of the commit you want. It re-runs the suite once per stale pattern, so a change
+touching several gated files costs several suite runs. It has not hung and it does not need
+interrupting; a verb that quietly became slow is easy to mistake for a wedged session, which
+is the mistake to avoid here.
+
 **Do not chain staging with committing.** Run them as separate calls:
 
     git add -A

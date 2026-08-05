@@ -242,7 +242,7 @@ def tokens(name):
 READ_VERBS = {
     "get", "list", "read", "search", "find", "view", "show", "fetch", "describe", "inspect",
     "count", "stat", "status", "diff", "log", "logs", "head", "tail", "query", "select",
-    "check", "exists", "browse", "enumerate", "peek", "print", "info",
+    "check", "exists", "browse", "enumerate", "peek", "print", "info", "lookup",
 }
 
 # Mutating / irreversible verbs, recognised in FIRST position (the verb slot of a vendor name).
@@ -258,7 +258,32 @@ MUTATE_VERBS = {
     "assign", "unassign", "invite", "revoke", "grant", "ban", "kick", "mute", "lock", "unlock",
     "enable", "disable", "subscribe", "unsubscribe", "sync", "migrate", "provision", "scale",
     "rotate", "sign", "pay", "charge", "refund", "order", "book", "schedule", "clear",
+    # State-changing verbs that first-party servers actually use, added because their absence
+    # dead-ended real work rather than because anything unsafe got through. Naming a verb here does
+    # NOT allow it: MUTATE_VERBS routes a call to the standing-writes / authorize policy, which is
+    # the same gate `edit` and `create` already pass through. That asymmetry is the whole argument
+    # for erring in this direction — a mutating verb mistakenly left UNCLASSIFIED fails closed and
+    # strands the agent, while a mutating verb mistakenly called READ-ONLY is a real bypass. So when
+    # a verb is genuinely ambiguous, MUTATE is the cheap side to be wrong on.
+    #
+    # Observed: a completed PR review could post its comments (`add`, `create`, `approve` — all
+    # classified) but could not resolve the threads it had just verified (`resolve` — unclassified,
+    # refused), so the review could not be finished unattended. An audit of the three servers a
+    # project had already granted standing writes found 19 of 38 tools in that same bucket, most of
+    # one whole first-party server, because its tool names lead with verbs nobody had enumerated.
+    #
+    # Review-thread and issue state: reversible, and the inverse of verbs already listed
+    # (`reopen`, `unarchive`, `unapprove`).
+    "resolve", "unresolve", "minimize", "unminimize", "convert", "transition",
+    # Device / app lifecycle and on-device effectors: each one ACTS on a running target, which is
+    # exactly what `start`/`stop`/`restart` above already cover.
+    "background", "foreground", "hot", "setup", "build", "open", "key", "pointer", "record",
+    "screenshot",
 }
+# Deliberately still UNCLASSIFIED, so they keep failing closed: verb slots that are real words in a
+# read-only tool name but far too generic to whitelist globally — the leading token of
+# `systemPrompt` or `atlassianUserInfo`, for instance. A project that wants those named can list the
+# exact tool in config.json -> mcp_read_only_tools, the right grain for a call only it can make.
 
 # Verbs so destructive they count ANYWHERE in the name, not just in the verb slot — this is what
 # catches `branchForcePush` or `getOrDeleteRecord`. Kept small and unambiguous: each of these is

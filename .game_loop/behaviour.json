@@ -1,6 +1,6 @@
 {
   "//": [
-    "BEHAVIOUR CHANGES — what an existing verb now COSTS or REFUSES differently.",
+    "BEHAVIOUR CHANGES \u2014 what an existing verb now COSTS or REFUSES differently.",
     "",
     "Not a changelog. A new verb costs nothing until you reach for it and can be discovered",
     "whenever; an existing verb that starts costing minutes, or refusing where it used to warn,",
@@ -12,7 +12,7 @@
     "the record as of your install. `status` compares it against the one on main and names only the",
     "entries you have not seen. No extra stamping, and nothing to keep in sync by hand.",
     "",
-    "seq is monotonic and never reused — it is the ordering, since commit shas have none.",
+    "seq is monotonic and never reused \u2014 it is the ordering, since commit shas have none.",
     "",
     "The test for whether an entry belongs here: would somebody who changed nothing about how they",
     "use game_loop notice this? If no, leave it out."
@@ -22,7 +22,35 @@
       "seq": 1,
       "sha": "61afb2c",
       "verb": "verify",
-      "change": "now re-runs the suite once per stale pattern. Making install.sh, test/run.py and verify.yaml gated files was correct, but a change touching several of them went from roughly one suite run to five — seconds to 2-4 minutes. Run `verify` as its own earlier step; under an autonomy mandate a verb that quietly became slow reads as an idle session."
+      "change": "now re-runs the suite once per stale pattern. Making install.sh, test/run.py and verify.yaml gated files was correct, but a change touching several of them went from roughly one suite run to five \u2014 seconds to 2-4 minutes. Run `verify` as its own earlier step; under an autonomy mandate a verb that quietly became slow reads as an idle session."
+    },
+    {
+      "seq": 2,
+      "sha": "6acd0c1",
+      "verb": "commit / bash",
+      "change": "a configured deploy verb now matches as a WORD, not a substring. Calls that were REFUSED for containing one inside ordinary English \u2014 'file surgery' contains 'surge', 'docker pushed' contains a default verb \u2014 now run. If you had worked around a false block by rewording a command, the reword is no longer needed.",
+      "why_it_qualifies": "an existing verb stopped refusing calls it used to refuse"
+    },
+    {
+      "seq": 3,
+      "sha": "55c9761",
+      "verb": "commit",
+      "change": "a commit whose TARGET TREE is built from a variable (git -C \"$TREE\" commit, or a cd through a variable) is now DENIED. It previously passed SILENTLY, because the gate could not read the path and treated unreadable as fine. Nothing about how you commit has to change for this to start blocking you.",
+      "why_it_qualifies": "silent pass became a denial \u2014 the sharpest kind of entry this file is for, and it went unrecorded for weeks while a consumer taught its agents the old behaviour as a measured finding"
+    },
+    {
+      "seq": 4,
+      "sha": "5f8f2db",
+      "verb": "every verb taking prose",
+      "change": "an INLINE value over 400 characters is now REFUSED, and must come from the option's --<name>-file twin. A long --notes, --learning or --assert that worked yesterday stops working today. The bound exists because a quoted shell argument is code to the shell first and mangled prose is indistinguishable from short prose.",
+      "why_it_qualifies": "an existing verb refuses input it used to accept"
+    },
+    {
+      "seq": 5,
+      "sha": "523de54",
+      "verb": "MCP calls",
+      "change": "a state-changing verb that nobody enumerated now reaches the standing-writes / authorize POLICY instead of failing closed before it. Calls that were refused as unclassifiable \u2014 resolve, merge-adjacent review verbs on first-party servers \u2014 are now governed by your mcp_writes and mcp_standing_writes settings rather than blocked outright. It does not make them free; it makes them decidable.",
+      "why_it_qualifies": "an existing verb stopped refusing outright and started deferring to policy, which changes what an unattended run can complete"
     }
   ]
 }

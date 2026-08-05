@@ -236,7 +236,7 @@ Stated so it can be re-checked rather than trusted, each re-read against the har
 installed here. `test/run.py` fails when that version moves, so this list cannot quietly
 describe a release nobody is running.
 
-<!-- game_loop-verified: 33f08de5 -->
+<!-- game_loop-verified: 3ca42da8 -->
 
 - The commit gate resolves **per target tree** and denies in two cases: when that tree carries
   no harness (`guard-writes-impl.sh:685`), and when the target is built from a **shell
@@ -246,9 +246,9 @@ describe a release nobody is running.
   however many trees it touches. (`EDITED_F` at line 243; stated at line 780.)
 - The blast-radius check is a **warning, never a denial** — `blast_note` reaches `note` and
   nothing else (lines 762, 1245) — and is silent when the session recorded no edits (line 777).
-- `install.sh` seeds user-owned files **only if absent** (lines 433-440), and ships
+- `install.sh` seeds user-owned files **only if absent** (line 442), and ships
   `templates/verify.yaml` empty — 0 non-comment lines.
-- Hooks are merged into `<project>/.claude/settings.json` (lines 508-556), so a worktree
+- Hooks are merged into `<project>/.claude/settings.json` (line 517), so a worktree
   without one has no rails at all.
 
 If any of these stops being true, `lib/showrunner/harness.py` and the shared-state audit in

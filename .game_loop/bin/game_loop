@@ -4221,8 +4221,33 @@ def cmd_confidence(s, a):
     out(f"✓ MARKED {a.mark.upper()} — {tag}",
         *["  " + l for l in lines],
         "")
-    if moved:
-        out(f"→ push BOTH, or nobody else can see it:",
+    # IS THIS COMMIT ACTUALLY ON THE BRANCH CONSUMERS TRACK? Pushing the channel pointer at a commit
+    # that is not on main hands every consumer a tree reachable only by that tag — and if the commit
+    # is later rebased away, the pointer names something no branch contains.
+    #
+    # NOT HYPOTHETICAL. I did it today, to this repo: another agent pushed to main while I worked,
+    # my `git push origin main` was REJECTED as non-fast-forward, and I pushed the tag and the
+    # channel anyway because they were separate commands and the failure was three lines up. For
+    # several minutes `stable` named a commit missing that agent's work, which my own rebase then
+    # orphaned. A consumer installing in that window would have got it, and nothing would have said so.
+    upstream = subprocess.run(["git", "rev-parse", "--abbrev-ref", "@{upstream}"], cwd=REPO_ROOT,
+                              capture_output=True, text=True)
+    on_upstream = None
+    if upstream.returncode == 0 and upstream.stdout.strip():
+        anc = subprocess.run(["git", "merge-base", "--is-ancestor", sha, upstream.stdout.strip()],
+                             cwd=REPO_ROOT, capture_output=True, text=True)
+        on_upstream = anc.returncode == 0
+    if moved and on_upstream is False:
+        out("⚠ THIS COMMIT IS NOT ON YOUR UPSTREAM BRANCH YET, so pushing the channel pointer now",
+            "  would aim every consumer at a commit no branch contains — and a rebase would orphan",
+            "  it entirely. PUSH THE BRANCH FIRST and only push the pointer once that SUCCEEDS:",
+            f"    git push origin HEAD          # if this is rejected, STOP — do not push below",
+            f"    git push origin {tag}",
+            f"    git push origin --force {a.mark}",
+            "  The order is load-bearing, not tidiness.")
+    elif moved:
+        out(f"→ push these IN ORDER, and stop if one is rejected:",
+            f"    git push origin HEAD                  # the branch consumers track — FIRST",
             f"    git push origin {tag}",
             f"    git push origin --force {a.mark}      # the channel pointer consumers install from",
             f"  `{a.mark}` now names this commit, so `GAME_LOOP_CHANNEL={a.mark} ./install.sh <dir>`",
@@ -4320,6 +4345,176 @@ def installed_by():
             "upgrade": up[:200]}
 
 
+CLAIMS_F = os.path.join(ROOT, "claims.json")
+
+
+def running_host_version():
+    """(version, how) for the Claude Code actually running this session — or (None, why not).
+
+    BEST EFFORT, AND THE FIRST OBVIOUS ANSWER IS WRONG. `claude --version` reads whatever is on
+    PATH, which is NOT necessarily the binary running this session: measured on this machine, PATH's
+    claude said 2.1.145 while CLAUDE_CODE_EXECPATH pointed at a 2.1.222 install. A check built on
+    the PATH answer would confidently name the wrong subject, which is worse than naming none.
+
+    So the execpath is preferred -- it names the running binary -- and its version is read from the
+    path rather than by forking it, because this runs inside `status` and a fork per status is a
+    cost nobody asked for. Neither is guaranteed: absence returns None with a reason, and every
+    caller must treat that as UNKNOWN rather than as agreement.
+    """
+    p = os.environ.get("CLAUDE_CODE_EXECPATH") or ""
+    m = re.search(r"claude-code[-_]?v?(\d+\.\d+\.\d+)", p)
+    if m:
+        return m.group(1), "the running binary's path"
+    if p:
+        return None, "CLAUDE_CODE_EXECPATH is set but carries no version"
+    return None, "no CLAUDE_CODE_EXECPATH in the environment"
+
+
+def _statusline_claim_live():
+    """A description of the live evidence that the host still sends rate_limits — or None.
+
+    THE TAP IS THE EXERCISE. game_loop's own statusline writes limits.json straight from the host's
+    payload, so a snapshot carrying the expected shape is not a record of somebody having checked:
+    it is the claim holding, on this machine, this run. Absence is NOT disproof — the tap may simply
+    never have run, which is the normal case on a host with no terminal statusline — so this returns
+    None and the caller says it cannot tell which, rather than reporting the claim broken.
+    """
+    try:
+        with open(LIMITS_F) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict):
+        return None
+    for w in ("five_hour", "seven_day"):
+        v = d.get(w)
+        if isinstance(v, dict) and "used_percentage" in v:
+            return f"{w} snapshot with used_percentage present"
+    return None
+
+
+def _windows_claim_live():
+    """Evidence about "only five_hour and seven_day windows appear" — or None if none was produced.
+
+    THE POSITIVE CONTROL IS WHAT MAKES AN ABSENCE MEAN ANYTHING (showrunner). "No third window" is
+    trivially true of an empty file, of a missing file, and of a parser that stopped working: the
+    claim would read as confirmed by every kind of nothing. So this reports only when at least one
+    KNOWN window is present — that is the mechanism demonstrably firing — and then says whether a
+    window nobody expected came with it.
+
+    Which is the sharper form of the rule I got wrong and stated publicly: the discriminator is not
+    presence versus absence, it is whether you control the input that would produce the effect. I
+    control this one, because our own tap writes the snapshot.
+    """
+    try:
+        with open(LIMITS_F) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict):
+        return None
+    windows = {k for k, v in d.items() if isinstance(v, dict) and "used_percentage" in v}
+    known = windows & {"five_hour", "seven_day"}
+    if not known:
+        return None                      # no control fired; an absence here proves nothing
+    extra = sorted(windows - {"five_hour", "seven_day"})
+    if extra:
+        return (False, "a window this claim says does not exist is present: " + ", ".join(extra))
+    return (True, f"{len(known)} known window(s) present and no others — the read worked and the "
+                  "unexpected window is genuinely absent")
+
+
+def external_claims_report():
+    """What this harness believes about its HOST, when it last checked, and against what.
+
+    Rung 5 on purpose. Nothing here can decide whether a claim still holds -- that needs a person
+    reading a doc -- so this refuses to imply it did. It makes "these have never been re-checked"
+    visible instead of buried in a ledger nobody opens.
+    """
+    try:
+        with open(CLAIMS_F) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return []
+    blocks = [(k, v) for k, v in d.items() if k != "//" and isinstance(v, dict)]
+    if not blocks:
+        return []
+    lines = []
+    for _k, b in blocks:
+        n = len(b.get("claims") or [])
+        on, against = b.get("verified_on") or "?", b.get("verified_against")
+        head = f"  claims : {n} load-bearing claim(s) about {b.get('subject', _k)}"
+        lines.append(head)
+        run, how = running_host_version()
+        if against and run and against != run:
+            lines.append(f"           ⚠ VERIFIED AGAINST {against}, RUNNING {run} ({how}) — re-read "
+                         "them; the subject moved.")
+        elif against and run:
+            lines.append(f"           verified against {against}, and that is what is running.")
+        elif not against:
+            # The absence IS the report. Saying "up to date" here would be the exact silence this
+            # whole file exists to remove.
+            lines.append(f"           last verified {on}, against an UNRECORDED version — so "
+                         "nothing can be compared")
+            lines.append("           and no run since has re-checked them. The first "
+                         "re-verification records a version")
+            lines.append("           and makes them checkable; until then this is a date, not an "
+                         "assurance.")
+        else:
+            lines.append(f"           last verified {on}; the running version is UNKNOWN ({how}), "
+                         "so no comparison was made.")
+        # AN EXERCISE OUTRANKS A STAMP, and is reported first when one exists (showrunner).
+        # A stamp records that the AUTHOR verified something on the AUTHOR's machine and then
+        # asserts it about a stranger's. An exercise checks it on the stranger's, every run, and
+        # cannot go stale because there is no recorded answer to rot.
+        # A CONDITIONAL absence, exercised through the same snapshot: the control is a known window
+        # being present at all, and the claim is that no third one came with it.
+        for c in (b.get("claims") or []):
+            if c.get("id") != "no-weekly-opus-window":
+                continue
+            w = _windows_claim_live()
+            if w is None:
+                lines.append("           · 'no-weekly-opus-window' is exercisable and unobserved: "
+                             "no snapshot, so its")
+                lines.append("             positive control did not run, and its absence would "
+                             "prove nothing.")
+            elif w[0]:
+                lines.append(f"           ✓ 'no-weekly-opus-window' CONFIRMED LIVE — {w[1]}.")
+            else:
+                lines.append(f"           ⚠ 'no-weekly-opus-window' IS NO LONGER TRUE — {w[1]}.")
+        # DECLARED DEBTS, not passes: exercisable, the control identified, nobody has written it.
+        debts = [c for c in (b.get("claims") or []) if c.get("exercisable") == "yes-not-yet"]
+        for c in debts:
+            lines.append(f"           · '{c['id']}' is exercisable and NOT YET exercised — "
+                         "a declared gap, not a pass.")
+        hard = [c for c in (b.get("claims") or []) if c.get("exercisable") == "no"]
+        if hard:
+            lines.append(f"           the remaining {len(hard)} are UNCONDITIONAL: the case where "
+                         "each is false is the one")
+            lines.append("           that cannot be constructed, so there is nothing to provoke "
+                         "and a stamp is the only")
+            lines.append("           instrument there is. (Saying that of ALL of them was wrong, "
+                         "and it was wrong here.)")
+        ex = [c for c in (b.get("claims") or []) if c.get("exercised_by")]
+        for c in ex:
+            live = _statusline_claim_live()
+            if live:
+                lines.append(f"           ✓ '{c['id']}' CONFIRMED LIVE here — {live}. Observed on "
+                             "this machine, not")
+                lines.append("             taken from a stamp, so it cannot be stale.")
+            else:
+                lines.append(f"           ✗ '{c['id']}' is exercisable and has NOT been observed "
+                             "here: no snapshot in the")
+                lines.append(f"             expected shape. Either the tap has never run, or the "
+                             "claim no longer holds —")
+                lines.append("             this cannot tell which, and does not pretend to.")
+        if b.get("why_it_matters"):
+            lines.append(f"           if they moved: {b['why_it_matters']}")
+    lines.append("  → this never checks whether a claim is TRUE. It only stops one going stale "
+                 "quietly.")
+    return lines
+
+
 def update_notice():
     """A one-line 'a newer game_loop is on main — re-install' note, or None. Silent unless BOTH the
     installed sha (VERSION) and the latest sha are known and they differ."""
@@ -4348,6 +4543,28 @@ def update_notice():
     rel = _compare_versions(repo, api, latest, inst)
     if rel in ("identical", "ahead"):
         return None                    # at or past the latest this check knows about — nothing owed
+    if rel == "diverged":
+        # THE INSTALLED COMMIT IS NOT ON THE BRANCH AT ALL, and every other signal says fine: the
+        # payload is complete, VERSION is stamped, CONFIDENCE may well say stable. That combination
+        # is what a commit orphaned by a rebase or a force-push looks like from inside a consumer,
+        # and until now this reported it as an ordinary "an update is available".
+        #
+        # I CAUSED ONE. A channel pointer was pushed at a commit whose branch push had been rejected,
+        # so for minutes `stable` named a tree on no branch; my own rebase then orphaned it. The
+        # producer-side guard that now prevents it only helps people who install AFTERWARDS —
+        # anyone who installed during the window could not discover it, and depended on me noticing
+        # and writing to everyone who might have. A downstream maintainer made that point and it is
+        # the half that could not see anything. This is that half.
+        return (f"⚠ THE COMMIT THIS WAS INSTALLED FROM IS NOT ON {repo}'s main.\n"
+                f"  Installed {inst[:8]}; it is not an ancestor of {latest[:8]}, so it was very "
+                f"likely orphaned\n"
+                f"  by a rebase or a force-push after you installed. Everything else looks normal — "
+                f"the payload\n"
+                f"  is complete and VERSION is stamped — which is exactly why this needs saying.\n"
+                f"  → re-install from a ref that a branch contains:\n"
+                f"    export GAME_LOOP_CHANNEL=stable\n"
+                f"    curl -fsSL https://raw.githubusercontent.com/{repo}/main/install.sh | "
+                f"bash -s -- .")
     if rel is None:
         # Could not determine is not the same as behind. Say what is known and no more, rather than
         # sending somebody to re-install over a difference that may be their own copy running ahead.
@@ -4569,6 +4786,9 @@ def coverage_report(s):
     lines.append("           A deploy verb nobody listed is NOT blocked — this is the one rail here "
                  "that defaults to")
     lines.append('           ALLOW. Add yours: config.json → "deploy_verbs".')
+    # The rails above are what this repo controls. The claims below are what it does not, and a
+    # coverage report that names only the first half implies the second half is settled.
+    lines += external_claims_report()
     lines.append("  → NONE of this sees: a mutation made through an MCP tool, an interpreter "
                  "one-liner, or a path")
     lines.append("    built from a shell variable; nor whether a listed check is real or a "
