@@ -259,14 +259,46 @@ def now():
     return datetime.datetime.now().isoformat(timespec="seconds")
 
 
+CONFIG_LOCAL_F = os.path.join(ROOT, "config.local.json")
+
+
 def config():
+    """config.json, then config.local.json on top — the second one GITIGNORED.
+
+    config.json is a tracked, user-owned file AND the seed a fresh install copies from. So a value
+    that is true of one machine -- a path, a tracked issue queue, a command that only exists here --
+    does not merely clutter this repo's config: it becomes the DEFAULT for everybody who installs
+    from it. This project has already had to remove one leak of exactly that kind from its docs.
+
+    The precedent is already here and this closes the gap in it: notify.json and triggers.json are
+    gitignored because they are site wiring. Config had no such home, so anything site-specific had
+    to go in the tracked file or nowhere.
+
+    A shallow update, deliberately, matching how config.json itself layers over the defaults --
+    nested keys are replaced whole rather than merged, so "watchdog" here means THIS watchdog block
+    and not a half of one. `status` names when an override is live, because a config you cannot see
+    is a divergence nobody can explain.
+    """
     cfg = dict(DEFAULT_CONFIG)
-    try:
-        with open(CONFIG_F) as f:
-            cfg.update(json.load(f))
-    except (OSError, ValueError):
-        pass
+    for f_ in (CONFIG_F, CONFIG_LOCAL_F):
+        try:
+            with open(f_) as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                cfg.update(d)
+        except (OSError, ValueError):
+            continue
     return cfg
+
+
+def config_local_keys():
+    """The keys config.local.json is overriding, for reporting. Never a decision."""
+    try:
+        with open(CONFIG_LOCAL_F) as f:
+            d = json.load(f)
+        return sorted(d) if isinstance(d, dict) else []
+    except (OSError, ValueError):
+        return []
 
 
 def load():
@@ -495,7 +527,14 @@ def fire_triggers(s, event, payload):
             timeout = max(1.0, float(t.get("timeout_sec") or 20))
         except (TypeError, ValueError):
             timeout = 20.0
-        env = dict(os.environ, GAME_LOOP_EVENT=event, GAME_LOOP_ROOT=ROOT, GAME_LOOP_REPO=REPO_ROOT)
+        # GAME_LOOP_SESSION rides along for the same reason the waiting probe gets it (#60): a
+        # checkout can hold many concurrent sessions, and a trigger that cannot tell which one it is
+        # speaking for cannot scope anything it reads or writes. Empty means UNKNOWN -- the legacy
+        # repo-global paths -- never a session whose name is the empty string.
+        env = dict(os.environ, GAME_LOOP_EVENT=event, GAME_LOOP_ROOT=ROOT, GAME_LOOP_REPO=REPO_ROOT,
+                   GAME_LOOP_SESSION=SESSION or "",
+                   GAME_LOOP_SESSION_DIR=(os.path.join(ROOT, "sessions", SESSION) if SESSION
+                                          else ""))
         try:
             r = subprocess.run(["bash", "-c", t["command"]], input=json.dumps(payload),
                                capture_output=True, text=True, timeout=timeout, env=env)
@@ -3813,9 +3852,20 @@ def waiting_report():
     if not last:
         return ["waiting: a probe is configured, but the watchdog has not run it yet — its verdict "
                 "appears here once it does."]
+    detail = last.get("detail") or ""
+    # A probe that could not ANSWER is a third state, and it used to be absorbed into "not waiting"
+    # — where it is invisible for as long as there is work, then wrong the moment there is not.
+    if last.get("answered") is False:
+        return [f"⚠ THE WAITING PROBE IS FAILING, not answering — as of {last.get('t', '?')}"
+                + (f" · {detail}" if detail else ""),
+                "  It must exit 0 (waiting) or 1 (not waiting); anything else means it could not "
+                "tell, and",
+                "  the watchdog rings. Until it answers, 'no work outstanding' and 'the probe is "
+                "broken' look",
+                "  the same from here — which is the failure this probe exists to prevent, one "
+                "level out."]
     verdict = "WAITING on dispatched work" if last.get("waiting") or \
               last.get("kind") == "watchdog_wait_held" else "not waiting"
-    detail = last.get("detail") or ""
     return [f"waiting: {verdict} — as of {last.get('t', '?')}" + (f" · {detail}" if detail else ""),
             "  (the watchdog's own last verdict, not a fresh one; it is conservative toward NOT "
             "waiting)"]
@@ -4402,6 +4452,28 @@ def coverage_report(s):
                  f"{len(cfg.get('allow_write_roots') or [])} configured allow_write_roots may be")
     lines.append("           written. Everything else is denied WITHOUT being named, so nothing "
                  "goes unprotected for")
+    _mw = str(cfg.get("mcp_writes") or "gated").strip().lower()
+    if _mw == "disabled":
+        lines.append("  mcp    : WRITES DISABLED — a mutating MCP call is refused outright and no "
+                     "authorization can")
+        lines.append("           open it. The escape hatch is not offered, by this project's own "
+                     "choice.")
+    else:
+        lines.append(f"  mcp    : writes are GATED (mcp_writes: {_mw!r}) — a mutating call is "
+                     "refused, and the human")
+        lines.append("           may open it once with `authorize`. Set mcp_writes: \"disabled\" "
+                     "to remove that door.")
+        # Standing doors are worth seeing without reading config, for the same reason the write
+        # roots are: a human should be able to tell what is open without going to look (#56).
+        _sw = [str(x) for x in (cfg.get("mcp_standing_writes") or [])]
+        if _sw:
+            lines.append(f"           STANDING, no human needed ({len(_sw)}): " + ", ".join(_sw))
+            lines.append("           Exact name or whole-server prefix; never an irreversible verb, "
+                         "never an")
+            lines.append("           argument-level finding. A PREFIX also stops short of the "
+                         "landing tier (merge,")
+            lines.append("           publish, deploy, release, push) — those need the tool named "
+                         "exactly (#57).")
     lines.append("           want of remembering it. 'This repo' includes its LINKED WORKTREES — "
                  "one project checked")
     lines.append("           out twice is still one project (#47) — and nothing else that shares a "
@@ -5154,13 +5226,25 @@ def cmd_status(s, a):
     if (w := limits_inert_warning(snap)):   # says what is OFF, not merely that a file is missing
         out(w)
     if notify:
+        _nsrc = notify.cfg_source() if hasattr(notify, "cfg_source") else None
+        # WHICH file, not just "configured": a user-level config applies to every project on the
+        # machine, so "where is this paging" must be answerable without guessing (#54).
+        _nwhere = ""
+        if _nsrc and os.path.dirname(_nsrc) != ROOT:
+            _nwhere = f"  ← from {_nsrc} (user-level, shared by every project here)"
         out("notify: " + ("Slack configured — replies readable (bot token)" if notify.can_read_replies()
                           else "Slack configured — send-only (webhook)" if notify.configured()
-                          else "not configured (.game_loop/notify.json; see bin/notify.py)"))
+                          else "not configured (.game_loop/notify.json or "
+                               "~/.config/game_loop/notify.json; see bin/notify.py)") + _nwhere)
     if (w := hooks_live_warning()):
         out(w)
     out(*session_start_warning())
     out(*installed_confidence_report())
+    if (_lk := config_local_keys()):
+        out(f"config: {len(_lk)} key(s) overridden by .game_loop/config.local.json (gitignored) — "
+            + ", ".join(_lk),
+            "  Site wiring lives there so it never seeds into anyone else's install; a config you "
+            "cannot see is a divergence nobody can explain.")
     if (w := legacy_mandate_warning()):
         out(w)
     try:
@@ -5308,6 +5392,84 @@ def cmd_stepback(s, a):
         "Then record each with a REAL artifact path (the ungameable bit, same as `claim --read`):",
         '  game_loop harden --learning ".." --artifact <real path> --mechanism ".." --rung <1..6>',
         "Rung 6 (doc/memory) is the LAST resort — if you pick it, say why 1-5 don't apply.")
+
+
+# ── prose arrives unmangled, or it does not arrive (#58) ─────────────────────────────────────────
+#
+# A quoted shell argument is CODE to the shell before it is text to this tool. Backticks run as
+# command substitution, $NAME expands to nothing, a lone quote truncates. The shell substitutes and
+# hands over the result, so by the time argparse sees the value THE EVIDENCE IS GONE: a sentence
+# with three words removed is just a shorter sentence, and no inspection here can tell it from one
+# somebody wrote that way. This is not fixable by detection; the unsafe path has to be bounded.
+#
+# Observed three times in one session, by the agent that owns this file: a public comment on #55
+# lost three terms; a `harden --general` lost a command name and was BROADCAST to five other agents
+# with a hole in it; a generated patch had its escapes consumed one layer early. After the first I
+# hardened "route prose through a file" as a thing to remember -- rung 6 -- and it failed twice more
+# while I was writing about checks that cannot report their own failure.
+PROSE_OPTS = ("--assert", "--learning", "--mechanism", "--general", "--reason", "--fact",
+              "--notes", "--text", "--because", "--confidence", "--promises", "--doing")
+
+# MEASURED, not chosen for roundness. Over the 130 prose values in this repo's log: p50 157, p75
+# 285, p95 632, max 1011. Both corrupted values were over 700. 400 sits above the p95 of every field
+# that is naturally a one-liner (assert 203, mechanism 359, reason 95, fact 59, text 258) and bites
+# only the fields that are long-form by nature -- learning (p50 352) , general (min 319), notes
+# (max 1011) -- which are exactly the ones that carry code, newlines and quoting.
+#
+# WHAT THIS DOES NOT FIX, since a bound is not a barrier: a SHORT value with a backtick in it is
+# still mangled and still accepted. The bound cuts exposure where the damage is largest and the
+# record is permanent; it does not remove the class. Nor does it reach `gh`, `git` or any other CLI
+# in the loop, which have the identical exposure and their own -F / --body-file answers.
+PROSE_MAX = 400
+
+
+def add_prose_file_options(sub):
+    """Give every prose option a `--<name>-file` sibling, on whatever verb happens to take it.
+
+    Done by walking the parsers rather than by listing pairs, so a verb that later reuses --notes
+    gets the safe path without anyone remembering to add it -- the failure being fixed here is
+    precisely a rule that depended on remembering.
+    """
+    for parser in sub.choices.values():
+        for act in list(parser._actions):  # noqa: SLF001 — one file, one process, stable since 3.2
+            for opt in act.option_strings:
+                if opt in PROSE_OPTS:
+                    parser.add_argument(opt + "-file", dest=act.dest + "_file", metavar="PATH",
+                                        help=f"read {opt}'s text from PATH instead — no shell "
+                                             "touches it, and prose over "
+                                             f"{PROSE_MAX} chars must come this way")
+
+
+def resolve_prose(p, a):
+    """Fill each prose option from its file, and refuse an inline value past the measured bound."""
+    for opt in PROSE_OPTS:
+        dest = "assert_" if opt == "--assert" else opt[2:].replace("-", "_")
+        if not hasattr(a, dest):
+            continue
+        path, inline = getattr(a, dest + "_file", None), getattr(a, dest)
+        if path and inline:
+            p.error(f"{opt} and {opt}-file are both set — pick one. Two sources for one value is "
+                    "the shape where nobody can say afterwards which one was recorded.")
+        if path:
+            try:
+                with open(path) as f:
+                    setattr(a, dest, f.read().strip())
+            except OSError as e:
+                p.error(f"{opt}-file: cannot read {path} ({e.strerror}). Refusing rather than "
+                        "recording an empty field, which would read as 'they left it blank'.")
+            continue
+        if isinstance(inline, str) and len(inline) > PROSE_MAX:
+            p.error(
+                f"{opt} is {len(inline)} chars; over {PROSE_MAX} it must come from a file:\n"
+                f"    {opt}-file <path>\n\n"
+                "NOT a style rule. A quoted shell argument is code to the shell first: backticks\n"
+                "run, $NAME expands to nothing, a lone quote truncates. The shell hands over the\n"
+                "result and this tool cannot tell a mangled sentence from a short one, so the\n"
+                "corruption lands in a permanent record silently. Measured on this repo's own log,\n"
+                f"{PROSE_MAX} is above the p95 of every field that is naturally a one-liner. Both\n"
+                "values corrupted here were over 700.\n\n"
+                "A SHORT value with a backtick in it is still mangled and still accepted — this\n"
+                "bounds the exposure, it does not remove it.")
 
 
 def main():
@@ -5472,7 +5634,9 @@ def main():
     cf.add_argument("--recheck", action="store_true",
                     help="do not trust the tag: run the gate the level claims")
 
+    add_prose_file_options(sub)
     a = p.parse_args()
+    resolve_prose(p, a)
     if a.cmd in ("stopgate", "limitgate", "statusline", "sessionstart"):
         # The hook payload is the authoritative session source — the env is a fallback for harnesses
         # that deliver payloads without a session_id. Parsed BEFORE load(): it decides whose state.

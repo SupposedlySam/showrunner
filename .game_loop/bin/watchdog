@@ -120,23 +120,34 @@ def set_session(sid):
         PID_PATH = os.path.join(sdir, ".watchdog.pid")
 
 
+def _merged_config(config_f):
+    """config.json, then config.local.json on top. The local file is GITIGNORED site wiring, and it
+    has to reach every component that reads config -- a setting only some of them honour is worse
+    than one nobody has, because it works in the place you test it and not in the place it matters.
+    (Shipped that way once: the waiting probe lived here and the watchdog could not see it.)"""
+    import json as _json
+    import os as _os
+    cfg = {}
+    for _p in (config_f, _os.path.join(_os.path.dirname(config_f), "config.local.json")):
+        try:
+            with open(_p) as _f:
+                _d = _json.load(_f)
+            if isinstance(_d, dict):
+                cfg.update(_d)
+        except (OSError, ValueError):
+            continue
+    return cfg
+
+
 def _cfg():
     wd = {"idle_sec": 30, "settle_sec": 5, "ring_cap": 3}
-    try:
-        with open(CONFIG_F) as f:
-            wd.update((json.load(f).get("watchdog") or {}))
-    except (OSError, ValueError):
-        pass
+    wd.update(_merged_config(CONFIG_F).get("watchdog") or {})
     return wd
 
 
 def _limits_cfg():
     lc = {"threshold_pct": 98, "exhausted_pct": 99, "handoff_file": "HANDOFF.md"}
-    try:
-        with open(CONFIG_F) as f:
-            lc.update((json.load(f).get("limits") or {}))
-    except (OSError, ValueError):
-        pass
+    lc.update(_merged_config(CONFIG_F).get("limits") or {})
     return lc
 
 
@@ -398,7 +409,28 @@ def poll_slack_replies(state):
         armed = state.get("t3_armed") or {}
 
 
-def waiting_verdict():
+def session_env():
+    """The session facts a project-supplied command needs to scope itself to THIS run.
+
+    WHY THIS IS NOT OPTIONAL, reported from a checkout running EIGHTEEN concurrent sessions (#60):
+    the natural liveness signal for "am I waiting on work I dispatched" is the mtime of the host's
+    per-session artifacts, and that path is keyed by session. Without an id, a probe can only glob
+    across every session sharing the checkout -- so it answers WAITING because somebody else's work
+    is live. That is a FALSE WAITING, the one direction that fails silent, and it silences the
+    watchdog on exactly the wedged run it exists to catch. The reporter did the right thing and
+    declined to wire a probe at all, which means the feature was unusable for the case it was built
+    for.
+
+    EMPTY MEANS UNKNOWN, and a probe must treat it as unknown rather than as a session named "".
+    A run with no id resolved is on the repo-global legacy paths, where scoping is not possible and
+    a probe that needs it should decline (exit 2) rather than guess -- the same three-outcome
+    discipline the exit contract already uses.
+    """
+    sdir = os.path.join(ROOT, "sessions", SESSION) if SESSION else ""
+    return {"GAME_LOOP_SESSION": SESSION or "", "GAME_LOOP_SESSION_DIR": sdir}
+
+
+def waiting_verdict(tpath=None):
     """Is this run WAITING on work it dispatched, rather than asleep? (bool, reason)
 
     Idleness is measured from transcript growth, and a subagent's output does not grow the parent's
@@ -432,15 +464,41 @@ def waiting_verdict():
     if not cmd:
         return False, ""
     try:
+        # SAME ENVIRONMENT CONTRACT AS A TRIGGER. Both features run a command the PROJECT supplied,
+        # and they were handing it different environments: triggers set GAME_LOOP_ROOT and
+        # GAME_LOOP_REPO, this set neither. A probe written to the documented trigger contract
+        # therefore expanded to an empty path, failed, and read as NOT WAITING -- so the watchdog
+        # rang exactly the run the probe existed to leave alone, and the conservative default hid
+        # the breakage. Two runners of project-supplied commands must not differ in what they
+        # provide, or the contract is whichever one you happened to test against.
+        # ...and the session it speaks for, plus the transcript that is this session's own liveness
+        # signal, so a probe never has to glob across the sessions sharing a checkout (#60).
+        env = dict(os.environ, GAME_LOOP_ROOT=ROOT, GAME_LOOP_REPO=REPO_ROOT,
+                   GAME_LOOP_TRANSCRIPT=tpath or "", **session_env())
         r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=15,
-                           cwd=REPO_ROOT)
+                           cwd=REPO_ROOT, env=env)
+        # THE EXIT CONTRACT IS 0 OR 1 AND NOTHING ELSE.
+        #
+        # "Conservative toward not waiting" is right, and on its own it made a BROKEN probe
+        # indistinguishable from a working one reporting work: both are non-zero, both ring, and
+        # the failure is invisible for exactly as long as the queue is busy. That is the
+        # statusline-tap shape (#45) reappearing inside the feature added to prevent this class.
+        #
+        # Measured here: this repo's own probe bailed on `command -v gh` because gh is not on a
+        # hook's PATH, exited 1 with EMPTY stderr, and read as "there is work" for five rounds while
+        # I reported the loop fixed. A silence that a legitimate answer also produces is not a
+        # signal, so the third state gets its own code and is reported rather than absorbed.
         waiting = r.returncode == 0
+        answered = r.returncode in (0, 1)
         reason = (r.stdout or "").strip().splitlines()
         reason = reason[0][:160] if reason else ""
         detail = reason if waiting else (r.stderr or "").strip()[:160]
-    except Exception:  # noqa: BLE001 — unrunnable, hung, anything: NOT waiting, and say why
-        waiting, detail = False, "probe did not run"
-    logline({"kind": "watchdog_waiting", "waiting": waiting, "detail": detail})
+        if not answered:
+            detail = (detail or f"exit {r.returncode} with nothing on stderr")[:160]
+    except Exception:  # noqa: BLE001 — unrunnable, hung, anything: NOT waiting, and say so
+        waiting, answered, detail = False, False, "probe did not run at all"
+    logline({"kind": "watchdog_waiting", "waiting": waiting, "answered": answered,
+             "detail": detail})
     return waiting, detail
 
 
@@ -556,7 +614,7 @@ def main():
 
     if rings >= RING_CAP:
         # Before spending the human: is this run waiting on work it dispatched? (#32)
-        _w, _why = waiting_verdict()
+        _w, _why = waiting_verdict(tpath)
         if _w:
             logline({"kind": "watchdog_wait_held", "rings": rings, "detail": _why,
                      "note": "cap reached but a declared wait still verifies — not paging"})
@@ -620,6 +678,24 @@ def main():
         quiet("the human called a break while sleeping")
     if state.get("t3_armed"):
         quiet("T3 armed while sleeping")
+
+    # A DECLARED WAIT STOPS THE RING, not merely the escalation at the cap.
+    #
+    # #32 guarded the cap, which stopped the human being paged about a healthy run. It did not stop
+    # the ringing, and ringing is a WAKE-UP: a run with nothing to do gets woken every idle_sec to
+    # discover that again, forever, burning a turn each time. Measured on this repo -- the standing
+    # mandate is "work any open issue", the queue emptied, and the watchdog rang on a loop while the
+    # probe sat there saying the run was legitimately idle.
+    #
+    # The counter-argument from #32 was that a nudge sometimes surfaces work the run had not
+    # noticed. That is true and it is weaker than the cost: the probe is the PROJECT's own
+    # declaration, config-authored and never settable by the agent, and it is conservative toward
+    # NOT waiting -- every failure mode returns "not waiting" and the ring happens. So the only way
+    # to reach this quiet is for the project's own check to positively assert there is nothing to do.
+    _w, _why = waiting_verdict(tpath)
+    if _w:
+        quiet(f"a declared wait verifies ({_why or 'probe says still waiting'}) — not ringing a run "
+              "that has correctly run out of work")
 
     after = transcript_size(tpath)
     if before is not None and after is not None and after > before:

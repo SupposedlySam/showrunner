@@ -100,6 +100,28 @@ writing — the next re-pin destroys it. Add GAME_LOOP_HOME=\"\$CLAUDE_PROJECT_D
 hook in .claude/settings.local.json and reload the window. \`game_loop self\` prints the whole block."
 fi
 CONFIG_F="$GAMELOOP_DIR/config.json"
+# config.local.json layered over config.json, computed ONCE and handed to every embedded reader
+# below. A gitignored local override that only SOME components honour is worse than none at all: it
+# works where you test it and not where it matters. (Shipped exactly that way once -- the waiting
+# probe lived in the local file and the watchdog, which is the component that needed it, could not
+# see it.) Merging here rather than in each block keeps one place to get it wrong instead of five.
+CONFIG_MERGED='{}'   # set BEFORE the computation: the line below exports the whole env
+                     # into its own subshell, and under `set -u` that read itself.
+CONFIG_MERGED=$(CONFIG_F="$CONFIG_F" python3 -c '
+import io, json, os
+cfg = {}
+for p in (os.environ["CONFIG_F"],
+          os.path.join(os.path.dirname(os.environ["CONFIG_F"]), "config.local.json")):
+    try:
+        with open(p) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        continue
+    if isinstance(d, dict):
+        cfg.update(d)
+print(json.dumps(cfg))
+' 2>/dev/null)
+[ -n "$CONFIG_MERGED" ] || CONFIG_MERGED='{}'
 
 # State is per-session: an authorization is granted IN a session and spendable only THERE. Mirrors
 # guard-writes-impl.sh and set_session() in bin/game_loop — payload session_id, then env, then the
@@ -125,9 +147,9 @@ fi
 #
 # NB: this Python is embedded in a $(...) here-doc, so it must contain NO backtick, NO dollar-paren,
 # and NO literal here-doc operator — any of those derails bash's parse of the surrounding $(...).
-verdict=$(GAMELOOP_DIR="$GAMELOOP_DIR" CONFIG_F="$CONFIG_F" STATE_F="$STATE_F" SID="$SID" \
+verdict=$(GAMELOOP_DIR="$GAMELOOP_DIR" CONFIG_F="$CONFIG_F" CONFIG_MERGED="$CONFIG_MERGED" STATE_F="$STATE_F" SID="$SID" \
           python3 - "$payload" <<'PY'
-import datetime, json, os, re, sys
+import datetime, io, json, os, re, sys
 
 try:
     payload = json.loads(sys.argv[1])
@@ -186,6 +208,17 @@ MUTATE_VERBS = {
 # almost never a NOUN in a read-only tool name, so it does not misfire on `getLatestRelease`.
 HARD_VERBS = {"delete", "destroy", "truncate", "purge", "wipe", "force"}
 
+# Verbs that LAND things — that move work into the world where undoing it is a social act, not an
+# edit. These are ordinary members of MUTATE_VERBS and stay so: they are refused by the ordinary
+# gate and a human may authorize them, exactly as before.
+#
+# What they are NOT is inheritable. An exact standing grant carries them, because typing
+# `mcp__github__mergePullRequest` IS the deliberate act #56 exists to respect. A PREFIX grant does
+# not, because a prefix is a rule evaluated once against tools that did not exist when it was
+# written, and "an agent may post its review unattended" must not quietly become "an agent may land
+# code unattended" the day a first-party server grows a merge tool (#57).
+LANDING_VERBS = {"merge", "publish", "deploy", "release", "push"}
+
 words = tokens(leaf) or tokens(tool)
 # Some servers repeat their own name inside the tool name (`mcp__pebble__pebble_run_command`).
 # Strip that prefix so the real VERB lands in the verb slot instead of the server's name — otherwise
@@ -200,12 +233,86 @@ first = words[0] if words else ""
 # prefixes. This ONLY resolves ambiguity. It can never override a mutating verb or a mutating
 # argument — an allowlist that can silence a detected mutation is a bypass with a friendly name.
 allow_names = []
+mcp_writes = "gated"        # default before the read, so an unreadable config cannot NameError
+standing_writes = []
 try:
-    with open(os.environ["CONFIG_F"]) as f:
-        allow_names = [str(x) for x in (json.load(f).get("mcp_read_only_tools") or [])]
+    with io.StringIO(os.environ.get("CONFIG_MERGED", "{}")) as f:
+        _c = json.load(f)
+        allow_names = [str(x) for x in (_c.get("mcp_read_only_tools") or [])]
+        # THE PROJECT'S POLICY ABOUT MCP WRITES (#53). "gated" is today's behaviour and the default,
+        # so nothing changes on upgrade. "disabled" is strictly MORE restrictive than today, which
+        # is why honouring it cannot be a bypass by construction -- the cheap half of the request,
+        # and the half that was missing entirely.
+        #
+        # Anything unrecognised reads as "gated": the error runs toward today's behaviour rather
+        # than toward a stricter one nobody asked for, and `status` names the policy so a typo is
+        # visible rather than silently doing something else.
+        mcp_writes = str(_c.get("mcp_writes") or "gated").strip().lower()
+        standing_writes = [str(x) for x in (_c.get("mcp_standing_writes") or [])]
 except (OSError, ValueError, KeyError):
     pass
 named_read_only = any(tool == a or (a.endswith("__") and tool.startswith(a)) for a in allow_names)
+
+# ── standing writes: the MCP analogue of allow_write_roots (#56) ─────────────────────────────────
+#
+# `allow_write_roots` lets a project say "writes to these places are fine, standing, no human
+# needed", and nobody calls that a bypass — it is a narrow reviewed policy stated once instead of a
+# human restating it per write. The MCP plane had no equivalent: after #53 it was ask-every-time or
+# never. So any workflow whose WORK PRODUCT lands through an MCP write could not finish unattended,
+# which is the category this tool exists to enable. Observed: a completed PR review that could not
+# be posted, where the human's authorization bought a RETRY rather than a safety decision.
+#
+# What keeps it a policy rather than an off switch, and each of these is refused at READ time rather
+# than silently dropped, because a policy that is half-honoured is worse than one that is rejected:
+#   * TWO GRAINS AND NOTHING BETWEEN THEM: an exact `mcp__server__tool`, or an `mcp__server__`
+#     prefix. #56 shipped exact names only, at my own ask, and that was the wrong constraint: when
+#     a project's MCP servers are its OWN first-party code the unit of trust is the server, and an
+#     enumeration goes stale toward a DEAD-ENDED agent every time that server grows a tool (#57).
+#     A prefix is safe here for a reason specific to this file — every floor below runs on the LIVE
+#     call, from the tool being invoked rather than from config, and returns before standing is
+#     consulted. So a prefix widens WHICH SERVERS are trusted; it cannot widen WHAT may be done
+#     through them. Globs stay refused, and a prefix never spans servers or reaches below one.
+#   * NEVER an irreversible verb. HARD_VERBS stays human-only regardless of what config says.
+# And three more enforced at the point of use rather than here:
+#   * never an ARGUMENT-level finding — that is per-call and cannot be pre-approved;
+#   * never a LANDING verb through a PREFIX (an exact name still carries one — see LANDING_VERBS);
+#   * inert under mcp_writes: "disabled", because disabled must stay absolute (#53).
+#
+# THE ASYMMETRY IS REAL AND WORTH SAYING OUT LOUD: an exact name is checked for an irreversible verb
+# twice, once here and once on the call. A prefix has no tool token to inspect, so only the call-site
+# check remains. That is two layers down to one — accepted because the surviving layer is the one
+# that runs on EVERY call, and because this read-time check never protected against a tool that does
+# not exist yet, which is the entire population a prefix is for.
+standing_bad = []
+standing_ok = set()
+standing_prefixes = set()
+for _e in standing_writes:
+    _is_prefix = _e.endswith("__") and _e.count("__") == 2
+    if "*" in _e or "?" in _e or not _e.startswith("mcp__"):
+        standing_bad.append((_e, "not an mcp__server__tool name or an mcp__server__ prefix, and "
+                                 "globs are never accepted"))
+    elif _is_prefix and len(_e) <= len("mcp____"):
+        standing_bad.append((_e, "a prefix must NAME a server: mcp__<server>__"))
+    elif _is_prefix:
+        standing_prefixes.add(_e)
+    elif _e.count("__") < 2 or _e.endswith("__"):
+        standing_bad.append((_e, "neither grain: an exact mcp__server__tool, or a whole-server "
+                                 "mcp__server__ prefix. A prefix below the server level would be a "
+                                 "third grain nobody can audit at a glance"))
+    elif set(tokens(_e)) & HARD_VERBS:
+        standing_bad.append((_e, "names an irreversible verb, which stays human-only"))
+    else:
+        standing_ok.add(_e)
+
+if standing_bad:
+    print("DENY")
+    print("BLOCKED: this project's mcp_standing_writes is not a valid policy, so no MCP call is\n"
+          "classified until it is fixed.\n\n"
+          + "\n".join("    " + e + "\n      " + why for e, why in standing_bad)
+          + "\n\nRefused at CONFIG-READ time rather than dropped: a standing allowance that is\n"
+            "partly honoured is worse than one that is rejected, because nobody can tell which\n"
+            "half is live. Fix .game_loop/config.json -> mcp_standing_writes.")
+    sys.exit(0)
 
 # ── argument shape ───────────────────────────────────────────────────────────────────────────────
 SQL_MUTATION = re.compile(
@@ -272,8 +379,43 @@ elif hard_hit:
     kind = "MUTATING"
     why = "its NAME carries an irreversible verb: '" + hard_hit[0] + "'"
 elif first in MUTATE_VERBS:
+    # Standing allowance applies HERE and nowhere else: past the argument findings and past the
+    # irreversible-verb branch, both of which have already returned above. So a declared tool whose
+    # ARGUMENTS carry a mutation is still refused, and a declared tool naming a hard verb never got
+    # into standing_ok in the first place.
+    by_prefix = sorted(p for p in standing_prefixes if tool.startswith(p))
+    lands = sorted(set(words) & LANDING_VERBS)
+    grain = "exact" if tool in standing_ok else ("prefix" if by_prefix and not lands else "")
+    if mcp_writes != "disabled" and grain:
+        try:
+            log_f = os.path.join(os.environ["GAMELOOP_DIR"], "log.jsonl")
+            with open(log_f, "a") as f:
+                rec = {"t": datetime.datetime.now().isoformat(timespec="seconds")}
+                sid = os.environ.get("SID", "")
+                if sid:
+                    rec["sid"] = sid[:8]
+                # Logged like an authorize spend (#41): "allowed by standing policy" and "never ran"
+                # must stay distinguishable afterwards.
+                # WHICH grant allowed it, not merely that one did: an audit that cannot tell an
+                # enumerated tool from a whole-server rule cannot review the rule.
+                rec.update({"kind": "standing_mcp_write", "tool": tool, "verb": first,
+                            "grain": grain})
+                if grain == "prefix":
+                    rec["via"] = by_prefix[0]
+                f.write(json.dumps(rec) + "\n")
+        except OSError:
+            pass
+        print("ALLOW")
+        sys.exit(0)
     kind = "MUTATING"
-    why = "its NAME's verb mutates: '" + first + "'"
+    if by_prefix and lands:
+        why = ("its verb '" + lands[0] + "' LANDS work, and the standing grant covering it is the\n"
+               "    whole-server prefix '" + by_prefix[0] + "'. A prefix is a rule written once,\n"
+               "    against tools that did not exist yet — so it grants the server, never the tier\n"
+               "    that moves work into the world. Name this tool EXACTLY in mcp_standing_writes\n"
+               "    to grant it standing, or authorize this one call.")
+    else:
+        why = "its NAME's verb mutates: '" + first + "'"
 elif first in READ_VERBS or named_read_only:
     print("ALLOW")
     sys.exit(0)
@@ -324,7 +466,10 @@ def consume_authorization(tool_name):
     return False
 
 
-if consume_authorization(tool):
+# DISABLED MEANS DISABLED. Consuming an authorization here would leave the door open while the
+# config said it was shut, which is worse than not having the setting -- the human would have
+# declared a policy the guard quietly did not hold.
+if mcp_writes != "disabled" and consume_authorization(tool):
     print("ALLOW")
     sys.exit(0)
 
@@ -345,10 +490,24 @@ else:
             "  ambiguity — it can never silence a mutating verb or a mutating argument.")
 
 print("DENY")
+if mcp_writes == "disabled":
+    # No remedy line, deliberately. Every other deny here ends by telling the agent how to get the
+    # call through, and a plausible-sounding workflow justification is exactly what an agent is good
+    # at producing. For a project that is meant to touch nothing, the door has to be absent rather
+    # than merely guarded.
+    print(body + "\n\n"
+          "This project has set  mcp_writes: \"disabled\"  in .game_loop/config.json, so mutating\n"
+          "MCP calls are refused outright and NO authorization can open this. There is no remedy to\n"
+          "reach for and asking for one is not the next step -- the human turned this off on\n"
+          "purpose, and changing it is their edit to make, not this run's.")
+    sys.exit(0)
 print(body + "\n\n"
       "If the human has explicitly authorized this one call, record their words and try again:\n"
-      "  game_loop authorize --path " + tool + " --reason \"<their exact words>\"\n"
-      "One authorization, one call, logged permanently. That is the only escape hatch, by design.")
+      "  " + os.environ.get("GAMELOOP_DIR", ".game_loop") + "/bin/game_loop authorize --path "
+      + tool + " --reason \"<their exact words>\" [--uses N]\n"
+      "One authorization per USE, logged permanently. Pass --uses N when the human authorised a run\n"
+      "of several calls, rather than interrupting them once per call. That is the only escape hatch,\n"
+      "by design.")
 PY
 )
 

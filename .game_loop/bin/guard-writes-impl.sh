@@ -127,6 +127,28 @@ then reload the window. \`game_loop self\` prints the whole block."
 fi
 REPO="${CLAUDE_PROJECT_DIR:-$(dirname "$GAMELOOP_DIR")}"
 CONFIG_F="$GAMELOOP_DIR/config.json"
+# config.local.json layered over config.json, computed ONCE and handed to every embedded reader
+# below. A gitignored local override that only SOME components honour is worse than none at all: it
+# works where you test it and not where it matters. (Shipped exactly that way once -- the waiting
+# probe lived in the local file and the watchdog, which is the component that needed it, could not
+# see it.) Merging here rather than in each block keeps one place to get it wrong instead of five.
+CONFIG_MERGED='{}'   # set BEFORE the computation: the line below exports the whole env
+                     # into its own subshell, and under `set -u` that read itself.
+CONFIG_MERGED=$(CONFIG_F="$CONFIG_F" python3 -c '
+import io, json, os
+cfg = {}
+for p in (os.environ["CONFIG_F"],
+          os.path.join(os.path.dirname(os.environ["CONFIG_F"]), "config.local.json")):
+    try:
+        with open(p) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        continue
+    if isinstance(d, dict):
+        cfg.update(d)
+print(json.dumps(cfg))
+' 2>/dev/null)
+[ -n "$CONFIG_MERGED" ] || CONFIG_MERGED='{}'
 
 # Running `verify` is two independent questions: WHICH CODE runs it, and WHICH TREE's record it
 # answers from. They were the same directory until pinning split them, and the commit gate needs
@@ -305,14 +327,14 @@ case "$tool" in
     [ -z "$fp" ] && exit 0
     # Prints "yes" when the target is inside an allow root, else the resolved realpath — which is
     # what an authorization is matched against (authorize records real prefixes, not raw tool input).
-    verdict=$(REPO_REAL="$REPO_REAL" SLUG="$SLUG" CONFIG_F="$CONFIG_F" FP="$fp" python3 <<'PY'
-import json, os, subprocess
+    verdict=$(REPO_REAL="$REPO_REAL" SLUG="$SLUG" CONFIG_F="$CONFIG_F" CONFIG_MERGED="$CONFIG_MERGED" FP="$fp" python3 <<'PY'
+import io, json, os, subprocess
 repo = os.environ["REPO_REAL"]
 home = os.path.expanduser("~")
 allow = [repo, "/tmp", "/private/tmp", "/var/folders",
          os.path.join(home, ".claude", "projects", os.environ["SLUG"])]
 try:
-    with open(os.environ["CONFIG_F"]) as f:
+    with io.StringIO(os.environ.get("CONFIG_MERGED", "{}")) as f:
         allow += [os.path.expanduser(p) for p in (json.load(f).get("allow_write_roots") or [])]
 except (OSError, ValueError):
     pass
@@ -381,7 +403,8 @@ PY
 
 Everything outside this project is READ-ONLY by default (this is the guardrail that makes unattended
 runs safe). If the repo genuinely needs that content, COPY it in and edit the copy. If the human has
-explicitly authorized this path:  game_loop authorize --path <prefix> --reason \"<their words>\""
+explicitly authorized this path:
+  $GAMELOOP_DIR/bin/game_loop authorize --path <prefix> --reason \"<their words>\" [--uses N]"
     ;;
 
   Bash)
@@ -479,7 +502,7 @@ PY
     #    lives inside a larger checkout, and a target git can name no tree for all keep this script's
     #    own .game_loop — so a repo without worktrees behaves exactly as it always did.
     commit_scan=$(REPO_REAL="$REPO_REAL" GAMELOOP_DIR="$GAMELOOP_DIR" SCAN_CMD="$scan_cmd" python3 - "$payload" <<'PY'
-import json, os, re, shlex, subprocess, sys
+import io, json, os, re, shlex, subprocess, sys
 payload = json.loads(sys.argv[1])
 cmd = os.environ.get("SCAN_CMD", "")
 repo = os.environ["REPO_REAL"]
@@ -679,10 +702,10 @@ Or commit with --no-verify to skip it on the record.$tree_hint$chained_hint"
       # Silent by design wherever it cannot reason: no recorded edits, no readable index, no git.
       # A commit's PROVENANCE is the third thing this needs to know and could not be told (issue
       # #29). See the attribution block inside the Python below.
-      blast_note=$(REPO_REAL="$REPO_REAL" EDITED_F="$EDITED_F" CONFIG_F="$CONFIG_F" \
+      blast_note=$(REPO_REAL="$REPO_REAL" EDITED_F="$EDITED_F" CONFIG_F="$CONFIG_F" CONFIG_MERGED="$CONFIG_MERGED" \
                    GAMELOOP_DIR="$GAMELOOP_DIR" TARGET_TREE="$TARGET_TREE" SID="$SID" \
                    STATE_F="$STATE_F" python3 <<'PY'
-import datetime, json, os, subprocess, sys
+import datetime, io, json, os, subprocess, sys
 from fnmatch import fnmatch
 
 repo = os.environ["REPO_REAL"]
@@ -774,7 +797,7 @@ EXEMPT = [".game_loop/sessions/*", ".game_loop/edited.txt", ".game_loop/log.json
           "*.lock", "*-lock.json", "*-lock.yaml", "*.g.dart", "*.freezed.dart", "*.pb.go",
           "*_pb2.py", "*.generated.*", "*.min.js", "*.min.css", "*.snap"]
 try:
-    with open(os.environ["CONFIG_F"]) as f:
+    with io.StringIO(os.environ.get("CONFIG_MERGED", "{}")) as f:
         EXEMPT += (json.load(f).get("generated_globs") or [])
 except (OSError, ValueError):
     pass
@@ -872,7 +895,7 @@ PY
       # writing the rules — sitting behind the gate (INV5).
       cov_json=$(run_verify "$GAMELOOP_DIR" --coverage --staged --porcelain 2>/dev/null || true)
       cov_note=$(COV="$cov_json" python3 <<'PY'
-import json, os
+import io, json, os
 try:
     cov = json.loads(os.environ.get("COV") or "")
 except ValueError:
@@ -912,13 +935,13 @@ PY
     fi
 
     # 1. Configured deploy/publish verbs — denied anywhere, no path needed.
-    deploy_hit=$(CONFIG_F="$CONFIG_F" CMD="$scan_cmd" python3 <<'PY'
-import json, os, re
+    deploy_hit=$(CONFIG_F="$CONFIG_F" CONFIG_MERGED="$CONFIG_MERGED" CMD="$scan_cmd" python3 <<'PY'
+import io, json, os, re
 defaults = ["npm publish", "yarn publish", "pnpm publish", "twine upload",
             "gh release create", "docker push"]
 verbs = list(defaults)
 try:
-    with open(os.environ["CONFIG_F"]) as f:
+    with io.StringIO(os.environ.get("CONFIG_MERGED", "{}")) as f:
         verbs += (json.load(f).get("deploy_verbs") or [])
 except (OSError, ValueError):
     pass
@@ -953,8 +976,8 @@ hatch, by design. (Configured in .game_loop/config.json -> deploy_verbs.)"
     fi
 
     # 2. Mutation aimed OUTSIDE the allow roots, decided by RESOLVING PATHS — not matching names.
-    offender=$(REPO_REAL="$REPO_REAL" SLUG="$SLUG" CONFIG_F="$CONFIG_F" SCAN_CMD="$scan_cmd" python3 - "$payload" <<'PY'
-import json, os, re, shlex, subprocess, sys
+    offender=$(REPO_REAL="$REPO_REAL" SLUG="$SLUG" CONFIG_F="$CONFIG_F" CONFIG_MERGED="$CONFIG_MERGED" SCAN_CMD="$scan_cmd" python3 - "$payload" <<'PY'
+import io, json, os, re, shlex, subprocess, sys
 
 payload = json.loads(sys.argv[1])
 cmd = os.environ.get("SCAN_CMD", "")          # here-doc DATA bodies already stripped (see scan_cmd)
@@ -965,7 +988,7 @@ repo = os.path.realpath(os.environ["REPO_REAL"])
 allow = [os.environ["REPO_REAL"], "/tmp", "/private/tmp", "/var/folders",
          os.path.join(home, ".claude", "projects", os.environ["SLUG"])]
 try:
-    with open(os.environ["CONFIG_F"]) as f:
+    with io.StringIO(os.environ.get("CONFIG_MERGED", "{}")) as f:
         allow += [os.path.expanduser(p) for p in (json.load(f).get("allow_write_roots") or [])]
 except (OSError, ValueError):
     pass
@@ -1154,7 +1177,7 @@ Everything outside this project is READ-ONLY by default. READING elsewhere is fi
 OUT of it: \`cp <their path> <repo path>\` is allowed. Copy what you need in and work on the copy.
 
 If the human has explicitly authorized this specific path, record their words and try again:
-  game_loop authorize --path <prefix> --reason \"<their exact words>\"
+  $GAMELOOP_DIR/bin/game_loop authorize --path <prefix> --reason \"<their exact words>\" [--uses N]
 One authorization, one mutation, logged permanently. That is the only escape hatch, by design."
     fi
 
