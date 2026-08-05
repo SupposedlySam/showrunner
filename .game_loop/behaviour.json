@@ -34,7 +34,14 @@
     "`schema` is an integer and consumers should pin to it. This file announces changes to game_loop's",
     "verbs and nothing announced changes to THIS FILE: adding a field is safe, but renaming `change`",
     "or dropping `why_it_qualifies` would break a programmatic reader silently. Bump it when a field",
-    "is renamed or removed; adding one does not require a bump."
+    "is renamed or removed; adding one does not require a bump.",
+    "",
+    "seq 2 was CORRECTED after a consumer read the entry against the source and found the record",
+    "less precise than the code. The entry said English false-positives now run; the source comment",
+    "three lines below the fix says the bare verb as a whole word still trips it. Both were written",
+    "by the same author in the same commit and both were accurate \u2014 the limit was simply written",
+    "where a reader of the record never looks. An entry must carry its own caveats, because the",
+    "person acting on it is not reading the guard."
   ],
   "changes": [
     {
@@ -49,9 +56,9 @@
       "seq": 2,
       "sha": "6acd0c1",
       "verb": "commit / bash",
-      "change": "a configured deploy verb now matches as a WORD, not a substring. Calls that were REFUSED for containing one inside ordinary English \u2014 'file surgery' contains 'surge', 'docker pushed' contains a default verb \u2014 now run. If you had worked around a false block by rewording a command, the reword is no longer needed.",
+      "change": "a configured deploy verb now requires a word boundary on BOTH sides, where it previously had one only before the verb. Calls refused because the verb appeared as a SUBSTRING of ordinary English \u2014 'file surgery' contains 'surge' \u2014 now run. NARROWED, NOT REMOVED: the bare verb as a WHOLE WORD in prose still trips it, deliberately. A sentence merely mentioning 'docker push' is still refused, because narrowing to command position would miss a real deploy nested in an interpreter argument, and missing a real publish is the expensive direction.",
       "why_it_qualifies": "an existing verb stopped refusing calls it used to refuse",
-      "consequence": "if you worked around a FALSE block \u2014 rewording a command, or deleting a verb from deploy_verbs to get past it \u2014 the workaround is now unnecessary AND the deleted verb is no longer blocked at all. Check deploy_verbs still lists what you meant it to."
+      "consequence": "if you worked around a SUBSTRING false block by rewording, the reword is now unnecessary \u2014 but if you reworded prose containing the bare verb as a whole word, YOU STILL NEED IT. Check which kind you had. And if you deleted a verb from deploy_verbs to get past a false block, it is no longer blocked at all: confirm deploy_verbs still lists what you meant."
     },
     {
       "seq": 3,
