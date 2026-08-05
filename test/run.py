@@ -1485,9 +1485,17 @@ def test_cli():
     subverb_cache = {}
 
     def subverbs_of(verb):
+        # A `choices=` positional renders EXACTLY like a subparser group, so reading the first
+        # {...} in the help text conflates them: `add` offers {task,epic} and `close` offers
+        # {holds,partial,...} as FLAG values, and treating those as subcommands reports
+        # `showrunner close mytask` — a valid command — as a ghost. That is the direction that
+        # costs trust in the check rather than four seconds. Flag choices are always attached
+        # to their flag; a subparser group never is. (llm_chat hit this shape and read the true
+        # warning as a false positive, one keystroke from suppressing it.)
         if verb not in subverb_cache:
             out = subprocess.run([sys.executable, exe, verb, "--help"],
                                  capture_output=True, text=True).stdout
+            out = re.sub(r"--?[a-z][a-z-]* \{[a-z0-9,\-]+\}", "", out)
             found = re.search(r"\{([a-z0-9,\-]+)\}", out)
             subverb_cache[verb] = set(found.group(1).split(",")) if found else set()
         return subverb_cache[verb]
@@ -1557,6 +1565,7 @@ def test_cli():
         "run `showrunner campaign` to see it\n"          # ghost: no such verb
         "run `showrunner lock guard -- cmd` first\n"     # real, with a real subcommand
         "run `showrunner lock sprint -- cmd` first\n"    # real verb, ghost subcommand
+        "run `showrunner close mytask --proof p` now\n"  # real verb + ARGUMENT, not a subverb
         "showrunner spawns a Crawler per leaf, and showrunner is generic\n")  # prose
     flagged = set()
     for word, sub in commands_in(fixture):
@@ -1564,9 +1573,36 @@ def test_cli():
             flagged.add(word)
         elif sub and subverbs_of(word) and sub not in subverbs_of(word):
             flagged.add("%s %s" % (word, sub))
-    eq("the rule separates a ghost verb, a ghost subcommand, a real command and prose — "
-       "checked on one fixture, so a clean repo cannot be mistaken for a working check",
-       flagged, {"campaign", "lock sprint"})
+    eq("the rule separates a ghost verb, a ghost subcommand, a real command, a real command "
+       "with an argument, and prose — one fixture, so a clean repo cannot be mistaken for a "
+       "working check", flagged, {"campaign", "lock sprint"})
+    ok("...and `close`'s flag VALUES are not mistaken for subcommands, which would report a "
+       "valid command as dead", not subverbs_of("close"), sorted(subverbs_of("close")))
+
+    # Everything above reads ONE string literal at a time, so a remedy assembled from f-string
+    # pieces or concatenation puts the verb in a different AST node from the rest and no
+    # amount of reading either node matches it. llm_chat shipped exactly that and its clean
+    # validator run WAS the blind spot rather than the absence of one. There are none here
+    # today — so rather than write that down as a caveat that ages, this keeps it true: a
+    # remedy split across nodes fails the suite instead of quietly leaving the check's range.
+    assembled = []
+    for rel_path in scanned:
+        if not rel_path.endswith(".py"):
+            continue
+        with open(os.path.join(ROOT, rel_path)) as fh:
+            tree = ast.parse(fh.read())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.JoinedStr) or (
+                    isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)):
+                try:
+                    txt = ast.unparse(node)
+                except Exception:
+                    continue
+                if "showrunner " in txt:
+                    assembled.append("%s:%d" % (rel_path, node.lineno))
+    ok("no remedy is assembled across AST nodes — the scan reads one literal at a time, so a "
+       "command split over an f-string or a concatenation would leave its range silently",
+       not assembled, sorted(set(assembled)))
 
 
 # ===================================================== OPTIONAL: br, tmux
