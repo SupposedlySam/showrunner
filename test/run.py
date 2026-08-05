@@ -1635,11 +1635,43 @@ def test_cli():
                     txt = ast.unparse(node)
                 except Exception:
                     continue
-                if "showrunner " in txt:
+                # The SUBJECT is a remedy, not any mention of the tool. Matching on the name
+                # alone flagged `f"showrunner is generic, at {path}"` — prose, failing the
+                # build with a message about remedies. Latent only because no such f-string
+                # exists yet, which is how the `choices=` false positive hid too: a count of
+                # zero says nothing when it is a count of the wrong thing.
+                # Two subjects, not one. (a) a real verb sits in a command position inside the
+                # assembled text; (b) the verb itself comes from an expression, so "showrunner"
+                # is followed straight by an interpolation or a concatenation boundary — the
+                # shape this check is NAMED for, and the one narrowing to (a) alone let past.
+                dynamic = re.search(r"showrunner (\{|['\"]\s*\+)", txt)
+                if dynamic or any(v in verbs for v, _ in commands_in(txt)):
                     assembled.append("%s:%d" % (rel_path, node.lineno))
     ok("no remedy is assembled across AST nodes — the scan reads one literal at a time, so a "
-       "command split over an f-string or a concatenation would leave its range silently",
+       "command split over an f-string or a concatenation leaves its range silently. Keep the "
+       "command in ONE literal, or teach the scan to join the pieces",
        not assembled, sorted(set(assembled)))
+
+    def is_assembled(src):
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, ast.JoinedStr) or (
+                    isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)):
+                txt = ast.unparse(node)
+                if re.search(r"showrunner (\{|['\"]\s*\+)", txt) or any(
+                        v in verbs for v, _ in commands_in(txt)):
+                    return True
+        return False
+
+    # Zero is only meaningful once it is a count of the RIGHT thing. Both prose cases here
+    # failed the build under the first version of this rule, and both assembly cases slipped
+    # past the second — so the clean run said "no split remedies" while meaning neither.
+    for src, want in [('X = f"showrunner is generic, at {p}"', False),      # prose, interpolated
+                      ('Y = "see " + "showrunner docs"', False),            # prose, concatenated
+                      ('Z = f"run `showrunner lock {s}` now"', True),       # arg interpolated
+                      ('V = f"run `showrunner {v}` now"', True),            # VERB interpolated
+                      ('W = "run `showrunner " + v + " now`"', True)]:      # verb concatenated
+        eq("the split-remedy subject separates prose from assembly: %s" % src.split(" = ")[1][:38],
+           is_assembled(src), want)
 
 
 # ===================================================== OPTIONAL: br, tmux
