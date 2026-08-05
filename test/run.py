@@ -1622,6 +1622,20 @@ def test_cli():
     # validator run WAS the blind spot rather than the absence of one. There are none here
     # today — so rather than write that down as a caveat that ages, this keeps it true: a
     # remedy split across nodes fails the suite instead of quietly leaving the check's range.
+    # The verb itself can come from an expression, so it appears in no literal anywhere and
+    # commands_in cannot see it. But POSITION still decides, exactly as it does everywhere
+    # else in this check: matching the name followed by an interpolation flagged
+    # `f"showrunner {n} leaves are ready"` — an ordinary sentence — as a split remedy. That was
+    # the too-wide error, written into the fix for the too-narrow one an hour earlier. llm_chat
+    # made the identical mistake in the same hour, in the one function it had built to be its
+    # honest instrument, having applied position correctly in two other places in that file.
+    def dynamic_command(txt):
+        for m in re.finditer(r"showrunner (\{|['\"]\s*\+)", txt):
+            before = txt[txt.rfind("\n", 0, m.start()) + 1:m.start()]
+            if "`" in before or re.match(r"^ {4,}$", before):
+                return True
+        return False
+
     assembled = []
     for rel_path in scanned:
         if not rel_path.endswith(".py"):
@@ -1640,12 +1654,7 @@ def test_cli():
                 # build with a message about remedies. Latent only because no such f-string
                 # exists yet, which is how the `choices=` false positive hid too: a count of
                 # zero says nothing when it is a count of the wrong thing.
-                # Two subjects, not one. (a) a real verb sits in a command position inside the
-                # assembled text; (b) the verb itself comes from an expression, so "showrunner"
-                # is followed straight by an interpolation or a concatenation boundary — the
-                # shape this check is NAMED for, and the one narrowing to (a) alone let past.
-                dynamic = re.search(r"showrunner (\{|['\"]\s*\+)", txt)
-                if dynamic or any(v in verbs for v, _ in commands_in(txt)):
+                if dynamic_command(txt) or any(v in verbs for v, _ in commands_in(txt)):
                     assembled.append("%s:%d" % (rel_path, node.lineno))
     ok("no remedy is assembled across AST nodes — the scan reads one literal at a time, so a "
        "command split over an f-string or a concatenation leaves its range silently. Keep the "
@@ -1657,8 +1666,7 @@ def test_cli():
             if isinstance(node, ast.JoinedStr) or (
                     isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)):
                 txt = ast.unparse(node)
-                if re.search(r"showrunner (\{|['\"]\s*\+)", txt) or any(
-                        v in verbs for v, _ in commands_in(txt)):
+                if dynamic_command(txt) or any(v in verbs for v, _ in commands_in(txt)):
                     return True
         return False
 
@@ -1667,6 +1675,8 @@ def test_cli():
     # past the second — so the clean run said "no split remedies" while meaning neither.
     for src, want in [('X = f"showrunner is generic, at {p}"', False),      # prose, interpolated
                       ('Y = "see " + "showrunner docs"', False),            # prose, concatenated
+                      ('A = f"showrunner {n} leaves are ready"', False),    # prose, name then {}
+                      ('B = "showrunner " + w + " orchestrates"', False),   # prose, name then +
                       ('Z = f"run `showrunner lock {s}` now"', True),       # arg interpolated
                       ('V = f"run `showrunner {v}` now"', True),            # VERB interpolated
                       ('W = "run `showrunner " + v + " now`"', True)]:      # verb concatenated
