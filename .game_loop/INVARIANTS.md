@@ -276,6 +276,22 @@ Paired with a count, because a scan that matches nothing passes exactly like a s
 verified everything; and proved end-to-end by reintroducing the real dead command and watching
 it fail, rather than trusting that it would.
 
+The count was not enough. A positional rule has a DENOMINATOR — the remedies written in a
+position it does not recognise — and those are not wrong, they are absent, which reads exactly
+like correctness. Six were invisible when this was written, three of them in the Crawler brief.
+So a second assertion walks every string literal by AST and requires each real verb to sit
+somewhere the scan can see. Only real verbs are flagged, so prose cannot make noise, and the
+day one is renamed it becomes a dead command the first rule already catches.
+
+A LIMIT NEEDS A CORPSE NEXT TO IT, which is llm_chat's idea and the best thing to come out of
+this exchange. Their docs check disclaimed, on every run, that it verifies a name APPEARS and
+never that the prose is right. Accurate, printed constantly, read as boilerplate by its own
+author for a day — and it stopped them looking, because "cannot verify correctness" sounds
+unmechanisable while "cannot catch `llm_chat serve`, which shipped in the module docstring for
+months" is a bug you go and find. So state limits with an instance attached, not as a category.
+Note that theirs never went stale: an accurate limit that reads as decoration is a second and
+worse failure than INV20's, because there is nothing to detect.
+
 ## INV20 — A stated LIMIT ages exactly like a stated PREMISE
 
 INV14 says to verify premises about our own repos. A premise is a claim I *act* on, so it gets

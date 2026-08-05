@@ -348,7 +348,8 @@ def cmd_lock_run(args):
     if cmd and cmd[0] == "--":
         cmd = cmd[1:]
     if not cmd:
-        die("nothing to run — usage: showrunner lock run <resource> --holder <who> -- <cmd...>", code=64)
+        die("nothing to run — usage: `showrunner lock run <resource> --holder <who> -- <cmd...>`",
+            code=64)
     if not lock.acquire(os.getpid(), args.holder, session=args.session, wait=args.wait):
         _, h = lock.state()
         eprint("BLOCKED: %r held by pid %s (%s). One consumer at a time."

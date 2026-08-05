@@ -18,6 +18,7 @@ So this harness is split in two:
 Run:  python3 test/run.py [-v]
 """
 
+import ast
 import filecmp
 import json
 import re
@@ -1457,10 +1458,18 @@ def test_cli():
     # grow every time someone writes "showrunner ships" in a sentence, and a list that grows
     # with the language is a list that will be wrong. A remedy is written in backticks or in
     # a fenced block; ordinary prose is not. That discriminator stays fixed as the docs grow.
+    # Three command positions. Backticks mean the same thing everywhere. A fenced block is
+    # markdown. An INDENTED line is a markdown code block — and that one is only safe because
+    # what it is applied to here is markdown: brief.py is a Python file whose strings are the
+    # markdown document handed to every Crawler. llm_chat hit the false positive this invites,
+    # applying the same indent rule to Python docstring PROSE and reading `llm_chat instead`
+    # out of "a consumer vendored llm_chat instead of pointing at a sibling clone". A
+    # positional rule stays fixed only while it means the same thing in what it is read over.
     def commands_in(text):
         spans = re.findall(r"`([^`\n]+)`", text)
         for block in re.findall(r"```[a-z]*\n(.*?)```", text, re.S):
             spans.extend(block.splitlines())
+        spans.extend(re.findall(r"^ {4,}(showrunner [a-z].*)$", text, re.M))
         for span in spans:
             m = re.match(r"\s*showrunner ([a-z][a-z-]+)", span)
             if m:
@@ -1488,6 +1497,33 @@ def test_cli():
        "than that the scan matched nothing", seen > 5, seen)
     ok("...and a verb the CLI rejects is caught rather than waved through",
        "campaign" not in verbs and bool(list(commands_in("run `showrunner campaign` now"))))
+
+    # The DENOMINATOR. Everything above only checks commands the positional rule can SEE, so
+    # a remedy written in a position it does not recognise is not wrong — it is absent, and
+    # absence reads here exactly like correctness. Six were, when this was written: three of
+    # them in the Crawler brief, the highest-traffic remedy text this repo ships. Only real
+    # verbs are flagged, so prose ("showrunner is generic") cannot make noise, and the day one
+    # is renamed the string becomes a dead command the rule can already catch.
+    invisible = []
+    for rel_path in scanned:
+        if not rel_path.endswith(".py"):
+            continue
+        with open(os.path.join(ROOT, rel_path)) as fh:
+            src = fh.read()
+        visible = set()
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                seen_here = list(commands_in(node.value))
+                for m in re.finditer(r"showrunner ([a-z][a-z-]+)", node.value):
+                    if m.group(1) not in verbs:
+                        continue          # prose, not a command
+                    if m.group(1) in seen_here or m.group(1) in visible:
+                        continue
+                    invisible.append("%s: showrunner %s" % (rel_path, m.group(1)))
+                visible.update(seen_here)
+    ok("every real verb printed inside a source string sits in a position the scan can see — "
+       "a remedy the checker cannot read is not checked, and looks identical to a passing one",
+       not invisible, sorted(set(invisible)))
 
 
 # ===================================================== OPTIONAL: br, tmux

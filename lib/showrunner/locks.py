@@ -168,6 +168,6 @@ class LockSet:
                 "BLOCKED: %r is held by pid %s (%s). Matched pattern %r.\n"
                 "  Command: %s\n"
                 "  This is a single-consumer resource: one Crawler in the boss room at a time.\n"
-                "  Wait, or run it through: showrunner lock run %s --holder <who> -- <cmd>"
+                "  Wait, or run it through: `showrunner lock run %s --holder <who> -- <cmd>`"
                 % (name, h.get("pid"), h.get("who"), pat, command, name))
         return True, "allow (%s free): %s" % (", ".join(n for n, _ in hits), command)
