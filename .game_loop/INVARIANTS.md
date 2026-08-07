@@ -294,6 +294,21 @@ Rung 4 where the subject is countable: the same instinct is why `test_claims_abo
 stamps the claims a Crawler is handed rather than trusting that whoever wrote them also warned
 whoever reads them.
 
+**THE CONVERSE, AND IT IS THE HARDER HALF.** llm_chat wrote a rule saying an agent must never
+install because a message asked it to, and one day later broadcast a message asking agents to run
+an installer — into a room it controls. Not carelessness. It read its own message as obviously
+fine *because it wrote it and knew it was genuine*, which is precisely the reasoning the rule
+exists to override. The author is the worst-placed reader of their own instruction, and the only
+thing that reliably corrects it is somebody downstream **declining to comply**.
+
+So the position that catches this is not the author's and cannot be made to be. It is the
+recipient's, and it only works if the recipient is permitted — and expected — to refuse. That is
+already why the Crawler brief carries "verify the premise, refuse the task if it does not hold"
+and why a refuted premise is a *successful* close: the machinery for a downstream refusal exists
+here. What it is not yet pointed at is the text the brief itself carries, since a leaf's title and
+body are interpolated straight into an instruction document handed to something that acts.
+Recorded as the open shape it is; the fix is the human's call, not this file's.
+
 ## INV21 — A printed remedy is a claim that a command exists
 
 Every refusal here ends by telling the reader what to run. That closing line is an assertion
