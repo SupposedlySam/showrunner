@@ -236,21 +236,21 @@ Stated so it can be re-checked rather than trusted, each re-read against the har
 installed here. `test/run.py` fails when that version moves, so this list cannot quietly
 describe a release nobody is running.
 
-<!-- game_loop-verified: fa311367 — payload digest, gated. First shipped in release 8173ec9c,
+<!-- game_loop-verified: 5f1fb460 — payload digest, gated. First shipped in release 128964a4,
      which is a past measurement and stays true; it is NOT a claim about what is installed now. -->
 
 
 - The commit gate resolves **per target tree** and denies in two cases: when that tree carries
-  no harness (`guard-writes-impl.sh:685`), and when the target is built from a **shell
-  variable** so the gate cannot resolve it without executing it (line 671). The second is
+  no harness (`guard-writes-impl.sh:706`), and when the target is built from a **shell
+  variable** so the gate cannot resolve it without executing it (line 692). The second is
   newer than the first — it used to pass silently, which is the default shape under fan-out.
 - The edited-file set is scoped to the **session**, not the tree — one session is one session
-  however many trees it touches. (`EDITED_F` at line 243; stated at line 780.)
+  however many trees it touches. (`EDITED_F` at line 263; stated at line 801.)
 - The blast-radius check is a **warning, never a denial** — `blast_note` reaches `note` and
-  nothing else (lines 762, 1245) — and is silent when the session recorded no edits (line 777).
-- `install.sh` seeds user-owned files **only if absent** (line 442), and ships
+  nothing else (lines 783, 1275) — and is silent when the session recorded no edits (line 798).
+- `install.sh` seeds user-owned files **only if absent** (line 516), and ships
   `templates/verify.yaml` empty — 0 non-comment lines.
-- Hooks are merged into `<project>/.claude/settings.json` (line 517), so a worktree
+- Hooks are merged into `<project>/.claude/settings.json` (line 591), so a worktree
   without one has no rails at all.
 
 If any of these stops being true, `lib/showrunner/harness.py` and the shared-state audit in

@@ -43,7 +43,14 @@
     "",
     "So `exercisable` is three-valued and the middle one is a declared debt, not a pass: 'yes-not-yet'",
     "means the control exists and nobody has written it. Saying four of these were unprovable was",
-    "wrong, and it was wrong in my own tool's output, which is the failure this file exists to name."
+    "wrong, and it was wrong in my own tool's output, which is the failure this file exists to name.",
+    "",
+    "PER-CLAIM VERIFICATION, because the block stamp could not express a partial re-read. This file",
+    "promised that the first re-verification would fill in the null and make THAT entry checkable.",
+    "With one stamp for six claims, filling it in would have asserted six re-readings where one",
+    "happened \u2014 so the promise was unkeepable as written, which is a small instance of exactly what",
+    "this file exists to catch. Each claim now carries its own verified_on/verified_against, and the",
+    "block values remain the original reading for entries nobody has revisited."
   ],
   "claude_code": {
     "subject": "Claude Code (the host this harness runs inside)",
@@ -60,7 +67,9 @@
         "exercised_by": "limits.json carrying five_hour/seven_day with used_percentage",
         "exercise_note": "the host writes this through our own tap, so a snapshot in the expected shape IS the claim holding, observed on the consumer's machine rather than on the author's",
         "exercisable": "yes",
-        "exercisable_why": "exercised: a snapshot in the expected shape IS the claim, and the missing-field arm is its positive control"
+        "exercisable_why": "exercised: a snapshot in the expected shape IS the claim, and the missing-field arm is its positive control",
+        "verified_on": "2026-07-29",
+        "verified_against": null
       },
       {
         "id": "statusline-config-keys",
@@ -69,7 +78,9 @@
         "breaks": "install.sh wires a statusline the host ignores",
         "ledger": "statusLine config keys",
         "exercisable": "no",
-        "exercisable_why": "unconditional: the host either honours the keys or does not, and I cannot construct the case where it does not"
+        "exercisable_why": "unconditional: the host either honours the keys or does not, and I cannot construct the case where it does not",
+        "verified_on": "2026-07-29",
+        "verified_against": null
       },
       {
         "id": "no-rate-limits-in-hooks",
@@ -78,7 +89,9 @@
         "breaks": "if it became true, the whole statusline detour is unnecessary",
         "ledger": "Hook payloads carry rate-limit data",
         "exercisable": "yes-not-yet",
-        "exercisable_why": "CONDITIONAL absence and exercisable, not yet exercised: every hook invocation supplies a payload I control, and the payload carrying session_id is the positive control that the read worked while rate_limits was still absent"
+        "exercisable_why": "CONDITIONAL absence and exercisable, not yet exercised: every hook invocation supplies a payload I control, and the payload carrying session_id is the positive control that the read worked while rate_limits was still absent",
+        "verified_on": "2026-07-29",
+        "verified_against": null
       },
       {
         "id": "no-headless-usage-flag",
@@ -87,7 +100,10 @@
         "breaks": "if it became true, usage could be read directly instead of inferred",
         "ledger": "A headless `claude usage` / `--usage` flag exists",
         "exercisable": "no",
-        "exercisable_why": "unconditional: the case where the flag exists is the one I cannot construct, so there is nothing to provoke and no control to pair"
+        "exercisable_why": "unconditional: the case where the flag exists is the one I cannot construct, so there is nothing to provoke and no control to pair",
+        "verified_on": "2026-08-05",
+        "verified_against": "2.1.223",
+        "verified_how": "read `claude --help` in full at 2.1.223: no --usage/--limit/--quota option and no usage/limit/quota subcommand (the command list is agents, auth, auto-mode, doctor, gateway, import, install, mcp, plugin, project, setup-token, ultrareview, update). Re-read because a user asked whether a spawned session could report usage \u2014 the question walked straight into a claim nobody had checked in a week."
       },
       {
         "id": "no-readable-ratelimit-headers",
@@ -96,7 +112,9 @@
         "breaks": "if it became true, the client-side derivative stops being the only form",
         "ledger": "`anthropic-ratelimit-unified-*` response headers are readable by harness code",
         "exercisable": "no",
-        "exercisable_why": "unconditional: nothing local produces the headers, so no run can discriminate"
+        "exercisable_why": "unconditional: nothing local produces the headers, so no run can discriminate",
+        "verified_on": "2026-07-29",
+        "verified_against": null
       },
       {
         "id": "no-weekly-opus-window",
@@ -106,8 +124,23 @@
         "ledger": "The per-model weekly (Opus) limit is in the statusline payload",
         "exercisable": "yes",
         "exercisable_why": "CONDITIONAL absence, now exercised: our own tap supplies the input, a known window present is the mechanism demonstrably firing, and an unexpected window would falsify it",
-        "exercised_by": "a known window present in limits.json (the control) with no third window beside it (the claim)"
+        "exercised_by": "a known window present in limits.json (the control) with no third window beside it (the claim)",
+        "verified_on": "2026-07-29",
+        "verified_against": null
+      },
+      {
+        "id": "fresh-session-token-floor",
+        "says": "a fresh session costs ~31.5k input tokens before answering, of which ~24k is irreducible base preamble; tool definitions are ~6k and MCP schemas ~1k",
+        "source": "measured: claude -p ... --output-format json at 2.1.223",
+        "breaks": "the recommendation against spawning sessions to sample usage rests on this floor; if it dropped to near zero the objection would weaken and a polling probe might be fine",
+        "ledger": "A fresh Claude Code session costs ~31.5k INPUT tokens before it answers anything, and ~24k of that is irreducible",
+        "verified_on": "2026-08-05",
+        "verified_against": "2.1.223",
+        "verified_how": "three probes at 2.1.223 reading usage from --output-format json: baseline 31,547 / --strict-mcp-config 30,323 / plus 13 tools disabled 24,377. Decomposed rather than estimated, because a single number cannot say what is trimmable.",
+        "exercisable": "yes-not-yet",
+        "exercisable_why": "CONDITIONAL and exercisable \u2014 I control the input and the probe reports its own usage, so re-running it is the exercise. NOT wired into the suite on purpose: the exercise spends the resource it measures and needs network and credentials, so it would make the suite cost tokens and fail offline. That is a real reason and it is still a debt, not a pass."
       }
-    ]
+    ],
+    "//note": "verified_on/verified_against now live on each CLAIM. The block values are the original reading and remain as the default for entries nobody has revisited; a claim carrying its own is the one that has actually been re-read."
   }
 }

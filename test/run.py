@@ -1300,6 +1300,34 @@ def test_publishable():
         ok("the tracked harness config grants no write root outside the repo",
            not hc.get("allow_write_roots"), hc.get("allow_write_roots"))
 
+    # THE SUBJECT GREW UNDER THIS CHECK. game_loop's config used to be one per-project file; it
+    # now UNIONS three — `~/.game_loop/config.json`, the project's, and config.local.json — so
+    # the assertion above answers "what does a stranger inherit from this repo" and is silent
+    # about what is actually enforced on this machine. Today those are the same thing because
+    # no machine-wide file exists here, and a check that passes for the right reason today
+    # passes identically for the wrong one tomorrow. Mirrors the guard's own source list.
+    layered = [os.path.expanduser("~/.game_loop/config.json"),
+               os.path.join(ROOT, ".game_loop", "config.json"),
+               os.path.join(ROOT, ".game_loop", "config.local.json")]
+    present, granted = [], []
+    for src in layered:
+        try:
+            with open(src) as fh:
+                d = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        present.append(os.path.basename(src) if not src.startswith(os.path.expanduser("~/.game"))
+                       else "~/.game_loop/config.json")
+        for root in d.get("allow_write_roots") or []:
+            if not os.path.abspath(root).startswith(ROOT):
+                granted.append("%s → %s" % (src, root))
+    ok("...and so does the EFFECTIVE config — the union game_loop actually reads, not just the "
+       "file this repo ships. showrunner's docs promise a Crawler cannot write outside the "
+       "repo, and a machine-wide layer can widen that without touching anything tracked",
+       not granted, granted)
+    ok("...checked against the layers that exist here, so this is a verdict rather than a file "
+       "that happened to be missing", bool(present), present)
+
     sr_cfg = os.path.join(ROOT, ".showrunner", "config.json")
     with open(sr_cfg) as fh:
         sc = json.load(fh)

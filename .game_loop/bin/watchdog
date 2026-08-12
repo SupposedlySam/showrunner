@@ -276,6 +276,45 @@ def _fmt_reset(epoch):
         return "?"
 
 
+def refresh_limits_if_due():
+    """Spawn a probe when the snapshot is too old to decide on — the automatic half of the feature.
+
+    A MANUAL PROBE HELPS NOBODY AT 1AM, which is the only hour this matters. The park and the
+    reset-ring below are exactly as blind as the snapshot they read, and on a host that renders no
+    statusline that snapshot never arrives on its own. So the watchdog — which is already the thing
+    that runs while nobody is watching — refreshes it on the interval the reading itself implies.
+    OFF unless the project turned it on, because it spends real tokens (~24k input per run).
+
+    NEVER FATAL, and never blocking a ring. If the probe fails the watchdog carries on with whatever
+    snapshot it had: a guard whose failure stops the guard above it is worse than the gap it fills.
+    """
+    try:
+        cfg = _merged_config(CONFIG_F)
+        pc = ((cfg.get("limits") or {}).get("probe") or {})
+        if not pc.get("enabled"):
+            return
+        snap = limits_snapshot()
+        now = time.time()
+        age = now - float((snap or {}).get("captured_at") or 0)
+        gl = os.path.join(CODE_ROOT, "bin", "game_loop")
+        # The interval the READING implies, computed by the same function `limitprobe` reports —
+        # one place decides "when next", so the watchdog and the verb cannot disagree about it.
+        due = subprocess.run([sys.executable, gl, "limitprobe", "--interval-only"],
+                             capture_output=True, text=True, timeout=20)
+        try:
+            need = float((due.stdout or "").strip())
+        except ValueError:
+            need = float(pc.get("max_interval_sec", 3600) or 3600)
+        if age < need:
+            return
+        r = subprocess.run([sys.executable, gl, "limitprobe"], capture_output=True, text=True,
+                           timeout=240)
+        logline({"kind": "watchdog_limit_probe", "ok": r.returncode == 0,
+                 "age_sec": int(age), "detail": (r.stderr or "").strip()[:160]})
+    except Exception:  # noqa: BLE001 — a probe that cannot run must not take the watchdog with it
+        logline({"kind": "watchdog_limit_probe", "ok": False, "detail": "probe raised"})
+
+
 def park_until_limit_resets(state):
     """An exhausted usage window means ringing is pointless: an asyncRewake wake-up is an API call,
     and the API is exactly what just ran dry. So don't burn the ring budget against a dead wall —
@@ -594,6 +633,8 @@ def main():
 
     # An exhausted usage window outranks everything below: idleness is EXPECTED while rate-limited,
     # and a ring is an API call into the very wall that killed the run. Park until the reset.
+    # Refresh BEFORE deciding: parking on a stale reading is the same failure as not parking.
+    refresh_limits_if_due()
     park_until_limit_resets(state)  # returns immediately when no window is exhausted
 
     # RESET BEFORE THE CAP. The cap means CONSECUTIVE UNPRODUCTIVE rings — stand down only if ringing

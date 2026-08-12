@@ -83,6 +83,15 @@
       "change": "a state-changing verb that nobody enumerated now reaches the standing-writes / authorize POLICY instead of failing closed before it. Calls that were refused as unclassifiable \u2014 resolve, merge-adjacent review verbs on first-party servers \u2014 are now governed by your mcp_writes and mcp_standing_writes settings rather than blocked outright. It does not make them free; it makes them decidable.",
       "why_it_qualifies": "an existing verb stopped refusing outright and started deferring to policy, which changes what an unattended run can complete",
       "consequence": "if you were relying on unclassifiable-verbs-fail-closed as your safety margin, that margin is now your mcp_writes and mcp_standing_writes settings instead. Read them and confirm they say what you meant; the default is still `gated`, so an unconfigured project is unchanged."
+    },
+    {
+      "seq": 6,
+      "sha": "789333a",
+      "verb": "MCP calls",
+      "notice": false,
+      "change": "a new OPT-IN key, mcp_trusted_servers, permits every call to a named server \u2014 irreversible verbs, landing verbs and mutating arguments included. Refusal lines moved in the guard, which is why this entry exists.",
+      "consequence": "none for anyone who does not set the key. A project with no mcp_trusted_servers is refused exactly what it was refused before, asserted in the suite as its own arm. If you DO set it, read the Configure section: this is the widest door in the tool and status reports it in capitals.",
+      "why_it_qualifies": "IT DOES NOT \u2014 recorded with notice:false because the behaviour gate fired and an omission would be indistinguishable from nobody having decided. The test is whether somebody who changed NOTHING would notice; an opt-in key they have not opted into changes nothing for them."
     }
   ],
   "schema": 1

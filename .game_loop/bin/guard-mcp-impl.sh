@@ -157,25 +157,45 @@ writing — the next re-pin destroys it. Add GAME_LOOP_HOME=\"\$CLAUDE_PROJECT_D
 hook in .claude/settings.local.json and reload the window. \`game_loop self\` prints the whole block."
 fi
 CONFIG_F="$GAMELOOP_DIR/config.json"
-# config.local.json layered over config.json, computed ONCE and handed to every embedded reader
-# below. A gitignored local override that only SOME components honour is worse than none at all: it
-# works where you test it and not where it matters. (Shipped exactly that way once -- the waiting
-# probe lived in the local file and the watchdog, which is the component that needed it, could not
-# see it.) Merging here rather than in each block keeps one place to get it wrong instead of five.
+# ~/.game_loop/config.json (machine-wide) + config.json + config.local.json, computed ONCE and handed
+# to every embedded reader below. A gitignored local override that only SOME components honour is
+# worse than none at all: it works where you test it and not where it matters. (Shipped exactly that
+# way once -- the waiting probe lived in the local file and the watchdog, which is the component that
+# needed it, could not see it.) Merging here rather than in each block keeps one place to get it wrong
+# instead of five.
+#
+# TRUST-LIST keys UNION across all three sources instead of replacing: a machine-wide grant
+# (~/.game_loop/config.json -> mcp_trusted_servers, say) must never be silently erased by a project
+# that happens to set its OWN, different list for the same key, and a project's own grant must never
+# be shadowed by the machine-wide file either. Everything else keeps normal later-wins replace, so a
+# project can still override a machine-wide scalar default (e.g. mcp_writes).
 CONFIG_MERGED='{}'   # set BEFORE the computation: the line below exports the whole env
                      # into its own subshell, and under `set -u` that read itself.
 CONFIG_MERGED=$(CONFIG_F="$CONFIG_F" python3 -c '
 import io, json, os
-cfg = {}
-for p in (os.environ["CONFIG_F"],
-          os.path.join(os.path.dirname(os.environ["CONFIG_F"]), "config.local.json")):
+UNION_KEYS = {"read_roots", "allow_write_roots", "deploy_verbs", "generated_globs",
+              "mcp_read_only_tools", "mcp_standing_writes", "mcp_trusted_servers"}
+cfg, union = {}, {}
+paths = [os.path.join(os.path.expanduser("~"), ".game_loop", "config.json"),
+         os.environ["CONFIG_F"],
+         os.path.join(os.path.dirname(os.environ["CONFIG_F"]), "config.local.json")]
+for p in paths:
     try:
         with open(p) as f:
             d = json.load(f)
     except (OSError, ValueError):
         continue
-    if isinstance(d, dict):
-        cfg.update(d)
+    if not isinstance(d, dict):
+        continue
+    for k, v in d.items():
+        if k in UNION_KEYS and isinstance(v, list):
+            bucket = union.setdefault(k, [])
+            for item in v:
+                if item not in bucket:
+                    bucket.append(item)
+        else:
+            cfg[k] = v
+cfg.update(union)
 print(json.dumps(cfg))
 ' 2>/dev/null)
 [ -n "$CONFIG_MERGED" ] || CONFIG_MERGED='{}'
@@ -317,6 +337,7 @@ first = words[0] if words else ""
 allow_names = []
 mcp_writes = "gated"        # default before the read, so an unreadable config cannot NameError
 standing_writes = []
+trusted_servers = []
 try:
     with io.StringIO(os.environ.get("CONFIG_MERGED", "{}")) as f:
         _c = json.load(f)
@@ -331,6 +352,7 @@ try:
         # visible rather than silently doing something else.
         mcp_writes = str(_c.get("mcp_writes") or "gated").strip().lower()
         standing_writes = [str(x) for x in (_c.get("mcp_standing_writes") or [])]
+        trusted_servers = [str(x) for x in (_c.get("mcp_trusted_servers") or [])]
 except (OSError, ValueError, KeyError):
     pass
 named_read_only = any(tool == a or (a.endswith("__") and tool.startswith(a)) for a in allow_names)
@@ -365,6 +387,45 @@ named_read_only = any(tool == a or (a.endswith("__") and tool.startswith(a)) for
 # check remains. That is two layers down to one — accepted because the surviving layer is the one
 # that runs on EVERY call, and because this read-time check never protected against a tool that does
 # not exist yet, which is the entire population a prefix is for.
+# ── mcp_trusted_servers: THIS SERVER IS OURS ─────────────────────────────────────────────────────
+#
+# The widest door in this tool, and it exists because the alternative was worse. Reported by a user
+# whose team WROTE the MCP server their agents call: every fresh PR-review agent was stopping to ask
+# for the same `approve` and `comment` authorizations, on a server the project owns and maintains.
+# `mcp_standing_writes` covers that case and deliberately stops short of the irreversible and
+# landing tiers (#57) — right for a server somebody else ships, wrong for one you wrote, where the
+# team already owns the blast radius and the review that made it safe happened in their own repo.
+#
+# So this is a SEPARATE key rather than a loosening of the other one, and the two grains keep their
+# meanings: mcp_standing_writes says "these specific writes are pre-approved", this says "this
+# server is ours". Nothing about the narrow grain gets weaker because the wide one exists.
+#
+# WHAT IT PERMITS: everything from the named servers. Irreversible verbs, landing verbs, and
+# argument-level findings all pass. That is the request, stated plainly rather than half-granted.
+#
+# WHAT STILL HOLDS, and each is a deliberate limit rather than an oversight:
+#   * CONFIG-AUTHORED ONLY, like every other policy here — an agent can never widen its own door.
+#   * SERVER GRAIN ONLY. "Trust everything" is a statement about a server, never about one tool.
+#   * INERT under mcp_writes: "disabled", because disabled stays absolute (#53).
+#   * EVERY consumption logged as trusted_mcp_write, so "allowed because ours" and "never ran"
+#     remain distinguishable afterwards.
+#   * `status` says it out loud, in the coverage report, because a door this wide that nobody can
+#     see is the failure this whole file argues against.
+#
+# WHAT IT CANNOT KNOW: that the server really is yours. Nothing here can check authorship — it
+# checks that somebody with commit access to your config said so. If that config is shared, this is
+# shared with it.
+trusted_bad = []
+trusted_ok = set()
+for _t in trusted_servers:
+    if "*" in _t or "?" in _t or not _t.startswith("mcp__"):
+        trusted_bad.append((_t, "not an mcp__server__ prefix, and globs are never accepted"))
+    elif not (_t.endswith("__") and _t.count("__") == 2 and len(_t) > len("mcp____")):
+        trusted_bad.append((_t, "must name a WHOLE SERVER as mcp__<server>__ — trusting everything "
+                                "is a statement about a server, never about one tool"))
+    else:
+        trusted_ok.add(_t)
+
 standing_bad = []
 standing_ok = set()
 standing_prefixes = set()
@@ -385,6 +446,16 @@ for _e in standing_writes:
         standing_bad.append((_e, "names an irreversible verb, which stays human-only"))
     else:
         standing_ok.add(_e)
+
+if trusted_bad:
+    print("DENY")
+    print("BLOCKED: this project's mcp_trusted_servers is not a valid policy, so no MCP call is\n"
+          "classified until it is fixed.\n\n"
+          + "\n".join("    " + e + "\n      " + why for e, why in trusted_bad)
+          + "\n\nRefused at CONFIG-READ time rather than dropped: this is the widest door in the\n"
+            "tool, and a half-honoured version of it is worse than one that is rejected.\n"
+            "Fix .game_loop/config.json -> mcp_trusted_servers.")
+    sys.exit(0)
 
 if standing_bad:
     print("DENY")
@@ -454,6 +525,26 @@ findings = list(dict.fromkeys(findings))
 
 # ── verdict ──────────────────────────────────────────────────────────────────────────────────────
 hard_hit = sorted(set(words) & HARD_VERBS)
+trusted_by = sorted(t for t in trusted_ok if tool.startswith(t))
+if trusted_by and mcp_writes != "disabled":
+    # BEFORE the argument findings and before the irreversible-verb branch, deliberately. Those
+    # floors exist to protect a project from servers it did not write; this key is the project
+    # saying it wrote this one. Placing it after them would grant "everything except the things you
+    # most likely built the server to do", which is the half-grant that made the user file this.
+    try:
+        log_f = os.path.join(os.environ["GAMELOOP_DIR"], "log.jsonl")
+        with open(log_f, "a") as f:
+            rec = {"t": datetime.datetime.now().isoformat(timespec="seconds")}
+            sid = os.environ.get("SID", "")
+            if sid:
+                rec["sid"] = sid[:8]
+            rec.update({"kind": "trusted_mcp_write", "tool": tool, "server": trusted_by[0],
+                        "verb": first})
+            f.write(json.dumps(rec) + "\n")
+    except OSError:
+        pass
+    print("ALLOW")
+    sys.exit(0)
 if findings:
     kind = "MUTATING"
     why = ("its ARGUMENTS carry a mutation:\n" + "\n".join("    - " + f for f in findings))

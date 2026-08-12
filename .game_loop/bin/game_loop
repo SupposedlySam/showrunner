@@ -743,25 +743,21 @@ def limits_summary(snap):
     return " · ".join(parts) or None
 
 
-def cmd_statusline(s, a, payload):
-    """The statusline tap: snapshot rate_limits to limits.json, render one row, page on crossing.
+def absorb_rate_limits(rate_limits, lc, now_epoch):
+    """Fold a rate_limits reading into the account-scoped snapshot; return the windows.
 
-    Runs on every statusline refresh, so it must be fast and must NEVER exit non-zero — a broken
-    statusline row is cosmetic, but this tap is what feeds the limitgate and the watchdog's park, so
-    it degrades to printing less rather than failing. crossed_at/notified survive refreshes for the
-    SAME window instance (same resets_at) and reset when the window rolls over.
+    EXTRACTED SO THE TAP AND THE PROBE CANNOT DRIFT. Both produce the same snapshot from the same
+    field, and both must carry crossing history forward, page exactly once per window instance, and
+    take the MAX against a previous reading of the same instance. Two copies of that would be two
+    chances to get paging wrong, and the second copy would be the one nobody re-read — which is the
+    shape this repo keeps paying for. The tap calls it on every statusline refresh; `limitprobe`
+    calls it with a reading fetched from a spawned session, on hosts that render no statusline.
     """
-    lc = limits_cfg()
-    now_epoch = time.time()
-    # The whole read-modify-write sits under the cross-session lock: two sessions' statuslines
-    # refresh the same account-scoped snapshot, and crossed_at/notified must be consumed exactly
-    # once between them. (The page itself is sent under the lock too — brief, bounded by the send
-    # timeout, and it is what makes "paged ONCE" true account-wide rather than per-session.)
     with limits_lock():
         prev = ((load_limits() or {}).get("windows") or {})
         windows = {}
         for name in ("five_hour", "seven_day"):
-            w = ((payload.get("rate_limits") or {}).get(name) or {})
+            w = ((rate_limits or {}).get(name) or {})
             try:
                 used = float(w["used_percentage"])
                 resets = float(w["resets_at"])
@@ -791,6 +787,23 @@ def cmd_statusline(s, a, payload):
             save_limits({"captured_at": now_epoch, "session": SESSION, "windows": windows})
         except OSError:
             pass
+    return windows
+
+def cmd_statusline(s, a, payload):
+    """The statusline tap: snapshot rate_limits to limits.json, render one row, page on crossing.
+
+    Runs on every statusline refresh, so it must be fast and must NEVER exit non-zero — a broken
+    statusline row is cosmetic, but this tap is what feeds the limitgate and the watchdog's park, so
+    it degrades to printing less rather than failing. crossed_at/notified survive refreshes for the
+    SAME window instance (same resets_at) and reset when the window rolls over.
+    """
+    lc = limits_cfg()
+    now_epoch = time.time()
+    # The whole read-modify-write sits under the cross-session lock: two sessions' statuslines
+    # refresh the same account-scoped snapshot, and crossed_at/notified must be consumed exactly
+    # once between them. (The page itself is sent under the lock too — brief, bounded by the send
+    # timeout, and it is what makes "paged ONCE" true account-wide rather than per-session.)
+    windows = absorb_rate_limits(payload.get("rate_limits"), lc, now_epoch)
     model = ((payload.get("model") or {}).get("display_name")) or ""
     try:
         ctx = f"ctx {float((payload.get('context_window') or {}).get('used_percentage')):.0f}%"
@@ -884,6 +897,137 @@ def cmd_limitgate(s, a, payload):
         "hookEventName": "PreToolUse", "permissionDecision": "deny",
         "permissionDecisionReason": reason}}))
     sys.exit(0)
+
+
+# CODE_ROOT, not ROOT: the probe is executable code, so under a pin it must come from the
+# pinned copy alongside every other script rather than from the project it is guarding.
+PROBE_SCRIPT = os.path.join(CODE_ROOT, "bin", "limit-probe.sh")
+# Longer than a probe takes (~75s measured) and far shorter than any sane interval: a stale claim
+# must expire on its own, or one session dying mid-probe would silence the others indefinitely.
+PROBE_LEASE_SEC = 300
+
+
+def probe_cfg():
+    """The probe's settings, OFF unless a human turned it on.
+
+    Default-off because it spends real tokens (~24k input per run, measured at 2.1.223) and because
+    a feature that costs money should be a decision somebody made, not one they inherited. Nothing
+    about the rest of the limit family changes when it is off.
+    """
+    lc = (config().get("limits") or {})
+    p = lc.get("probe") if isinstance(lc.get("probe"), dict) else {}
+    return {"enabled": bool(p.get("enabled", False)),
+            "min_interval_sec": int(p.get("min_interval_sec", 900) or 900),
+            "max_interval_sec": int(p.get("max_interval_sec", 3600) or 3600)}
+
+
+def next_probe_after(snap, now_epoch, pc=None):
+    """Seconds until the next probe is worth spending tokens on — the 'when to check next' half.
+
+    SCALED TO WHAT IS AT STAKE, because a fixed interval is wrong at both ends: far from the limit
+    it burns tokens to learn nothing, and near the limit it learns too late. Closest window by
+    percentage decides, and a window about to RESET is not urgent no matter how full it is — the
+    thing being timed is the moment work would stop, and a window that resets in two minutes stops
+    nothing.
+
+    Returns the max interval when there is no snapshot to reason from: the first probe is the one
+    with the least information, so it should not also be the most frequent.
+    """
+    pc = pc or probe_cfg()
+    lo, hi = pc["min_interval_sec"], max(pc["min_interval_sec"], pc["max_interval_sec"])
+    worst = 0.0
+    for w in ((snap or {}).get("windows") or {}).values():
+        try:
+            used, resets = float(w["used_percentage"]), float(w["resets_at"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if resets <= now_epoch:
+            continue                      # already reset — it constrains nothing
+        worst = max(worst, used)
+    if not worst:
+        return hi
+    # Linear from hi at 0% to lo at 90%+, then hold at lo. Not a tuned curve and not presented as
+    # one: it is a ramp chosen so the spend rises as the risk does, and the numbers it interpolates
+    # between are the human's own config rather than anything invented here.
+    frac = min(1.0, worst / 90.0)
+    return int(hi - (hi - lo) * frac)
+
+
+def cmd_limitprobe(s, a):
+    """Fetch a usage reading by spawning a session, on a host that cannot render a statusline.
+
+    THE COST IS REAL AND SO IS THE ALTERNATIVE. ~24k input tokens per run against an unattended run
+    that hits its limit at 1am, dies mid-action, and is still dead at 7am because nothing could see
+    the wall coming. The whole limit family — the handoff gate, the park, the wake-on-reset — is
+    built and tested and was only ever missing the snapshot. This supplies it.
+    """
+    pc = probe_cfg()
+    if getattr(a, "interval_only", False):
+        # The watchdog asks the SAME function that reports "next probe in ~N min", so the two can
+        # never disagree about when the next spend is due. Prints seconds and nothing else.
+        out(str(next_probe_after(load_limits(), time.time(), pc)))
+        return
+    if not (pc["enabled"] or a.force):
+        die("the limit probe is off. It spends ~24k input tokens per run, so it is a decision "
+            "somebody makes rather than inherits:\n"
+            '  .game_loop/config.json -> "limits": {"probe": {"enabled": true}}\n'
+            "Or run this once by hand with --force.")
+    if not os.path.exists(PROBE_SCRIPT):
+        die(f"the probe script is missing: {PROBE_SCRIPT}")
+
+    # ONE PROBE SERVES THE CHECKOUT. The snapshot is account-scoped, so the number is the same for
+    # every session sharing it — but each session runs its own watchdog, and each would
+    # independently find the snapshot stale and spend ~24k tokens fetching an answer another session
+    # was already fetching. Reported from a checkout running EIGHTEEN concurrent sessions, where
+    # that is 430k tokens to read one number.
+    #
+    # A LEASE RATHER THAN A HELD LOCK. The probe takes ~75s and the limits lock is also what the
+    # statusline tap takes on every refresh, so holding it across the spawn would stall every
+    # statusline in the checkout for over a minute. Instead: claim under the lock, release, spawn.
+    # A claim older than the lease is ignored, so a session that dies mid-probe cannot wedge the
+    # others — it costs one duplicate probe, once, which is the cheap direction to fail.
+    now_probe = time.time()
+    if not a.force:
+        with limits_lock():
+            snap = load_limits() or {}
+            claimed = float(snap.get("probe_started_at") or 0)
+            if now_probe - claimed < PROBE_LEASE_SEC:
+                out(f"another session started a probe {int(now_probe - claimed)}s ago — skipping.",
+                    "  The snapshot is account-scoped, so its answer is this session's answer too.")
+                logline({"kind": "limit_probe", "outcome": "deferred_to_peer"})
+                return
+            snap["probe_started_at"] = now_probe
+            try:
+                save_limits(snap)
+            except OSError:
+                pass                    # unclaimable is not fatal; worst case is a duplicate probe
+    r = subprocess.run(["bash", PROBE_SCRIPT], capture_output=True, text=True, timeout=180)
+    if r.returncode == 2:
+        # COULD NOT LOOK. Never folded into "no limits data": a caller that treats them the same
+        # reports a broken probe as an account with no windows, forever.
+        logline({"kind": "limit_probe", "outcome": "could_not_tell",
+                 "detail": (r.stderr or "").strip()[:200]})
+        die("the probe could not tell: " + ((r.stderr or "").strip()[:300] or "no reason given"))
+    if r.returncode == 1:
+        logline({"kind": "limit_probe", "outcome": "no_rate_limits"})
+        out("the host rendered a statusline and carried NO rate_limits.",
+            "  That is an answer, not a failure: the field is subscriber-only. Nothing here can",
+            "  protect a run whose limits it cannot see, and it will keep saying so.")
+        return
+    try:
+        rl = json.loads(r.stdout or "{}")
+    except ValueError:
+        logline({"kind": "limit_probe", "outcome": "unparseable"})
+        die("the probe answered with something that is not JSON — treating as could-not-tell.")
+    now_epoch = time.time()
+    windows = absorb_rate_limits(rl, limits_cfg(), now_epoch)
+    logline({"kind": "limit_probe", "outcome": "ok",
+             "windows": {k: v.get("used_percentage") for k, v in (windows or {}).items()}})
+    nxt = next_probe_after({"windows": windows}, now_epoch, pc)
+    out("✓ usage read by spawning a session — the snapshot is live on this host now.",
+        "  " + (limits_summary({"windows": windows}) or "no windows in the reading"),
+        f"  next probe worth spending on in ~{nxt // 60} min (scaled to the fullest window;",
+        "  a window about to reset is not urgent however full it is).")
 
 
 def cmd_notify(s, a):
@@ -4277,7 +4421,10 @@ def pinned_sha():
 
 def run_verify_check():
     """'' when nothing is owed, else the text of what is stale. Never raises."""
-    v = os.path.join(ROOT, "bin", "verify")
+    # CODE_ROOT, not ROOT: the binary comes from wherever this process's code came from — pinned or
+    # central dispatch both keep reading that code's verify, never a copy that may not exist locally
+    # at all. Same reasoning as coverage_report() just below; this one had drifted from it.
+    v = os.path.join(CODE_ROOT, "bin", "verify")
     if not os.path.isfile(v):
         return ""
     try:
@@ -4386,8 +4533,14 @@ def _statusline_claim_live():
         return None
     if not isinstance(d, dict):
         return None
+    # THE WINDOWS ARE NESTED, and the first version of this read them at the top level — so it could
+    # never report the claim confirmed, on any host, however well the tap was working. An exercise
+    # that cannot fire positive is worse than no exercise: it reports "not observed" forever and
+    # that reads as the claim failing rather than as the check being wrong. Found only when a real
+    # snapshot finally existed to compare against, which is the argument for producing one.
+    ws = d.get("windows") or {}
     for w in ("five_hour", "seven_day"):
-        v = d.get(w)
+        v = ws.get(w)
         if isinstance(v, dict) and "used_percentage" in v:
             return f"{w} snapshot with used_percentage present"
     return None
@@ -4413,7 +4566,8 @@ def _windows_claim_live():
         return None
     if not isinstance(d, dict):
         return None
-    windows = {k for k, v in d.items() if isinstance(v, dict) and "used_percentage" in v}
+    windows = {k for k, v in (d.get("windows") or {}).items()
+               if isinstance(v, dict) and "used_percentage" in v}
     known = windows & {"five_hour", "seven_day"}
     if not known:
         return None                      # no control fired; an absence here proves nothing
@@ -4445,7 +4599,28 @@ def external_claims_report():
         on, against = b.get("verified_on") or "?", b.get("verified_against")
         head = f"  claims : {n} load-bearing claim(s) about {b.get('subject', _k)}"
         lines.append(head)
+        # PER-CLAIM FIRST. A block stamp cannot express "one of these was re-read last Tuesday",
+        # and reporting the block value alone would speak one re-verification as six.
+        claims = b.get("claims") or []
+        redone = [c for c in claims if c.get("verified_against")]
         run, how = running_host_version()
+        for c in redone:
+            # NAMED APART from the block's `on`/`against` on purpose: a Python loop variable
+            # outlives its loop, and the first version of this leaked the per-claim date into the
+            # block line below — which then reported one re-reading as though it were all six.
+            _cv, _con = c["verified_against"], c.get("verified_on", "?")
+            if run and _cv != run:
+                lines.append(f"           ⚠ '{c['id']}' was re-read {_con} against {_cv}; RUNNING "
+                             f"{run} ({how}) — re-read it.")
+            elif run:
+                lines.append(f"           ✓ '{c['id']}' re-read {_con} against {_cv}, and that is "
+                             "what is running.")
+            else:
+                lines.append(f"           · '{c['id']}' re-read {_con} against {_cv}; running "
+                             f"version UNKNOWN ({how}).")
+        if redone and len(redone) < len(claims):
+            lines.append(f"           the other {len(claims) - len(redone)} have NOT been re-read "
+                         "since the original reading below.")
         if against and run and against != run:
             lines.append(f"           ⚠ VERIFIED AGAINST {against}, RUNNING {run} ({how}) — re-read "
                          "them; the subject moved.")
@@ -4495,7 +4670,13 @@ def external_claims_report():
                          "and a stamp is the only")
             lines.append("           instrument there is. (Saying that of ALL of them was wrong, "
                          "and it was wrong here.)")
-        ex = [c for c in (b.get("claims") or []) if c.get("exercised_by")]
+        # EACH CLAIM REPORTS ITS OWN EVIDENCE. The first version called the statusline check for
+        # every exercised claim, so the weekly-window claim was reported twice — once correctly by
+        # its own block above, and once carrying the statusline claim's evidence under its name.
+        # A reading about the wrong subject, which is the defect this file exists to name.
+        _dedicated = {"no-weekly-opus-window"}
+        ex = [c for c in (b.get("claims") or [])
+              if c.get("exercised_by") and c["id"] not in _dedicated]
         for c in ex:
             live = _statusline_claim_live()
             if live:
@@ -4765,6 +4946,20 @@ def coverage_report(s):
                      "to remove that door.")
         # Standing doors are worth seeing without reading config, for the same reason the write
         # roots are: a human should be able to tell what is open without going to look (#56).
+        # THE WIDEST DOOR FIRST, and unmissable. mcp_trusted_servers permits EVERYTHING from the
+        # named servers -- irreversible verbs, landing verbs, argument-level findings -- because a
+        # project that wrote a server already owns its blast radius. That is a legitimate thing to
+        # declare and an illegitimate thing to hide, so it is reported above the narrow grain and in
+        # capitals: somebody inheriting this repo must meet it before they meet anything else.
+        _ts = [str(x) for x in (cfg.get("mcp_trusted_servers") or [])]
+        if _ts:
+            lines.append("           ⚠ WHOLLY TRUSTED SERVER(S) — EVERY call is allowed, including "
+                         "irreversible and")
+            lines.append("           landing verbs and mutating arguments: " + ", ".join(_ts))
+            lines.append("           This is the project declaring it OWNS these servers. Nothing "
+                         "here can check that")
+            lines.append("           it does — only that somebody with commit access to config "
+                         "said so.")
         _sw = [str(x) for x in (cfg.get("mcp_standing_writes") or [])]
         if _sw:
             lines.append(f"           STANDING, no human needed ({len(_sw)}): " + ", ".join(_sw))
@@ -5309,8 +5504,17 @@ def cmd_self(s, a):
     Writes nothing outside the repo: the checkout lands in <repo>/.game_loop_self, and the hooks
     block is PRINTED for .claude/settings.local.json rather than written over a file that may hold
     the human's own settings.
+
+    --dest overrides where the checkout lands, for the one caller outside this repo that needs a
+    checkout somewhere else entirely: a machine-wide central install that `install.sh --central`
+    points many *other* repos' dispatcher shims at (see docs/how-it-works.md). Everything above still
+    applies to that copy — OWNED_FILES stripped, VERSION/PINNED stamped, resolve_home still refuses a
+    bare run against it — this flag only changes WHERE, never the safety properties of what lands
+    there.
     """
-    dest = os.path.join(REPO_ROOT, PINNED_DIRNAME)
+    if a.dest and not a.pin:
+        die("self --dest: only meaningful with --pin — it names where the checkout should land.")
+    dest = os.path.abspath(os.path.expanduser(a.dest)) if a.dest else os.path.join(REPO_ROOT, PINNED_DIRNAME)
     code = os.path.join(dest, ".game_loop")
     if not a.pin:
         if CODE_ROOT != ROOT:
@@ -5355,16 +5559,23 @@ def cmd_self(s, a):
     with open(os.path.join(code, "VERSION"), "w") as f:
         f.write(sha + "\n")
     with open(os.path.join(code, PINNED_MARK), "w") as f:
+        # "home" names the ONE project this pin belongs to — meaningless for a --dest checkout meant
+        # to serve many different consumers, so it is left null rather than naming whichever repo
+        # happened to run the pin command.
         json.dump({"ref": a.pin, "sha": sha, "at": datetime.datetime.now().isoformat(
-            timespec="seconds"), "home": ROOT}, f, indent=2)
+            timespec="seconds"), "home": None if a.dest else ROOT}, f, indent=2)
         f.write("\n")
     logline({"kind": "self_pin", "ref": a.pin, "sha": sha, "dest": code})
     out(f"pinned {a.pin} ({sha[:8]}) → {code}",
         f"  dropped the project's own files from the copy: {', '.join(dropped) or '(none present)'}",
         f"  stamped VERSION and {PINNED_MARK} — running this code without {HOME_ENV} now REFUSES,",
-        "  rather than quietly checking the copy instead of the project.",
-        f"  add {PINNED_DIRNAME}/ to .gitignore if it is not there already.",
-        "", *self_hooks_block(code))
+        "  rather than quietly checking the copy instead of the project.")
+    if a.dest:
+        out("  this is a --dest checkout, not the repo's own .game_loop_self — wire consumer repos",
+            "  at it with `install.sh --central`, not with the hooks block below.")
+    else:
+        out(f"  add {PINNED_DIRNAME}/ to .gitignore if it is not there already.",
+            "", *self_hooks_block(code))
 
 
 def self_hooks_block(code):
@@ -5444,6 +5655,120 @@ def _extract_game_loop(sha, dest):
         raise RuntimeError(f"that commit carries no .game_loop/bin/game_loop")
 
 
+def session_models(path=None):
+    """Every model this session has answered on, in order — or None if it cannot be read.
+
+    Returns {"models": [...], "first": str, "last": str, "changed": bool}.
+
+    NOT A SCALAR, and that correction came from showrunner rather than from me. I first returned
+    the last model named, which is wrong for the failure this exists to catch: `--fallback-model`
+    does not fail at spawn, it degrades MID-RUN under load, silently. A single value reports
+    whichever message happened to be read and cannot represent "started as Sonnet, fell back to
+    Haiku at message 400" — and that is the shape most likely to happen on a real fan-out, when
+    every Crawler hits the same limit at the same moment. A scalar there is a reading of the wrong
+    subject.
+
+    NO HOOK PAYLOAD CARRIES THE MODEL. Verified against a real captured Stop payload: cwd, effort,
+    permission_mode, session_id, transcript_path, and no model anywhere. The statusline payload has
+    `model.display_name` and is TUI-only, so an editor-hosted session never sees it. The transcript
+    records it per assistant message and every hook payload points at the transcript, so this works
+    on every host with nothing to configure.
+
+    `<synthetic>` records are the harness talking rather than a model answering, and are skipped —
+    counting them would report the harness to itself.
+    """
+    path = path or (load() or {}).get("transcript_path")
+    if not path or not os.path.isfile(path):
+        return None
+    tail, _stats, why_not = _scan_transcript(path)
+    if why_not:
+        return None
+    seen = []
+    for rec in tail:
+        m = ((rec.get("message") or {}) if isinstance(rec, dict) else {}).get("model")
+        if isinstance(m, str) and m and not m.startswith("<") and (not seen or seen[-1] != m):
+            seen.append(m)
+    if not seen:
+        return None
+    # Ordered-unique-by-adjacency above, so an A→B→A flip keeps all three and `changed` stays true.
+    return {"models": seen, "first": seen[0], "last": seen[-1],
+            "changed": len(set(seen)) > 1}
+
+
+MODEL_F = "model.json"
+
+
+def write_model_verdict():
+    """Publish what this session is running, where the PARENT can read it. Returns the verdict.
+
+    THE READER IS NOT THIS SESSION. A status line about a model mismatch is read by the Crawler,
+    which is the one party that can do nothing about it: it cannot switch its own model, and by the
+    time it reads the line the run is already priced. The party that can act is the orchestrator
+    that dispatched it — a different process, outside, reconciling from the parent.
+    (showrunner's INV22: a caveat filed where the reader does not stand.)
+
+    So the verdict is a FILE under this session's own directory, keyed by session id, which is what
+    a parent already holds in its dispatch record. Written on every hook run, so it stays current
+    without the Crawler cooperating or even knowing.
+    """
+    v = session_models()
+    if not v or not SESSION:
+        return None
+    v = dict(v, session=SESSION, observed_at=now())
+    try:
+        d = os.path.join(SESSIONS_DIR, SESSION)
+        os.makedirs(d, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".model.", suffix=".tmp")
+        with os.fdopen(fd, "w") as f:
+            json.dump(v, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, os.path.join(d, MODEL_F))
+    except OSError:
+        pass                      # a verdict nobody can write is not worth taking a hook down for
+    return v
+
+
+def model_report(s):
+    """What model is running, and whether it CHANGED under the run's feet.
+
+    ADVISORY, NEVER A GATE, and for a reason worth stating: a model mismatch is not a correctness
+    failure, it is a COST failure. An Opus-priced Crawler doing Sonnet work produces perfectly good
+    output, which is exactly why nothing notices and why it can run for a week. Bricking a
+    deliberately-dispatched Crawler would be the guard doing more damage than the thing it guards.
+
+    NOTHING HAS TO BE DECLARED for this to be useful, which is what makes the feature optional by
+    construction rather than by a config default. The check that matters — did the model change
+    mid-run — is answerable from the transcript alone, with no knob for anyone to forget to set.
+    """
+    # Take the path from the state handed in rather than re-reading the global: a report that
+    # ignores its own argument cannot be exercised except through the whole binary.
+    v = session_models((s or {}).get("transcript_path"))
+    if not v:
+        return []
+    if not v["changed"]:
+        return [f"model: {v['last']}"]
+    return [f"⚠ MODEL CHANGED MID-RUN — {' → '.join(v['models'])}.",
+            "  A fallback degrades under load rather than failing at spawn, so work you dispatched",
+            "  for one model has been finishing on another. Not blocked: nothing can switch a live",
+            "  session back, and the output is fine — this is a COST failure, not a correctness one.",
+            f"  The parent can read this at sessions/{SESSION or '<id>'}/{MODEL_F}."]
+
+
+def cmd_model(s, a):
+    """Report the models this session has run on — the verb a parent or a human can call."""
+    v = write_model_verdict() or session_models()
+    if not v:
+        die("cannot read this session's model: no transcript recorded yet.\n"
+            "  A hook has to run once first — the transcript path arrives on a hook payload and\n"
+            "  nowhere else. This is absence of the reading, never evidence of a model.")
+    if a.json:
+        out(json.dumps(v, indent=2))
+        return
+    out(f"models this session has answered on: {' → '.join(v['models'])}",
+        f"  first {v['first']} · last {v['last']} · changed: {'YES' if v['changed'] else 'no'}",
+        f"  machine-readable: {os.path.join(SESSIONS_DIR, SESSION or '<id>', MODEL_F)}")
+
+
 def cmd_status(s, a):
     _prune_stale_sessions()
     # RUNNING status IS ORIENTATION (#60). A guard refusal carries a one-line pointer to this
@@ -5454,6 +5779,8 @@ def cmd_status(s, a):
         s["oriented"] = True
         save(s)
     out(render_banner(s))
+    if (_m := model_report(s)):
+        out(*_m)
     if (n := retro_nudge(s)):
         out(n)
     m = s.get("mandate") or {}
@@ -5949,11 +6276,26 @@ def main():
                     help="check .game_loop out of REF into <repo>/.game_loop_self and stamp it, so "
                          "the hooks can run code that editing this repo cannot break. No --pin: "
                          "report what is pinned now and print the hook wiring.")
+    sf.add_argument("--dest", metavar="PATH",
+                    help="with --pin: check out to PATH instead of <repo>/.game_loop_self — for a "
+                         "machine-wide central install other repos dispatch to via "
+                         "`install.sh --central` (see docs/how-it-works.md), not for this repo's own "
+                         "hooks.")
 
     sub.add_parser("stopgate")    # Stop-hook entrypoint; not for humans
     sub.add_parser("limitgate")   # PreToolUse entrypoint (usage-limit handoff gate); not for humans
     sub.add_parser("statusline")  # statusline entrypoint (limits tap + one-row render); not for humans
     sub.add_parser("sessionstart")  # SessionStart/PostCompact entrypoint; not for humans
+    md = sub.add_parser("model")
+    md.add_argument("--json", action="store_true",
+                    help="emit the verdict as JSON — the form a PARENT reads, since the session "
+                         "itself is the one party that cannot act on a model mismatch")
+    lp = sub.add_parser("limitprobe")
+    lp.add_argument("--interval-only", dest="interval_only", action="store_true",
+                    help="print the seconds until the next probe is worth spending on, and exit")
+    lp.add_argument("--force", action="store_true",
+                    help="run it even though limits.probe.enabled is false — it costs ~24k input "
+                         "tokens, so the default is off")
     cf = sub.add_parser("confidence")
     cf.add_argument("--mark", help="beta | stable — refused unless the evidence for it exists")
     cf.add_argument("--ref", help="the commit to report on (default HEAD)")
@@ -5972,6 +6314,17 @@ def main():
         except (json.JSONDecodeError, ValueError):
             payload = {}
         set_session(payload.get("session_id") or env_session())
+        # REMEMBER WHERE THE TRANSCRIPT IS. Hooks receive it; `status` is not a hook and never
+        # does, so without this the model reading would work inside a Stop gate and nowhere a
+        # human ever looks.
+        if (_tp := payload.get("transcript_path")):
+            _st = load()
+            if _st.get("transcript_path") != _tp:
+                _st["transcript_path"] = _tp
+                save(_st)
+            # Publish where the PARENT reads, on every hook run, so the verdict stays current
+            # without the Crawler knowing or cooperating.
+            write_model_verdict()
         {"stopgate": cmd_stopgate, "limitgate": cmd_limitgate,
          "statusline": cmd_statusline,
          "sessionstart": cmd_sessionstart}[a.cmd](load(), a, payload)
@@ -5986,7 +6339,8 @@ def main():
      "checkpoint": cmd_checkpoint, "authorize": cmd_authorize, "notify": cmd_notify,
      "pin": cmd_pin, "effector": cmd_effector, "fix": cmd_fix, "owned": cmd_owned,
      "worktree": cmd_worktree, "self": cmd_self, "confidence": cmd_confidence,
-     "instrument": cmd_instrument, "measure": cmd_measure}[a.cmd](s, a)
+     "instrument": cmd_instrument, "measure": cmd_measure,
+     "limitprobe": cmd_limitprobe, "model": cmd_model}[a.cmd](s, a)
 
 
 if __name__ == "__main__":
