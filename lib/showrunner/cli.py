@@ -143,6 +143,26 @@ def cmd_doctor(args):
     if gap and not harness.spec(cfg)["dirs"]:
         print("  %s %s" % (YEL + "warn " + OFF, gap))
 
+    # THE RECIPROCAL HALF: showrunner's config names paths into a NEIGHBOUR's tree, and only
+    # this repo can see whether they still resolve. A neighbour who moves or uninstalls their
+    # tool cannot fail our suite — they do not know we point at them — so the failure would
+    # otherwise surface one Crawler at a time, as a soft warning, mid-fan-out. Configured-and-
+    # missing and never-configured are different states and used to print the same thing.
+    chat_cfg = (dispatch.dispatch_config(cfg).get("chat") or {})
+    if chat_cfg.get("enabled"):
+        for key in ("cli", "installer"):
+            path = dispatch.chat_path(cfg, key)
+            if not path:
+                print("  %s chat is enabled but dispatch.chat.%s is unset — Crawlers will spawn "
+                      "unreachable" % (YEL + "warn " + OFF, key))
+            elif not os.path.exists(path):
+                print("  %s dispatch.chat.%s points at %s, which does not exist. A neighbour "
+                      "moving their checkout cannot fail our suite, so this is the only place "
+                      "it shows." % (RED + "ERROR" + OFF, key, path))
+                bad += 1
+            else:
+                print("  %s chat %s resolves: %s" % (GRN + "ok   " + OFF, key, path))
+
     if gates.load_baseline(cfg) is None:
         print("  %s no baseline recorded — `showrunner baseline` on a known-good tree, or "
               "integration cannot tell a new failure from a pre-existing one." % (YEL + "warn " + OFF))

@@ -1517,6 +1517,15 @@ def test_dispatch():
        "up under repeated fan-out", ling and ling["pid"] == mypid, ling)
     ok("...and a dead process is not lingering, so a reaped Crawler is not reported twice",
        dispatch.lingering({"pid": 999999, "finished_at": old}) is None)
+    # A PID names a process only inside the boot that issued it. Across a reboot the number is
+    # reused, so `pid_alive` answers a question about a stranger — and unlike the usual
+    # cross-namespace error this one is a false POSITIVE wired to a SIGTERM.
+    from showrunner.util import boot_token as _bt
+    ok("a pid from a PREVIOUS boot is never lingering — the number belongs to someone else now, "
+       "and this is the one check here that acts rather than reports",
+       dispatch.lingering({"pid": mypid, "finished_at": old, "boot": "a-previous-boot"}) is None)
+    ok("...while the same pid recorded THIS boot still is, so the guard did not just disable "
+       "the feature", dispatch.lingering({"pid": mypid, "finished_at": old, "boot": _bt()}))
 
     # Closing a room must never be the thing that fails a close.
     ok("a Crawler with no channel closes cleanly rather than erroring",

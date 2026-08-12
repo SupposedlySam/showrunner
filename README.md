@@ -10,7 +10,7 @@ single Crawler can see, and keeps the campaign coherent across sessions.
 > Status: **implemented and self-hosting.** The orchestration loop is real code
 > ([`lib/showrunner/`](lib/showrunner/)), it installs in one line with no packages, and it has been
 > run against its own issue list — see [Dogfooding](#dogfooding-showrunner-on-its-own-issues).
-> `python3 test/run.py` → **286 assertions, no setup beyond Python 3 and git.**
+> `python3 test/run.py` → **288 assertions, no setup beyond Python 3 and git.**
 
 ## Requirements
 
@@ -262,7 +262,7 @@ things worth reporting because they are evidence rather than claims:
 ## Verifying it
 
 ```bash
-python3 test/run.py            # 286 CORE assertions — Python 3 + git, nothing else
+python3 test/run.py            # 288 CORE assertions — Python 3 + git, nothing else
 bash prototype/demo.sh         # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 

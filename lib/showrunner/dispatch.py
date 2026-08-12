@@ -32,7 +32,7 @@ import subprocess
 import uuid
 
 from . import campaign
-from .util import Refused, die, eprint, now, pid_alive, rel
+from .util import Refused, boot_token, die, eprint, now, pid_alive, rel
 
 # game_loop's hooks gate writes, commits and deploy verbs regardless of this, and they are the
 # actual rails. This only decides whether Claude Code stops to ASK, which no one is present to
@@ -282,6 +282,19 @@ def lingering(entry, grace=LINGER_GRACE_SECONDS):
     Returns None when it is not lingering, so the caller cannot mistake "no opinion" for
     "safe to kill" — an absence here would otherwise read as permission.
     """
+    # A PID IS ONLY MEANINGFUL INSIDE THE BOOT THAT ISSUED IT. `pid_alive` in a later boot
+    # answers "is some process 36042 alive", not "is my Crawler alive" — and the OS will have
+    # reused that number for something that has nothing to do with this campaign. Every other
+    # liveness question here already scopes by boot token (`campaign.live`); this one did not,
+    # and it is the only one that ACTS, so the consequence of getting it wrong is a SIGTERM
+    # sent to a stranger's process rather than a wrong answer on a report.
+    #
+    # Note which direction the error runs. Resolving an identifier in the wrong namespace
+    # usually yields a false NEGATIVE — absent, so you conclude nothing happened. Here it
+    # yields a false POSITIVE, and a false positive that is wired to an action is the shape
+    # worth being frightened of.
+    if entry.get("boot") and entry["boot"] != boot_token():
+        return None
     pid = entry.get("pid")
     if not pid or not pid_alive(pid):
         return None
