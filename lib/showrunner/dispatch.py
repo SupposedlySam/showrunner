@@ -32,7 +32,7 @@ import subprocess
 import uuid
 
 from . import campaign
-from .util import Refused, die, eprint, now, rel
+from .util import Refused, die, eprint, now, pid_alive, rel
 
 # game_loop's hooks gate writes, commits and deploy verbs regardless of this, and they are the
 # actual rails. This only decides whether Claude Code stops to ASK, which no one is present to
@@ -221,7 +221,66 @@ def models_agree(declared, observed):
     return observed.startswith("claude-%s-" % declared)
 
 
+# How long a finished Crawler's process is left alone before it counts as LINGERING. A
+# Crawler closes its own leaf from inside its own session, so at the instant the leaf closes
+# the process is still mid-call: writing its last commit, flushing its transcript, running the
+# Stop gate. Terminating there truncates the work it just certified. The grace window is the
+# difference between "spun down" and "killed while finishing".
+LINGER_GRACE_SECONDS = 120
+
 ERROR_MARKERS = ("Execution error", "API Error", "Invalid API key", "rate limit")
+
+
+def close_channel(cfg, entry):
+    """Close the Crawler's room. Safe at any point, so it happens as soon as the leaf closes.
+
+    One room per Crawler is the right shape while it works and a leak the moment it stops:
+    under fan-out the rooms accumulate one per leaf forever, and a list of dead rooms is how
+    a channel list stops being readable. Leaving as the only member closes it.
+
+    Idempotent by construction — a room already closed, or never opened, is success. Returns
+    (ok, detail) and never raises: spin-down must not be the thing that fails a close.
+    """
+    channel = entry.get("channel")
+    if not channel:
+        return True, "no channel"
+    cli = os.path.join(cfg.root, ".lamp", "llm_chat", "bin", "llm_chat")
+    if not os.path.exists(cli):
+        return False, "llm_chat CLI not vendored — room %s left open" % channel
+    try:
+        p = subprocess.run([cli, "leave", channel, "--as", "orchestrator"],
+                           capture_output=True, text=True, timeout=60, cwd=cfg.root)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, "could not close %s: %s" % (channel, exc)
+    out = (p.stdout + p.stderr).lower()
+    if p.returncode == 0 or "closed" in out or "no such" in out or "not a member" in out:
+        return True, "closed %s" % channel
+    return False, (p.stderr or p.stdout).strip()[:160]
+
+
+def lingering(entry, grace=LINGER_GRACE_SECONDS):
+    """Is this Crawler's process still running well after its work ended?
+
+    Two facts, both required. The leaf being finished is what makes stopping SAFE — the work
+    is done by definition, so nothing is lost. The grace window is what makes it CORRECT,
+    because the moment of closing is the moment the process is busiest.
+
+    Returns None when it is not lingering, so the caller cannot mistake "no opinion" for
+    "safe to kill" — an absence here would otherwise read as permission.
+    """
+    pid = entry.get("pid")
+    if not pid or not pid_alive(pid):
+        return None
+    finished = entry.get("finished_at")
+    if not finished:
+        return None
+    try:
+        age = now() - float(finished)
+    except (TypeError, ValueError):
+        return None
+    if age < grace:
+        return None
+    return {"pid": pid, "seconds_since_finished": int(age)}
 
 
 def session_health(cfg, entry):

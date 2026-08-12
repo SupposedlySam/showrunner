@@ -241,10 +241,41 @@ def reconcile(cfg, graph, base="HEAD"):
             f["verdict"] = "DONE BUT NOT INTEGRATED — awaiting `showrunner integrate`"
         elif not f["branch_exists"] and not f["worktree_exists"]:
             f["verdict"] = "GONE — nothing on disk"
+        elif f["leaf_status"] in ("closed", "refuted"):
+            # DONE IS NOT ABANDONED. The clause below says "the work is not integrated", which
+            # is simply false once the leaf closed — the close gate demanded a real artifact to
+            # get here, and a refuted premise is a successful outcome. Observed: a Crawler that
+            # finished, closed its leaf and was cleanly retired came back labelled ABANDONED,
+            # and `reap` then set its state to match. Under fan-out every completed Crawler
+            # would report that way, which trains a reader to skim past abandonment notices —
+            # the one report that must never become routine.
+            f["verdict"] = "RETIRED — leaf %s and the Crawler is no longer running" % f["leaf_status"]
         else:
             f["verdict"] = "ABANDONED — owner is not alive and the work is not integrated"
         findings.append(f)
     return findings
+
+
+
+def finish(cfg, leaf_id, why="leaf closed"):
+    """Mark every Crawler on this leaf finished, and close its room. Called when a leaf closes.
+
+    The SAFE half of spin-down, and it runs immediately because nothing here can damage work:
+    the room is a convenience and the leaf is already closed. The process is deliberately NOT
+    touched — a Crawler closes its own leaf from inside its own session, so at this instant it
+    is mid-call, and killing it would truncate the very work it just certified. `reap` handles
+    a process that is still alive well after this, which is a different and later question.
+    """
+    from . import dispatch as _dispatch
+    done = []
+    for entry in load(cfg).get("crawlers", []):
+        if entry.get("leaf") != leaf_id or entry.get("state") in ("finished", "retired"):
+            continue
+        ok, detail = _dispatch.close_channel(cfg, entry)
+        set_state(cfg, entry["crawler"], "finished", finished_at=now(), finished_why=why,
+                  channel_closed=bool(ok))
+        done.append({"crawler": entry["crawler"], "channel": detail, "channel_closed": ok})
+    return done
 
 
 # -------------------------------------------------------------------- reap
@@ -287,6 +318,51 @@ def reap(cfg, graph, base="HEAD", apply=False):
             })
             if apply:
                 locks.Lock(ls.root, name).release(force=True)
+
+    # 2b. Processes that outlived their work. A Crawler whose leaf is FINISHED has, by
+    #     definition, nothing left to lose — but the instant of closing is the instant it is
+    #     busiest, so only a process still alive well after the grace window counts. Sent
+    #     SIGTERM, never SIGKILL: a Crawler that ignores a term is a finding, not something
+    #     to escalate against silently. Left stacking, these are what fills a machine under
+    #     repeated fan-out.
+    from . import dispatch as _dispatch
+    import signal as _signal
+    for entry in load(cfg).get("crawlers", []):
+        ling = _dispatch.lingering(entry)
+        if not ling:
+            continue
+        actions.append({
+            "kind": "process",
+            "crawler": entry.get("crawler"),
+            "leaf": entry.get("leaf"),
+            "why": "finished %ds ago and pid %s is still alive"
+                   % (ling["seconds_since_finished"], ling["pid"]),
+            "action": "SIGTERM" if apply else "would SIGTERM",
+        })
+        if apply:
+            try:
+                os.kill(ling["pid"], _signal.SIGTERM)
+                set_state(cfg, entry["crawler"], "retired", retired_at=now())
+            except OSError as exc:
+                warnings.append("could not terminate pid %s: %s" % (ling["pid"], exc))
+
+    # 2c. Rooms belonging to Crawlers that are done. A channel per Crawler is right while it
+    #     works and a leak once it stops; closing on `close` covers the normal path, and this
+    #     covers the Crawler that died without ever closing its leaf.
+    for entry in load(cfg).get("crawlers", []):
+        if entry.get("channel") and not entry.get("channel_closed") and not live(entry):
+            actions.append({
+                "kind": "room",
+                "crawler": entry.get("crawler"),
+                "why": "owner not alive and its room is still open",
+                "action": "close %s" % entry["channel"] if apply else "would close %s" % entry["channel"],
+            })
+            if apply:
+                ok, detail = _dispatch.close_channel(cfg, entry)
+                set_state(cfg, entry["crawler"], entry.get("state") or "abandoned",
+                          channel_closed=bool(ok))
+                if not ok:
+                    warnings.append(detail)
 
     # 3. Worktrees and scratch dirs of dead Crawlers. Reported, never deleted: they may
     #    hold the only copy of real work.

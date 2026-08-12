@@ -1460,6 +1460,78 @@ def test_dispatch():
     ok("...and it names what it matched, so the verdict can be argued with",
        h["errors"] == ["Execution error"], h)
 
+    # SPIN-DOWN. The dangerous half is knowing when NOT to stop something. A Crawler closes
+    # its own leaf from inside its own session, so at that instant it is mid-call — writing
+    # its last commit, running its Stop gate. Terminating there truncates the work it just
+    # certified, and the tell is that the record looks finished while the process is busiest.
+    import os as _os
+    mypid = _os.getpid()
+    ok("a live process with no finish time is never lingering — it is just working",
+       dispatch.lingering({"pid": mypid}) is None)
+    ok("...and one that finished a moment ago is protected by the grace window, which is the "
+       "assertion that stops this from killing a Crawler mid-commit",
+       dispatch.lingering({"pid": mypid, "finished_at": time.time()}) is None)
+    old = time.time() - (dispatch.LINGER_GRACE_SECONDS + 60)
+    ling = dispatch.lingering({"pid": mypid, "finished_at": old})
+    ok("...but one still alive long after its leaf closed IS lingering, which is what stacks "
+       "up under repeated fan-out", ling and ling["pid"] == mypid, ling)
+    ok("...and a dead process is not lingering, so a reaped Crawler is not reported twice",
+       dispatch.lingering({"pid": 999999, "finished_at": old}) is None)
+
+    # Closing a room must never be the thing that fails a close.
+    ok("a Crawler with no channel closes cleanly rather than erroring",
+       dispatch.close_channel(cfg, {"crawler": "x"})[0] is True)
+
+    # Spin-down that stops happening is invisible — the leaf still closes, the report still
+    # looks right, and the processes and rooms just accumulate. So assert the record actually
+    # MOVES, not merely that close succeeded.
+    fcfg = make_repo({})
+    campaign.record_spawn(fcfg, {"crawler": "c-fin", "leaf": "L1", "branch": "b",
+                                 "worktree": ".worktrees/c-fin",
+                                 "scratch": ".showrunner/scratch/c-fin"}, pid=None, session="s")
+    campaign.set_state(fcfg, "c-fin", "running", channel="room_c-fin")
+    done = campaign.finish(fcfg, "L1")
+    ok("closing a leaf spins its Crawler down", [d["crawler"] for d in done] == ["c-fin"], done)
+    ent = [c for c in campaign.load(fcfg)["crawlers"] if c["crawler"] == "c-fin"][0]
+    eq("...and the record says finished, which is what reap keys on", ent["state"], "finished")
+    ok("...and stamps WHEN, because the grace window is measured from it",
+       isinstance(ent.get("finished_at"), (int, float)), ent.get("finished_at"))
+    ok("...and a room it could not close is recorded as NOT closed rather than assumed shut — "
+       "a leaked room that believes it is tidy is the one nobody goes looking for",
+       ent.get("channel_closed") is False, ent)
+    eq("...and spinning down twice does nothing the second time, so reap is safe to re-run",
+       campaign.finish(fcfg, "L1"), [])
+
+    # DONE IS NOT ABANDONED. Observed on a real spin-down: a Crawler that finished, closed its
+    # leaf and was cleanly retired came back as "ABANDONED — the work is not integrated",
+    # which is false once the close gate has demanded an artifact. Under fan-out every
+    # completed Crawler reports that way, and an abandonment notice that fires on success is
+    # one a reader learns to skim.
+    dcfg2 = make_repo({})
+    dg = G.open_graph(dcfg2)
+    dl = dg.add("done leaf", labels=["test"], leaf_id="done-leaf")
+    dg.claim(dl, "who", pid=999999)
+    dg.close(dl, "refuted", "README.md", "proved by spin-down")
+    campaign.record_spawn(dcfg2, {"crawler": "c-done", "leaf": dl, "branch": "nope",
+                                  "worktree": ".", "scratch": "."}, pid=999999, session="s")
+    v = [f for f in campaign.reconcile(dcfg2, dg) if f["crawler"] == "c-done"][0]["verdict"]
+    ok("a Crawler whose leaf CLOSED is retired, never abandoned — abandonment has to keep "
+       "meaning work that may be lost", v.startswith("RETIRED"), v)
+
+    # Through the consumer, not just the predicate: a finished Crawler whose process outlived
+    # the grace window has to be REPORTED by reap, or the detector is correct and unused. Dry
+    # run, so nothing is signalled — reap stays a report until --apply, including here.
+    campaign.set_state(fcfg, "c-fin", "finished", pid=mypid,
+                       finished_at=time.time() - (dispatch.LINGER_GRACE_SECONDS + 60))
+    fg = G.open_graph(fcfg)
+    racts, _ = campaign.reap(fcfg, fg, apply=False)
+    procs = [a for a in racts if a.get("kind") == "process"]
+    ok("reap reports a process that outlived its work, so lingering Crawlers cannot pile up "
+       "unnoticed across waves", len(procs) == 1 and procs[0]["crawler"] == "c-fin", racts)
+    ok("...and says it WOULD terminate rather than having done so — reap is a report until "
+       "--apply, and stopping someone's process is exactly the kind of act that must be asked",
+       procs and procs[0]["action"].startswith("would"), procs)
+
     # A dispatch that never started must still be visible. Recording after launching would
     # leave a live agent no record names, which cannot be reaped and cannot be reclaimed.
     out = dispatch.launch(cfg, rec, {"rule": "pure-logic", "lane": "headless"},
@@ -1520,6 +1592,7 @@ def test_claims_about_the_layer_below():
         "lib/showrunner/harness.py": "why a tree carrying no harness must be refused",
         "lib/showrunner/worktree.py": "the per-tree gate the shared-state audit rests on",
         "lib/showrunner/campaign.py": "what a drifted tree's gate is said to owe",
+        "lib/showrunner/dispatch.py": "why a Crawler must be a session — hooks, park, transcript",
         "docs/DESIGN.md": "a retracted claim about the gate, and what replaced it",
         "README.md": "the per-tree gate and the blank-verify.yaml consequence",
         ".gitignore": "tracking .game_loop/ is JUSTIFIED by the per-tree gate holding",

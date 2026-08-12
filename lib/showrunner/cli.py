@@ -277,6 +277,11 @@ def cmd_close(args):
         evidence=args.evidence, stale_proof_reason=args.stale_proof_reason,
         premise=args.premise, premise_read=args.premise_read)
     print("%s %s (%s)" % ("REFUTED" if args.refuted else "closed", leaf["id"], leaf.get("proof")))
+    # Spin the Crawler down as soon as its leaf closes: mark it finished and close its room.
+    # The process is left alone here on purpose — it is mid-call at this exact moment, having
+    # just run this very command. `reap` takes it if it is still alive after the grace window.
+    for done in campaign.finish(cfg, leaf["id"]):
+        print("  %sspun down %s — %s%s" % (DIM, done["crawler"], done["channel"], OFF))
     for n in notes:
         print("  %s%s%s" % (DIM, n, OFF))
     return 0

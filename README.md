@@ -10,7 +10,7 @@ single Crawler can see, and keeps the campaign coherent across sessions.
 > Status: **implemented and self-hosting.** The orchestration loop is real code
 > ([`lib/showrunner/`](lib/showrunner/)), it installs in one line with no packages, and it has been
 > run against its own issue list — see [Dogfooding](#dogfooding-showrunner-on-its-own-issues).
-> `python3 test/run.py` → **268 assertions, no setup beyond Python 3 and git.**
+> `python3 test/run.py` → **282 assertions, no setup beyond Python 3 and git.**
 
 ## Requirements
 
@@ -130,6 +130,15 @@ party of Crawlers into separate rooms in parallel", and the documented workflow 
 launched them, which is the correct reading of what was written and not of what ran. A limitation
 nobody wrote down is one the reader has to discover by being wrong.
 
+**A finished Crawler spins itself down.** Closing a leaf marks its Crawler finished and
+closes its chat room immediately — both safe, because the leaf is already closed. The
+*process* is deliberately left alone at that moment: a Crawler closes its own leaf from inside
+its own session, so it is mid-call right then, and terminating it would truncate the work it
+just certified. `showrunner reap` takes a process that is still alive well after its leaf
+closed (SIGTERM, never SIGKILL), and closes rooms belonging to Crawlers that died without
+closing anything. Under repeated fan-out those two leaks — a stacking process and a room per
+dead Crawler — are what fill a machine and make a channel list unreadable.
+
 **The model is declared, observed, and compared — never enforced.** A lane names a model,
 `spawn --launch` passes it, game_loop records what actually ran, and `showrunner reconcile`
 reports a mismatch or a mid-run fallback. Nothing blocks: an Opus-priced Crawler doing Sonnet work
@@ -226,7 +235,7 @@ things worth reporting because they are evidence rather than claims:
 ## Verifying it
 
 ```bash
-python3 test/run.py            # 268 CORE assertions — Python 3 + git, nothing else
+python3 test/run.py            # 282 CORE assertions — Python 3 + git, nothing else
 bash prototype/demo.sh         # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 

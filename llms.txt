@@ -45,7 +45,10 @@ showrunner spawn <leaf> --launch     # ...and STARTS a real Claude Code session 
                                      # command and start nothing. Without --launch, spawn prepares
                                      # and stops, and you start the agent yourself.
 showrunner integrate                 # serial merge, checks re-run on each MERGED result
-showrunner reap                      # dry run; --apply to reclaim dead Crawlers' claims and locks
+showrunner reap                      # dry run; --apply to reclaim dead Crawlers' claims and locks,
+                                     # close rooms they left open, and SIGTERM processes that
+                                     # outlived their leaf. `close` already closed the room and
+                                     # marked the Crawler finished; this catches what died badly.
 showrunner reconcile                 # on resume: merged / abandoned / live — ask this FIRST
 ```
 
@@ -179,7 +182,7 @@ records no liveness on a claim, so `reap` cannot work against it and says so rat
 ## Verifying the tool itself
 
 ```
-python3 test/run.py        # 268 assertions; needs only Python 3 + git
+python3 test/run.py        # 282 assertions; needs only Python 3 + git
 bash prototype/demo.sh     # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 
