@@ -7,3 +7,5 @@ campaign.json
 routing.jsonl
 baseline.json
 integration-commit.json
+config.local.json
+campaign.json.lock

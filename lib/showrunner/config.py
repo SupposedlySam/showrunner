@@ -13,6 +13,7 @@ import os
 from .util import Refused, die, main_checkout
 
 CONFIG_NAME = "config.json"
+CONFIG_LOCAL_NAME = "config.local.json"
 STATE_DIR = ".showrunner"
 
 DEFAULTS = {
@@ -261,6 +262,27 @@ def load(start=None, required=False):
             die("%s is not valid JSON: %s" % (path, exc), code=2)
     merged = dict(DEFAULTS)
     merged.update(data)
+
+    # A LOCAL, UNTRACKED OVERLAY, and the absence of one is what caused a real leak. Some
+    # settings are facts about THIS machine — where a chat tool is installed, an absolute
+    # path only you have — and the tracked config is the wrong home for them: it ships to
+    # every clone, so a stranger inherits a path that does not exist and a dependency they
+    # never chose. Without somewhere else to put them they end up tracked anyway, which is
+    # exactly how internal tooling reached a public repo here.
+    #
+    # Shallow merge by top-level key, deliberately: a deep merge lets a local file silently
+    # half-override a rule (half a lane, half a resource) and produce a configuration nobody
+    # wrote. Replacing a whole key is a change you can see.
+    local_path = os.path.join(root, STATE_DIR, CONFIG_LOCAL_NAME)
+    if os.path.exists(local_path):
+        with open(local_path) as fh:
+            try:
+                local = json.load(fh)
+            except json.JSONDecodeError as exc:
+                die("%s is not valid JSON: %s" % (local_path, exc), code=2)
+        if not isinstance(local, dict):
+            die("%s must be a JSON object" % local_path, code=2)
+        merged.update(local)
     return Config(merged, root, path)
 
 

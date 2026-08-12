@@ -84,7 +84,7 @@
       "serialized": "opus"
     },
     "chat": {
-      "enabled": true,
+      "enabled": false,
       "channel_prefix": "showrunner"
     }
   }

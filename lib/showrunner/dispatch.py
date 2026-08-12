@@ -75,6 +75,19 @@ def channel_for(cfg, record):
     return "%s_%s" % (prefix, record["crawler"])
 
 
+def chat_path(cfg, key):
+    """Where the chat tool lives, from config — never a vendored path baked into the source.
+
+    An earlier version hardcoded a private vendoring layout, which made this repo unusable to
+    anyone who does not share it and quietly pinned a public project to an internal tool. A
+    consumer names their own path or turns chat off; showrunner knows only that a CLI exists.
+    """
+    raw = (dispatch_config(cfg).get("chat") or {}).get(key)
+    if not raw:
+        return None
+    return raw if os.path.isabs(raw) else os.path.join(cfg.root, raw)
+
+
 def provision_chat(cfg, record, channel):
     """Install llm_chat into the Crawler's worktree so it can be talked to while it works.
 
@@ -87,9 +100,10 @@ def provision_chat(cfg, record, channel):
     that cannot be chatted with is degraded, not broken, and refusing to start real work over a
     missing convenience would be the guard doing more damage than the thing it guards.
     """
-    installer = os.path.join(cfg.root, ".lamp", "llm_chat", "install.sh")
-    if not os.path.exists(installer):
-        return False, "llm_chat is not vendored at .lamp/llm_chat — `lamp add llm_chat`"
+    installer = chat_path(cfg, "installer")
+    if not installer or not os.path.exists(installer):
+        return False, ("no chat installer configured — set dispatch.chat.installer to the path "
+                       "of your chat tool's install script, or dispatch.chat.enabled=false")
     wt = cfg.abspath(record["worktree"])
     p = subprocess.run([installer, wt], capture_output=True, text=True, timeout=120)
     if p.returncode != 0:
@@ -105,9 +119,9 @@ def provision_chat(cfg, record, channel):
     # in the dispatch report, and left the Crawler unreachable in a room nobody had created.
     # A name is not a room, and reporting one as if it were is the failure this whole repo
     # keeps finding: a claim about a thing that was never made.
-    cli = os.path.join(cfg.root, ".lamp", "llm_chat", "bin", "llm_chat")
-    if not os.path.exists(cli):
-        return False, "llm_chat CLI missing at .lamp/llm_chat/bin/llm_chat"
+    cli = chat_path(cfg, "cli")
+    if not cli or not os.path.exists(cli):
+        return False, "no chat CLI configured — set dispatch.chat.cli"
     topic = "Crawler %s — leaf %s. The orchestrator reads here." % (record["crawler"],
                                                                    record.get("leaf", "?"))
     p = subprocess.run([cli, "open", channel, "--as", "orchestrator", "--topic", topic],
@@ -244,9 +258,9 @@ def close_channel(cfg, entry):
     channel = entry.get("channel")
     if not channel:
         return True, "no channel"
-    cli = os.path.join(cfg.root, ".lamp", "llm_chat", "bin", "llm_chat")
-    if not os.path.exists(cli):
-        return False, "llm_chat CLI not vendored — room %s left open" % channel
+    cli = chat_path(cfg, "cli")
+    if not cli or not os.path.exists(cli):
+        return False, "no chat CLI configured — room %s left open" % channel
     try:
         p = subprocess.run([cli, "leave", channel, "--as", "orchestrator"],
                            capture_output=True, text=True, timeout=60, cwd=cfg.root)

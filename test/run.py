@@ -1293,6 +1293,46 @@ def test_publishable():
     ok("no tracked file hardcodes an absolute home or session path — this repo is public and "
        "a stranger inherits every tracked rule", not offenders, offenders[:6])
 
+    # The overlay is what makes the rule above LIVEABLE. Without somewhere untracked to put a
+    # machine-specific path, it goes in the tracked config, and that is precisely how internal
+    # tooling reached this repo. A rule with no legitimate alternative gets broken.
+    ocfg = make_repo({"project_name": "base", "worktree_root": ".worktrees"})
+    with open(os.path.join(ocfg.root, ".showrunner", "config.local.json"), "w") as fh:
+        json.dump({"project_name": "overlaid",
+                   "dispatch": {"chat": {"cli": "/opt/chat/bin/chat"}}}, fh)
+    merged = config.load(ocfg.root)
+    eq("an untracked local overlay wins over the tracked config", merged.get("project_name"),
+       "overlaid")
+    eq("...and carries machine paths the tracked file must never hold",
+       (merged.get("dispatch") or {}).get("chat", {}).get("cli"), "/opt/chat/bin/chat")
+    eq("...while keys it does not mention are untouched, so an overlay cannot silently drop "
+       "half a config", merged.get("worktree_root"), ".worktrees")
+
+    # INTERNAL TOOLING MUST NOT REACH A PUBLIC CLONE. The package manager used to dogfood
+    # these repos is ours; a stranger has never heard of it, cannot install it, and should
+    # not inherit a path pinned to it. This shipped anyway: a lockfile, a packager marker, and
+    # a module that looked for its vendored layout by hardcoded path — so a clone without that
+    # tool had a chat feature that could only ever fail. Scanning the tracked set is the check,
+    # because the failure is not that the tool is used, it is that the USE became visible.
+    internal = []
+    for rel_path in tracked:
+        full = os.path.join(ROOT, rel_path)
+        try:
+            if os.path.getsize(full) > 400_000:
+                continue
+            with open(full, errors="ignore") as fh:
+                body = fh.read()
+        except OSError:
+            continue
+        # Assembled so this file's own explanation of the rule does not trip it.
+        needle = "l" + "amp"
+        for line in body.splitlines():
+            low = line.lower()
+            if needle in low and "internal" not in low and "example" not in low:
+                internal.append("%s: %s" % (rel_path, line.strip()[:90]))
+    ok("no tracked file names or pins to the internal package manager — a public clone must "
+       "not depend on tooling only we have", not internal, internal[:6])
+
     harness_cfg = os.path.join(ROOT, ".game_loop", "config.json")
     if os.path.exists(harness_cfg):
         with open(harness_cfg) as fh:
@@ -1641,7 +1681,7 @@ def test_claims_about_the_layer_below():
     unclassified = []
     for rel_path in tracked:
         # The vendored payload IS game_loop; it is the source these claims cite, not a claim.
-        if rel_path.startswith(".game_loop/") or rel_path.startswith(".lamp/"):
+        if rel_path.startswith(".game_loop/"):
             continue
         if rel_path in claim_files or rel_path in not_claims:
             continue
