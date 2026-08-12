@@ -99,7 +99,31 @@ REPO_ROOT = os.path.dirname(ROOT)                   # the project itself — whe
 STATE_F = os.path.join(ROOT, "state.json")          # re-pointed by set_session()
 LOG_F = os.path.join(ROOT, "log.jsonl")
 CONFIG_F = os.path.join(ROOT, "config.json")
-LIMITS_F = os.path.join(ROOT, "limits.json")        # account-scoped snapshot from `game_loop statusline`
+def _limits_file():
+    """The MAIN checkout's snapshot when this tree is a linked worktree — else this tree's.
+
+    Mirrors bin/game_loop's limits_file(). The windows are ACCOUNT-wide and a linked worktree is
+    this project (#47), so N worktrees must not keep N snapshots of one account's usage: the park
+    and the reset-ring would each read a copy nobody else updates. Degrades to this tree whenever
+    git cannot answer — a snapshot in the wrong place is a degraded reading, and a watchdog that
+    raised here would take the run's only wake mechanism with it.
+    """
+    local = os.path.join(ROOT, "limits.json")
+    try:
+        r = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=REPO_ROOT,
+                           capture_output=True, text=True, timeout=5)
+        if r.returncode == 0:
+            for line in r.stdout.split("\n"):
+                if line.startswith("worktree "):
+                    main = line.split(" ", 1)[1].strip()
+                    shared = os.path.join(main, ".game_loop", "limits.json")
+                    return shared if os.path.isdir(os.path.dirname(shared)) else local
+    except Exception:  # noqa: BLE001 — no git, timeout, anything: this tree, never a raise
+        pass
+    return local
+
+
+LIMITS_F = _limits_file()        # account-scoped snapshot from `game_loop statusline`
 PID_PATH = os.path.join(ROOT, ".watchdog.pid")      # re-pointed by set_session()
 
 SESSION = None

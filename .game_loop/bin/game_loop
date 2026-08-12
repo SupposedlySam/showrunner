@@ -140,6 +140,45 @@ LOG_F = os.path.join(ROOT, "log.jsonl")
 CONFIG_F = os.path.join(ROOT, "config.json")
 INV_F = os.path.join(ROOT, "INVARIANTS.md")
 LIMITS_F = os.path.join(ROOT, "limits.json")  # account-scoped, deliberately NOT per-session
+_LIMITS_PATH = None
+
+
+def limits_file():
+    """Where the account-scoped snapshot lives — the MAIN checkout's copy, not this worktree's.
+
+    THE RESOURCE IS ACCOUNT-WIDE AND THE FILE WAS PER-CHECKOUT, which #47 already settled for the
+    write guard and never reached here: a linked worktree IS this project. Every worktree resolved
+    ROOT to its own tree, and the snapshot is gitignored so it does not cross — so N worktrees meant
+    N snapshots of one account's windows, N probes fetching the same number, and N leases each
+    believing it was the only one. The lease was reported as protection and did not reach the
+    topology it was offered for.
+
+    Found by an orchestrator reading this source against its own dispatch, in about four minutes,
+    after I told it the lease covered its fan-out. My sentence was unfalsifiable in this repo and
+    checkable in theirs — the two-owner rule, the day it was broadcast.
+
+    ONLY THE SNAPSHOT MOVES. Session state, the edited-file set, claims and authorizations stay
+    per-tree: sharing those would collapse the isolation a worktree exists for, which is the fix the
+    orchestrator explicitly refused to make on its side and was right to refuse.
+
+    Cached because it shells out to git and every statusline refresh reads it. Falls back to this
+    tree whenever the main checkout cannot be determined — a snapshot in the wrong place is a
+    degraded reading, while failing here would take the statusline down with it.
+    """
+    global _LIMITS_PATH
+    if _LIMITS_PATH is None:
+        main = None
+        try:
+            main = main_checkout()
+        except Exception:  # noqa: BLE001 — no git, odd worktree, anything: degrade, never raise
+            main = None
+        if main:
+            shared = os.path.join(main, ".game_loop", "limits.json")
+            if os.path.isdir(os.path.dirname(shared)):
+                _LIMITS_PATH = shared
+        if _LIMITS_PATH is None:
+            _LIMITS_PATH = LIMITS_F
+    return _LIMITS_PATH
 VERSION_F = os.path.join(ROOT, "VERSION")     # the game_loop commit sha install.sh copied in
 UPDATE_CACHE_F = os.path.join(ROOT, ".update_cache.json")  # cached latest-sha lookup (gitignored)
 
@@ -664,18 +703,20 @@ def handoff_path():
 
 def load_limits():
     try:
-        with open(LIMITS_F) as f:
+        with open(limits_file()) as f:
             return json.load(f)
     except (OSError, ValueError):
         return None
 
 
 def save_limits(snap):
-    fd, tmp = tempfile.mkstemp(dir=ROOT, prefix=".limits.", suffix=".tmp")
+    # The temp file must sit beside the DATA file — os.replace cannot cross filesystems, and after
+    # the snapshot moved to the main checkout, ROOT is no longer where it lands.
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(limits_file()), prefix=".limits.", suffix=".tmp")
     with os.fdopen(fd, "w") as f:
         json.dump(snap, f, indent=2)
         f.write("\n")
-    os.replace(tmp, LIMITS_F)
+    os.replace(tmp, limits_file())
 
 
 class limits_lock:
@@ -693,7 +734,11 @@ class limits_lock:
         self._fh = None
         try:
             import fcntl
-            self._fh = open(os.path.join(ROOT, ".limits.lock"), "w")
+            # BESIDE THE DATA FILE, not in this tree. Once the snapshot moved to the main
+            # checkout, a per-tree lock would let two worktrees serialise against different files
+            # and race on the one that matters — a shared file with private locks is worse than
+            # the private files it replaced.
+            self._fh = open(os.path.join(os.path.dirname(limits_file()), ".limits.lock"), "w")
             fcntl.flock(self._fh, fcntl.LOCK_EX)
         except Exception:  # noqa: BLE001
             if self._fh:
@@ -4537,7 +4582,7 @@ def _statusline_claim_live():
     None and the caller says it cannot tell which, rather than reporting the claim broken.
     """
     try:
-        with open(LIMITS_F) as f:
+        with open(limits_file()) as f:
             d = json.load(f)
     except (OSError, ValueError):
         return None
@@ -4570,7 +4615,7 @@ def _windows_claim_live():
     control this one, because our own tap writes the snapshot.
     """
     try:
-        with open(LIMITS_F) as f:
+        with open(limits_file()) as f:
             d = json.load(f)
     except (OSError, ValueError):
         return None
