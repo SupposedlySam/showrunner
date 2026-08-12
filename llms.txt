@@ -45,6 +45,11 @@ showrunner spawn <leaf> --launch     # ...and STARTS a real Claude Code session 
                                      # command and start nothing. Without --launch, spawn prepares
                                      # and stops, and you start the agent yourself.
 showrunner integrate                 # serial merge, checks re-run on each MERGED result
+
+# Optional: reach a Crawler while it works. Clone any chat tool and point config at it —
+# nothing is vendored. git clone https://github.com/SupposedlySam/llm_chat.git ../llm_chat
+# then dispatch.chat = {enabled, cli, installer}. Omit it and dispatch is unchanged.
+# Machine-specific paths go in .showrunner/config.local.json, an untracked overlay.
 showrunner reap                      # dry run; --apply to reclaim dead Crawlers' claims and locks,
                                      # close rooms they left open, and SIGTERM processes that
                                      # outlived their leaf. `close` already closed the room and

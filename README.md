@@ -139,6 +139,33 @@ closed (SIGTERM, never SIGKILL), and closes rooms belonging to Crawlers that die
 closing anything. Under repeated fan-out those two leaks — a stacking process and a room per
 dead Crawler — are what fill a machine and make a channel list unreadable.
 
+**Talking to a running Crawler is optional and unbundled.** If you want to reach a Crawler
+while it works, clone a chat tool and point showrunner at it — nothing is vendored and no
+package manager is assumed:
+
+```bash
+git clone https://github.com/SupposedlySam/llm_chat.git ../llm_chat
+```
+
+```jsonc
+// .showrunner/config.json  (or config.local.json for paths only your machine has)
+"dispatch": {
+  "chat": {
+    "enabled": true,
+    "cli":       "../llm_chat/bin/llm_chat",
+    "installer": "../llm_chat/install.sh"
+  }
+}
+```
+
+`spawn --launch` then opens a room per Crawler, installs the tool into its worktree, and tells
+it in its brief to join and to ask rather than guess. Leave `chat` out entirely and dispatch
+works exactly the same, minus the conversation.
+
+**`.showrunner/config.local.json` is an untracked overlay** merged over `config.json` by
+top-level key. Machine-specific values — an absolute path only you have — belong there, not in
+the file that ships to every clone.
+
 **The model is declared, observed, and compared — never enforced.** A lane names a model,
 `spawn --launch` passes it, game_loop records what actually ran, and `showrunner reconcile`
 reports a mismatch or a mid-run fallback. Nothing blocks: an Opus-priced Crawler doing Sonnet work
