@@ -212,7 +212,12 @@ instruction.
 #   pinned checkout of ITSELF, so editing this repo cannot break the gate guarding the edit.
 #   No --pin: report what is pinned now and print the hook wiring.
 ./.game_loop/bin/game_loop confidence [--mark beta|stable] [--ref <sha>] [--recheck]  # see below
-./.game_loop/bin/game_loop limitprobe [--force]                                      # read the usage
+./.game_loop/bin/game_loop model [--json]                                            # which model(s)
+#   this session has actually answered on, read from your own transcript. A SEQUENCE, not one
+#   value: a fallback degrades mid-run, so `changed` tells you the work finished on a different
+#   model than it started. Also written to sessions/<id>/model.json for a PARENT to read — you
+#   are the one party who cannot act on a model mismatch, so the file is the point, not the line.
+./.game_loop/bin/game_loop limitprobe [--force] [--interval-only]                    # read the usage
 #   windows by SPAWNING a short session, on a host that renders no statusline (so limits.json never
 #   arrives on its own). Off unless the project enabled it — it costs ~24k input tokens per run —
 #   and the watchdog fires it automatically on an interval the reading implies. You do not normally

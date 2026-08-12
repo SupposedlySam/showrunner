@@ -583,6 +583,16 @@ def triggers_report():
     for ev, t in entries:
         name = str(t.get("name") or "(unnamed)")
         rec = seen.get(name)
+        if ev not in TRIGGER_EVENTS:
+            # NOT THE SAME AS "hasn't happened yet", and game_loop is the only party that can tell
+            # them apart. A neighbouring project can assert that its own docs agree with each other
+            # about which moment to recommend — agreement is all it can check — but whether that
+            # moment EXISTS is a fact about this tool, falsifiable only here. Wired to a name
+            # game_loop does not have, a trigger never fires, and "never fired" reads as patience.
+            lines.append(f"  ✗ [{ev}] {name} — THERE IS NO SUCH MOMENT. This will never fire, no "
+                         "matter how long you wait.")
+            lines.append("      game_loop's moments are: " + " · ".join(sorted(TRIGGER_EVENTS)))
+            continue
         if not rec:
             lines.append(f"  ⚠ [{ev}] {name} — CONFIGURED BUT NEVER FIRED in this tree. Either the "
                          f"moment has not come round yet, or it is not wired to anything.")
