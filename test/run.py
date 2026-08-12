@@ -35,7 +35,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from showrunner import brief, campaign, collide, config, gates, graph as G, lanes, locks, worktree  # noqa: E402
+from showrunner import brief, campaign, collide, config, dispatch, gates, graph as G, lanes, locks, worktree  # noqa: E402
 from showrunner.util import Refused  # noqa: E402
 
 VERBOSE = "-v" in sys.argv or "--verbose" in sys.argv
@@ -1338,6 +1338,143 @@ def test_publishable():
        sc.get("checks"))
 
 
+def test_dispatch():
+    group("Dispatching a Crawler as a real session (issue #15)")
+    if not have("git"):
+        skip("the dispatch group", "git is not installed")
+        return
+
+    cfg = make_repo({
+        "lanes": [
+            {"name": "device-work", "lane": "serialized", "resource": "device",
+             "match": {"labels": ["device"]}, "model": "opus"},
+            {"name": "pure-logic", "lane": "headless", "match": {"labels": ["test"]},
+             "model": "sonnet"},
+            {"name": "docs-work", "lane": "headless", "match": {"labels": ["docs"]}},
+        ],
+        "dispatch": {"default_model": "haiku", "models_by_lane": {"serialized": "opus"},
+                     "chat": {"enabled": True, "channel_prefix": "sr"}},
+    })
+
+    # The bug the exact-match rewrite fixed: two rules share the `headless` lane, and only one
+    # of them declares a model. Resolving by lane picks whichever rule is listed first, so
+    # docs-work would silently inherit pure-logic's sonnet. A wrong model is not an error
+    # downstream — it is a bill — so this is the assertion that has to be exact.
+    eq("the model comes from the rule that actually MATCHED, not the first sharing its lane",
+       dispatch.resolve_model(cfg, {"rule": "docs-work", "lane": "headless"}), "haiku")
+    eq("...and a rule that declares one gets it",
+       dispatch.resolve_model(cfg, {"rule": "pure-logic", "lane": "headless"}), "sonnet")
+    eq("...a lane default applies when the rule declares nothing",
+       dispatch.resolve_model(cfg, {"rule": "unnamed", "lane": "serialized"}), "opus")
+    eq("...and the config default is the last resort",
+       dispatch.resolve_model(cfg, {"rule": "nope", "lane": "headless"}), "haiku")
+    empty = make_repo({"lanes": [], "dispatch": {}})
+    ok("...and with nothing declared it inherits rather than inventing a model",
+       dispatch.resolve_model(empty, {"rule": "x", "lane": "headless"}) is None)
+
+    rec = {"crawler": "crawler-a", "worktree": ".worktrees/a", "scratch": ".showrunner/scratch/a"}
+    cmd = dispatch.build_command(cfg, rec, "sonnet", "abc-123", "THE BRIEF")
+    ok("the launch command starts a real session with the brief as its prompt",
+       cmd[0] == "claude" and "-p" in cmd and "THE BRIEF" in cmd, cmd)
+    ok("...pins the session id showrunner already recorded, so the claim and the process agree",
+       "--session-id" in cmd and cmd[cmd.index("--session-id") + 1] == "abc-123", cmd)
+    ok("...names the model when one is declared", cmd[cmd.index("--model") + 1] == "sonnet", cmd)
+    ok("...and omits --model entirely when none is, rather than passing a made-up default",
+       "--model" not in dispatch.build_command(cfg, rec, None, "abc", "b"))
+    ok("...and carries a display name, so a fan-out is legible in /resume",
+       "-n" in cmd and cmd[cmd.index("-n") + 1] == "crawler-a", cmd)
+
+    ok("two dispatches never share a session id",
+       dispatch.new_session_id() != dispatch.new_session_id())
+
+    ok("the chat channel is per-Crawler", dispatch.channel_for(cfg, rec) == "sr_crawler-a")
+    ok("...and two Crawlers never share one — a shared room mixes two agents' work and the "
+       "orchestrator cannot tell which one answered",
+       dispatch.channel_for(cfg, rec) != dispatch.channel_for(cfg, dict(rec, crawler="crawler-b")))
+    nochat = make_repo({"dispatch": {"chat": {"enabled": False}}})
+    ok("...and is None when chat is switched off, so nothing half-wires",
+       dispatch.channel_for(nochat, rec) is None)
+
+    # game_loop's own warning, asserted rather than trusted: `changed: false` means the model
+    # did not MOVE, never that it matched what was asked for — and an absent file means nobody
+    # looked. Both must read as UNKNOWN, because an absence that reads as agreement is the
+    # exact defect this comparison exists to catch.
+    entry = {"session": "s1", "worktree": ".worktrees/a", "model_declared": "sonnet"}
+    eq("a session with no model.json is UNKNOWN, never a match",
+       dispatch.model_finding(cfg, entry)["verdict"], "unknown")
+
+    sess = os.path.join(cfg.root, ".worktrees", "a", ".game_loop", "sessions", "s1")
+    os.makedirs(sess, exist_ok=True)
+
+    def write_model(**kw):
+        with open(os.path.join(sess, "model.json"), "w") as fh:
+            json.dump(kw, fh)
+
+    # `--model` takes an ALIAS; the transcript records the full id. Comparing them as strings
+    # calls every correctly-dispatched Crawler a mismatch, which is the false-positive
+    # direction — the one that gets a check ignored rather than costing four seconds.
+    ok("the alias you dispatch with matches the full id that gets recorded",
+       dispatch.models_agree("sonnet", "claude-sonnet-5"))
+    ok("...a full id declared verbatim still matches",
+       dispatch.models_agree("claude-opus-5", "claude-opus-5"))
+    ok("...and the match is not so loose that a different model passes",
+       not dispatch.models_agree("opus", "claude-sonnet-5"))
+    ok("...nor does a prefix collision slip through",
+       not dispatch.models_agree("sonnet", "claude-sonnet2-5"))
+
+    write_model(models=["claude-sonnet-5"], changed=False)
+    eq("a session that ran what it was dispatched as reports match",
+       dispatch.model_finding(cfg, entry)["verdict"], "match")
+    write_model(models=["claude-opus-5"], changed=False)
+    eq("a session that ran something else is a MISMATCH — an Opus-priced Crawler doing Sonnet "
+       "work produces fine output, which is why nothing else notices",
+       dispatch.model_finding(cfg, entry)["verdict"], "mismatch")
+    write_model(models=["claude-sonnet-5", "claude-haiku-4-5"], changed=True)
+    eq("a model that changed UNDER the run is caught even though it started correct — "
+       "--fallback-model degrades mid-run, silently, exactly when every Crawler hits the cap",
+       dispatch.model_finding(cfg, entry)["verdict"], "changed-mid-run")
+
+    # A LIVE PID IS NOT A WORKING AGENT. Measured: a dispatched Crawler printed "Execution
+    # error", stopped, and kept its process, and reconcile called it running/alive — correct
+    # about the PID and silent about the work. Liveness stays PID-based on purpose; this is a
+    # second fact beside it, so the two states stop being indistinguishable.
+    hcfg = make_repo({})
+    hentry = {"scratch": ".showrunner/scratch/h", "session": "s"}
+    ok("no log at all reports NOTHING, not health — an absence is not a verdict",
+       dispatch.session_health(hcfg, hentry) is None)
+    hdir = os.path.join(hcfg.root, ".showrunner", "scratch", "h")
+    os.makedirs(hdir, exist_ok=True)
+    hlog = os.path.join(hdir, "session.log")
+    open(hlog, "w").close()
+    eq("an empty log is QUIET — started, said nothing yet",
+       dispatch.session_health(hcfg, hentry)["verdict"], "quiet")
+    with open(hlog, "w") as fh:
+        fh.write("working on it\nwrote a file\n")
+    eq("output that is not an error is PRODUCING",
+       dispatch.session_health(hcfg, hentry)["verdict"], "producing")
+    with open(hlog, "w") as fh:
+        fh.write("Execution error")
+    h = dispatch.session_health(hcfg, hentry)
+    eq("...and an errored session is ERRORED even though its process is still alive",
+       h["verdict"], "errored")
+    ok("...and it names what it matched, so the verdict can be argued with",
+       h["errors"] == ["Execution error"], h)
+
+    # A dispatch that never started must still be visible. Recording after launching would
+    # leave a live agent no record names, which cannot be reaped and cannot be reclaimed.
+    out = dispatch.launch(cfg, rec, {"rule": "pure-logic", "lane": "headless"},
+                          "brief text", "sess-9", dry_run=True)
+    ok("a dry run starts nothing and says so", out["launched"] is False, out)
+    ok("...and still reports the model and session it WOULD have used, so the plan is checkable "
+       "before it costs anything", out["model"] == "sonnet" and out["session"] == "sess-9", out)
+    # A companion for channel_for, which the sweep found THIN: neutering it to return None
+    # was noticed by exactly one assertion, so a Crawler silently unreachable by chat would
+    # have looked like a working dispatch. This catches the same failure through the path
+    # that actually consumes it.
+    eq("...and the dispatch carries the chat channel, so a Crawler that cannot be reached is "
+       "not mistaken for one nobody has messaged yet", out["channel"], "sr_crawler-a")
+
+
 def test_claims_about_the_layer_below():
     group("Claims about game_loop, and whether they still describe what is installed")
     if not have("git"):
@@ -1770,7 +1907,8 @@ def main():
     for fn in (test_locks, test_config_refusals, test_every_rule_can_fail, test_graph, test_lifecycle, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_waiting, test_concurrency,
-               test_integration, test_publishable, test_claims_about_the_layer_below,
+               test_integration, test_publishable, test_dispatch,
+               test_claims_about_the_layer_below,
                test_cli, test_optional):
         try:
             fn()

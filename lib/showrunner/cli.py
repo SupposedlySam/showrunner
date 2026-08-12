@@ -9,7 +9,7 @@ import json
 import os
 import sys
 
-from . import (__version__, brief, campaign, collide, config, gates, graph as G, harness,
+from . import (__version__, brief, campaign, collide, config, dispatch, gates, graph as G, harness,
                lanes, locks, worktree)
 from .util import Refused, die, eprint, rel, run, slug
 
@@ -429,13 +429,26 @@ def cmd_spawn(args):
         eprint("%sNOTE: %s%s" % (YEL, decision["why"], OFF))
 
     record = worktree.spawn(cfg, leaf, actor=args.actor, base=args.base, branch=args.branch)
+    # The channel is named before the brief is written, so the brief can TELL the Crawler
+    # where to reach the orchestrator. A room the agent is never told about is a room it
+    # never joins, which is indistinguishable from one that was never opened.
+    chat_channel = dispatch.channel_for(cfg, record) if getattr(args, "launch", False) else None
     text = brief.build(cfg, leaf, record, decision,
-                       orchestrator_findings=args.finding or None)
+                       orchestrator_findings=args.finding or None,
+                       chat_channel=chat_channel)
     brief_path = brief.write(cfg, record, text)
-    entry = campaign.record_spawn(cfg, record, pid=args.pid, session=args.session)
+
+    # Generated here, before the claim, so the claim, the campaign record and the process all
+    # name one session. Reading it back from a launched process would leave a window in which
+    # the claim names nothing and a live agent cannot be reaped.
+    session = args.session
+    if getattr(args, "launch", False) and not session:
+        session = dispatch.new_session_id()
+
+    entry = campaign.record_spawn(cfg, record, pid=args.pid, session=session)
 
     if not args.no_claim:
-        g.claim(leaf["id"], args.actor, pid=args.pid, tree=record["worktree"], session=args.session)
+        g.claim(leaf["id"], args.actor, pid=args.pid, tree=record["worktree"], session=session)
 
     print("%sCrawler %s%s" % (BOLD, record["crawler"], OFF))
     print("  leaf     %s — %s" % (leaf["id"], leaf.get("title", "")))
@@ -454,6 +467,27 @@ def cmd_spawn(args):
         print("  - %s" % item["what"])
     if record.get("harness_gap"):
         eprint("\n%sHARNESS GAP: %s%s" % (YEL, record["harness_gap"], OFF))
+
+    if getattr(args, "launch", False) or getattr(args, "dry_run", False):
+        if record.get("harness_gap") and not args.dry_run:
+            die("refusing to start a session in a tree with a harness gap: %s\n"
+                "A Crawler without its own rails cannot gate its own commits, and under fan-out "
+                "nobody is watching it." % record["harness_gap"], code=2)
+        out = dispatch.launch(cfg, record, decision, text, session,
+                              dry_run=bool(getattr(args, "dry_run", False)))
+        print("\n%sDispatch%s" % (BOLD, OFF))
+        print("  model    %s" % (out["model"] or "(inherited — no lane model declared)"))
+        print("  session  %s" % out["session"])
+        if out.get("channel"):
+            print("  chat     %s" % out["channel"])
+        elif out.get("chat"):
+            eprint("  %schat     not wired: %s%s" % (YEL, out["chat"], OFF))
+        if out["launched"]:
+            print("  pid      %s" % out["pid"])
+            print("  log      %s" % out["log"])
+        else:
+            print("  command  %s" % " ".join(out["cmd"][:2] + ["<brief>"] + out["cmd"][3:]))
+            print("  (dry run — nothing started)")
     return 0
 
 
@@ -782,6 +816,10 @@ def build_parser():
     s.add_argument("--pid", type=int)
     s.add_argument("--session")
     s.add_argument("--no-claim", action="store_true")
+    s.add_argument("--launch", action="store_true",
+                   help="start a REAL Claude Code session in the worktree, with its own hooks")
+    s.add_argument("--dry-run", action="store_true",
+                   help="with --launch: show what would start, and start nothing")
     s.add_argument("--finding", action="append",
                    help="something you already checked; the Crawler is asked to confirm or refute it")
     s.set_defaults(func=cmd_spawn)

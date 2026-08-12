@@ -89,6 +89,18 @@ TARGETS = [
     ("no-new-failures comparison", "gates.compare_to_baseline", "lib/showrunner/gates.py",
      r"(def compare_to_baseline\(cfg, current, baseline\):\n)",
      "    return True, []\ndef _neutered_compare(cfg, current, baseline):\n"),
+    ("session health beside liveness", "dispatch.session_health", "lib/showrunner/dispatch.py",
+     r"(def session_health\(cfg, entry\):\n)",
+     "    return None\ndef _neutered_health(cfg, entry):\n"),
+    ("alias-vs-full model agreement", "dispatch.models_agree", "lib/showrunner/dispatch.py",
+     r"(def models_agree\(declared, observed\):\n)",
+     "    return False\ndef _neutered_agree(declared, observed):\n"),
+    ("the Crawler's chat channel", "dispatch.channel_for", "lib/showrunner/dispatch.py",
+     r"(def channel_for\(cfg, record\):\n)",
+     "    return None\ndef _neutered_channel_for(cfg, record):\n"),
+    ("the model game_loop OBSERVED", "dispatch.observed_models", "lib/showrunner/dispatch.py",
+     r"(def observed_models\(cfg, entry\):\n)",
+     "    return None\ndef _neutered_observed(cfg, entry):\n"),
     ("lane routing", "lanes.route", "lib/showrunner/lanes.py",
      r"(def route\(cfg, leaf\):\n)",
      "    return Decision({'leaf': leaf['id'], 'title': '', 'lane': 'headless',\n"
@@ -459,8 +471,21 @@ def main():
     print("-" * 78)
 
     weak = []
+    # A --target that matches nothing swept NOTHING and then printed "every producer above is
+    # noticed", which is a clean bill of health for a run that did no work. Found by typing a
+    # KEY where the filter only ever read the label. Both are matched now, and matching zero
+    # is an error rather than a quiet success — the whole point of this tool is that a check
+    # which cannot fail is worse than no check.
+    if only:
+        matched = [t for t in TARGETS
+                   if only.lower() in t[0].lower() or only.lower() in t[1].lower()]
+        if not matched:
+            print("--target %r matched no producer. Names and keys available:" % only)
+            for name, key, _r, _p, _s in TARGETS:
+                print("  %-34s %s" % (name, key))
+            return 1
     for name, _key, relpath, pattern, stub in TARGETS:
-        if only and only.lower() not in name.lower():
+        if only and not (only.lower() in name.lower() or only.lower() in _key.lower()):
             continue
         work = tempfile.mkdtemp(prefix="mutate-")
         tree = os.path.join(work, "s")

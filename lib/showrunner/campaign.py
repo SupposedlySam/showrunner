@@ -193,6 +193,15 @@ def reconcile(cfg, graph, base="HEAD"):
         }
         f["merged"] = is_merged(cfg, entry.get("branch") or "", base)
         f["empty"] = is_empty(cfg, entry.get("branch") or "", entry.get("base_sha"))
+        # What was DISPATCHED against what actually RAN. Imported here rather than at module
+        # scope because dispatch imports campaign — the comparison lives with reconciliation,
+        # which is where every other "recorded vs real" question in this file is answered.
+        from . import dispatch as _dispatch
+        f["model"] = _dispatch.model_finding(cfg, entry) if entry.get("session") else None
+        # Beside `alive`, never instead of it: a PID that exists and a session that is working
+        # are two different facts, and reporting only the first calls an errored Crawler
+        # healthy. Observed doing exactly that.
+        f["session_health"] = _dispatch.session_health(cfg, entry)
         if f["worktree_exists"]:
             f["uncommitted"] = worktree.dirty(wt) or []
         if scratch and os.path.isdir(scratch):

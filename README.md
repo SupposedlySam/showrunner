@@ -10,7 +10,7 @@ single Crawler can see, and keeps the campaign coherent across sessions.
 > Status: **implemented and self-hosting.** The orchestration loop is real code
 > ([`lib/showrunner/`](lib/showrunner/)), it installs in one line with no packages, and it has been
 > run against its own issue list — see [Dogfooding](#dogfooding-showrunner-on-its-own-issues).
-> `python3 test/run.py` → **238 assertions, no setup beyond Python 3 and git.**
+> `python3 test/run.py` → **268 assertions, no setup beyond Python 3 and git.**
 
 ## Requirements
 
@@ -87,8 +87,11 @@ which is the worst available failure, since it looks like it is working.
 showrunner ready                # the only work-discovery entrypoint: unblocked, UNCLAIMED leaves
   └─ showrunner plan            # group them into waves whose file sets do not overlap
   └─ for each leaf in a wave:
-       showrunner spawn <leaf>  # worktree INSIDE the repo + private scratch + injected secrets
-                                #   + a brief that demands the premise be verified first
+       showrunner spawn <leaf> --launch
+                                # worktree INSIDE the repo + private scratch + injected secrets
+                                #   + a brief that demands the premise be verified first,
+                                #   then STARTS a real session in it on the lane's model.
+                                #   Omit --launch to prepare the room and start it yourself.
        Crawler works under game_loop (kept alive, honest, safe)
        showrunner close <leaf> --proof <real artifact> --premise <verdict> --premise-read <file>
   └─ showrunner integrate       # serial merge, checks re-run on each MERGED result
@@ -110,6 +113,28 @@ green tests, same satisfied gate — because the gate checks that work *happened
 
 **Dependency-gated fan-out.** Blocked work is hidden, so a shared prerequisite gates everything behind
 it; the moment it closes, its dependents become ready and fan out together.
+
+**Each Crawler is a real session, not a subagent.** `showrunner spawn <leaf> --launch` starts
+`claude -p` inside the worktree, on the model that leaf's lane declares. A subagent would be the
+easier thing to build and the wrong one: game_loop's rails are Claude Code hooks registered per
+project, its usage park and watchdog key on a session, and the model it observes is read from a
+session transcript. A Crawler that is not a session has no commit gate of its own, no Stop gate,
+and nothing to reap when it dies — which is the entire point of sending one somewhere unattended.
+The worktree carries the hooks because `.claude/settings.json` is tracked and `git worktree add`
+copies tracked files.
+
+Without `--launch`, spawn prepares the room and stops, and you start the agent yourself. **That
+used to be the only behaviour, and this section did not say so** — it said showrunner "sends a
+party of Crawlers into separate rooms in parallel", and the documented workflow ran
+`plan → route → spawn → integrate` with no step that started anything. A reader concluded spawn
+launched them, which is the correct reading of what was written and not of what ran. A limitation
+nobody wrote down is one the reader has to discover by being wrong.
+
+**The model is declared, observed, and compared — never enforced.** A lane names a model,
+`spawn --launch` passes it, game_loop records what actually ran, and `showrunner reconcile`
+reports a mismatch or a mid-run fallback. Nothing blocks: an Opus-priced Crawler doing Sonnet work
+produces perfectly good output, which is exactly why nothing else notices and why it can run for a
+week. A missing observation reads as UNKNOWN rather than as agreement.
 
 **Collision prediction.** The graph answers "what is unblocked?" — a question about *dependencies*. It
 models nothing about what two agents will *touch*. `showrunner plan` estimates each leaf's blast
@@ -201,7 +226,7 @@ things worth reporting because they are evidence rather than claims:
 ## Verifying it
 
 ```bash
-python3 test/run.py            # 238 CORE assertions — Python 3 + git, nothing else
+python3 test/run.py            # 268 CORE assertions — Python 3 + git, nothing else
 bash prototype/demo.sh         # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 

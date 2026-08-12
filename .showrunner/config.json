@@ -20,7 +20,7 @@
       "match": [
         "\\bgh\\s+issue\\s+(close|edit|comment)\\b"
       ],
-      "note": "the GitHub issue tracker — one upstream that two Crawlers would interleave writes to."
+      "note": "the GitHub issue tracker \u2014 one upstream that two Crawlers would interleave writes to."
     }
   ],
   "lanes": [
@@ -29,16 +29,26 @@
       "lane": "serialized",
       "resource": "git-index",
       "match": {
-        "labels": ["integration", "release"],
+        "labels": [
+          "integration",
+          "release"
+        ],
         "title": "integrat|merge|release"
-      }
+      },
+      "model": "opus"
     },
     {
       "name": "implementation",
       "lane": "headless",
       "match": {
-        "labels": ["impl", "docs", "test", "design"]
-      }
+        "labels": [
+          "impl",
+          "docs",
+          "test",
+          "design"
+        ]
+      },
+      "model": "sonnet"
     }
   ],
   "default_lane": "serialized",
@@ -67,5 +77,15 @@
       "prototype/README.md"
     ]
   },
-  "shared_state": []
+  "shared_state": [],
+  "dispatch": {
+    "default_model": "sonnet",
+    "models_by_lane": {
+      "serialized": "opus"
+    },
+    "chat": {
+      "enabled": true,
+      "channel_prefix": "showrunner"
+    }
+  }
 }

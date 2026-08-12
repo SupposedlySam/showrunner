@@ -39,6 +39,11 @@ showrunner ready                     # unblocked AND unclaimed leaves — the on
 showrunner plan                      # group them into waves whose estimated file sets do not overlap
 showrunner route                     # which lane each leaf takes, and the rule that decided
 showrunner spawn <leaf> --actor <name> [--finding "<something you already checked>"]
+                                     # prepares the room: worktree, branch, scratch, brief, lock, claim
+showrunner spawn <leaf> --launch     # ...and STARTS a real Claude Code session in it, with its own
+                                     # hooks, on the model its lane declares. --dry-run to see the
+                                     # command and start nothing. Without --launch, spawn prepares
+                                     # and stops, and you start the agent yourself.
 showrunner integrate                 # serial merge, checks re-run on each MERGED result
 showrunner reap                      # dry run; --apply to reclaim dead Crawlers' claims and locks
 showrunner reconcile                 # on resume: merged / abandoned / live — ask this FIRST
@@ -174,7 +179,7 @@ records no liveness on a claim, so `reap` cannot work against it and says so rat
 ## Verifying the tool itself
 
 ```
-python3 test/run.py        # 238 assertions; needs only Python 3 + git
+python3 test/run.py        # 268 assertions; needs only Python 3 + git
 bash prototype/demo.sh     # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 

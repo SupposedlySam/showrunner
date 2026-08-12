@@ -33,6 +33,7 @@ TEMPLATE = """\
 
 ## Lane
 {lane_line}
+{chat_block}
 
 {lock_block}
 ## FIRST, BEFORE YOU WRITE ANYTHING: verify the premise
@@ -147,6 +148,25 @@ ORCH_HEADER = """\
 
 """
 
+CHAT_BLOCK = """\
+## You are reachable
+
+The orchestrator opened a channel for you and installed llm_chat in this worktree. Join it
+once, as yourself, before you start:
+
+    llm_chat join {channel} --as {crawler}
+
+Then say what you are about to do, and say it again if the premise turns out not to hold.
+Messages arrive in your context automatically; you do not poll.
+
+**This is how you ask instead of guessing.** You are one of several Crawlers who cannot see
+each other, working from an issue that may describe a different repo. If the premise looks
+refuted, if two leaves seem to want the same file, or if you are about to do something wide
+and irreversible, say so in the channel and keep working on what is unambiguous. The
+orchestrator is reading. A question costs a sentence; the wrong guess costs a merge.
+
+"""
+
 LOCK_BLOCK = """\
 This leaf is serialized behind the single-consumer resource **{resource}**. Do not run the
 consuming command directly. Run it through the lock so the lock is held by the process
@@ -160,13 +180,18 @@ guarantee only where the consumer itself takes it.
 """
 
 
-def build(cfg, leaf, spawn_record, decision=None, orchestrator_findings=None):
+def build(cfg, leaf, spawn_record, decision=None, orchestrator_findings=None,
+          chat_channel=None):
     decision = decision or lanes.route(cfg, leaf)
 
     lock_block = ""
     if decision.get("lane") == lanes.SERIALIZED and decision.get("resource"):
         lock_block = LOCK_BLOCK.format(resource=decision["resource"],
                                        crawler=spawn_record["crawler"])
+
+    chat_block = ""
+    if chat_channel:
+        chat_block = CHAT_BLOCK.format(channel=chat_channel, crawler=spawn_record["crawler"])
 
     shares = spawn_record.get("shares") or worktree.audit_shared(cfg)
     shared_block = ""
@@ -205,7 +230,7 @@ def build(cfg, leaf, spawn_record, decision=None, orchestrator_findings=None):
         leaf_id=leaf["id"],
         title=leaf.get("title", ""),
         body=(leaf.get("body") or "_(no description on the leaf)_").strip(),
-        lane_line=lane_line,
+        chat_block=chat_block, lane_line=lane_line,
         lock_block=lock_block,
         orchestrator_block=orchestrator_block,
         shared_block=shared_block,
