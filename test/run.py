@@ -727,6 +727,22 @@ def test_spawn():
     ok("both scratch dirs sit under one scratch root, so they are findable on reap",
        os.path.dirname(rec["scratch"]) == os.path.dirname(rec_b["scratch"]))
 
+    # ONE CRAWLER, ONE CHECKOUT — and this is load-bearing for a NEIGHBOUR, which is why it is
+    # asserted rather than left as a property of how spawn happens to work. game_loop resolves
+    # a Crawler's harness home from CLAUDE_PROJECT_DIR, and it reasoned about our fan-out on
+    # the assumption that each Crawler is its own checkout: its account-scoped snapshot shares
+    # across linked worktrees precisely because ROOT does not. If this repo ever put several
+    # Crawlers in ONE checkout, that assumption silently inverts — and game_loop has no way to
+    # find out, because nothing in their tree can see our topology. So the day this assertion
+    # fails is the day somebody owes them a message; that is the whole reason it exists.
+    homes = {os.path.realpath(os.path.join(r["worktree"], ".game_loop")) for r in (rec, rec_b)}
+    ok("each Crawler's harness home is its own — two Crawlers never share one checkout. If this "
+       "ever changes, TELL game_loop: their per-account lease assumes the opposite",
+       len(homes) == 2, sorted(homes))
+    ok("...and neither is the orchestrator's own harness home, so a Crawler cannot quietly "
+       "inherit the parent's session state, claims or authorizations",
+       os.path.realpath(os.path.join(cfg.root, ".game_loop")) not in homes, sorted(homes))
+
     # `git worktree add` copies TRACKED files only, so an untracked harness never crosses.
     hcfg = make_repo(files={"README.md": "seed\n"})
     os.makedirs(os.path.join(hcfg.root, ".game_loop", "bin"), exist_ok=True)
