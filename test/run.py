@@ -1324,6 +1324,42 @@ def test_publishable():
     eq("...while keys it does not mention are untouched, so an overlay cannot silently drop "
        "half a config", merged.get("worktree_root"), ".worktrees")
 
+    # REFERENCE COUNTS AS DESIGN FACTS — game_loop's instrument, and it covers the gap the
+    # payload stamp cannot reach. A stamp compares prose against a dependency that moved; it is
+    # blind inside one file, where a comment, its code and its digest all change together. A
+    # reference count asserts something different and cheaper: this name has exactly N
+    # legitimate readers, so the N+1th fails LOUDLY and has to be argued for.
+    #
+    # Both counts below are here because a new reader is how the real bug arrived. `lingering`
+    # was a sixth reader of pid_alive that skipped the boot check, and it was the only one
+    # wired to a kill.
+    src = {}
+    for name in ("campaign.py", "dispatch.py", "graph.py", "locks.py", "util.py"):
+        with open(os.path.join(ROOT, "lib", "showrunner", name)) as fh:
+            src[name] = fh.read()
+
+    kills = []
+    for name, body in src.items():
+        for i, line in enumerate(body.splitlines(), 1):
+            if "os.kill(" in line and "os.kill(int(pid), 0)" not in line:
+                kills.append("%s:%d" % (name, i))
+    ok("exactly one place sends a real signal to a process — a second way to terminate a "
+       "Crawler is a decision, not a refactor, and this repo has already shipped one that "
+       "could hit a stranger's pid", len(kills) == 1, kills)
+
+    readers = []
+    for name, body in src.items():
+        if name == "util.py":
+            continue          # defines it
+        for i, line in enumerate(body.splitlines(), 1):
+            if "pid_alive(" in line and not line.strip().startswith(("#", "from", "import")):
+                readers.append("%s:%d" % (name, i))
+    # Five: campaign.live, dispatch.lingering, graph.stale_claims, graph.claim, locks._live.
+    # Every one of them must decide what a pid means ACROSS A BOOT before it trusts the answer.
+    # If this number changes, the new reader is the thing to look at — not this assertion.
+    eq("pid_alive has exactly the readers that were audited for boot scoping; a new one must "
+       "justify itself rather than inherit the audit", len(readers), 5)
+
     # INTERNAL TOOLING MUST NOT REACH A PUBLIC CLONE. The package manager used to dogfood
     # these repos is ours; a stranger has never heard of it, cannot install it, and should
     # not inherit a path pinned to it. This shipped anyway: a lockfile, a packager marker, and

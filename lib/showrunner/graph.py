@@ -260,7 +260,15 @@ class SqliteGraph:
             self.db.rollback()
             current = self.show(leaf_id)
             if current["status"] == IN_PROGRESS:
-                if pid_alive(current.get("claim_pid")) or current.get("parked"):
+                # Boot-scoped like every other liveness question here. `stale_claims` two
+                # methods up already refuses to call a claim live across a boot; this path did
+                # not, so after a reboot a REUSED pid made an abandoned claim look held and
+                # refused a leaf that was actually free. Milder than the SIGTERM version of
+                # this bug — a wrong refusal rather than a wrong action — and recoverable via
+                # `reap`, but it blocks real work with a confident and false explanation.
+                claim_boot = current.get("claim_boot")
+                same_boot = not claim_boot or claim_boot == boot_token()
+                if (same_boot and pid_alive(current.get("claim_pid"))) or current.get("parked"):
                     die("%s is already claimed by %s (pid %s)%s"
                         % (leaf_id, current.get("actor"), current.get("claim_pid"),
                            " [parked]" if current.get("parked") else ""), code=2)
