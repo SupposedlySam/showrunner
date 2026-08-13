@@ -318,6 +318,20 @@ def reap(cfg, graph, base="HEAD", apply=False):
             })
             if apply:
                 locks.Lock(ls.root, name).release(force=True)
+        elif state == locks.UNREADABLE:
+            # Surfaced and never released, even with --apply. This is the one lock state
+            # nobody can adjudicate from here: an unreadable pid may belong to a process
+            # still holding the resource, and `--apply` meaning "reclaim whatever looks
+            # broken" is how a mutex becomes a suggestion.
+            actions.append({
+                "kind": "lock",
+                "resource": name,
+                "why": "holder pid is UNREADABLE (%r) — cannot be proved dead"
+                       % ((holder.get("pid") or "")[:40]),
+                "action": "SURFACED, not released — check whether %s is still running, then "
+                          "`showrunner lock release %s --force`"
+                          % (holder.get("who") or "the holder", name),
+            })
 
     # 2b. Processes that outlived their work. A Crawler whose leaf is FINISHED has, by
     #     definition, nothing left to lose — but the instant of closing is the instant it is

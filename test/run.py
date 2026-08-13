@@ -36,7 +36,7 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
 from showrunner import brief, campaign, collide, config, dispatch, gates, graph as G, lanes, locks, worktree  # noqa: E402
-from showrunner.util import Refused  # noqa: E402
+from showrunner.util import Refused, boot_token as boot_token_for_test  # noqa: E402
 
 VERBOSE = "-v" in sys.argv or "--verbose" in sys.argv
 PASS, FAIL, SKIP = [], [], []
@@ -161,6 +161,36 @@ def test_locks():
     ls = locks.LockSet(cfg)
     device = ls.lock("device")
     pg = ls.lock("pg-port")
+
+    # AN UNREADABLE PID IS NOT A DEAD ONE. `pid_alive` returns False both for "not running"
+    # and for "not a pid", and only the first licenses deleting somebody else's lock. A
+    # partial write by a LIVE holder reads exactly like a holder that died — which is how a
+    # mutex hands a single-consumer resource to a second Crawler and logs that it reclaimed
+    # a stale lock. llm_chat hit this shape as a lockfile holding binary instead of a pid,
+    # where the consequence was a kill that silently did nothing.
+    corrupt = ls.lock("device")
+    os.makedirs(corrupt.dir, exist_ok=True)
+    with open(os.path.join(corrupt.dir, "boot"), "w") as fh:
+        fh.write(boot_token_for_test())
+    with open(os.path.join(corrupt.dir, "holder"), "w") as fh:
+        fh.write("crawler-a")
+    for label, raw in (("binary", b"\x00\x01rubbish"), ("empty", b"")):
+        with open(os.path.join(corrupt.dir, "pid"), "wb") as fh:
+            fh.write(raw)
+        eq("a %s pid reads UNREADABLE, never STALE — STALE is a licence to delete the lock"
+           % label, corrupt.state()[0], locks.UNREADABLE)
+    # The control: this must not have become "never reclaim anything". A pid that parses and
+    # does not respond, recorded this boot, is still proved dead and still reclaimable.
+    with open(os.path.join(corrupt.dir, "pid"), "w") as fh:
+        fh.write("999999")
+    eq("...while a readable pid that is genuinely gone is still STALE, so reclaiming still "
+       "works", corrupt.state()[0], locks.STALE)
+    with open(os.path.join(corrupt.dir, "pid"), "wb") as fh:
+        fh.write(b"\x00rubbish")
+    raises("acquiring against an unreadable lock REFUSES rather than reclaiming or silently "
+           "polling to a timeout, which reads the same as a busy resource",
+           lambda: corrupt.acquire(os.getpid(), "crawler-b"), "UNREADABLE")
+    shutil.rmtree(corrupt.dir, ignore_errors=True)
 
     state, _ = device.state()
     eq("a fresh lock is FREE", state, locks.FREE)

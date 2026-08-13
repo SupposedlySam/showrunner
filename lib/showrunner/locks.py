@@ -35,6 +35,33 @@ import time
 from .util import boot_token, die, eprint, now, pid_alive
 
 FREE, HELD, STALE = "FREE", "HELD", "STALE"
+# A fourth state, and the reason it exists is the whole point of this module. STALE means
+# PROVED DEAD — a pid we read, that does not respond, recorded this boot — and `acquire`
+# answers it by deleting the lock directory and taking the resource. An unreadable pid used to
+# reach that same verdict: `pid_alive` catches ValueError and returns False, so binary or empty
+# contents said "dead" when they meant "cannot tell". A partial write by a LIVE holder reads
+# exactly like a holder that died, and the consequence is two Crawlers on a single-consumer
+# resource with a note in the log saying the lock was reclaimed.
+#
+# 'could not tell' and 'proved dead' must never be the same answer — the same sentence the
+# harness check uses, arriving in the mutex this project exists to enforce.
+UNREADABLE = "UNREADABLE"
+
+
+def _parsable_pid(pid):
+    """Can this be READ as a pid at all? Separate from whether it is alive.
+
+    The two questions are different and were being answered by one call: `pid_alive` returns
+    False both for "this pid is not running" and for "this is not a pid", and only the first
+    licenses reclaiming somebody else's lock.
+    """
+    if pid is None or pid == "":
+        return False
+    try:
+        int(pid)
+        return True
+    except (TypeError, ValueError):
+        return False
 
 
 class Lock:
@@ -66,6 +93,8 @@ class Lock:
         h = self.holder()
         if not h:
             return FREE, None
+        if not _parsable_pid(h.get("pid")):
+            return UNREADABLE, h
         return (HELD if self._live(h) else STALE), h
 
     @staticmethod
@@ -104,6 +133,19 @@ class Lock:
                        % (self.name, h.get("pid"), h.get("boot")))
                 shutil.rmtree(self.dir, ignore_errors=True)
                 continue
+
+            if state == UNREADABLE:
+                # Refuse rather than reclaim, and refuse rather than poll: waiting would spin
+                # to the deadline and then return False, which is indistinguishable from a
+                # busy resource and leaves the corruption in place for the next caller to
+                # rediscover. A human clears this, because only a human can find out whether
+                # the holder is still running.
+                die("lock %r holds an UNREADABLE pid (%r) — it cannot be proved dead, so it "
+                    "will not be reclaimed. A partial write by a LIVE holder looks exactly "
+                    "like this. Find out whether %s is still running, then "
+                    "`showrunner lock release %s --force` if it is not."
+                    % (self.name, (h.get("pid") or "")[:40], h.get("who") or "the holder",
+                       self.name), code=2)
 
             if time.time() >= deadline:
                 return False
