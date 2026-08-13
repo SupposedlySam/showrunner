@@ -170,6 +170,35 @@ Cite the file, in the sibling repo, at the version you read. `docs/BOUNDARY.md` 
 what showrunner currently assumes about game_loop and the line numbers it was verified against, so
 the next reader re-checks instead of re-deriving.
 
+## INV23 — A test is falsifiable only by something that did not share the belief
+
+The limit on every instrument in this repo, and it took a second repo to state.
+
+`test/mutate.py` asks whether an assertion is LOAD-BEARING. A confidently wrong assertion is
+perfectly load-bearing: it kills its mutant, reports a healthy number and reads as coverage.
+llm_chat shipped a test asserting that an unreadable pidfile EQUALS an absent one — written in
+the same sitting, from the same belief, as the code it covered. It confirmed the bug instead of
+catching it, and no sweep, count or coverage metric could have known, because none of them ask
+the question. They ask whether the assertion matters, not whether it is true.
+
+Two things do qualify, and only two:
+
+**A fixture that PREDATES the distinction.** It cannot encode a belief formed later, so it
+stands in the one place the new reasoning never went. When adding a case split, go looking for
+old test data whose fields omit what the new branch reads — llm_chat caught two real defects
+this way. Its limit is exact: it only works when older evidence EXISTS. Both splits added here
+(UNREADABLE locks, unadjudicable claims) were new in the code and the tests together, and the
+search turned up nothing, because there was nothing older to disagree with me.
+
+**A second party.** Not a reviewer who was present while the belief formed — someone with their
+own repo, their own defect, and no stake in this one being right. Every hard case this week came
+in from outside: the leaked pin, the lease topology, the SIGTERM across a reboot, the mutex
+reclaiming a live lock. Each was invisible from the inside and cheap from the outside.
+
+The uncomfortable part is that the second is not a mechanism and cannot be made into one. It is
+worth writing down anyway, because the alternative is believing the sweep covers this — and a
+green sweep over a wrong belief is exactly the shape everything else in this file is about.
+
 ## INV15 — Pair every non-event assertion with the case where it happens
 
 An assertion whose evidence is that something did **not** occur cannot tell being satisfied

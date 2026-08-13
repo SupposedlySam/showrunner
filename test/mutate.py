@@ -31,6 +31,17 @@ target gets optimised rather than understood:
 * It measures whether an assertion NOTICES a producer that stopped producing. It says
   nothing about whether the producer is RIGHT. A wrong message and a correct one are killed
   identically, because both are non-empty.
+* **It cannot see an assertion that is CONFIDENTLY WRONG, and this is the sharpest limit
+  here.** The sweep asks whether an assertion is load-bearing. A wrong assertion is perfectly
+  load-bearing: it kills its mutant, reports a healthy number, and reads as coverage. llm_chat
+  shipped `test_an_unreadable_pidfile_is_not_mistaken_for_a_live_waker` asserting that
+  unreadable EQUALS absent — written from the same belief as the code it covered, so it
+  confirmed the bug instead of catching it, and no sweep could have known. This file's own
+  near-miss was smaller: a corrupt-lock fixture that also carried a stale boot token, where
+  the boot check returned first, so the test passed for a reason unrelated to what it claimed.
+  A fixture is falsifiable only by something that did not share the belief — a fixture that
+  PREDATES the distinction (the past did not share it) or a second party (they were not
+  there). Mutation never qualifies, because sharing the belief is not what it measures.
 * It only tests the broken form written down here — silence. It cannot see a validator that
   wrongly ACCEPTS, a detector that fires on EVERYTHING, or a threshold that drifted. Those
   are different mutations and this file does not contain them.
