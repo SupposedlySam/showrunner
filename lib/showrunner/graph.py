@@ -26,7 +26,7 @@ import shutil
 import sqlite3
 import time
 
-from .util import Refused, boot_token, die, now, pid_alive, run, slug
+from .util import Refused, boot_token, die, eprint, now, pid_alive, pid_readable, run, slug
 
 OPEN = "open"
 IN_PROGRESS = "in_progress"
@@ -169,7 +169,7 @@ class SqliteGraph:
         Crawler pauses in a long unattended run, and a parked Crawler is not dead.
         """
         token = boot_token()
-        out = []
+        out, unprovable = [], []
         for leaf in self.list(status=IN_PROGRESS):
             if leaf.get("parked"):
                 continue
@@ -178,8 +178,18 @@ class SqliteGraph:
             if claim_boot and claim_boot != token:
                 out.append((leaf, "claimed on a different boot (%s, now %s) — its process "
                                   "cannot still be running" % (claim_boot, token)))
+            elif not pid_readable(pid):
+                # NOT reported as stale. `reap --apply` RELEASES a stale claim, which returns
+                # the leaf to `ready` for someone else to take — so an unprovable pid here
+                # ends with two Crawlers on one leaf, which is the same failure as two on one
+                # device, one layer up. A claim whose owner cannot be named cannot be proved
+                # abandoned, and abandonment is the thing that licenses the release.
+                unprovable.append((leaf, "owning pid %r cannot be read, so this claim cannot "
+                                         "be proved abandoned" % pid))
             elif not pid_alive(pid):
                 out.append((leaf, "owning pid %s is not alive" % pid))
+        for leaf, why in unprovable:
+            eprint("note: %s holds a claim that cannot be adjudicated — %s" % (leaf["id"], why))
         return out
 
     # -- writes ------------------------------------------------------------

@@ -32,7 +32,7 @@ import re
 import shutil
 import time
 
-from .util import boot_token, die, eprint, now, pid_alive
+from .util import boot_token, die, eprint, now, pid_alive, pid_readable
 
 FREE, HELD, STALE = "FREE", "HELD", "STALE"
 # A fourth state, and the reason it exists is the whole point of this module. STALE means
@@ -46,22 +46,6 @@ FREE, HELD, STALE = "FREE", "HELD", "STALE"
 # 'could not tell' and 'proved dead' must never be the same answer — the same sentence the
 # harness check uses, arriving in the mutex this project exists to enforce.
 UNREADABLE = "UNREADABLE"
-
-
-def _parsable_pid(pid):
-    """Can this be READ as a pid at all? Separate from whether it is alive.
-
-    The two questions are different and were being answered by one call: `pid_alive` returns
-    False both for "this pid is not running" and for "this is not a pid", and only the first
-    licenses reclaiming somebody else's lock.
-    """
-    if pid is None or pid == "":
-        return False
-    try:
-        int(pid)
-        return True
-    except (TypeError, ValueError):
-        return False
 
 
 class Lock:
@@ -93,7 +77,7 @@ class Lock:
         h = self.holder()
         if not h:
             return FREE, None
-        if not _parsable_pid(h.get("pid")):
+        if not pid_readable(h.get("pid")):
             return UNREADABLE, h
         return (HELD if self._live(h) else STALE), h
 

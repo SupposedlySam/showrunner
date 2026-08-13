@@ -66,6 +66,23 @@ def boot_token():
     return "%s:unknown" % host
 
 
+def pid_readable(pid):
+    """Can this be READ as a pid at all? A different question from whether it is alive.
+
+    `pid_alive` answers False for BOTH "not running" and "not a pid", and only the first
+    licenses acting on somebody else's resource — deleting their lock, releasing their claim.
+    A partial write by a LIVE holder is indistinguishable from a holder that died unless the
+    two are separated here.
+    """
+    if pid is None or pid == "":
+        return False
+    try:
+        int(pid)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
 def pid_alive(pid):
     if not pid:
         return False

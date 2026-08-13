@@ -440,6 +440,21 @@ def test_lifecycle():
     ok("the dead claim is detected as stale", any(l["id"] == "w1" for l, _ in stale), stale)
     ok("the reason names the dead pid", any("pid" in why for _, why in stale), stale)
 
+    # SAME CONFLATION AS THE LOCK, ONE LAYER UP. `reap --apply` RELEASES a stale claim, which
+    # returns the leaf to `ready` for somebody else — so a claim whose pid cannot be read must
+    # not be called stale, or the result is two Crawlers on one leaf. The lock version of this
+    # was two Crawlers on one device; the licence is the same word, "proved abandoned".
+    g.db.execute("UPDATE leaves SET claim_pid=NULL WHERE id=?", ("w1",))
+    g.db.commit()
+    ok("a claim whose pid cannot be READ is not reported stale — it cannot be proved "
+       "abandoned, and abandonment is what licenses releasing somebody else's claim",
+       "w1" not in [l["id"] for l, _ in g.stale_claims()], g.stale_claims())
+    # The control, again: this must not have become "nothing is ever stale".
+    g.db.execute("UPDATE leaves SET claim_pid=? WHERE id=?", (dead.pid, "w1"))
+    g.db.commit()
+    ok("...while a readable pid that is genuinely gone is still stale, so reap still works",
+       "w1" in [l["id"] for l, _ in g.stale_claims()])
+
     actions, _ = campaign.reap(cfg, g, apply=False)
     ok("reap DRY RUN reports without mutating",
        any(a.get("leaf") == "w1" for a in actions) and g.show("w1")["status"] == G.IN_PROGRESS)
