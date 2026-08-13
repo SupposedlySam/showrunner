@@ -143,6 +143,20 @@ def cmd_doctor(args):
     if gap and not harness.spec(cfg)["dirs"]:
         print("  %s %s" % (YEL + "warn " + OFF, gap))
 
+    # THE UPGRADE WINDOW. Between upgrading the harness and committing it, the orchestrator runs
+    # scripts a Crawler cannot have: `git worktree add` copies TRACKED files, so a new worktree
+    # gets HEAD's payload, not the working tree's. Spawn already refuses — correctly, and loudly
+    # — but it refuses one Crawler at a time, in the middle of a fan-out, which is the worst
+    # moment to discover a condition that has been true since the upgrade. It is knowable now.
+    if os.path.isdir(os.path.join(cfg.root, ".game_loop")):
+        rc, out, _ = run(["git", "diff", "HEAD", "--name-only", "--", ".game_loop/bin/"],
+                         cwd=cfg.root)
+        pending = [x for x in (out or "").split() if x]
+        if rc == 0 and pending:
+            print("  %s the harness payload is upgraded but NOT COMMITTED (%s). A worktree gets "
+                  "HEAD's copy, so every spawn will refuse until this is committed — commit "
+                  "first, then fan out." % (YEL + "warn " + OFF, ", ".join(pending[:3])))
+
     # THE RECIPROCAL HALF: showrunner's config names paths into a NEIGHBOUR's tree, and only
     # this repo can see whether they still resolve. A neighbour who moves or uninstalls their
     # tool cannot fail our suite — they do not know we point at them — so the failure would

@@ -1658,6 +1658,7 @@ def test_claims_about_the_layer_below():
         "lib/showrunner/worktree.py": "the per-tree gate the shared-state audit rests on",
         "lib/showrunner/campaign.py": "what a drifted tree's gate is said to owe",
         "lib/showrunner/dispatch.py": "why a Crawler must be a session — hooks, park, transcript",
+        "lib/showrunner/cli.py": "doctor's account of what a worktree inherits and when spawn refuses",
         "docs/DESIGN.md": "a retracted claim about the gate, and what replaced it",
         "README.md": "the per-tree gate and the blank-verify.yaml consequence",
         ".gitignore": "tracking .game_loop/ is JUSTIFIED by the per-tree gate holding",
