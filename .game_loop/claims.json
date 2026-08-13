@@ -79,8 +79,9 @@
         "ledger": "statusLine config keys",
         "exercisable": "no",
         "exercisable_why": "unconditional: the host either honours the keys or does not, and I cannot construct the case where it does not",
-        "verified_on": "2026-07-29",
-        "verified_against": null
+        "verified_on": "2026-08-13",
+        "verified_against": "2.1.223",
+        "verified_how": "re-read in the running binary: type:literal(\"command\"), command:string(), padding:number().optional(), refreshInterval:number().min(1).optional() \u2014 all four keys and the 1s floor, from the client's own schema rather than from the docs page the claim cites"
       },
       {
         "id": "no-rate-limits-in-hooks",
@@ -88,10 +89,11 @@
         "source": "anthropics/claude-code#34817",
         "breaks": "if it became true, the whole statusline detour is unnecessary",
         "ledger": "Hook payloads carry rate-limit data",
-        "exercisable": "yes-not-yet",
+        "exercisable": "yes",
         "exercisable_why": "CONDITIONAL absence and exercisable, not yet exercised: every hook invocation supplies a payload I control, and the payload carrying session_id is the positive control that the read worked while rate_limits was still absent",
         "verified_on": "2026-07-29",
-        "verified_against": null
+        "verified_against": null,
+        "exercised_by": "the Stop payload's own keys, scanned on every turn-end, with session_id present as the control that the read worked"
       },
       {
         "id": "no-headless-usage-flag",
@@ -114,7 +116,8 @@
         "exercisable": "no",
         "exercisable_why": "unconditional: nothing local produces the headers, so no run can discriminate",
         "verified_on": "2026-07-29",
-        "verified_against": null
+        "verified_against": null,
+        "reverify_attempt": "2026-08-13 against 2.1.223: COULD NOT TELL, deliberately not stamped. 14 distinct anthropic-ratelimit-unified-* header names are present in the client, so the subject still exists \u2014 but the claim is about PERSISTENCE to somewhere harness code can read, and a minified binary establishes that neither way. A version stamp here would record that the header names exist, which is not what this claim says."
       },
       {
         "id": "no-weekly-opus-window",
@@ -138,7 +141,19 @@
         "verified_against": "2.1.223",
         "verified_how": "three probes at 2.1.223 reading usage from --output-format json: baseline 31,547 / --strict-mcp-config 30,323 / plus 13 tools disabled 24,377. Decomposed rather than estimated, because a single number cannot say what is trimmable.",
         "exercisable": "yes-not-yet",
-        "exercisable_why": "CONDITIONAL and exercisable \u2014 I control the input and the probe reports its own usage, so re-running it is the exercise. NOT wired into the suite on purpose: the exercise spends the resource it measures and needs network and credentials, so it would make the suite cost tokens and fail offline. That is a real reason and it is still a debt, not a pass."
+        "exercisable_why": "CONDITIONAL and exercisable, and the CHEAP path is now known. Previously recorded as not-yet because the exercise spends the resource it measures and needs network and credentials. That reasoning was sound and INCOMPLETE: the statusline payload's context_window carries ABSOLUTE counts (total_input_tokens, context_window_size, current_usage.input_tokens), not only used_percentage \u2014 read out of 2.1.223's own embedded schema on 2026-08-13. So `limitprobe` already spawns a FRESH session and its render already carries this claim's number: the exercise can ride a spawn that is being paid for anyway, instead of buying one. Still a debt, but a debt with a costed route rather than a reason to leave it alone."
+      },
+      {
+        "id": "statusline-context-window",
+        "says": "the statusline payload's context_window carries ABSOLUTE token counts \u2014 total_input_tokens, total_output_tokens, context_window_size, and current_usage {input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens} \u2014 alongside used_percentage/remaining_percentage",
+        "source": "read in the running binary at 2.1.223 (the client's own embedded payload schema)",
+        "breaks": "the harness reads only used_percentage, so every absolute token question is currently answered by inference or by spawning something. If these fields moved, any future usage work resting on them silently loses its measurement",
+        "ledger": "The statusline payload exposes only a PERCENTAGE of context used",
+        "exercisable": "yes-not-yet",
+        "exercisable_why": "exercisable the same way the rate_limits claim is \u2014 our own tap sees the payload, so a snapshot carrying the fields IS the claim holding, with a known field present as the positive control. Not yet wired: this host renders no statusline, so the tap never fires here and only `limitprobe` produces a render.",
+        "verified_on": "2026-08-13",
+        "verified_against": "2.1.223",
+        "verified_how": "found by grepping the running binary for used_percentage while checking whether the probe could exercise fresh-session-token-floor for free. I had just asserted the payload carried 'a percentage, not an absolute count' from reading OUR parser rather than the host \u2014 the parser reads used_percentage, which is a fact about us, not about the payload."
       }
     ],
     "//note": "verified_on/verified_against now live on each CLAIM. The block values are the original reading and remain as the default for entries nobody has revisited; a claim carrying its own is the one that has actually been re-read."

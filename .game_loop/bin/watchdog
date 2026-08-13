@@ -123,7 +123,7 @@ def _limits_file():
     return local
 
 
-LIMITS_F = _limits_file()        # account-scoped snapshot from `game_loop statusline`
+LIMITS_PATH = _limits_file()     # RESOLVED account-scoped snapshot (shared across worktrees)
 PID_PATH = os.path.join(ROOT, ".watchdog.pid")      # re-pointed by set_session()
 
 SESSION = None
@@ -274,7 +274,7 @@ def claim_pidfile():
 
 def limits_snapshot():
     try:
-        with open(LIMITS_F) as f:
+        with open(LIMITS_PATH) as f:
             return json.load(f)
     except (OSError, ValueError):
         return None

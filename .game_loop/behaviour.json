@@ -92,6 +92,24 @@
       "change": "a new OPT-IN key, mcp_trusted_servers, permits every call to a named server \u2014 irreversible verbs, landing verbs and mutating arguments included. Refusal lines moved in the guard, which is why this entry exists.",
       "consequence": "none for anyone who does not set the key. A project with no mcp_trusted_servers is refused exactly what it was refused before, asserted in the suite as its own arm. If you DO set it, read the Configure section: this is the widest door in the tool and status reports it in capitals.",
       "why_it_qualifies": "IT DOES NOT \u2014 recorded with notice:false because the behaviour gate fired and an omission would be indistinguishable from nobody having decided. The test is whether somebody who changed NOTHING would notice; an opt-in key they have not opted into changes nothing for them."
+    },
+    {
+      "seq": 7,
+      "sha": "7209686",
+      "verb": "confidence --mark",
+      "notice": true,
+      "change": "marking a commit that is ALREADY marked at that level no longer dies on `tag already exists`. It reports RE-MARKED, leaves the immutable tag untouched, and re-fires the confidence triggers. The same name over a DIFFERENT commit still refuses, and now names the commit it already records instead of passing through a bare git error.",
+      "consequence": "a mark whose trigger declined for a TRANSIENT reason can be retried. Observed here: the mark landed, its publish trigger correctly declined because HEAD was not pushed yet, and after pushing there was no way back \u2014 the record existed and the publication it exists to cause did not. Recovery meant running the trigger script by hand from a path only its author knows, so consumers stayed on the previous stable in the meantime. If you script `--mark` and relied on a non-zero exit to mean 'already marked', that exit is now 0.",
+      "why_it_qualifies": "a consumer who changed nothing gets a different exit code and a different action from the same command on the same commit. The triggers firing again is the deliberate part, not a side effect."
+    },
+    {
+      "seq": 8,
+      "sha": "4f203f5",
+      "verb": "stopgate (turn-end)",
+      "notice": true,
+      "change": "turn-end can now be REFUSED by something other than the mandate gate. A `stop` key in .game_loop/triggers.json attaches a command to turn-end: a NON-ZERO exit blocks the turn and its stderr goes back to the model. Previously `stop` was not a moment at all, so such a key ran nothing and status called it THERE IS NO SUCH MOMENT. It is bounded in three ways that are part of the contract, not implementation detail: a timeout, an unrunnable command or a crash FAILS OPEN loudly (the turn ends UNCHECKED, which is not a pass); after 3 CONSECUTIVE blocks the attachment STANDS DOWN with a notice and the turn ends, resetting the moment it passes once; and it runs only where turn-end would otherwise be allowed, before any checkpoint/arm/park is consumed. Its default timeout is 10s, not the usual 20, because it runs on every turn-end.",
+      "consequence": "if you already had a `stop` key in triggers.json it was INERT and is now LIVE — a command that used to run never now runs on every turn-end and can block it. That is the silent-pass-became-a-denial shape, and it is the one group here who changed nothing. For everyone else the moment is opt-in and nothing changes. If you attach one: do not design around the stand-down bound (it is there for the case where your check is RIGHT and the thing it wants is impossible), exit 0 when you cannot tell rather than blocking on an unanswered question, and expect its timeout on every turn you take.",
+      "why_it_qualifies": "a new way for an existing verb to refuse. An install with no `stop` attachment is byte-identical, but an install that already carried the key gets a live gate it never enabled, and every attachment inherits a bound and a fail-open that decide what happens when its condition cannot be cleared."
     }
   ],
   "schema": 1

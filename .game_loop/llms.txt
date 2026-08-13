@@ -60,6 +60,12 @@ When a human binds a mandate (`game_loop mandate --set "..."`), two hooks keep y
 - The **watchdog** rings you back to work (via an `asyncRewake` Stop hook) if you go idle with work
   still outstanding.
 
+A project can also attach **its own check** to turn-end (a `stop` trigger — see the Triggers section
+of the README). That one runs with or without a mandate: if it exits non-zero the turn is refused and
+*its* stderr is the reason, naming what it wants. Do what it asks and end the turn again; if it is
+wrong, it is a line in `.game_loop/triggers.json` and you may fix or remove it. It stands down after
+3 consecutive blocks, so it can never trap you.
+
 So under a mandate, do NOT end your turn by asking a question or by announcing work and stopping.
 Instead, keep working — and when you genuinely need to end a turn, pick one:
 

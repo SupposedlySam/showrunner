@@ -139,7 +139,12 @@ STATE_F = LEGACY_STATE_F                            # re-pointed by set_session(
 LOG_F = os.path.join(ROOT, "log.jsonl")
 CONFIG_F = os.path.join(ROOT, "config.json")
 INV_F = os.path.join(ROOT, "INVARIANTS.md")
-LIMITS_F = os.path.join(ROOT, "limits.json")  # account-scoped, deliberately NOT per-session
+# THE FALLBACK, NOT THE ANSWER — read limits_file() below, which is account-scoped. This one is
+# per-CHECKOUT and is used only when git cannot tell us where the main checkout is. It carried the
+# comment "account-scoped" until an orchestrator grepped it, read the property it asserts, and
+# nearly filed a false report that the worktree fix had never landed. A name that reads as the
+# authority is a defect even when the code beneath it is correct.
+_LIMITS_LOCAL = os.path.join(ROOT, "limits.json")   # degraded: this tree only, never the shared one
 _LIMITS_PATH = None
 
 
@@ -177,7 +182,7 @@ def limits_file():
             if os.path.isdir(os.path.dirname(shared)):
                 _LIMITS_PATH = shared
         if _LIMITS_PATH is None:
-            _LIMITS_PATH = LIMITS_F
+            _LIMITS_PATH = _LIMITS_LOCAL
     return _LIMITS_PATH
 VERSION_F = os.path.join(ROOT, "VERSION")     # the game_loop commit sha install.sh copied in
 UPDATE_CACHE_F = os.path.join(ROOT, ".update_cache.json")  # cached latest-sha lookup (gitignored)
@@ -285,6 +290,11 @@ DEFAULT_STATE = {
     "attributed": [],  # merges declared by REF and recomputed here — one commit each (see #29)
     "watchdog_rings_total": 0,
     "stop_gate_blocks_total": 0,
+    # Per-ATTACHMENT, keyed by the trigger's name: how many turn-ends in a row it has blocked, and
+    # what it last did. Keyed by name rather than counted in one number because the bound is a
+    # statement about ONE attachment — two of them each blocking once is not the same event as one
+    # blocking twice, and a shared counter would stand the innocent one down.
+    "stop_triggers": {},
     "flair_fired": [],
     "pins": [],        # load-bearing environment facts, carried so `status` re-shows them post-compaction
     "pin_seq": 0,      # monotonic id source — a released pin's id is never handed out again
@@ -535,6 +545,39 @@ TRIGGER_EVENTS = {
     # does not happen: the first stable mark was published by a downstream maintainer who happened
     # to be watching, not by the person who marked it.
     "confidence": "a commit was just marked — the moment to publish it wherever consumers take it",
+    # THE ONE MOMENT THAT IS NOT A VERB SOMEBODY TYPED (#63). `sessionstart` already runs at the
+    # right instant and can TELL a session things; what it could not do is ACT once on the session's
+    # behalf, and the only way to get that was a SECOND SessionStart hook beside game_loop's — a
+    # second registrant in one settings file, which makes "registered vs has-fired vs firing-now"
+    # harder to diagnose in exchange for no new capability.
+    #
+    # TWO THINGS DIFFER FROM THE OTHER THREE, and both are the reader's problem if left unsaid
+    # (INV6). It runs on the session's CRITICAL PATH, so the budget is per attachment: N of them
+    # cost up to N timeouts before the session sees a word, and nothing here caps the sum. And it
+    # fires at EVERY start and EVERY compaction, so "once per project" is the attachment's own job
+    # — the payload carries `source` (startup / resume / compact) so it can tell those apart.
+    "session_start": "a session just started or was compacted — the moment to ACT once on its "
+                     "behalf, before it reads anything",
+    # THE ONE MOMENT THAT PARTICIPATES IN A DECISION (#64). The other four are ANNOUNCEMENTS: the
+    # verb has already happened, the attachment reports on it, and nothing it does can change the
+    # outcome — "a trigger never blocks the work" is printed under every failure. Here the exit code
+    # MEANS something: non-zero blocks turn-end and stderr goes back to the model, which is
+    # cmd_stopgate's own contract handed to a command this repo did not write.
+    #
+    # It exists because "reply when a human addresses you" lived in prose, and prose is followed
+    # sometimes: an agent asked a direct question through a chat bridge did the work and ended its
+    # turn without answering. A rule the agent must remember is followed only sometimes; a rule a
+    # hook consumes holds every time (INV1). The alternative was a SECOND Stop hook registered
+    # beside game_loop's — two registrants deciding one turn-end, either able to end it, neither
+    # able to see that the other said no.
+    #
+    # THREE THINGS DIFFER FROM THE OTHER FOUR, and every one of them is the reader's problem if left
+    # unsaid (INV6). Its exit code is a verdict rather than a status. It runs on EVERY turn-end, so
+    # its timeout is a tax on every turn and the default is small. And its condition is EXTERNAL —
+    # the only block in this gate that may be satisfiable by nobody present — so it is bounded by
+    # consecutive count (STOP_TRIGGER_BLOCK_LIMIT) rather than trusted to clear itself.
+    "stop": "the turn is about to end — the moment to REFUSE that, if something this project can "
+            "check says the turn is not actually finished",
 }
 
 
@@ -552,43 +595,70 @@ def triggers_for(event):
     return [t for t in e if isinstance(t, dict) and t.get("command")] if isinstance(e, list) else []
 
 
+def _run_trigger(s, t, event, payload, default_timeout=20.0):
+    """Run ONE attachment, record it, and report what happened. Raises nothing, ever.
+
+    Returns (name, ran, code, body, err). `ran` is the distinction the `stop` moment lives on and
+    the other four do not need: True means the command REACHED A VERDICT — it exited, whatever the
+    code — and False means nothing was decided, because it timed out or could not be run at all.
+    Everywhere else those two collapse into "failed", correctly: an announcement that failed and an
+    announcement that never ran cost the same, which is nothing. Where the exit code BLOCKS a turn
+    they must never be one state — "it said no" is a refusal to honour, "it could not tell me" is a
+    guard that has to fail open (INV5), and a gate that cannot tell them apart picks one at random.
+    """
+    name = str(t.get("name") or "(unnamed)")
+    try:
+        timeout = max(1.0, float(t.get("timeout_sec") or default_timeout))
+    except (TypeError, ValueError):
+        timeout = default_timeout
+    # GAME_LOOP_SESSION rides along for the same reason the waiting probe gets it (#60): a
+    # checkout can hold many concurrent sessions, and a trigger that cannot tell which one it is
+    # speaking for cannot scope anything it reads or writes. Empty means UNKNOWN -- the legacy
+    # repo-global paths -- never a session whose name is the empty string.
+    env = dict(os.environ, GAME_LOOP_EVENT=event, GAME_LOOP_ROOT=ROOT, GAME_LOOP_REPO=REPO_ROOT,
+               GAME_LOOP_SESSION=SESSION or "",
+               GAME_LOOP_SESSION_DIR=(os.path.join(ROOT, "sessions", SESSION) if SESSION
+                                      else ""))
+    ran, code = True, None
+    try:
+        r = subprocess.run(["bash", "-c", t["command"]], input=json.dumps(payload),
+                           capture_output=True, text=True, timeout=timeout, env=env)
+        code, body, err = r.returncode, (r.stdout or "").strip(), (r.stderr or "").strip()
+        if code != 0 and not err:
+            err = f"exited {code} with nothing on stderr"
+    except subprocess.TimeoutExpired:
+        ran, body, err = False, "", f"timed out after {timeout:.0f}s"
+    except Exception as exc:  # noqa: BLE001 — see below; the promise above has to be true
+        # NOT JUST OSError, which is what this caught while the docstring promised "raises nothing,
+        # ever". A `command` that is a number rather than a string raises TypeError from inside
+        # subprocess, and one badly-typed line of site config would then propagate out of a function
+        # two entry points call without expecting it to. Config is somebody's typing, so anything it
+        # can do to us is an ANSWER — unrunnable — never a crash.
+        ran, body, err = False, "", f"could not run: {exc}"
+    ok = ran and code == 0
+    rec = s.setdefault("triggers", {}).setdefault(name, {})
+    rec.update({"event": event, "at": now(), "ok": ok, "detail": (err or body)[:200]})
+    logline({"kind": "trigger", "name": name, "event": event, "ok": ok,
+             "detail": (err or "")[:200]})
+    return name, ran, code, body, err
+
+
 def fire_triggers(s, event, payload):
     """Run this project's attachments for `event`. Returns lines to print; raises nothing, ever.
 
     The payload goes in as JSON on stdin — the same shape Claude Code hands its own hooks, so anyone
     who has written one of those already knows this contract. stdout comes BACK to the agent on
     purpose: a trigger that reads a channel is useless if what it read is thrown away.
+
+    THE `stop` MOMENT DOES NOT COME THROUGH HERE. This function's whole shape is announcement — it
+    collects outcomes, prints them, and lets the verb stand no matter what any of them said. A
+    moment whose exit code is a VERDICT needs the opposite shape, so it runs the same attachments
+    through the same runner and decides for itself: see stop_trigger_block.
     """
     fired = []
     for t in triggers_for(event):
-        name = str(t.get("name") or "(unnamed)")
-        try:
-            timeout = max(1.0, float(t.get("timeout_sec") or 20))
-        except (TypeError, ValueError):
-            timeout = 20.0
-        # GAME_LOOP_SESSION rides along for the same reason the waiting probe gets it (#60): a
-        # checkout can hold many concurrent sessions, and a trigger that cannot tell which one it is
-        # speaking for cannot scope anything it reads or writes. Empty means UNKNOWN -- the legacy
-        # repo-global paths -- never a session whose name is the empty string.
-        env = dict(os.environ, GAME_LOOP_EVENT=event, GAME_LOOP_ROOT=ROOT, GAME_LOOP_REPO=REPO_ROOT,
-                   GAME_LOOP_SESSION=SESSION or "",
-                   GAME_LOOP_SESSION_DIR=(os.path.join(ROOT, "sessions", SESSION) if SESSION
-                                          else ""))
-        try:
-            r = subprocess.run(["bash", "-c", t["command"]], input=json.dumps(payload),
-                               capture_output=True, text=True, timeout=timeout, env=env)
-            ok, body, err = r.returncode == 0, (r.stdout or "").strip(), (r.stderr or "").strip()
-            if not ok and not err:
-                err = f"exited {r.returncode} with nothing on stderr"
-        except subprocess.TimeoutExpired:
-            ok, body, err = False, "", f"timed out after {timeout:.0f}s"
-        except OSError as exc:                       # command unrunnable — still an ANSWER, not a crash
-            ok, body, err = False, "", str(exc)
-        rec = s.setdefault("triggers", {}).setdefault(name, {})
-        rec.update({"event": event, "at": now(), "ok": ok, "detail": (err or body)[:200]})
-        logline({"kind": "trigger", "name": name, "event": event, "ok": ok,
-                 "detail": (err or "")[:200]})
-        fired.append((name, ok, body, err))
+        name, ran, code, body, err = _run_trigger(s, t, event, payload)
+        fired.append((name, ran and code == 0, body, err))
     if not fired:
         return []
     save(s)
@@ -632,6 +702,16 @@ def triggers_report():
                          "matter how long you wait.")
             lines.append("      game_loop's moments are: " + " · ".join(sorted(TRIGGER_EVENTS)))
             continue
+        if ev == "session_start" and not config().get("session_start", True):
+            # A FOURTH state, and only this moment can be in it. The moment exists, the wiring is
+            # right, and `session_start: false` has switched the whole entry point off — so the
+            # attachment waits forever while "CONFIGURED BUT NEVER FIRED" reads as patience. The
+            # opt-out is written by somebody who wants no injected status block; nobody typing it
+            # is thinking about an attachment added months earlier, which is exactly why the harness
+            # has to be the one that remembers.
+            lines.append(f"  ✗ [{ev}] {name} — SWITCHED OFF by config.json session_start:false, so "
+                         "this moment never comes round. Not waiting — disabled.")
+            continue
         if not rec:
             lines.append(f"  ⚠ [{ev}] {name} — CONFIGURED BUT NEVER FIRED in this tree. Either the "
                          f"moment has not come round yet, or it is not wired to anything.")
@@ -639,6 +719,23 @@ def triggers_report():
             mark = "✓" if rec.get("ok") else "✗"
             lines.append(f"  {mark} [{ev}] {name} — last {rec.get('at')}"
                          + ("" if rec.get("ok") else f" · FAILING: {rec.get('detail') or '?'}"))
+        # THE STOP MOMENT'S EXTRA STATE, because "FAILING" is the wrong word for it and would be
+        # read as harmless. Everywhere else a failing attachment costs an announcement; here it is
+        # holding the turn shut, or it has stopped being able to, and those are different enough
+        # that a session asking "why did this not stop" must not have to reconstruct them from the
+        # log. Three verdicts, three lines, and the third one is the one nobody would guess.
+        st = ((s.get("stop_triggers") or {}).get(name) or {}) if ev == "stop" else {}
+        if st.get("verdict") == "stood_down":
+            lines.append(f"      STOOD DOWN — it blocked {st.get('consecutive')} consecutive "
+                         f"turn-ends, past its bound of {STOP_TRIGGER_BLOCK_LIMIT}, and is now "
+                         "OVERRIDDEN: turn-end no longer waits on it. It is still running, and one "
+                         "pass resets the count and puts it back in charge.")
+        elif st.get("verdict") == "failed_open_error":
+            lines.append(f"      FAILED OPEN — it could not answer ({st.get('detail') or '?'}), so "
+                         "the last turn-end went UNCHECKED. Not a pass: nothing was decided.")
+        elif st.get("consecutive"):
+            lines.append(f"      BLOCKING turn-end — {st.get('consecutive')} consecutive of "
+                         f"{STOP_TRIGGER_BLOCK_LIMIT} before it stands down.")
     unused = [e for e in TRIGGER_EVENTS if not triggers_for(e)]
     if unused:
         lines.append("  → moments with nothing attached: " + ", ".join(sorted(unused)))
@@ -796,6 +893,50 @@ def limits_summary(snap):
         except (TypeError, ValueError, KeyError):
             continue
     return " · ".join(parts) or None
+
+
+def probe_reading(doc):
+    """Split a probe's stdout into (rate_limits, context_window). Never raises on shape.
+
+    TWO SHAPES ON PURPOSE. The probe used to print the rate_limits object bare; it now prints an
+    envelope carrying context_window beside it. Both are accepted because a PIN can pair an older
+    shipped probe script with newer game_loop code — the pinned copy and the repo copy are separate
+    trees, and assuming they move together is the kind of assumption this file exists to refuse.
+
+    The discriminator is the envelope's own key. A real rate_limits object carries window names
+    (five_hour, seven_day) and can never contain a key called "rate_limits", so the test cannot
+    misread a legacy reading as an envelope.
+    """
+    if not isinstance(doc, dict):
+        return {}, None
+    if "rate_limits" in doc:
+        rl = doc.get("rate_limits")
+        cw = doc.get("context_window")
+        return (rl if isinstance(rl, dict) else {},
+                cw if isinstance(cw, dict) else None)
+    return doc, None                 # legacy: the bare rate_limits object, from an older probe
+
+
+def record_context_window(cw):
+    """Write the raw context_window a probe render carried, or record that it carried none.
+
+    NOT INTERPRETED. This does not compute a token floor, compare against the claim, or decide
+    anything — it records what the host said so a later exercise reads a real reading instead of my
+    expectation of one. Absent is written as an explicit null rather than an empty file, because a
+    missing file cannot say whether the probe ran.
+    """
+    try:
+        p = os.path.join(ROOT, "probe", "context-window.json")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        tmp = p + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"context_window": cw, "observed_at": int(time.time()),
+                       "note": "raw, uninterpreted: what the probe's fresh-session render carried"},
+                      f, indent=2)
+            f.write("\n")
+        os.replace(tmp, p)
+    except (OSError, ValueError, TypeError):
+        pass                         # a recording that fails must never cost the reading
 
 
 def absorb_rate_limits(rate_limits, lc, now_epoch):
@@ -1074,10 +1215,15 @@ def cmd_limitprobe(s, a):
     except ValueError:
         logline({"kind": "limit_probe", "outcome": "unparseable"})
         die("the probe answered with something that is not JSON — treating as could-not-tell.")
+    rl, cw = probe_reading(rl)
+    record_context_window(cw)
     now_epoch = time.time()
     windows = absorb_rate_limits(rl, limits_cfg(), now_epoch)
     logline({"kind": "limit_probe", "outcome": "ok",
-             "windows": {k: v.get("used_percentage") for k, v in (windows or {}).items()}})
+             "windows": {k: v.get("used_percentage") for k, v in (windows or {}).items()},
+             # RECORDED, NOT JUDGED: whether a fresh render carries a usable count is a question the
+             # first real reading answers, not one this line should pretend to have settled.
+             "context_window_keys": sorted(cw) if isinstance(cw, dict) else None})
     nxt = next_probe_after({"windows": windows}, now_epoch, pc)
     out("✓ usage read by spawning a session — the snapshot is live on this host now.",
         "  " + (limits_summary({"windows": windows}) or "no windows in the reading"),
@@ -3572,6 +3718,123 @@ def _stop_verdict(s, payload):
         "unchecked_because": why_not}
 
 
+# After this many CONSECUTIVE blocks from ONE attachment, it stands down and the turn ends.
+#
+# THE BOUND IS THE POINT, AND IT IS NOT OPTIONAL. Every other way this gate blocks is satisfiable
+# from INSIDE the session in one command — checkpoint, arm, mandate --clear all reset it. A `stop`
+# attachment's condition is EXTERNAL, and the dangerous case is not a crash and not a timeout: it is
+# a perfectly working command returning a perfectly correct "still owed" that nobody present can
+# clear, because the thing it asks about is unreachable. Failing open on error does not cover that
+# at all. Unbounded, it would be a gate no session in this tree could ever pass — the harness itself
+# preventing every agent from finishing, which is the worst failure this repo can ship (INV5).
+#
+# THREE, counted as turns rather than rounded: one to TELL the agent (the first block is the first
+# it has heard of the obligation), one for the attempt it makes in response, and one for the attempt
+# it makes after reading why the first attempt did not clear it. A fourth consecutive block is no
+# longer evidence that the condition is agent-satisfiable, and the likelier reading is that it is
+# not satisfiable from here at all. The mandate gate's own breaker stands down at 2, deliberately
+# tighter: what it asks for is a command in this session, where a `stop` attachment asks for an
+# effect somewhere else, and an effect somewhere else legitimately needs a retry.
+STOP_TRIGGER_BLOCK_LIMIT = 3
+
+
+def stop_trigger_block(s, payload, notices):
+    """Run this project's `stop` attachments. Returns the text that BLOCKS turn-end, or None.
+
+    Non-zero exit blocks and its stderr goes back to the model — cmd_stopgate's contract, handed to
+    a command this repo did not write.
+
+    Loud fail-open notices are appended to `notices` rather than returned, and the split is the
+    whole of INV5 here: those belong to a turn that is ENDING. A notice that had to block to be
+    delivered would be the failure it is reporting.
+    """
+    trigs = triggers_for("stop")
+    if not trigs:
+        return None                  # silent when nothing is attached, like every other moment
+    # The host's own Stop fields are passed THROUGH rather than summarised. An attachment deciding
+    # whether a turn may end wants the same evidence this gate uses — the closing message above all,
+    # since "did it answer the question" is a question about that text — and re-deriving it from the
+    # transcript is work the harness has already done.
+    fields = ("session_id", "transcript_path", "stop_hook_active", "last_assistant_message")
+    tp = {k: payload.get(k) for k in fields if payload.get(k) is not None}
+    tp.update({"event": "stop", "project": config().get("project_name"), "session": SESSION})
+    blocks, seen = [], s.setdefault("stop_triggers", {})
+    for t in trigs:
+        # ALL OF THEM RUN, even after one has already said no, and that is a decision rather than an
+        # oversight. Short-circuiting would save nothing on the passing path (every attachment must
+        # pass for the turn to end, so all of them run anyway) and would cost two things on the
+        # blocking one: the agent gets ONE turn-end and should be told everything it owes rather
+        # than discovering the second obligation only after clearing the first — N attachments would
+        # otherwise cost N turns to surface — and a skipped attachment can neither increment nor
+        # reset its own count, so its bound would stop being measured in turn-ends and could sit on
+        # a stale streak indefinitely. The latency is the sum of the timeouts either way.
+        name, ran, code, body, err = _run_trigger(s, t, "stop", tp, default_timeout=10.0)
+        rec = seen.setdefault(name, {})
+        n = rec.get("consecutive", 0)
+        if not ran:
+            # COULD NOT TELL, which is not a pass and not a refusal. Fail open, loudly — a guard
+            # must never block its own fix, and an attachment that times out while somebody is
+            # repairing it would otherwise hold the session shut with the repair inside.
+            #
+            # The streak is left ALONE: not incremented (it did not block) and not reset (it did not
+            # pass). A run of blocks broken by an unanswered question is still a run of blocks, and
+            # letting "could not tell" launder the count would hand back the unbounded case through
+            # a trigger that fails every other turn.
+            rec.update({"at": now(), "verdict": "failed_open_error", "detail": err[:200],
+                        "consecutive": n})
+            logline({"kind": "stop_trigger_failed_open", "name": name, "why": "errored",
+                     "detail": err[:200], "consecutive": n})
+            notices.append(
+                f"⚠ STOP TRIGGER FAILED OPEN — `{name}` could not answer ({err}).\n"
+                "  The turn is ending UNCHECKED. This is not a pass: nothing was decided, and\n"
+                "  whatever it exists to catch was not looked for on this turn. It is recorded in\n"
+                "  the log and `game_loop status` names it until it answers again.")
+            continue
+        if code == 0:
+            # THE RESET, and the only thing that performs one. Blocking is cheap to enter and must
+            # be cheap to leave: the moment the attachment is satisfied once, the count is gone and
+            # it is back to full strength on the next turn.
+            rec.update({"at": now(), "verdict": "passed", "detail": body[:200], "consecutive": 0})
+            continue
+        n += 1
+        detail = err or body or "(exited non-zero, saying nothing at all)"
+        rec.update({"at": now(), "detail": detail[:200], "consecutive": n})
+        if n > STOP_TRIGGER_BLOCK_LIMIT:
+            rec["verdict"] = "stood_down"
+            logline({"kind": "stop_trigger_stood_down", "name": name, "consecutive": n,
+                     "limit": STOP_TRIGGER_BLOCK_LIMIT, "detail": detail[:200]})
+            notices.append(
+                f"⚠ STOP TRIGGER STOOD DOWN — `{name}` has blocked {n} consecutive turn-ends, past "
+                f"its bound of\n  {STOP_TRIGGER_BLOCK_LIMIT}, and is now OVERRIDDEN. The turn is "
+                "ending. It is still being run, and it\n  is still saying no:\n"
+                + "\n".join("     " + l for l in detail.splitlines()) + "\n"
+                "  Either nobody present can satisfy it, or it is wrong. A block nobody can clear\n"
+                "  would gate every turn in this tree forever, so the harness stops honouring it\n"
+                "  rather than becoming the thing that prevents every agent from finishing (INV5).\n"
+                "  One pass resets the count and puts it back in charge.")
+            continue
+        rec["verdict"] = "blocked"
+        logline({"kind": "stop_trigger_block", "name": name, "consecutive": n,
+                 "limit": STOP_TRIGGER_BLOCK_LIMIT, "detail": detail[:200]})
+        blocks.append((name, n, detail))
+    if not blocks:
+        return None
+    lines = ["STOP GATE CLOSED — this project attached a check to turn-end, and it says no.\n"]
+    for name, n, detail in blocks:
+        lines.append(f"  TRIGGER: {name}   (consecutive block {n} of {STOP_TRIGGER_BLOCK_LIMIT})")
+        lines.extend("     " + l for l in detail.splitlines())
+    lines.append(
+        "\nThis is your project's own rule, running as a command instead of sitting in prose —\n"
+        "which is the entire reason it holds every time rather than most times. Do ONE of these:\n\n"
+        "  1. DO WHAT IT ASKS, then end the turn again. Nearly always correct: the check is cheap\n"
+        "     and it passes the moment the thing it wants is true.\n"
+        "  2. If it is WRONG, it is not a law — it is a line in .game_loop/triggers.json. Fix the\n"
+        "     command or detach it. Nothing here stops you editing the file that configures it.\n\n"
+        f"It stands down after {STOP_TRIGGER_BLOCK_LIMIT} consecutive blocks and lets the turn end,\n"
+        "so an attachment whose condition nobody present can satisfy cannot trap this session.")
+    return "\n".join(lines)
+
+
 def cmd_stopgate(s, a, payload):
     """Stop-hook entrypoint. exit 0 = may stop · exit 2 = blocked, stderr goes back to the model.
 
@@ -3588,6 +3851,10 @@ def cmd_stopgate(s, a, payload):
             f.write("\n")
     except OSError:
         pass  # a probe that fails must never take the gate down with it
+    # EXERCISE, not a stamp: check the claim against the payload this host actually delivered.
+    # Unconditional, unlike the stop-payload probe above it — a claim checked only when a debug
+    # flag is set is a claim nobody checks.
+    record_hook_claim_observation(payload)
     # #45: the handoff is maintained HERE, at every turn-end, rather than demanded at the cliff.
     # A limit death then costs at most one turn, in any host, with no number to invent.
     refresh_handoff(s)
@@ -3603,6 +3870,50 @@ def cmd_stopgate(s, a, payload):
     if rec:
         logline(rec)
     if allow:
+        # THE PROJECT'S OWN CHECK, BEFORE ANYTHING IS CONSUMED (#64). Ordering is the whole safety
+        # of this: a checkpoint, an arm and a park are each single-use, and spending one on a
+        # turn-end that then gets blocked would burn the human's interruption on a turn that never
+        # ended. Blocked here, they are all still declared, so satisfying the attachment costs one
+        # turn and nothing else.
+        #
+        # It runs on the ALLOWING path only. A turn-end the mandate gate has already refused is not
+        # a turn-end, so the attachment's question is moot — and asking it anyway would spend its
+        # timeout on every blocked turn and count a block against a bound measured in turn-ends.
+        #
+        # It DOES run under stop_hook_active, where the mandate gate declines to stack. That gate can
+        # afford to defer because what it wants is satisfiable in this session; deferring here would
+        # make the check vacuous — the attachment would fire once per continuation and never verify
+        # that what it asked for happened. The consecutive bound is what makes that safe.
+        notices = []
+        try:
+            tblock = stop_trigger_block(s, payload, notices)
+        except Exception as exc:  # noqa: BLE001 — belt beside the braces in _run_trigger
+            # That runner already turns everything a command can do into an answer, so reaching here
+            # means the promise was wrong. This is the one case that would gate every turn-end in
+            # the tree, so it fails open and says so rather than trusting the layer below it.
+            tblock = None
+            notices.append(f"⚠ STOP TRIGGERS CRASHED INSIDE THE HARNESS — {exc}\n"
+                           "  The turn is ending UNCHECKED. Nothing your project attached to `stop`\n"
+                           "  was consulted; a harness fault must not cost a session its exit.")
+            try:
+                logline({"kind": "stop_trigger_failed_open", "why": "harness-crash",
+                         "detail": str(exc)[:200]})
+            except OSError:
+                pass
+        if notices:
+            # Loud where somebody is watching, and DURABLE where nobody is: the log has every one of
+            # these, and `status` re-states them for the next session. Turn-end is proceeding, so
+            # this text cannot rely on the block channel it is reporting the absence of.
+            print("\n".join(notices), file=sys.stderr)
+        if tblock:
+            # A trigger-sourced block is COUNTED like any other, so "how often did the gate hold"
+            # keeps its meaning. `stop_blocks` is deliberately NOT touched: that counter is the
+            # mandate breaker's fuel, and letting an attachment spend it would let one gate stand
+            # another one down for a reason that has nothing to do with it.
+            s["stop_gate_blocks_total"] = s.get("stop_gate_blocks_total", 0) + 1
+            save(s)
+            print(tblock, file=sys.stderr)
+            sys.exit(2)
         if (rec or {}).get("kind") == "mandate_park_stop":
             # CONSUME: one park == one turn-end (the break itself). The mandate stays parked — it is
             # not a closure — but the pass is gone, so the gate is live again on the next turn-end.
@@ -4097,6 +4408,11 @@ def cmd_sessionstart(s, a, payload):
         (#43) again -- a check whose silence is indistinguishable from never having run.
       * IT DEGRADES DURING INSTALL AND UPGRADE. Mid-install, or on a branch with no .game_loop/, it
         says nothing rather than erroring: a guard must never block its own fix (INV5).
+
+    THE `session_start` TRIGGER MOMENT INHERITS ALL THREE (#63), and inherits them the hard way: an
+    attachment is a project's ARBITRARY command running on the one path every session crosses. So it
+    is bounded by the trigger timeout, wrapped so nothing it does can raise out of here, and its
+    outcome is written to state where `triggers_report` prints it in the very block this returns.
     """
     if not config().get("session_start", True):
         return                       # a project that wants silence gets silence, opt-out not opt-in
@@ -4107,20 +4423,44 @@ def cmd_sessionstart(s, a, payload):
                        "source": payload.get("source") or payload.get("hook_event_name") or ""}, f)
     except OSError:
         pass                         # the probe is evidence, never a precondition
+    # FIRED BEFORE STATUS IS RENDERED, on the `stepback` precedent — there the attachment runs first
+    # so what it read is an INPUT to the reflection rather than an appendix to it, and here the same
+    # ordering buys the observability: the attachment acts, its outcome lands in state, and the
+    # TRIGGERS block `status` is about to print therefore reports THIS run rather than the previous
+    # session's. One moment, one text, no second place to look.
+    #
+    # Its OWN try/except, not the status one, and the split is the whole of INV5 here: this is the
+    # only code in the entry point that runs a command nobody in this repo wrote. If it explodes the
+    # session still gets its status, because an attachment is an addition to the moment and never a
+    # precondition for it. fire_triggers already promises not to raise; the wrapper is for the
+    # promise being wrong, which is the case that would gate EVERY session in the tree.
+    fired = []
+    try:
+        fired = fire_triggers(s, "session_start", {
+            "event": "session_start",
+            "source": payload.get("source") or payload.get("hook_event_name") or "",
+            "project": config().get("project_name"), "session": SESSION})
+    except Exception:  # noqa: BLE001 — no attachment gets to cost a session its start
+        fired = []
+    parts = []
     try:
         import io
         import contextlib
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             cmd_status(s, a)
-        text = buf.getvalue().strip()
+        if (text := buf.getvalue().strip()):
+            parts.append(text)
     except Exception:  # noqa: BLE001 — mid-install, half-written state, anything: say nothing
-        return
-    if not text:
+        pass           # ...about STATUS. A trigger that has already ACTED still gets to report it:
+        #                dropping its output would leave a session that was acted upon and not told.
+    if fired:
+        parts.append("\n".join(fired))
+    if not parts:
         return
     print(json.dumps({"hookSpecificOutput": {
         "hookEventName": payload.get("hook_event_name") or "SessionStart",
-        "additionalContext": text}}))
+        "additionalContext": "\n".join(parts)}}))
 
 
 def session_start_warning():
@@ -4392,8 +4732,24 @@ def cmd_confidence(s, a):
     msg = "\n".join(lines)
     r = subprocess.run(["git", "tag", "-a", tag, "-m", msg], cwd=REPO_ROOT,
                        capture_output=True, text=True)
+    remark = False
     if r.returncode != 0:
-        die("could not create the tag: " + (r.stderr or "").strip())
+        # A MARK IS ONE-SHOT, AND ITS TRIGGERS ARE NOT THE SAME THING AS ITS RECORD. Observed here:
+        # the mark landed, its publish trigger declined because HEAD was not pushed YET, I pushed,
+        # and the re-run died on `tag already exists`. The record existed; the publication it exists
+        # to cause did not; and the only recovery was running the trigger script by hand from a path
+        # nobody but its author knows. Meanwhile consumers stayed on the previous stable.
+        #
+        # So an existing tag AT THE SAME COMMIT is not an error — it is a retry, and the thing worth
+        # retrying is the triggers. At a DIFFERENT commit it still dies: the immutable record of what
+        # was checked must never be silently rewritten, which is the whole reason it is immutable.
+        _at = _rev(tag)
+        if _at and _at == sha:
+            remark = True
+        else:
+            die("could not create the tag: " + (r.stderr or "").strip()
+                + ("\n  it names " + _at[:8] + ", not this commit — that record stands."
+                   if _at else ""))
     # AND MOVE THE CHANNEL POINTER (#61). `stable-<sha>` is the immutable record of one mark;
     # `stable` is "the newest thing marked at that level", and it exists so that NOBODY DOWNSTREAM
     # HAS TO ORDER TAGS.
@@ -4417,7 +4773,9 @@ def cmd_confidence(s, a):
     moved = ch.returncode == 0
     logline({"kind": "confidence", "level": a.mark, "sha": sha, "tag": tag,
              "channel_moved": moved, "notes": a.notes})
-    out(f"✓ MARKED {a.mark.upper()} — {tag}",
+    out(f"✓ MARKED {a.mark.upper()} — {tag}" if not remark else
+        f"✓ RE-MARKED {a.mark.upper()} — {tag} already records this commit, unchanged. The record "
+        f"was already made;\n  what is being retried is everything the mark CAUSES, below.",
         *["  " + l for l in lines],
         "")
     # IS THIS COMMIT ACTUALLY ON THE BRANCH CONSUMERS TRACK? Pushing the channel pointer at a commit
@@ -4633,6 +4991,76 @@ def _windows_claim_live():
                   "unexpected window is genuinely absent")
 
 
+HOOK_CLAIM_F = os.path.join(ROOT, "probe", "claims-observed.json")
+
+
+def _rate_limit_keys(obj, path="", depth=0, out=None):
+    """Every key anywhere in a payload whose name mentions a rate limit. Bounded, because this runs
+    inside the Stop gate and a pathological payload must not become a hang."""
+    if out is None:
+        out = []
+    if depth > 6 or len(out) > 8:
+        return out
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            p = f"{path}.{k}" if path else str(k)
+            if "rate_limit" in str(k).lower():
+                out.append(p)
+            _rate_limit_keys(v, p, depth + 1, out)
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj[:20]):
+            _rate_limit_keys(v, f"{path}[{i}]", depth + 1, out)
+    return out
+
+
+def record_hook_claim_observation(payload):
+    """Exercise 'no hook payload carries rate-limit data' against the payload actually delivered.
+
+    THE CLAIM DECLARED ITS OWN CONTROL AND THEN SAT AS A DEBT. Its `exercisable_why` already named
+    session_id as the positive control — a payload carrying it was genuinely read, so rate_limits
+    being absent from THAT is an absence that discriminates, rather than the absence of a payload,
+    of a parse, or of a hook that never fired. Everything needed was written down; only the code
+    was missing, which is the shape of every stale claim in this file.
+
+    Never raises. This runs inside the Stop gate, and an exercise that can take the gate down is a
+    worse defect than the staleness it fixes.
+    """
+    if not isinstance(payload, dict):
+        return
+    try:
+        rec = {"claim": "no-rate-limits-in-hooks",
+               "control": bool(payload.get("session_id")),
+               "rate_limit_keys": _rate_limit_keys(payload),
+               "top_level_keys": sorted(str(k) for k in payload),
+               "hook": str(payload.get("hook_event_name") or ""),
+               "observed_at": int(time.time())}
+        os.makedirs(os.path.dirname(HOOK_CLAIM_F), exist_ok=True)
+        tmp = HOOK_CLAIM_F + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(rec, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, HOOK_CLAIM_F)
+    except (OSError, ValueError, TypeError):
+        pass
+
+
+def _hooks_claim_live():
+    """Evidence about "no hook payload carries rate-limit data" — or None if none was produced."""
+    try:
+        with open(HOOK_CLAIM_F) as f:
+            d = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(d, dict) or not d.get("control"):
+        return None                      # no control fired; an absence here proves nothing
+    hits = [h for h in (d.get("rate_limit_keys") or []) if isinstance(h, str)]
+    if hits:
+        return (False, "a hook payload carried rate-limit data at " + ", ".join(hits[:4]))
+    n = len(d.get("top_level_keys") or [])
+    return (True, f"a real payload was read ({n} keys, session_id among them) and carried no "
+                  "rate-limit key anywhere in it")
+
+
 def external_claims_report():
     """What this harness believes about its HOST, when it last checked, and against what.
 
@@ -4712,6 +5140,18 @@ def external_claims_report():
                 lines.append(f"           ✓ 'no-weekly-opus-window' CONFIRMED LIVE — {w[1]}.")
             else:
                 lines.append(f"           ⚠ 'no-weekly-opus-window' IS NO LONGER TRUE — {w[1]}.")
+        for c in (b.get("claims") or []):
+            if c.get("id") != "no-rate-limits-in-hooks":
+                continue
+            h = _hooks_claim_live()
+            if h is None:
+                lines.append("           · 'no-rate-limits-in-hooks' is exercisable and unobserved: "
+                             "no hook payload has been")
+                lines.append("             read here yet, so its positive control did not run.")
+            elif h[0]:
+                lines.append(f"           ✓ 'no-rate-limits-in-hooks' CONFIRMED LIVE — {h[1]}.")
+            else:
+                lines.append(f"           ⚠ 'no-rate-limits-in-hooks' IS NO LONGER TRUE — {h[1]}.")
         # DECLARED DEBTS, not passes: exercisable, the control identified, nobody has written it.
         debts = [c for c in (b.get("claims") or []) if c.get("exercisable") == "yes-not-yet"]
         for c in debts:
@@ -4729,7 +5169,7 @@ def external_claims_report():
         # every exercised claim, so the weekly-window claim was reported twice — once correctly by
         # its own block above, and once carrying the statusline claim's evidence under its name.
         # A reading about the wrong subject, which is the defect this file exists to name.
-        _dedicated = {"no-weekly-opus-window"}
+        _dedicated = {"no-weekly-opus-window", "no-rate-limits-in-hooks"}
         ex = [c for c in (b.get("claims") or [])
               if c.get("exercised_by") and c["id"] not in _dedicated]
         for c in ex:
