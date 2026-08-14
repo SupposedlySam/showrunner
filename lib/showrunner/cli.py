@@ -624,6 +624,32 @@ def _stamp_or(ts):
     return stamp(ts) if ts else "?"
 
 
+def cmd_worktree_register(args):
+    """Put the guard's PreToolUse entry in .claude/settings.json. Idempotent.
+
+    A VERB RATHER THAN A PARAGRAPH, and the reason is a bug this repo shipped and then found
+    within the hour: `init` registered the guard, and `init` only runs when there is no config
+    — so every ALREADY-INSTALLED consumer got the shim file on upgrade and no registration, and
+    would have been handed a `doctor` error for a gap the installer created. That is exactly the
+    "fires once per repo, leaving the population that has the hole" shape `install.sh` already
+    carries a comment about for the ignore rules.
+
+    So the installer calls this on EVERY run, and `doctor`'s remedy can name a command that
+    exists instead of printing JSON to paste by hand.
+    """
+    cfg = _cfg(args)
+    changed, note = lease.register_guard(cfg)
+    if changed:
+        print(note)
+        return 0
+    if note:
+        eprint(note)
+        return 2
+    print("the worktree guard is already registered in %s"
+          % rel(os.path.join(cfg.root, ".claude", "settings.json"), cfg.root))
+    return 0
+
+
 def _hook_payload():
     """The PreToolUse JSON on stdin. Returns (payload, problem).
 
@@ -1498,6 +1524,10 @@ def build_parser():
     t.add_argument("--tool", help="the tool name; defaults to the payload's")
     t.add_argument("--command", help="a Bash command to judge, instead of reading stdin")
     t.set_defaults(func=cmd_worktree_guard)
+
+    t = wsub.add_parser("register", help="register the guard's PreToolUse hook in "
+                                         ".claude/settings.json (idempotent)")
+    t.set_defaults(func=cmd_worktree_register)
 
     s = sub.add_parser("self", help="pin showrunner's own code at a git ref, for a central "
                                     "install (nothing consumes it yet — see CI-03)")

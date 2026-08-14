@@ -2455,6 +2455,42 @@ def test_installer_leaves_no_vendored_copy():
     ok("...and re-running the installer appends nothing a second time", before == after,
        "%d -> %d bytes" % (len(before), len(after)))
 
+    # THE UPGRADE PATH REGISTERS THE GUARD, and this assertion exists because it did not. The
+    # registration lived in `init`, `init` runs only when there is no config, so every
+    # ALREADY-INSTALLED consumer — the entire existing population — took the upgrade path and
+    # received the shim FILE with nothing wired to it, plus a `doctor` error the installer
+    # itself had just created. Found by upgrading a real consumer, not by reading the code.
+    # It is the same shape as the ignore rules two blocks up, which carry the same warning.
+    upgraded = fresh_repo()
+    os.makedirs(os.path.join(upgraded, ".showrunner"), exist_ok=True)
+    os.makedirs(os.path.join(upgraded, ".claude"), exist_ok=True)
+    with open(os.path.join(upgraded, ".showrunner", "config.json"), "w") as fh:
+        json.dump({"project_name": "already-installed"}, fh)
+    with open(os.path.join(upgraded, ".claude", "settings.json"), "w") as fh:
+        json.dump({"hooks": {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": "theirs.sh"}]}]}}, fh)
+    sh([installer, upgraded], ROOT)
+
+    def registered_hooks(repo):
+        with open(os.path.join(repo, ".claude", "settings.json")) as fh:
+            data = json.load(fh)
+        return [h.get("command", "") for e in data["hooks"]["PreToolUse"]
+                for h in e.get("hooks", [])]
+
+    hooks = registered_hooks(upgraded)
+    ok("upgrading a repo that ALREADY has a config registers the worktree guard — the "
+       "population with the hole is exactly the one an install-time-only fix never reaches",
+       any("worktree-guard" in c for c in hooks), hooks)
+    ok("...without displacing a PreToolUse hook the consumer already had",
+       any("theirs.sh" in c for c in hooks), hooks)
+    ok("...and the shim it registers is actually there to be run",
+       os.path.exists(os.path.join(upgraded, ".showrunner", "hooks", "worktree-guard.sh")))
+    before_n = len(registered_hooks(upgraded))
+    sh([installer, upgraded], ROOT)
+    eq("...and re-running the installer registers nothing a second time, so an installer that "
+       "runs on every upgrade does not accumulate duplicates",
+       len(registered_hooks(upgraded)), before_n)
+
     # An ignore rule does NOT untrack what is already committed, and a consumer who followed
     # the old installer's implicit invitation has it committed. Saying "ignored" to them
     # without saying that would be a remedy that silently does nothing.

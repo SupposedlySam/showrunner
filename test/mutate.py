@@ -489,6 +489,12 @@ NOT_SWEPT = {
                     "0 on a clean pin, 2 on a directory edited since it was pinned. WHAT THAT "
                     "DOES NOT COVER: the two argument refusals (--pin without --dest, --dest "
                     "without either), which are asserted nowhere.",
+    "cli.cmd_worktree_register": "CLI wrapper over lease.register_guard, which IS swept. Its "
+                                 "effect is asserted end to end through install.sh, on the "
+                                 "UPGRADE path that had the bug: a repo with an existing config "
+                                 "comes out registered, keeps its own hooks, and a second run "
+                                 "adds nothing. WHAT THAT DOES NOT COVER: its exit 2 on an "
+                                 "unwritable/unparseable settings file, asserted nowhere.",
     "lease._guard_registration": "private; reached only through guard_health, which IS swept, "
                                  "and both of its answers (registered / not) are asserted there",
     "cli.cmd_integrate": "CLI wrapper over campaign.integrate, which is asserted directly",

@@ -412,18 +412,19 @@ def guard_health(cfg):
     # this file today.
     settings = os.path.join(cfg.root, ".claude", "settings.json")
     registered, matcher = _guard_registration(settings)
+    # A COMMAND, not JSON to paste. This printed the raw hook entry for a reader to copy, which
+    # is a remedy that asks somebody to hand-edit the file the guard depends on — and `register`
+    # exists precisely so they do not have to. INV: a printed remedy is a claim that a command
+    # exists, and now one does.
+    fix = "%s worktree register" % _sr(cfg)
     if registered is None:
-        out.append(("error", "no %s, so nothing registers the worktree guard. It will never "
-                             "run. Add a PreToolUse entry:\n      {\"matcher\": \"%s\", "
-                             "\"hooks\": [{\"type\": \"command\", \"command\": \"$CLAUDE_PROJECT_"
-                             "DIR/%s\"}]}"
-                             % (rel_or(settings, cfg.root), "|".join(GUARD_TOOLS), GUARD_SHIM)))
+        out.append(("error", "no %s, so nothing registers the worktree guard and it will never "
+                             "run. Fix: `%s`" % (rel_or(settings, cfg.root), fix)))
     elif not registered:
         out.append(("error", "%s registers no worktree-guard hook. The verb exists and has "
                              "never once run — which is exactly what was true of `lock guard` "
-                             "for this repo's whole life. Add a PreToolUse entry on \"%s\" "
-                             "whose command is $CLAUDE_PROJECT_DIR/%s"
-                             % (rel_or(settings, cfg.root), "|".join(GUARD_TOOLS), GUARD_SHIM)))
+                             "for this repo's whole life. Fix: `%s`"
+                             % (rel_or(settings, cfg.root), fix)))
     else:
         missing = [t for t in GUARD_TOOLS if t not in (matcher or "")]
         if missing:
@@ -489,6 +490,12 @@ def register_guard(cfg):
         fh.write("\n")
     return True, ("registered the worktree guard in %s (PreToolUse on %s)"
                   % (rel_or(path, cfg.root), "|".join(GUARD_TOOLS)))
+
+
+def _sr(cfg):
+    """The binary, named absolutely — a remedy is read from wherever the reader is standing."""
+    from .brief import sr_bin
+    return sr_bin(cfg)
 
 
 def rel_or(path, root):

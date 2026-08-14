@@ -186,6 +186,15 @@ else
   echo "  seeded  .showrunner/config.json"
 fi
 
+# EVERY RUN, not only a fresh one. `init` registers the guard and `init` only runs when there is
+# no config — so every ALREADY-INSTALLED consumer took the upgrade path, received the shim file,
+# and got no registration: a hook that exists and can never fire, plus a `doctor` error the
+# installer itself created. Found by upgrading a real consumer. It is the same shape as the
+# ignore rules above, and it is idempotent for the same reason: a second run appends nothing.
+if (cd "$TARGET" && "$SRC/bin/showrunner" worktree register 2>/dev/null | grep -q registered); then
+  echo "  hooked  the worktree guard is registered in .claude/settings.json"
+fi
+
 echo
 echo "Done. Next:"
 echo "  1. \$EDITOR $TARGET/.showrunner/config.json"
