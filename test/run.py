@@ -35,7 +35,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from showrunner import brief, campaign, collide, config, dispatch, gates, graph as G, lanes, locks, worktree  # noqa: E402
+from showrunner import brief, campaign, collide, config, dispatch, gates, graph as G, lanes, lease, locks, util, worktree  # noqa: E402
 from showrunner.util import Refused, boot_token as boot_token_for_test  # noqa: E402
 
 VERBOSE = "-v" in sys.argv or "--verbose" in sys.argv
@@ -1491,6 +1491,164 @@ def test_integration():
 
 
 # ======================================================== CORE: the CLI
+def test_worktree_lease():
+    group("The worktree lease: one session per tree (WL-02)")
+    cfg = make_repo()
+    os.makedirs(cfg.worktree_root, exist_ok=True)
+    tree = "crawler-se-01"
+    os.makedirs(os.path.join(cfg.worktree_root, tree), exist_ok=True)
+
+    # JURISDICTION FIRST. A lease covers trees showrunner PLACED, and nothing else. Claiming
+    # authority over the main checkout, or over a linked worktree somebody made by hand, would
+    # be a guard inventing its own reach — and the main checkout is already serialised by
+    # integrate's own file lock, so it would also be a second answer to a settled question.
+    eq("a path inside the managed worktree root resolves to its tree",
+       lease.tree_for(cfg, os.path.join(cfg.worktree_root, tree, "lib", "x.py")), tree)
+    eq("the main checkout is NOT a leased tree", lease.tree_for(cfg, cfg.root), None)
+    eq("the worktree root itself is not a tree either",
+       lease.tree_for(cfg, cfg.worktree_root), None)
+
+    # POSITIVE CONTROLS, added because the mutation sweep reported this producer THIN at 1 and
+    # was right. The two None assertions above pass unchanged against a `tree_for` that returns
+    # None for EVERYTHING — which is the jurisdiction check silently answering "no path is ever
+    # in a managed worktree", i.e. the whole lease switched off while every test stays green.
+    # A refusal cannot be produced by absence, but a permission can, so the negatives need a
+    # positive beside them or they are asserting nothing.
+    second = "crawler-se-02"
+    os.makedirs(os.path.join(cfg.worktree_root, second, "deep", "er"), exist_ok=True)
+    eq("...and a DIFFERENT tree resolves to its own name, so the answer tracks the path rather "
+       "than being a constant", lease.tree_for(cfg, os.path.join(cfg.worktree_root, second)),
+       second)
+    eq("...at any depth inside it",
+       lease.tree_for(cfg, os.path.join(cfg.worktree_root, second, "deep", "er")), second)
+    ok("...and the tree root and a file deep inside it agree, which a constant answer cannot do "
+       "while also distinguishing the main checkout",
+       lease.tree_for(cfg, os.path.join(cfg.worktree_root, tree)) == tree
+       and lease.tree_for(cfg, cfg.root) is None)
+
+    holder_proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        a = lease.Lease(cfg, tree)
+        got, h = a.acquire("session-A", who="crawler-se-01", pid=holder_proc.pid,
+                           basis="dispatch-recorded")
+        ok("a free tree can be leased", got, h)
+        eq("...and it reads HELD, from the same primitive the device lane uses",
+           a.state()[0], locks.HELD)
+
+        # THE DISTINCTION THE WHOLE MODULE TURNS ON. Re-entry by the same session is not a
+        # hijack — a session that reconnects to its own tree and gets refused would be the
+        # guard blocking the work it was taken out for.
+        hijack, _ = lease.Lease(cfg, tree).held_by_other("session-A")
+        ok("the SAME session re-entering its own tree is not a hijack", not hijack)
+        hijack, who = lease.Lease(cfg, tree).held_by_other("session-B")
+        ok("a DIFFERENT live session is", hijack, who)
+
+        # Paired with the case where it fires, because "returns False" and "never looked" are
+        # the same observation from outside — the asymmetry worktree.unignored was rewritten
+        # to solve, arriving in the module that refuses people.
+        eq("...and the refusal names the session it is protecting, not just a pid",
+           (who or {}).get("session"), "session-A")
+
+        eq("the liveness BASIS is recorded, so a discovered pid is never shown as a given one",
+           (a.holder() or {}).get("pid_basis"), "dispatch-recorded")
+
+        # RELEASE IS KEYED ON SESSION, NOT PID. The pid was discovered by walking an ancestry,
+        # so the process releasing may be a different child of the same session than the one
+        # that acquired. Keying on pid would refuse the true owner and push --force into
+        # routine use, and an escape hatch reached routinely has stopped being one.
+        okr, why = lease.Lease(cfg, tree).release(session="session-B")
+        ok("a stranger's release is refused", not okr, why)
+        okr, why = lease.Lease(cfg, tree).release(session="session-A")
+        ok("...and the owning SESSION may release, even from another process", okr, why)
+        eq("released leaves the tree FREE", lease.Lease(cfg, tree).state()[0], locks.FREE)
+    finally:
+        holder_proc.terminate()
+        holder_proc.wait()
+
+    # A dead holder is reclaimable; an unreadable one is not adjudicable from here at all.
+    # Both inherited from locks.Lock rather than re-decided, which is the point of building
+    # ON it — a second liveness rule that drifts from the first fails silently.
+    d = lease.Lease(cfg, tree)
+    d.acquire("session-dead", who="ghost", pid=999999, basis="ancestor-claude")
+    eq("a lease whose process is gone is STALE, so a tree is never wedged by a dead session",
+       d.state()[0], locks.STALE)
+    with open(os.path.join(d.lock.dir, "pid"), "wb") as fh:
+        fh.write(b"\x00rubbish")
+    eq("...while an UNREADABLE pid stays UNREADABLE — a partial write by a LIVE holder reads "
+       "exactly like a dead one, and only one of those licenses taking the tree",
+       d.state()[0], locks.UNREADABLE)
+    shutil.rmtree(d.lock.dir, ignore_errors=True)
+
+    # THE FIELD I ADDED TO locks.Lock MUST NOT BE A BACK DOOR. `extra` lets a caller record
+    # why its pid means what it does; if it could also overwrite pid or boot, a caller could
+    # hand itself an immortal lock through the same door — and the liveness rule would then
+    # live in whoever called last, not in locks.py.
+    victim = locks.Lock(cfg.lock_root, "extra-probe")
+    victim.acquire(999999, "probe", session="s", extra={"pid": "1", "boot": "forged",
+                                                        "note": "kept"})
+    eq("extra cannot overwrite the pid the liveness rule reads", victim._read("pid"), "999999")
+    eq("...nor the boot token that makes a previous boot's claim unusable",
+       victim._read("boot"), boot_token_for_test())
+    eq("...while a field that is genuinely new is still recorded",
+       victim._read("note"), "kept")
+    eq("...so a forged extra cannot make a dead holder read alive",
+       victim.state()[0], locks.STALE)
+    shutil.rmtree(victim.dir, ignore_errors=True)
+
+    # The walk itself. Its VERDICT is machine-dependent, so what is asserted is the contract:
+    # a basis always comes back, and a resolved pid is a real live process.
+    pid, basis = util.session_pid()
+    ok("session_pid always reports the BASIS of what it found, never a bare pid",
+       isinstance(basis, str) and basis in ("ancestor-claude", "ppid-fallback", "unresolved"),
+       (pid, basis))
+    if pid:
+        ok("...and a pid it resolved is genuinely alive, whichever basis it used",
+           util.pid_alive(pid), (pid, basis))
+    else:
+        eq("...and when it resolves nothing it says so rather than returning a plausible pid",
+           basis, "unresolved")
+
+    # A lease with no process behind it is a note that outlives its writer — which is exactly
+    # the campaign-record situation this module replaces. Refusing to take one is the point.
+    hollow, why = lease.Lease(cfg, "no-such-tree").acquire("s", pid=None, basis=None)
+    if hollow:
+        lease.Lease(cfg, "no-such-tree").release(force=True)
+    ok("a lease is refused outright when no session process can be resolved, rather than "
+       "taken with no liveness at all",
+       hollow is False or util.session_pid()[0] is not None, why)
+
+    # status was reported UNPROTECTED by the sweep — 0 assertions noticed it returning []. The
+    # only thing asserted was that it returns a list, which an empty one satisfies, and for a
+    # READ-ONLY verb the report IS the product: "no tree is held" is what a human reads before
+    # deciding to take one. So assert what it says, not its type.
+    live = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        lease.Lease(cfg, tree).acquire("session-S", who="crawler-se-01", pid=live.pid,
+                                       basis="ancestor-claude")
+        rows = lease.status(cfg)
+        held = [r for r in rows if r["tree"] == tree]
+        ok("status REPORTS a held tree — an empty report is what a reader takes as 'free', so "
+           "silence here is not a safe default", len(held) == 1, rows)
+        eq("...with the state the lock actually holds", held[0]["state"] if held else None,
+           locks.HELD)
+        eq("...and the session holding it", (held[0]["holder"] if held else {}).get("session"),
+           "session-S")
+        eq("...and the BASIS of the liveness claim, which is the field a reader needs to know "
+           "how much the word HELD is worth", held[0]["pid_basis"] if held else None,
+           "ancestor-claude")
+        eq("...scoped to one tree when asked for one",
+           [r["tree"] for r in lease.status(cfg, tree)], [tree])
+        after = lease.status(cfg)
+        eq("...and reporting did not take, release or alter the lease",
+           lease.Lease(cfg, tree).state()[0], locks.HELD)
+        eq("...nor change what a second read reports", [r["state"] for r in after],
+           [r["state"] for r in lease.status(cfg)])
+    finally:
+        live.terminate()
+        live.wait()
+        lease.Lease(cfg, tree).release(force=True)
+
+
 def test_installer_leaves_no_vendored_copy():
     group("What install.sh leaves behind in somebody ELSE's repo")
     if not have("git"):
@@ -3102,7 +3260,7 @@ def main():
     for fn in (test_locks, test_config_refusals, test_every_rule_can_fail, test_graph, test_lifecycle, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_waiting, test_concurrency,
-               test_integration, test_installer_leaves_no_vendored_copy,
+               test_integration, test_worktree_lease, test_installer_leaves_no_vendored_copy,
                test_publishable, test_dispatch, test_filed_issues_15_to_21,
                test_claims_about_the_layer_below, test_observability,
                test_retracted_doc_claims,

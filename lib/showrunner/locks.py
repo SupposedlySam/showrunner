@@ -89,13 +89,23 @@ class Lock:
         return pid_alive(h.get("pid"))
 
     # -- mutation ----------------------------------------------------------
-    def _write_owner(self, pid, who, session):
-        for key, val in (("pid", pid), ("boot", boot_token()), ("holder", who),
-                         ("session", session or ""), ("ts", now())):
+    def _write_owner(self, pid, who, session, extra=None):
+        fields = [("pid", pid), ("boot", boot_token()), ("holder", who),
+                  ("session", session or ""), ("ts", now())]
+        # `extra` exists so a CALLER can record why its pid means what it does, without this
+        # module growing a vocabulary for every kind of holder. The worktree lease needs it:
+        # its pid comes from walking a hook's ancestry, which can fail, and a lease whose
+        # liveness rests on a weaker fact has to say so where the reader stands. Written LAST
+        # and never read by anything here — the four states above are computed from pid and
+        # boot alone, so a caller cannot widen or weaken the liveness rule by passing a field.
+        for key, val in list(extra.items() if extra else []):
+            if key not in dict(fields):
+                fields.append((key, val))
+        for key, val in fields:
             with open(os.path.join(self.dir, key), "w") as fh:
                 fh.write("%s\n" % val)
 
-    def acquire(self, pid, who, session=None, wait=0, poll=1.0):
+    def acquire(self, pid, who, session=None, wait=0, poll=1.0, extra=None):
         """Take the lock, or return False. `wait` seconds of polling is NOT fair —
         there is no queue, so a starved waiter can lose repeatedly. Said out loud
         because a fairness property nobody stated is one somebody will assume."""
@@ -108,7 +118,7 @@ class Lock:
                 if exc.errno != errno.EEXIST:
                     raise
             else:
-                self._write_owner(pid, who, session)
+                self._write_owner(pid, who, session, extra)
                 return True
 
             state, h = self.state()

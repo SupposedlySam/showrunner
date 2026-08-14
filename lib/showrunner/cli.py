@@ -10,8 +10,8 @@ import os
 import shutil
 import sys
 
-from . import (__version__, brief, campaign, collide, config, dispatch, events, gates, graph as G, harness,
-               lanes, locks, worktree)
+from . import (__version__, brief, campaign, collide, config, dispatch, events, gates,
+               graph as G, harness, lanes, lease, locks, worktree)
 from .util import Refused, die, eprint, rel, run, slug
 
 BOLD, DIM, RED, GRN, YEL, OFF = "\033[1m", "\033[2m", "\033[31m", "\033[32m", "\033[33m", "\033[0m"
@@ -449,6 +449,38 @@ def cmd_lock_status(args):
             print("%-14s FREE" % name)
         else:
             print("%-14s %s by pid %s (%s) since %s" % (name, state, h.get("pid"), h.get("who"), h.get("ts")))
+    return 0
+
+
+def cmd_lease_status(args):
+    """What holds each worktree. Read-only, and it prints the BASIS of every liveness claim.
+
+    A lease's pid is discovered by walking a hook's ancestry rather than handed over (WL-01),
+    and that walk can land on a weaker fact. Printing the state without the basis would show
+    HELD in the same shape whether the process was identified or merely guessed at, which is
+    the reader forming a belief the data does not support.
+    """
+    cfg = _cfg(args)
+    rows = lease.status(cfg, args.tree)
+    if not rows:
+        print("no worktree leases (nothing has entered a managed worktree, or none exist)")
+        return 0
+    for r in rows:
+        h = r["holder"] or {}
+        if r["state"] == locks.FREE:
+            print("%-28s FREE" % r["tree"])
+            continue
+        basis = r.get("pid_basis") or "?"
+        print("%-28s %s by pid %s (%s) session %s since %s"
+              % (r["tree"], r["state"], h.get("pid"), h.get("who") or "?",
+                 (h.get("session") or "?")[:8], h.get("ts")))
+        print("%-28s   liveness basis: %s%s"
+              % ("", basis,
+                 "  ← the session process was NOT identified; this pid is its parent, so a "
+                 "dead session may still read as HELD" if basis == "ppid-fallback" else ""))
+        if not r["exists"]:
+            print("%-28s   NOTE: %s no longer exists on disk, but the lease does — a lease "
+                  "outliving its tree is stale state, not a holder" % ("", r["path"]))
     return 0
 
 
@@ -1041,6 +1073,12 @@ def build_parser():
     s.set_defaults(func=cmd_stop_gate)
 
     # locks
+    s = sub.add_parser("lease", help="worktree leases — one session per tree")
+    esub = s.add_subparsers(dest="leasecmd")
+    t = esub.add_parser("status", help="what holds each worktree, and on what evidence")
+    t.add_argument("tree", nargs="?")
+    t.set_defaults(func=cmd_lease_status)
+
     s = sub.add_parser("lock", help="single-consumer resource locks")
     lsub = s.add_subparsers(dest="lockcmd")
 

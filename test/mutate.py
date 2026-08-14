@@ -82,6 +82,18 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # The lease's JURISDICTION. Answering None everywhere means no path is ever inside a
+    # managed worktree, so every lease check silently becomes a no-op — the guard is still
+    # called, still returns, and never fires. That is the exact shape this file exists to
+    # catch, and it is indistinguishable from "no hijack happened" without a mutant.
+    ("worktree-lease jurisdiction", "lease.tree_for", "lib/showrunner/lease.py",
+     r"(def tree_for\(cfg, path=None\):\n)",
+     "    return None\ndef _neutered_tree_for(cfg, path=None):\n"),
+    # Reporting, but the reporting IS the product for a read-only verb: an empty list reads
+    # as "no tree is held" to a human deciding whether to take one.
+    ("worktree-lease status", "lease.status", "lib/showrunner/lease.py",
+     r"(def status\(cfg, tree=None\):\n)",
+     "    return []\ndef _neutered_status(cfg, tree=None):\n"),
     ("lock guard", "locks.LockSet.guard", "lib/showrunner/locks.py",
      r"(    def guard\(self, command, session=None\):\n)",
      "        return True, ''\n    def _neutered_guard(self, command, session=None):\n"),

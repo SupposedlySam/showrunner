@@ -96,6 +96,56 @@ def pid_alive(pid):
         return True
 
 
+SESSION_PROCESS = "claude"
+MAX_ANCESTRY = 12
+
+
+def session_pid(start=None):
+    """The Claude Code process this call sits under. Returns (pid, basis).
+
+    WL-01 settled that no PID reaches a hook. The spec says so verbatim and game_loop — hooks
+    on every event, and the consumer that would simply be using such a field if it existed —
+    reads eleven payload fields across its guards and never one. So the only way to a live
+    process is the ancestry, and a hook is a child of the session that spawned it.
+
+    `basis` is the whole point of the return shape. The match is on process NAME, and here
+    `claude` is a native binary whose argv is the bare name — but an install launched through
+    `npx` or a node shim presents as `node`, and the walk finds nothing. That case gets the
+    immediate parent and a basis that SAYS so, because a lease whose liveness rests on a
+    weaker fact must carry that where the reader stands. 'Could not tell' and 'proved it' must
+    never be the same answer — the distinction `locks.py` draws between UNREADABLE and STALE,
+    arriving one layer up.
+
+    What this does NOT establish: that the process found is *this* session rather than another
+    `claude` in the same ancestry. Nothing observed suggests that shape and nothing here would
+    detect it, which is why a lease records the session id beside the pid — the pid answers
+    "alive?", the session id answers "who?", and neither is asked to do the other's job.
+    """
+    pid = int(start or os.getpid())
+    first_parent = None
+    for _ in range(MAX_ANCESTRY):
+        rc, out, _ = run(["ps", "-o", "ppid=,comm=", "-p", str(pid)])
+        if rc != 0 or not out.strip():
+            break
+        parts = out.strip().split(None, 1)
+        if len(parts) != 2:
+            break
+        ppid, comm = parts[0].strip(), os.path.basename(parts[1].strip())
+        if comm.startswith(SESSION_PROCESS):
+            return pid, "ancestor-%s" % SESSION_PROCESS
+        if first_parent is None:
+            first_parent = ppid
+        if ppid in ("0", "1"):
+            break
+        pid = int(ppid)
+    # Deliberately the caller's own parent and not the last pid the walk reached: the walk
+    # stopping early means it learned nothing, and the highest ancestor it happened to touch
+    # is init or a terminal, which is alive forever and would make the lease immortal.
+    if first_parent and first_parent not in ("0", "1"):
+        return int(first_parent), "ppid-fallback"
+    return None, "unresolved"
+
+
 def run(cmd, cwd=None, check=False, timeout=None, env=None):
     """Run a command, returning (rc, stdout, stderr). Never raises on non-zero unless asked."""
     proc = subprocess.run(
