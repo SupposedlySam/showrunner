@@ -343,6 +343,13 @@ def reap(cfg, graph, base="HEAD", apply=False):
             })
             if apply:
                 locks.Lock(ls.root, name).release(force=True)
+                # RECLAIM IS NOT RELEASE. A holder letting go and a reaper taking a resource
+                # off a dead one are different facts, and only the second says something went
+                # wrong. Collapsing them into one event would hand a viewer a lock that looks
+                # tidily handed back by an agent that never came home.
+                events.emit(cfg, "lock.reclaimed", {"resource": name,
+                                                    "dead_pid": holder.get("pid"),
+                                                    "was_held_by": holder.get("who")})
         elif state == locks.UNREADABLE:
             # Surfaced and never released, even with --apply. This is the one lock state
             # nobody can adjudicate from here: an unreadable pid may belong to a process
@@ -592,10 +599,30 @@ def _integrate_locked(cfg, graph, base=None, only=None, dry_run=False):
     candidates.sort(key=lambda e: (e.get("created_ts") or 0, e.get("crawler") or ""))
 
     results = []
+
+    def record(outcome):
+        """Append an outcome AND journal it. One path on purpose.
+
+        integrate has five ways to finish — refused for a drifted harness, would-merge,
+        conflict, checks-failed-on-the-merged-result, integrated — and each was an
+        independent `results.append`. Emitting beside each one means a sixth arrives without
+        an event and a viewer silently stops seeing the riskiest verb finish. Routing every
+        outcome through here makes forgetting impossible rather than unlikely, which is the
+        difference between a rail and a habit.
+        """
+        results.append(outcome)
+        events.emit(cfg, "integrate.%s" % outcome["status"],
+                    {"crawler": outcome.get("crawler"), "branch": outcome.get("branch"),
+                     "base": base, "dry_run": bool(dry_run),
+                     # The report can be long and is already on disk for the case that matters;
+                     # a journal line is a summary, not a document.
+                     "detail": (outcome.get("detail") or "")[:200] or None,
+                     "merged_proof": outcome.get("merged_proof")})
+
     for entry in candidates:
         branch = entry["branch"]
         if entry.get("_harness_block"):
-            results.append({
+            record({
                 "crawler": entry["crawler"], "branch": branch,
                 "status": "harness-%s" % entry["_harness_block"],
                 "report": [entry.get("_harness_detail") or "",
@@ -607,13 +634,13 @@ def _integrate_locked(cfg, graph, base=None, only=None, dry_run=False):
         rc, before, _ = git(["rev-parse", "HEAD"], cwd=cfg.root)
         before = before.strip()
         if dry_run:
-            results.append({"crawler": entry["crawler"], "branch": branch, "status": "would-merge"})
+            record({"crawler": entry["crawler"], "branch": branch, "status": "would-merge"})
             continue
 
         rc, out, err = git(["merge", "--no-ff", "--no-edit", branch], cwd=cfg.root)
         if rc != 0:
             git(["merge", "--abort"], cwd=cfg.root)
-            results.append({"crawler": entry["crawler"], "branch": branch, "status": "conflict",
+            record({"crawler": entry["crawler"], "branch": branch, "status": "conflict",
                             "detail": (err or out).strip()[:2000]})
             return results, False
 
@@ -621,7 +648,7 @@ def _integrate_locked(cfg, graph, base=None, only=None, dry_run=False):
         ok, report = gates.compare_to_baseline(cfg, current_checks, baseline)
         if ok is False:
             git(["reset", "--hard", before], cwd=cfg.root)
-            results.append({"crawler": entry["crawler"], "branch": branch,
+            record({"crawler": entry["crawler"], "branch": branch,
                             "status": "checks-failed-on-merged-result", "report": report})
             return results, False
 
@@ -642,7 +669,7 @@ def _integrate_locked(cfg, graph, base=None, only=None, dry_run=False):
         except OSError:
             proof_path = None
 
-        results.append({
+        record({
             "crawler": entry["crawler"], "branch": branch, "status": "integrated",
             "merged_proof": proof_path,
             "report": report,

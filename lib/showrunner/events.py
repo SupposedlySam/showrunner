@@ -201,15 +201,27 @@ def dropped():
 
 
 def read(cfg, since_seq=None, limit=None):
-    """Replay the journal. Malformed lines are COUNTED, not skipped in silence.
+    """Replay the journal. Returns (events, unparseable, unreadable).
 
-    A half-written final line is ordinary — a viewer may attach while an append is in flight — and
-    dropping it quietly would make a torn write and an empty campaign look the same.
+    Malformed lines are COUNTED, not skipped in silence: a half-written final line is ordinary —
+    a viewer may attach while an append is in flight — and dropping it quietly would make a torn
+    write and an empty campaign look the same.
+
+    **A FAILED READ IS NOT A FACT ABOUT THE CAMPAIGN**, and this returned one as if it were. The
+    first version caught `OSError` and returned the events it had so far, so a journal that could
+    not be opened — a permission change, a full disk, a path that became a directory — came back
+    as `([], 0)`: an empty list and no complaint, indistinguishable from an orchestrator that has
+    genuinely done nothing. A viewer would have rendered a confident, quiet, wrong "idle".
+
+    So `unreadable` is its own third value rather than an absence folded into the first. Callers
+    must not treat it as zero events; `watch` refuses on it rather than printing a clean replay.
     """
     out, bad = [], 0
     p = path_for(cfg)
     if not os.path.exists(p):
-        return out, bad
+        # A journal that has never been written is genuinely empty — that IS a fact about the
+        # campaign, and it is a different one from a journal that exists and cannot be opened.
+        return out, bad, False
     try:
         with open(p, errors="ignore") as fh:
             for raw in fh:
@@ -225,7 +237,7 @@ def read(cfg, since_seq=None, limit=None):
                     continue
                 out.append(ev)
     except OSError:
-        return out, bad
+        return out, bad, True
     if limit:
         out = out[-limit:]
-    return out, bad
+    return out, bad, False

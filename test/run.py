@@ -2671,11 +2671,11 @@ def test_observability():
     g = new_graph(cfg)
 
     ok("a repo that has done nothing has an empty journal, not a missing answer",
-       EV.read(cfg) == ([], 0), EV.read(cfg))
+       EV.read(cfg) == ([], 0, False), EV.read(cfg))
 
     EV.emit(cfg, "test.one", {"leaf": "a"})
     EV.emit(cfg, "test.two", {"leaf": "b"})
-    evs, bad = EV.read(cfg)
+    evs, bad, _ = EV.read(cfg)
     eq("events land in order", [e["kind"] for e in evs], ["test.one", "test.two"])
     ok("...and every frame names which showrunner wrote it, because one viewer may watch "
        "several and a repo may be driven by more than one orchestrator",
@@ -2690,7 +2690,7 @@ def test_observability():
     for leaf_id in ("ev1", "ev2"):
         subprocess.run([sys.executable, exe, "add", "work " + leaf_id, "--id", leaf_id],
                        cwd=cfg.root, capture_output=True, text=True, env=env)
-    evs, _ = EV.read(cfg)
+    evs, _, _ = EV.read(cfg)
     seqs = [e["seq"] for e in evs]
     eq("...and the sequence is strictly increasing ACROSS processes", seqs, sorted(set(seqs)))
     ok("...which is what makes --since a resume rather than a guess",
@@ -2730,9 +2730,113 @@ def test_observability():
     # COUNTED. Skipping it silently makes a half-written journal and a quiet campaign identical.
     with open(EV.path_for(cfg), "a") as fh:
         fh.write('{"kind": "half-writ')
-    evs, bad = EV.read(cfg)
+    evs, bad, _ = EV.read(cfg)
     eq("an unparseable line is counted, not silently skipped", bad, 1)
     ok("...and the readable events still come back", len(evs) >= 4, len(evs))
+
+    # THE SERIALIZATION POINT, which is the one thing no single Crawler can observe — so a view
+    # that cannot show the queue cannot show the most important thing showrunner does. A REFUSAL
+    # is as much a fact as a grant: a resource nobody is waiting on and one with three Crawlers
+    # queued behind it look identical if only the holder is recorded.
+    lk = make_repo({"resources": [{"name": "device", "match": [r"\bdeploy\b"]}]})
+    kinds = lambda c: [e["kind"] for e in EV.read(c)[0]]
+    # `lock run` is the AUTHORITATIVE path and the only one worth asserting here: `lock acquire`
+    # records the invoking shell, which exits immediately, so a second acquire finds a STALE
+    # lock and takes it — the behaviour that verb warns about in its own output. A first draft
+    # of this test used it and got two grants and no refusal, which is the tool being right and
+    # the fixture being wrong.
+    subprocess.run([sys.executable, exe, "lock", "run", "device", "--holder", "first",
+                    "--", "true"], cwd=lk.root, capture_output=True, text=True, env=env)
+    seen = kinds(lk)
+    ok("a lock grant is journalled on the authoritative path", "lock.acquired" in seen, seen)
+    ok("...and its release, from the FINALLY, so a consumer killed mid-command still reports "
+       "the release that actually happened", "lock.released" in seen, seen)
+
+    # A REFUSAL is as much a fact as a grant, and it needs a genuinely live holder to provoke —
+    # which is the whole reason the authoritative path exists.
+    live = DeadPid  # placeholder to keep the name obvious if this is ever restructured
+    holder_lock = locks.LockSet(lk).lock("device")
+    holder_lock.acquire(os.getpid(), "first", session="s-live")
+    try:
+        subprocess.run([sys.executable, exe, "lock", "run", "device", "--holder", "second",
+                        "--", "true"], cwd=lk.root, capture_output=True, text=True, env=env)
+    finally:
+        holder_lock.release(force=True)
+    # THE FLAG ORDER THE README DOCUMENTS. `command` was nargs=REMAINDER, which takes everything
+    # after the first positional — so `lock run device --holder crawler-a -- ./deploy.sh` put
+    # `--holder` into the COMMAND, left the holder at its default, and then tried to execute
+    # `--holder` as a program. The flagship example of the one hard rule this project exists to
+    # enforce, and it crashed. Found by a test that used that order by habit and got a holder of
+    # "run" back.
+    ran = subprocess.run([sys.executable, exe, "lock", "run", "device",
+                          "--holder", "crawler-a", "--", "echo", "hi"],
+                         cwd=lk.root, capture_output=True, text=True, env=env)
+    eq("`lock run <resource> --holder X -- cmd` runs the command, in the order the README "
+       "documents (%s)" % (ran.stderr or "").strip()[:60], ran.returncode, 0)
+    ok("...and the command's own output comes through, so this is the command running rather "
+       "than the lock merely being taken", "hi" in ran.stdout, ran.stdout[:120])
+    held = [e for e in EV.read(lk)[0] if e["kind"] == "lock.acquired"]
+    ok("...and the holder recorded is the one NAMED, not the parser's default — a lock whose "
+       "holder is mislabelled is one nobody can trace back to a consumer",
+       any(e.get("who") == "crawler-a" for e in held), [e.get("who") for e in held])
+
+    refusals = [e for e in EV.read(lk)[0] if e["kind"] == "lock.refused"]
+    ok("a REFUSAL is journalled too, because a contended resource and an idle one are "
+       "otherwise the same picture", refusals, kinds(lk))
+    if refusals:
+        ok("...naming who was waiting AND who held it, so a queue can be drawn at all",
+           refusals[0].get("who") == "second" and refusals[0].get("held_by") == "first",
+           refusals[0])
+
+    # RECLAIM IS NOT RELEASE. Only one of them says something went wrong, and collapsing them
+    # hands a viewer a resource that looks tidily handed back by an agent that never came home.
+    src = open(os.path.join(ROOT, "lib", "showrunner", "campaign.py")).read()
+    ok("reap journals a reclaimed lock under its own kind", "lock.reclaimed" in src, None)
+
+    # EVERY WAY INTEGRATE CAN FINISH goes through one path. It has five, each previously its own
+    # `results.append`, so a sixth would have arrived with no event and a viewer would silently
+    # stop seeing the riskiest verb finish.
+    tree = ast.parse(src)
+    integ = next(n for n in ast.walk(tree)
+                 if isinstance(n, ast.FunctionDef) and n.name == "integrate")
+    appends = [n for n in ast.walk(integ)
+               if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+               and n.func.attr == "append" and getattr(n.func.value, "id", "") == "results"]
+    ok("no outcome inside integrate appends to `results` directly — they route through the one "
+       "path that also journals, so forgetting is impossible rather than unlikely",
+       not appends, [getattr(a, "lineno", "?") for a in appends])
+
+    # A FAILED READ IS NOT A FACT ABOUT THE CAMPAIGN. `read` used to catch OSError and return
+    # the events it had, so a journal that could not be opened came back as ([], 0) —
+    # indistinguishable from an orchestrator that has genuinely done nothing, and a viewer would
+    # have rendered a confident, quiet, wrong "idle" over a live fan-out.
+    #
+    # The test is the cheap one: break the file, then ask whether anything says a clean "none".
+    blocked = make_repo()
+    EV.emit(blocked, "test.before", {"leaf": "x"})
+    jp = EV.path_for(blocked)
+    os.chmod(jp, 0o000)
+    try:
+        unreadable_ok = os.access(jp, os.R_OK) is False
+        evs, bad, unreadable = EV.read(blocked)
+        if not unreadable_ok:
+            skip("the unreadable-journal check", "this filesystem ignores chmod 000 (running "
+                 "as root?), so the condition cannot be constructed here")
+        else:
+            ok("an unreadable journal reports UNREADABLE, not zero events — 'I cannot see this "
+               "campaign' and 'this campaign did nothing' are different answers and only one is "
+               "safe to draw as an idle dashboard", unreadable is True, (len(evs), bad, unreadable))
+            p = subprocess.run([sys.executable, exe, "watch"], cwd=blocked.root,
+                               capture_output=True, text=True, env=env)
+            eq("...and `watch` REFUSES rather than streaming a clean empty replay over it",
+               p.returncode, 2)
+            ok("...naming the journal, so the remedy is obvious rather than a mystery",
+               "could not be read" in (p.stdout + p.stderr), (p.stdout + p.stderr)[:200])
+    finally:
+        os.chmod(jp, 0o644)
+    evs, _, unreadable = EV.read(blocked)
+    ok("...and a journal that is readable again is not still reported unreadable — the flag is "
+       "a measurement, not a latch", unreadable is False and len(evs) == 1, (evs, unreadable))
 
     # THE STREAM, END TO END, through the real binary. Everything above tests the file; this
     # tests the thing a viewer actually attaches to, including that it replays BEFORE it follows

@@ -490,8 +490,13 @@ def cmd_lock_acquire(args):
     ok = lock.acquire(os.getpid(), args.holder, session=args.session, wait=args.wait)
     if not ok:
         _, h = lock.state()
+        events.emit(cfg, "lock.refused", {"resource": args.resource, "who": args.holder,
+                                          "held_by": h.get("who"), "held_pid": h.get("pid"),
+                                          "path": "acquire"})
         eprint("BLOCKED: %r held by pid %s (%s)" % (args.resource, h.get("pid"), h.get("who")))
         return 2
+    events.emit(cfg, "lock.acquired", {"resource": args.resource, "who": args.holder,
+                                       "lock_pid": os.getpid(), "path": "acquire"})
     print("ACQUIRED %s (pid %s — %s)" % (args.resource, os.getpid(), args.holder))
     eprint("NOTE: the holder recorded is THIS shell, which exits immediately. `lock run` is the "
            "authoritative path — there the holder is the consumer process itself.")
@@ -502,6 +507,8 @@ def cmd_lock_release(args):
     cfg = _cfg(args)
     lock = locks.LockSet(cfg).lock(args.resource)
     if lock.release(pid=args.pid or os.getpid(), force=args.force):
+        events.emit(cfg, "lock.released", {"resource": args.resource, "forced": bool(args.force),
+                                           "path": "release"})
         print("released %s" % args.resource)
         return 0
     print("%s was not held" % args.resource)
@@ -530,14 +537,26 @@ def cmd_lock_run(args):
             code=64)
     if not lock.acquire(os.getpid(), args.holder, session=args.session, wait=args.wait):
         _, h = lock.state()
+        events.emit(cfg, "lock.refused", {"resource": args.resource, "who": args.holder,
+                                          "held_by": h.get("who"), "held_pid": h.get("pid"),
+                                          "path": "run", "waited": args.wait})
         eprint("BLOCKED: %r held by pid %s (%s). One consumer at a time."
                % (args.resource, h.get("pid"), h.get("who")))
         return 2
+    events.emit(cfg, "lock.acquired", {"resource": args.resource, "who": args.holder,
+                                       "lock_pid": os.getpid(), "path": "run"})
+    rc = None
     try:
         import subprocess
-        return subprocess.call(cmd, cwd=cfg.root)
+        rc = subprocess.call(cmd, cwd=cfg.root)
+        return rc
     finally:
         lock.release(pid=os.getpid(), force=True)
+        # In the FINALLY, so a consumer killed mid-command still reports the release that
+        # actually happened. A view that shows a resource held by a process that died is the
+        # stale-lock confusion this whole module exists to prevent, one layer out.
+        events.emit(cfg, "lock.released", {"resource": args.resource, "who": args.holder,
+                                           "path": "run", "exit": rc})
 
 
 # ------------------------------------------------------------- route/plan
@@ -806,7 +825,14 @@ def cmd_watch(args):
     since, err = events.parse_cursor(cfg, args.since)
     if err:
         die(err, code=2)
-    backlog, bad = events.read(cfg, since_seq=since, limit=args.limit)
+    backlog, bad, unreadable = events.read(cfg, since_seq=since, limit=args.limit)
+    if unreadable:
+        # NOT an empty replay. "I cannot see this campaign" and "this campaign has done nothing"
+        # are different answers, and only one of them is safe to render as an idle dashboard.
+        die("the event journal exists and could not be read (%s). Refusing to stream a clean "
+            "empty replay over it: a viewer cannot tell that from a campaign that has done "
+            "nothing, and would show an orchestrator mid-fan-out as idle."
+            % events.path_for(cfg), code=2)
     for ev in backlog:
         print(json.dumps(ev, sort_keys=True), flush=True)
     seq = backlog[-1]["seq"] if backlog else (since or 0)
@@ -823,7 +849,7 @@ def cmd_watch(args):
     last_beat = 0.0
     try:
         while True:
-            fresh, bad = events.read(cfg, since_seq=seq)
+            fresh, bad, unreadable = events.read(cfg, since_seq=seq)
             for ev in fresh:
                 print(json.dumps(ev, sort_keys=True), flush=True)
                 seq = max(seq, ev.get("seq", seq))
@@ -835,9 +861,13 @@ def cmd_watch(args):
                 # alone freezes exactly when the work is hardest, which is when somebody is most
                 # likely to be watching it. The heartbeat carries the cheap live counters so the
                 # picture keeps moving without inventing events that did not happen.
+                # `unreadable` rides every heartbeat rather than only the attach: a journal
+                # can become unreadable long after a viewer connected, and the stream would
+                # otherwise go quiet in exactly the way a finished campaign does.
                 print(json.dumps({"type": "heartbeat", "ts": int(nowt), "seq": seq,
                                   "cursor": events.cursor(cfg, seq),
                                   "dropped": events.dropped(),
+                                  "unreadable": unreadable,
                                   "unparseable": bad}, sort_keys=True), flush=True)
             time.sleep(args.interval)
     except KeyboardInterrupt:
@@ -1109,7 +1139,12 @@ def build_parser():
     t.add_argument("--holder", default="run")
     t.add_argument("--session")
     t.add_argument("--wait", type=float, default=0)
-    t.add_argument("command", nargs=argparse.REMAINDER)
+    # nargs="*" AND NOT REMAINDER. REMAINDER takes everything after the first positional, so
+    # `lock run device --holder crawler-a -- ./deploy.sh` — the form documented in the README,
+    # for the one hard rule this project exists to enforce — put `--holder` into the COMMAND,
+    # left holder at its default, and then tried to execute `--holder` as a program. Both flag
+    # orders parse correctly with "*", and the `--` separator still works.
+    t.add_argument("command", nargs="*")
     t.set_defaults(func=cmd_lock_run)
 
     # routing / planning
