@@ -1507,11 +1507,16 @@ def test_publishable():
         for i, line in enumerate(body.splitlines(), 1):
             if "pid_alive(" in line and not line.strip().startswith(("#", "from", "import")):
                 readers.append("%s:%d" % (name, i))
-    # Five: campaign.live, dispatch.lingering, graph.stale_claims, graph.claim, locks._live.
+    # Seven: campaign.live, dispatch.lingering, graph.stale_claims, graph.claim, locks._live,
+    # and TWO in reap's terminate block — added when SIGTERM stopped claiming a retirement it
+    # had not witnessed. Those two are safe without their own boot check for a reason worth
+    # writing down rather than assuming: they run only after `lingering()` returned non-None,
+    # and `lingering` refuses across a boot. The pid is known to be this boot before either
+    # call is reached, so the audit is inherited THROUGH A GUARD rather than skipped.
     # Every one of them must decide what a pid means ACROSS A BOOT before it trusts the answer.
     # If this number changes, the new reader is the thing to look at — not this assertion.
     eq("pid_alive has exactly the readers that were audited for boot scoping; a new one must "
-       "justify itself rather than inherit the audit", len(readers), 5)
+       "justify itself rather than inherit the audit", len(readers), 7)
 
     # INTERNAL TOOLING MUST NOT REACH A PUBLIC CLONE. The package manager used to dogfood
     # these repos is ours; a stranger has never heard of it, cannot install it, and should
@@ -1800,6 +1805,32 @@ def test_dispatch():
     ok("...and says it WOULD terminate rather than having done so — reap is a report until "
        "--apply, and stopping someone's process is exactly the kind of act that must be asked",
        procs and procs[0]["action"].startswith("would"), procs)
+
+    # AN EFFECTOR MUST PROVE IT ACTED. `os.kill` returning without error means the SIGNAL was
+    # delivered, not that the process stopped — and recording "retired" off the first is a
+    # result nobody observed. A neighbouring project shipped the same shape in a relay that
+    # counted messages it never sent. Here the subject declines to die: a child that traps
+    # SIGTERM and keeps running must leave the record saying so, and must stay reportable.
+    stubborn = subprocess.Popen(
+        [sys.executable, "-c",
+         "import signal,time\nsignal.signal(signal.SIGTERM, lambda *a: None)\n"
+         "while True: time.sleep(0.2)"])
+    try:
+        campaign.set_state(fcfg, "c-fin", "finished", pid=stubborn.pid,
+                           boot=boot_token_for_test(),
+                           finished_at=time.time() - (dispatch.LINGER_GRACE_SECONDS + 60))
+        acts, warns = campaign.reap(fcfg, fg, apply=True)
+        ent2 = [c for c in campaign.load(fcfg)["crawlers"] if c["crawler"] == "c-fin"][0]
+        ok("a Crawler that IGNORES SIGTERM is not recorded as retired — the signal landing is "
+           "not the process stopping", ent2["state"] != "retired", ent2)
+        ok("...and it says so out loud rather than leaving a silent disagreement between the "
+           "record and the machine", any("still alive" in w for w in warns), warns)
+        ok("...and stays reportable, so the next reap raises it again instead of a record that "
+           "claims a retirement nobody witnessed",
+           bool(dispatch.lingering(ent2)), ent2)
+    finally:
+        stubborn.kill()
+        stubborn.wait()
 
     # A dispatch that never started must still be visible. Recording after launching would
     # leave a live agent no record names, which cannot be reaped and cannot be reclaimed.

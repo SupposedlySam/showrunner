@@ -38,6 +38,7 @@ failure rather than stacking branches onto a broken trunk.
 import contextlib
 import json
 import os
+import time
 
 from .util import (atomic_write_json, boot_token, die, eprint, file_lock, git, now,
                    pid_alive, rel, run, try_file_lock)
@@ -356,9 +357,30 @@ def reap(cfg, graph, base="HEAD", apply=False):
         if apply:
             try:
                 os.kill(ling["pid"], _signal.SIGTERM)
-                set_state(cfg, entry["crawler"], "retired", retired_at=now())
             except OSError as exc:
                 warnings.append("could not terminate pid %s: %s" % (ling["pid"], exc))
+                continue
+            # PROVE IT ACTED. `os.kill` returning without error means the SIGNAL WAS
+            # DELIVERED, not that the process stopped — two different facts, and recording
+            # "retired" off the first is the effector reporting a result it never observed.
+            # A process is free to ignore SIGTERM, and this module's own comment says one
+            # that does is a FINDING rather than something to escalate against. So: watch
+            # for the exit, briefly, and say which of the two actually happened.
+            for _ in range(20):
+                if not pid_alive(ling["pid"]):
+                    break
+                time.sleep(0.1)
+            if pid_alive(ling["pid"]):
+                # State stays `finished`, so `lingering` reports it again next run rather
+                # than a record that claims a retirement nobody witnessed.
+                set_state(cfg, entry["crawler"], "finished",
+                          terminate_sent_at=now())
+                warnings.append(
+                    "pid %s was sent SIGTERM and is still alive — it is ignoring the signal. "
+                    "NOT escalating to SIGKILL: a Crawler that declines to stop is something "
+                    "to look at, not something to kill quietly." % ling["pid"])
+            else:
+                set_state(cfg, entry["crawler"], "retired", retired_at=now())
 
     # 2c. Rooms belonging to Crawlers that are done. A channel per Crawler is right while it
     #     works and a leak once it stops; closing on `close` covers the normal path, and this
