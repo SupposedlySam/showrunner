@@ -1671,6 +1671,118 @@ def test_worktree_lease():
         live.wait()
         lease.Lease(cfg, tree).release(force=True)
 
+    # ---- worktree enter (WL-03): the prompt, never the enforcement -------------------
+    def events_of(kind):
+        p = os.path.join(cfg.state_dir, "events.jsonl")
+        if not os.path.exists(p):
+            return []
+        out = []
+        for line in open(p):
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if e.get("kind") == kind:
+                out.append(e)
+        return out
+
+    eq("entering the MAIN checkout is not a lease event at all — an orchestrator that narrates "
+       "every non-event trains its reader to skim the one that matters",
+       lease.enter(cfg, "s1", path=cfg.root)[0], "not-a-worktree")
+
+    ent = os.path.join(cfg.worktree_root, "enter-probe")
+    os.makedirs(ent, exist_ok=True)
+    v, d = lease.enter(cfg, "sess-1", path=ent, who="crawler-1")
+    eq("a free tree is acquired on entry", v, "acquired")
+    ok("...and the acquisition records the basis of its liveness claim",
+       bool((d.get("holder") or {}).get("pid_basis")), d)
+    eq("the SAME session re-entering is 'own', not a hijack",
+       lease.enter(cfg, "sess-1", path=ent)[0], "own")
+
+    before = len(events_of("lease.hijack"))
+    v, d = lease.enter(cfg, "sess-2", path=ent)
+    eq("a DIFFERENT live session entering is a hijack", v, "hijack")
+    eq("...and the holder it reports carries the pid_basis, which is the field saying how much "
+       "the word HELD is worth — it printed '?' here until a real hijack showed it",
+       (d.get("holder") or {}).get("pid_basis"), "ancestor-claude")
+    eq("...and the hijack is LOGGED, because WL-05 may not build a gate without an observed "
+       "failure, and a line printed to a terminal nobody kept is not an observation",
+       len(events_of("lease.hijack")), before + 1)
+    ev = events_of("lease.hijack")[-1]
+    eq("...naming the intruder", ev.get("intruder_session"), "sess-2")
+    eq("...and the holder it collided with", ev.get("holder_session"), "sess-1")
+    eq("entering does NOT take the tree from the holder — the prompt is not the enforcement",
+       lease.Lease(cfg, "enter-probe").holder().get("session"), "sess-1")
+
+    # A dead holder is reclaimed, loudly. Paired with the hijack above so neither reads as
+    # "enter always does the same thing".
+    lease.Lease(cfg, "enter-probe").release(force=True)
+    lease.Lease(cfg, "enter-probe").acquire("sess-dead", who="ghost", pid=999999,
+                                            basis="ancestor-claude")
+    v, d = lease.enter(cfg, "sess-3", path=ent)
+    eq("a tree whose holder is provably dead is RECLAIMED, so a crashed session cannot wedge it "
+       "forever", v, "reclaimed")
+    eq("...and the new holder is the entering session",
+       lease.Lease(cfg, "enter-probe").holder().get("session"), "sess-3")
+
+    # UNREADABLE must survive entry untouched. The one state where being helpful is the bug: a
+    # partial write by a LIVE holder is indistinguishable from a dead one.
+    lease.Lease(cfg, "enter-probe").release(force=True)
+    lease.Lease(cfg, "enter-probe").acquire("sess-x", who="x", pid=999999, basis="b")
+    with open(os.path.join(lease.Lease(cfg, "enter-probe").lock.dir, "pid"), "wb") as fh:
+        fh.write(b"\x00rubbish")
+    v, _ = lease.enter(cfg, "sess-4", path=ent)
+    eq("an UNREADABLE lease is reported, never reclaimed by entry", v, "unreadable")
+    eq("...and it is still there afterwards, held by nobody this code can name",
+       lease.Lease(cfg, "enter-probe").state()[0], locks.UNREADABLE)
+    shutil.rmtree(lease.Lease(cfg, "enter-probe").lock.dir, ignore_errors=True)
+
+    # ---- worktree fork (WL-04): the option the hijack prompt offers first ------------
+    # THE REFUSAL IS THE INTERESTING HALF. Told to "just make another worktree" a reader picks
+    # HEAD, and HEAD is not where the held tree started. Worse, git cannot reconstruct the real
+    # base afterwards — a fully-merged branch and one that never received a commit both have
+    # the base as their merge-base — so a guessed base is wrong exactly when the held tree has
+    # already merged, silently, and the fork still looks fine.
+    raises("fork REFUSES rather than guessing a base when none was recorded — a guess is wrong "
+           "precisely in the case nobody would check",
+           lambda: lease.fork(cfg, "enter-probe", "sess-9"), "will not guess")
+
+    sh(["git", "commit", "-q", "--allow-empty", "-m", "second"], cfg.root)
+    head = sh(["git", "rev-parse", "HEAD"], cfg.root).stdout.strip()
+    first = sh(["git", "rev-parse", "HEAD~1"], cfg.root).stdout.strip()
+    path, d = lease.fork(cfg, "enter-probe", "sess-9", base=first, name="fork-probe")
+    ok("...and forks from the base it was given when it has one", os.path.isdir(path), path)
+    eq("the new tree starts at THAT commit, asserted against the SHA rather than 'it has "
+       "commits' — which is true of the wrong base too",
+       sh(["git", "rev-parse", "HEAD"], path).stdout.strip(), first)
+    ok("...which is NOT the tip, so the assertion above can distinguish them", first != head)
+    eq("the fork's base is recorded RESOLVED, not as the symbolic ref it was asked for — git "
+       "cannot recover what 'HEAD' meant at this instant afterwards", d["base"], first)
+    eq("...and the forking session holds the new tree",
+       lease.Lease(cfg, "fork-probe").holder().get("session"), "sess-9")
+    eq("...while the tree it forked FROM is untouched", lease.tree_for(cfg, ent), "enter-probe")
+
+    _, d2 = lease.fork(cfg, "enter-probe", "sess-9", base="HEAD", name="fork-symbolic")
+    eq("a symbolic base is resolved to a sha before anything is created",
+       d2["base"], head)
+
+    # THE RECORDED PATH, which every assertion above bypasses by passing base= explicitly.
+    # Without this, base_sha_of could return None forever: fork would still refuse, the refusal
+    # assertion would still pass, and the producer would be dead with the suite green. It fails
+    # SAFE today, which is a fact about today's caller and not a reason to leave it unwatched.
+    rec = campaign.load(cfg)
+    rec.setdefault("crawlers", []).append(
+        {"crawler": "recorded-probe", "leaf": "L1", "worktree": ".worktrees/recorded-probe",
+         "base_sha": first, "state": "spawned"})
+    campaign.save(cfg, rec)
+    os.makedirs(os.path.join(cfg.worktree_root, "recorded-probe"), exist_ok=True)
+    eq("the base is read back from the campaign record, which is the only place it survives",
+       lease.base_sha_of(cfg, "recorded-probe"), first)
+    _, d3 = lease.fork(cfg, "recorded-probe", "sess-10", name="fork-recorded")
+    eq("...and fork uses it with no --base, landing on the commit the held tree started at",
+       d3["base"], first)
+    ok("...which is not the tip, so that assertion can tell the two apart", first != head)
+
 
 def test_installer_leaves_no_vendored_copy():
     group("What install.sh leaves behind in somebody ELSE's repo")
@@ -3126,13 +3238,24 @@ def test_cli():
     # applying the same indent rule to Python docstring PROSE and reading `llm_chat instead`
     # out of "a consumer vendored llm_chat instead of pointing at a sibling clone". A
     # positional rule stays fixed only while it means the same thing in what it is read over.
+    # A REMEDY BUILT BY FORMATTING IS STILL A REMEDY, and this check could not see one. The
+    # hijack prompt in lease.py is a template — it writes `{sr} worktree fork`, filled at print
+    # time with the resolved binary path — so the literal word "showrunner" never appears and
+    # every verb it advertised was invisible here. It advertised two that did not exist.
+    #
+    # That is the highest-traffic remedy text in the module, unchecked by the check written for
+    # exactly this, and the reason is worth naming: the scan keyed on the SPELLING of the binary
+    # rather than on the shape of a command. `sr_bin` exists precisely because that spelling is
+    # resolved rather than fixed, so the two were always going to diverge.
+    BINARY = r"(?:showrunner|\{[a-z_][a-z_0-9]*\})"
+
     def commands_in(text):
         spans = re.findall(r"`([^`\n]+)`", text)
         for block in re.findall(r"```[a-z]*\n(.*?)```", text, re.S):
             spans.extend(block.splitlines())
-        spans.extend(re.findall(r"^ {4,}(showrunner [a-z].*)$", text, re.M))
+        spans.extend(re.findall(r"^ {2,}(%s [a-z].*)$" % BINARY, text, re.M))
         for span in spans:
-            m = re.match(r"\s*showrunner ([a-z][a-z-]+)((?: [a-z][a-z-]+)?)", span)
+            m = re.match(r"\s*%s ([a-z][a-z-]+)((?: [a-z][a-z-]+)?)" % BINARY, span)
             if m:
                 yield m.group(1), m.group(2).strip()
 
@@ -3184,6 +3307,21 @@ def test_cli():
        "remedies deep here and only its first word was ever checked",
        "run" in subverbs_of("lock") and "guard" in subverbs_of("lock"),
        sorted(subverbs_of("lock")))
+
+    # THE EXTENSION NEEDS ITS OWN CONTROL. Widening a scan and watching the suite stay green
+    # proves nothing — a pattern that matches nothing looks exactly like a repo with no ghosts.
+    # So: a template spelling must be EXTRACTED, and a ghost written that way must be CAUGHT.
+    # Without these two, deleting the {placeholder} branch would be invisible.
+    tmpl = "  {sr} worktree fork --from x\n  {binary} lock run device -- ./x\n"
+    found = set(commands_in(tmpl))
+    ok("a remedy written as a TEMPLATE is extracted — `{sr} worktree fork` never contains the "
+       "word 'showrunner', which is how lease.py advertised two verbs that did not exist",
+       ("worktree", "fork") in found and ("lock", "run") in found, sorted(found))
+    ghost = set(commands_in("  {sr} worktree teleport --now\n"))
+    ok("...and a ghost spelled that way is CAUGHT — the widened scan can fail, which is the "
+       "only thing separating it from a regex that quietly matches nothing",
+       ("worktree", "teleport") in ghost
+       and "teleport" not in subverbs_of("worktree"), sorted(ghost))
     # Pure observation passes by finding nothing, which is also what a broken regex returns.
     ok("...and it found commands to check at all, so a PASS means they were verified rather "
        "than that the scan matched nothing", seen > 5, seen)

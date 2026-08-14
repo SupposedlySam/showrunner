@@ -94,6 +94,22 @@ TARGETS = [
     ("worktree-lease status", "lease.status", "lib/showrunner/lease.py",
      r"(def status\(cfg, tree=None\):\n)",
      "    return []\ndef _neutered_status(cfg, tree=None):\n"),
+    # The hijack DETECTOR. 'not-a-worktree' is its silent, reassuring answer — every session
+    # reads as being nowhere in particular, no lease is ever taken, no hijack is ever seen, and
+    # the journal WL-05's gate is owed stays empty. A detector that never fires and a world
+    # with nothing to detect are the same observation from outside.
+    # Answering None always means fork can never find a recorded base — which lands in the
+    # REFUSAL, not in a wrong tree, so this one degrades safely. Swept anyway rather than
+    # excused, because "it fails safe" is a claim about today's caller: the moment anything
+    # falls back to HEAD instead of refusing, a silent None becomes a fork off the wrong
+    # commit, and nothing would be watching.
+    ("fork's recorded base", "lease.base_sha_of", "lib/showrunner/lease.py",
+     r"(def base_sha_of\(cfg, tree\):\n)",
+     "    return None\ndef _neutered_base_sha_of(cfg, tree):\n"),
+    ("worktree enter (hijack detection)", "lease.enter", "lib/showrunner/lease.py",
+     r"(def enter\(cfg, session, path=None, who=None\):\n)",
+     "    return 'not-a-worktree', {}\n"
+     "def _neutered_enter(cfg, session, path=None, who=None):\n"),
     ("lock guard", "locks.LockSet.guard", "lib/showrunner/locks.py",
      r"(    def guard\(self, command, session=None\):\n)",
      "        return True, ''\n    def _neutered_guard(self, command, session=None):\n"),

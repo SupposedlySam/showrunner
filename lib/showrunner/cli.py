@@ -452,6 +452,110 @@ def cmd_lock_status(args):
     return 0
 
 
+def _stamp(ts):
+    """An epoch second is a number a reader has to go and convert. `since 1786738962` was
+    printed to a human deciding whether to take somebody's worktree, which is a decision about
+    how long ago something happened."""
+    try:
+        import datetime
+        return datetime.datetime.fromtimestamp(int(ts)).isoformat(timespec="seconds")
+    except (TypeError, ValueError):
+        return str(ts or "?")
+
+
+def _short(sid):
+    """Abbreviate a session id, and SAY that it is abbreviated. `sess-AAAA` came out as
+    `sess-AAA` — eight characters of a nine-character id, indistinguishable from the whole
+    thing, in a report whose entire job is telling two sessions apart."""
+    sid = sid or ""
+    if not sid:
+        return "?"
+    return sid if len(sid) <= 12 else sid[:12] + "…"
+
+
+def cmd_worktree_enter(args):
+    """SessionStart hook shape. ALWAYS exits 0 — see below.
+
+    Exit 0 unconditionally, including on a detected hijack, and that is not timidity. A
+    SessionStart hook cannot deny a session; a non-zero exit here would abort the session's
+    startup over a condition this leaf explicitly does not yet enforce, which is a gate built
+    before its failure was observed. The teeth are WL-05, on PreToolUse, where a refusal
+    actually maps onto the event.
+    """
+    cfg = _cfg(args)
+    session = args.session or os.environ.get("SHOWRUNNER_SESSION") or ""
+    verdict, detail = lease.enter(cfg, session, path=args.path, who=args.holder)
+    tree = detail.get("tree")
+    h = detail.get("holder") or {}
+
+    if verdict == "not-a-worktree":
+        return 0
+    if verdict == "own":
+        print("showrunner: you already hold worktree %s" % tree)
+        return 0
+    if verdict == "acquired":
+        print("showrunner: worktree %s is yours (liveness basis: %s)"
+              % (tree, h.get("pid_basis") or "?"))
+    elif verdict == "reclaimed":
+        prev = detail.get("previous") or {}
+        print("showrunner: worktree %s was held by a session that is NOT alive (pid %s, "
+              "session %s) — reclaimed.\n  Its work may still be in the tree. Nothing here "
+              "deleted anything." % (tree, prev.get("pid"), (prev.get("session") or "?")[:8]))
+    elif verdict == "unreadable":
+        print("showrunner: worktree %s holds an UNREADABLE pid (%r). It cannot be proved dead, "
+              "so it will not be reclaimed — a partial write by a LIVE holder looks exactly "
+              "like this.\n  Find out whether %s is still running, then `%s worktree takeover "
+              "%s --reason \"<why>\"`."
+              % (tree, (h.get("pid") or "")[:40], h.get("who") or "the holder",
+                 brief.sr_bin(cfg), tree))
+        return 0
+    elif verdict == "no-liveness":
+        print("showrunner: no session process could be resolved, so a lease here would have no "
+              "liveness at all and was NOT taken (%s).\n  This tree is unprotected; that is "
+              "said out loud rather than left to look like success." % h.get("why", ""))
+        return 0
+    elif verdict == "hijack":
+        print(lease.OPTIONS.format(
+            who=h.get("who") or "?", session=_short(h.get("session")),
+            pid=h.get("pid"), since=_stamp(h.get("ts")),
+            basis=h.get("pid_basis") or "unrecorded",
+            sr=brief.sr_bin(cfg), tree=tree))
+
+    # WHAT A WORKTREE DOES NOT ISOLATE, printed from the audit rather than restated here.
+    # Restating it is how the two copies drift, and worktree.audit_shared is the one that gets
+    # maintained because spawn already depends on it.
+    shares = worktree.audit_shared(cfg)
+    if shares and verdict in ("acquired", "reclaimed", "hijack"):
+        print("\n  A lease covers this TREE. Still shared with every sibling:")
+        for item in shares:
+            print("    - %s" % item["what"])
+    return 0
+
+
+def cmd_worktree_fork(args):
+    """Your own tree, from the same commit the held one started at. Exit 2 on refusal."""
+    cfg = _cfg(args)
+    session = args.session or os.environ.get("SHOWRUNNER_SESSION") or ""
+    try:
+        path, d = lease.fork(cfg, getattr(args, "from"), session, base=args.base, name=args.name)
+    except Refused as exc:
+        die(str(exc), code=2)
+    print("forked %s -> %s" % (d["from"], d["tree"]))
+    # Resolved, and described as what it IS rather than as what it usually is. This said
+    # "the commit X started at, not HEAD" unconditionally, which is false the moment somebody
+    # passes --base HEAD — the line then argued with itself in the same breath.
+    print("  base    %s  (%s)" % (
+        d["base"][:12],
+        "explicit --base" if args.base else "the commit %s started at" % d["from"]))
+    print("  path    %s" % rel(path, cfg.root))
+    print("  lease   held by you")
+    for line in d.get("injected") or []:
+        print("  inject  %s" % line)
+    for line in d.get("warnings") or []:
+        print("  note    %s" % line)
+    return 0
+
+
 def cmd_lease_status(args):
     """What holds each worktree. Read-only, and it prints the BASIS of every liveness claim.
 
@@ -1108,6 +1212,21 @@ def build_parser():
     t = esub.add_parser("status", help="what holds each worktree, and on what evidence")
     t.add_argument("tree", nargs="?")
     t.set_defaults(func=cmd_lease_status)
+
+    s = sub.add_parser("worktree", help="the tree a session is standing in")
+    wsub = s.add_subparsers(dest="worktreecmd")
+    t = wsub.add_parser("enter", help="SessionStart: take this tree's lease, or report who holds it")
+    t.add_argument("--session", help="the Claude Code session id (hooks supply it on stdin)")
+    t.add_argument("--path", help="the tree to consider; defaults to the cwd")
+    t.add_argument("--holder", help="a name for the holder; defaults to 'interactive'")
+    t.set_defaults(func=cmd_worktree_enter)
+
+    t = wsub.add_parser("fork", help="your own tree, off the same base as a held one")
+    t.add_argument("--from", required=True, help="the held worktree to fork from")
+    t.add_argument("--session", help="the Claude Code session id")
+    t.add_argument("--base", help="override the base commit; refuses rather than guess one")
+    t.add_argument("--name", help="a name for the new tree")
+    t.set_defaults(func=cmd_worktree_fork)
 
     s = sub.add_parser("lock", help="single-consumer resource locks")
     lsub = s.add_subparsers(dest="lockcmd")

@@ -74,17 +74,21 @@ class Lease:
     def state(self):
         """(state, holder) straight from the lock. Never reinterpreted here.
 
-        Deliberately a pass-through. Any 'helpful' collapsing at this layer — treating
+        A pass-through, and it must stay one. Any 'helpful' collapsing at this layer — treating
         UNREADABLE as free, say, or aging a HELD lease out — would be this module quietly
-        holding a different liveness rule than the one the device lane enforces, and two
-        layers disagreeing about the rules silently is the failure BOUNDARY.md exists for.
+        holding a different liveness rule than the one the device lane enforces, and two layers
+        disagreeing about the rules silently is the failure BOUNDARY.md exists for.
+
+        The holder that comes back now CARRIES `pid_basis`, which it did not when this was
+        written: `Lock.acquire` had a write side with no read side, so a caller taking the
+        holder from here got the basis missing and printed "?" in the hijack report — the one
+        place the field exists for. Fixed at the lock (d89ab28), which is the right layer; the
+        local workaround that reached through `Lock._read` is deleted rather than kept beside
+        it, because two ways to get the same field is how they start disagreeing.
         """
         return self.lock.state()
 
     def holder(self):
-        """Straight through. `Lock.holder` returns the extras `acquire` wrote, including
-        `pid_basis` — this used to reach through `Lock._read` for it, because only the write
-        side of that interface existed."""
         return self.lock.holder()
 
     def held_by_other(self, session):
@@ -136,6 +140,163 @@ class Lease:
                            "session is gone" % (h.get("session") or "?"))
         self.lock.release(force=True)
         return True, "released"
+
+
+OPTIONS = """\
+This worktree is held by another live session.
+
+  holder   {who}  (session {session}, pid {pid}, alive, this boot)
+  since    {since}
+  basis    {basis}
+
+Nothing is stopping your writes yet — the guard that will is WL-05, and it is deliberately
+not built until a real hijack has been observed rather than imagined. Treat this as the
+warning it is:
+
+  1. Your own tree, same starting point — the usual answer:
+       {sr} worktree fork --from {tree}
+     New worktree and branch off the same base commit.
+
+  2. Read-only. Stay, read, do not write. Nothing further needed.
+
+  3. Take it over — NOT BUILT YET (WL-06). Said plainly rather than printed as though it
+     works: a remedy naming a command that does not exist is worse than no remedy, and this
+     project has shipped that twice. Until it lands, a holder you know is gone is cleared with
+     `{sr} lease status` to confirm the state, then by hand.
+
+  4. Leave."""
+
+
+def enter(cfg, session, path=None, who=None):
+    """SessionStart: work out who holds this tree and say so. Never blocks, never denies.
+
+    SessionStart CANNOT block a session — that is a fact about the event, not a decision made
+    here — so this is where the *prompt* lives and WL-05 is where the *enforcement* will. The
+    two are kept apart on purpose: a prompt that reads like a refusal teaches a reader that
+    refusals are advisory, and then the real one gets argued with.
+
+    Returns (verdict, detail). Verdicts: 'not-a-worktree', 'acquired', 'own', 'hijack',
+    'reclaimed', 'unreadable', 'no-liveness'.
+    """
+    from . import events
+
+    tree = tree_for(cfg, path)
+    if not tree:
+        # Silent. A session in the main checkout is the ordinary case, and an orchestrator that
+        # narrates every non-event trains its reader to skim the one that matters.
+        return "not-a-worktree", {}
+
+    lease = Lease(cfg, tree)
+    state, h = lease.state()
+
+    if state == locks.UNREADABLE:
+        # Not adjudicable from here, and deliberately not "reclaim it and carry on". A partial
+        # write by a LIVE holder reads exactly like a dead one; only a human can find out which.
+        events.emit(cfg, "lease.unreadable", {"tree": tree, "session": session})
+        return "unreadable", {"tree": tree, "holder": h or {}}
+
+    if state == locks.HELD:
+        if h and h.get("session") == session:
+            return "own", {"tree": tree, "holder": h}
+        # THE EVENT THIS WHOLE LEAF EXISTS TO PRODUCE. WL-05 may not build anything that
+        # refuses until a hijack has actually been observed — no gate without a logged failure —
+        # and a verdict printed to a terminal nobody kept is not an observation. The journal is
+        # where it becomes one.
+        events.emit(cfg, "lease.hijack", {
+            "tree": tree,
+            "intruder_session": session,
+            "holder_session": h.get("session") if h else None,
+            "holder_pid": h.get("pid") if h else None,
+            "holder": h.get("who") if h else None,
+        })
+        return "hijack", {"tree": tree, "holder": h or {}}
+
+    if state == locks.STALE:
+        events.emit(cfg, "lease.reclaimed", {
+            "tree": tree, "session": session,
+            "dead_session": h.get("session") if h else None,
+            "dead_pid": h.get("pid") if h else None,
+        })
+
+    got, holder = lease.acquire(session, who=who or INTERACTIVE)
+    if not got:
+        return "no-liveness", {"tree": tree, "holder": holder or {}}
+    verdict = "reclaimed" if state == locks.STALE else "acquired"
+    events.emit(cfg, "lease.acquired", {"tree": tree, "session": session,
+                                        "basis": (holder or {}).get("pid_basis")})
+    return verdict, {"tree": tree, "holder": holder or {}, "previous": h or {}}
+
+
+def base_sha_of(cfg, tree):
+    """The commit the held tree started from, read from the campaign record.
+
+    Recorded at spawn precisely because git CANNOT reconstruct it afterwards: a fully-merged
+    branch and one that never received a commit both have the base as their merge-base. So a
+    fork that guessed with `merge-base` would silently start from the wrong place whenever the
+    held tree had already merged, and produce a tree that looks right.
+
+    Returns None when unknown, and callers must treat that as "ask", never as "use HEAD".
+    """
+    from . import campaign
+    for entry in campaign.load(cfg).get("crawlers", []):
+        if os.path.basename(str(entry.get("worktree") or "")) == tree:
+            return entry.get("base_sha")
+    return None
+
+
+def fork(cfg, tree, session, base=None, name=None):
+    """A tree of your own, from the same commit the held one started at.
+
+    The answer the hijack prompt offers first, and the reason it is a VERB rather than a
+    paragraph: told to "just make another worktree", a reader picks HEAD, which is not where
+    the held tree started and is the one detail that makes the two trees incomparable.
+
+    Returns (path, detail). Raises Refused on anything it will not guess at.
+    """
+    from . import harness
+    from .util import Refused, git, slug
+
+    src = tree_for(cfg, os.path.join(cfg.worktree_root, tree))
+    if not src:
+        raise Refused("%r is not a worktree under %s" % (tree, cfg.worktree_root))
+    if base is None:
+        base = base_sha_of(cfg, tree)
+    if not base:
+        raise Refused(
+            "no recorded base commit for %r, and this will not guess one. git cannot tell a "
+            "merged branch from an empty one after the fact, so a guessed base is wrong exactly "
+            "when the held tree has already merged — silently, and the fork would look fine. "
+            "Pass --base <commit> if you know it." % tree)
+
+    # RESOLVE TO A SHA BEFORE CREATING ANYTHING, for the reason `spawn` does it: afterwards git
+    # cannot tell a fully-merged branch from one that never received a commit, so the symbolic
+    # ref is not recoverable as the thing it meant at this instant. A caller passing `--base
+    # HEAD` also made the report say `base HEAD ... not HEAD`, which is a sentence that argues
+    # with itself — observed on the first real fork.
+    rc, resolved, _ = git(["rev-parse", "%s^{commit}" % base], cwd=cfg.root)
+    if rc != 0 or not resolved.strip():
+        raise Refused("git cannot resolve base %r in %s" % (base, cfg.root))
+    base = resolved.strip()
+
+    name = name or slug("%s-fork-%s" % (tree, (session or "x")[:8]), 60)
+    from . import worktree as W
+    path = W.create(cfg, name, "showrunner/%s" % name, base)
+    injected, problems = W.inject(cfg, path)
+    provisioned, hp, hw = harness.provision(cfg, path)
+    if hp and harness.spec(cfg)["require"]:
+        W.remove(cfg, name, force=True)
+        git(["branch", "-D", "showrunner/%s" % name], cwd=cfg.root)
+        raise Refused("fork aborted — the new tree's harness is not the project's:\n  - %s"
+                      % "\n  - ".join(hp))
+
+    lease = Lease(cfg, name)
+    lease.acquire(session, who=INTERACTIVE)
+    from . import events
+    events.emit(cfg, "lease.forked", {"from": tree, "tree": name, "session": session,
+                                      "base": base})
+    return path, {"tree": name, "base": base, "from": tree, "injected": injected,
+                  "provisioned": provisioned, "warnings": hw,
+                  "problems": [] if not hp else hp}
 
 
 def status(cfg, tree=None):
