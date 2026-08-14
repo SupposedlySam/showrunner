@@ -62,16 +62,43 @@ class Lock:
         except OSError:
             return ""
 
+    # The five this module OWNS and computes liveness from. Everything else in the directory
+    # was put there by a caller through `acquire(extra=...)` and is returned untouched.
+    _OWN = ("pid", "boot", "holder", "session", "ts")
+
     def holder(self):
+        """Who holds it, including whatever the caller recorded alongside.
+
+        EXTRAS ARE READ BACK HERE, and that is a fix rather than a feature. `acquire` grew an
+        `extra` parameter so a caller could record why its pid means what it does — the worktree
+        lease needs it, since its pid comes from walking a hook's ancestry and can rest on a
+        weaker fact. But only the WRITE side was added: this returned the five fixed fields, so
+        the lease had to reach through `Lock._read` to get its own value back.
+
+        An interface that lets a caller write a field and not read it forces exactly that, and
+        reaching past an interface into another module's privates is the coupling this project
+        deleted `DEFAULT_RULE_FILES` to end. The asymmetry was the defect; the reach was the
+        symptom.
+
+        Extras are returned and never interpreted. The four states are still computed from `pid`
+        and `boot` alone, so no caller can widen or weaken the liveness rule by passing a field.
+        """
         if not os.path.isdir(self.dir):
             return None
-        return {
+        h = {
             "pid": self._read("pid"),
             "boot": self._read("boot"),
             "who": self._read("holder") or "?",
             "session": self._read("session"),
             "ts": self._read("ts"),
         }
+        try:
+            for name in sorted(os.listdir(self.dir)):
+                if name not in self._OWN and os.path.isfile(os.path.join(self.dir, name)):
+                    h[name] = self._read(name)
+        except OSError:
+            pass
+        return h
 
     def state(self):
         h = self.holder()

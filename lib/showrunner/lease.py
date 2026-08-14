@@ -82,11 +82,10 @@ class Lease:
         return self.lock.state()
 
     def holder(self):
-        h = self.lock.holder()
-        if h is not None:
-            h.setdefault("pid_basis", "")
-            h["pid_basis"] = self.lock._read("pid_basis")
-        return h
+        """Straight through. `Lock.holder` returns the extras `acquire` wrote, including
+        `pid_basis` — this used to reach through `Lock._read` for it, because only the write
+        side of that interface existed."""
+        return self.lock.holder()
 
     def held_by_other(self, session):
         """True only when a DIFFERENT session holds this tree and is alive.

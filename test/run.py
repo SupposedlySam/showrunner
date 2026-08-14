@@ -173,6 +173,29 @@ def test_locks():
     device = ls.lock("device")
     pg = ls.lock("pg-port")
 
+    # WHAT A CALLER WRITES, A CALLER CAN READ BACK. `acquire(extra=...)` was added for the
+    # worktree lease and only the WRITE half existed — `holder()` returned five fixed fields, so
+    # the lease reached through `Lock._read` for its own value. It worked and was tested one
+    # layer up, which is why nothing here objected: an interface missing half of itself produces
+    # a caller that goes around it, not a failure.
+    extra_lock = ls.lock("device")
+    extra_lock.acquire(os.getpid(), "someone", session="s-extra",
+                       extra={"pid_basis": "discovered", "tree": "crawler-a"})
+    try:
+        back = extra_lock.holder() or {}
+        eq("an extra a caller recorded comes back from holder()", back.get("pid_basis"),
+           "discovered")
+        eq("...all of them, not just the one somebody needed first", back.get("tree"),
+           "crawler-a")
+        ok("...alongside the fields this module owns, not instead of them",
+           back.get("session") == "s-extra" and back.get("pid"), back)
+        # The reason extras are returned UNINTERPRETED: a caller must not be able to widen or
+        # weaken liveness by passing a field. State is computed from pid and boot alone.
+        state, _ = extra_lock.state()
+        eq("...and an extra cannot change the lock's state", state, locks.HELD)
+    finally:
+        extra_lock.release(force=True)
+
     # AN UNREADABLE PID IS NOT A DEAD ONE. `pid_alive` returns False both for "not running"
     # and for "not a pid", and only the first licenses deleting somebody else's lock. A
     # partial write by a LIVE holder reads exactly like a holder that died — which is how a
