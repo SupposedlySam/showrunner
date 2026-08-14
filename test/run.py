@@ -1397,7 +1397,7 @@ def test_publishable():
                 return False
         return True
 
-    injectable = []
+    injectable, examined = [], 0
     for name in ("campaign.py", "cli.py", "collide.py", "dispatch.py", "gates.py",
                  "graph.py", "harness.py", "locks.py", "util.py", "worktree.py"):
         with open(os.path.join(ROOT, "lib", "showrunner", name)) as fh:
@@ -1407,12 +1407,19 @@ def test_publishable():
                 continue
             if not node.args:
                 continue
+            examined += 1
             first = node.args[0]
             if builds_a_string(first):
                 injectable.append("%s:%d" % (name, node.lineno))
     ok("no run() argument is BUILT by interpolation — a list goes to argv and a bare config "
        "string is an intended shell command, but a formatted string is data becoming code",
        not injectable, injectable)
+    # A SCANNER WHOSE MATCHER GOES STALE PASSES IDENTICALLY TO A CLEAN TREE. This one finds
+    # calls named `run` in a hardcoded module list: rename the helper, or rename a file, and it
+    # examines nothing and reports success. The finding is the absence of hits, so the count of
+    # things looked at is the only thing separating "clean" from "did not look".
+    ok("...and it examined a real number of run() call sites, so a PASS means they were "
+       "checked rather than that the scan matched nothing", examined > 8, examined)
     # Both directions pinned, because this rule is one edit from useless in either. Too wide
     # and it flags every list concat and gets switched off; too narrow and it misses the
     # f-string that turns a leaf title into shell.
