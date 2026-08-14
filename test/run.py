@@ -2382,6 +2382,89 @@ def test_claims_about_the_layer_below():
            real and not lands_near(real + 200, ["EDITED_F"]), real)
 
 
+def test_retracted_doc_claims():
+    group("Claims the docs used to make that are now false")
+    # A DOCUMENTATION PASS FOUND FOUR, and none of them could have been caught by reading the
+    # docs — every one was internally coherent and specific. They were caught by reading the
+    # source beside them. The README described showrunner copying the hook-registration file
+    # (the one thing harness.py says never to do), comparing rule files itself (the hardcoded
+    # list that was deleted), and chat being optional; both docs said `waiting` exits 0 while
+    # dispatched work has a live owner, which stopped being true the day a blocked Crawler
+    # became a thing this can see.
+    #
+    # WHAT THIS CATCHES AND WHAT IT DOES NOT. It catches a retracted claim COMING BACK — from a
+    # revert, a copy-paste out of git history, or a rewrite by someone who read the old version.
+    # It cannot catch a NEW wrong claim; nothing here reads a sentence and judges it. That is
+    # the same limit as the layer-below stamp and it is worth stating rather than implying,
+    # because a green run here means "the four known corpses are still buried", never "the docs
+    # are true".
+    #
+    # Each entry carries the SOURCE FACT that makes it false, asserted in the same breath — so
+    # if the code ever changes back, this fails as a stale guard rather than silently forbidding
+    # a sentence that has become true again.
+    retracted = [
+        ("copies the hook registration",
+         "lib/showrunner/harness.py", "Never copy the hook-registration file",
+         "the installer MERGES hooks; a wholesale copy discards the project's own settings"),
+        ("minus the conversation",
+         "lib/showrunner/dispatch.py", "def wire_stop_gate",
+         "a wired turn-end gate means a refused Crawler needs a message to restart, so the "
+         "room is load-bearing for correctness under --launch"),
+        ("exits 0 while dispatched work has a live owner\n",
+         "lib/showrunner/campaign.py", "blocked_crawlers",
+         "a blocked Crawler IS a live owner and now counts as neither waiting nor parked"),
+        ("compares every\nrule file **byte-for-byte** against the main checkout",
+         "lib/showrunner/harness.py", "showrunner keeps no list of its own",
+         "the harness answers which files are rules; showrunner asks and never compares"),
+    ]
+    # WHITESPACE-NORMALISED, because the first version of this scan was VACUOUS and passed. The
+    # docs wrap at 96 columns, so "minus the conversation" is stored as "minus the\nconversation"
+    # and a substring search for the sentence found nothing — in a README that quotes it three
+    # lines below. A scan whose pattern does not match the format its subject is written in
+    # returns "clean" and "never looked" as the same answer, and the tell was that the result
+    # contradicted something already seen directly.
+    def flat(text):
+        return " ".join(text.split())
+
+    docs = {}
+    for rel_path in ("README.md", "llms.txt", "docs/DESIGN.md", "docs/BOUNDARY.md"):
+        full = os.path.join(ROOT, rel_path)
+        if os.path.exists(full):
+            with open(full, errors="ignore") as fh:
+                docs[rel_path] = flat(fh.read())
+    ok("there are docs to check, so a pass here is not a pass over nothing", len(docs) >= 3, list(docs))
+
+    # QUOTING A RETRACTED CLAIM IS NOT MAKING IT. Naming what a doc used to say, next to why it
+    # was wrong, is the practice that makes these findable at all — so an occurrence is only a
+    # failure when nothing near it marks it as retracted.
+    MARKERS = ("was wrong", "no longer", "used to", "stopped being true", "is not true",
+               "and that was", "until ")
+    for phrase, src, anchor, why in retracted:
+        with open(os.path.join(ROOT, src), errors="ignore") as fh:
+            source = fh.read()
+        ok("the source still says what makes '%s' false — %s" % (flat(phrase)[:40], why),
+           anchor in source, (src, anchor))
+        needle = flat(phrase)
+        asserted = []
+        for doc, text in docs.items():
+            at = text.find(needle)
+            while at != -1:
+                window = text[max(0, at - 240):at + len(needle) + 240]
+                if not any(m in window for m in MARKERS):
+                    asserted.append("%s @%d" % (doc, at))
+                at = text.find(needle, at + 1)
+        ok("...and no tracked doc asserts it again (quoting it as retracted is fine)",
+           not asserted, asserted)
+
+    # THE POSITIVE CONTROL, and it has to use a RETRACTED phrase rather than any old word: the
+    # question is whether this scan can find one of these sentences in the docs as they are
+    # actually written, which is precisely what it could not do before.
+    quoted = [p for p, _, _, _ in retracted if any(flat(p) in t for t in docs.values())]
+    ok("the scan finds a retracted phrase that IS present — so 'no doc asserts it' means "
+       "checked, not that the pattern stopped matching the way the docs wrap",
+       quoted, [flat(p)[:40] for p, _, _, _ in retracted])
+
+
 def test_cli():
     group("CLI surface")
     exe = os.path.join(ROOT, "bin", "showrunner")
@@ -2774,7 +2857,7 @@ def main():
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_waiting, test_concurrency,
                test_integration, test_publishable, test_dispatch, test_filed_issues_15_to_21,
-               test_claims_about_the_layer_below,
+               test_claims_about_the_layer_below, test_retracted_doc_claims,
                test_cli, test_optional):
         try:
             fn()

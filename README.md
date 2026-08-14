@@ -10,7 +10,7 @@ single Crawler can see, and keeps the campaign coherent across sessions.
 > Status: **implemented and self-hosting.** The orchestration loop is real code
 > ([`lib/showrunner/`](lib/showrunner/)), it installs in one line with no packages, and it has been
 > run against its own issue list — see [Dogfooding](#dogfooding-showrunner-on-its-own-issues).
-> `python3 test/run.py` → **385 assertions, no setup beyond Python 3 and git.**
+> `python3 test/run.py` → **395 assertions, no setup beyond Python 3 and git.**
 
 ## Requirements
 
@@ -99,7 +99,9 @@ showrunner ready                # the only work-discovery entrypoint: unblocked,
      repeat until ready is dry
 ```
 
-Six mechanics carry the weight.
+The mechanics that carry the weight, each with the failure it exists to prevent. (This said "six"
+and there have not been six for a long time — an ungated number in prose, which is the same thing
+the boundary doc's stamp exists to stop and the third one this repo has had to correct.)
 
 **Proof-of-done gate.** A leaf cannot close unless it cites a real, non-empty artifact that is *newer
 than the claim* — an artifact older than the work is evidence about something else. The proof is
@@ -139,9 +141,17 @@ closed (SIGTERM, never SIGKILL), and closes rooms belonging to Crawlers that die
 closing anything. Under repeated fan-out those two leaks — a stacking process and a room per
 dead Crawler — are what fill a machine and make a channel list unreadable.
 
-**Talking to a running Crawler is optional and unbundled.** If you want to reach a Crawler
-while it works, clone a chat tool and point showrunner at it — nothing is vendored and no
-package manager is assumed:
+**A Crawler can also stop without dying, and that is the harder one.** Its turn-end gate refuses
+while its leaf is still open — correct, and the reason it no longer exits with work unfinished —
+but a headless session has nothing to deliver "go back to work" to itself. It stays alive and
+inert, and every signal reads healthy: a live pid, an open leaf, a report already on disk, `reap`
+correctly proposing nothing. `showrunner reconcile` reports those as **BLOCKED**, ranked above
+LIVE precisely because they *are* live. One sat that way for 44 minutes here and then woke,
+reported and closed correctly the moment a message reached it. Making the old failure loud
+created a quieter one; this is what reads it back.
+
+**Talking to a running Crawler is unbundled — and under `--launch`, not optional.** Clone a chat
+tool and point showrunner at it; nothing is vendored and no package manager is assumed:
 
 ```bash
 git clone https://github.com/SupposedlySam/llm_chat.git ../llm_chat
@@ -258,7 +268,7 @@ orchestration failure — a file appearing in an integration commit that **no Cr
 
 ## Dogfooding: showrunner on its own issues
 
-This repo's 14 open issues were loaded into showrunner's own graph and run through the loop. Two
+This repo's first 14 issues were loaded into showrunner's own graph and run through the loop. Two
 things worth reporting because they are evidence rather than claims:
 
 - **Dependency-gated fan-out fired for real.** The work-graph decision gated six issues; closing it
@@ -268,10 +278,24 @@ things worth reporting because they are evidence rather than claims:
   the finding the collision issue reported from doing it by hand — and the run says *why* it is
   serializing rather than looking like an unexplained slow run.
 
+**The rounds after that are the more useful evidence, because they came from running it rather
+than reading it.** A later batch of seven was filed by an agent working in a *consuming* repo, and
+all seven premises held — a better rate than the first run's, where three of fourteen did not
+survive contact with the code. Every one of the seven was something only a real `--launch` could
+surface: a brief naming a binary that could not resolve from a worktree, a permission mode that
+left a Crawler unable to run any command, a claim whose liveness named the shell that spawned it
+rather than the session it launched.
+
+The batch after *that* came from watching the fixes run, and two of them were caused by earlier
+fixes of mine — a wired turn-end gate that turned a loud failure into a silent one, and a brief
+instruction that cost the orchestrator one blocked turn-end per Crawler under fan-out. That is
+the honest shape of dogfooding: the second-order defects only exist once the first-order ones are
+gone, and nothing but running it finds them.
+
 ## Verifying it
 
 ```bash
-python3 test/run.py            # 385 CORE assertions — Python 3 + git, nothing else
+python3 test/run.py            # 395 CORE assertions — Python 3 + git, nothing else
 bash prototype/demo.sh         # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 
@@ -319,8 +343,19 @@ Two things stay deliberately single: **integration** (it merges, runs checks, an
 resource** you have configured. Both refuse loudly instead of waiting silently, because a
 multi-minute silent wait is indistinguishable from a hang.
 
-`showrunner waiting` exits 0 while dispatched work has a live owner or an explicit park — the
-recomputable fact an idle watchdog needs, since it cannot see a subagent.
+`showrunner waiting` exits 0 while dispatched work has a **working** owner — a live PID that is
+not blocked — or an explicit park. That is the recomputable fact an idle watchdog needs, since it
+cannot see a subagent. A Crawler refused at a turn-end is live and is deliberately *not* counted:
+it is doing nothing, only a message restarts it, and calling that "waiting" would silence the
+watchdog on the one run that needs it. Those are reported separately, because somebody has to go
+and prompt them.
+
+**Arming that watchdog is a manual step, once per install.** `showrunner doctor` names it and
+prints the exact line to paste, including the absolute path. It cannot do it for you: the verb
+that would arm it is callable by the sessions being watched, and a probe that always exits 0
+reads as "always waiting" — the watchdog switched off by the thing it watches. Until it is armed,
+an orchestrator that has correctly dispatched a full wave looks exactly like one that fell
+asleep, gets rung, and eventually pages you for a run that was behaving perfectly.
 
 ## What a Crawler's harness gets
 
@@ -335,10 +370,27 @@ so a fresh install in a worktree yields a blank `verify.yaml` — **a commit gat
 and reports success** — plus default invariants and default write roots. Nothing errors. The party
 simply plays by two rule sets, and the weaker one is the one running unattended in N worktrees.
 
-So showrunner copies the harness minus whatever it declares as runtime state (read from the
-harness's *own* ignore file, because session state belongs to a session and must never be handed
-to a Crawler), copies the hook registration so the Crawler actually has rails, and compares every
-rule file **byte-for-byte** against the main checkout. A mismatch aborts the spawn.
+So showrunner prefers the harness's **own installer** when one is configured, because that is the
+thing that knows how to provision a tree from a parent rather than from blank templates. Failing
+that it copies the harness minus whatever it declares as runtime state — read from the harness's
+*own* ignore file, because session state belongs to a session and must never be handed to a
+Crawler.
+
+It **never copies the hook-registration file.** That was the first version and it was wrong: the
+installer *merges* its hooks, preserving the project's own statusLine, permissions and unrelated
+hooks, and warning about a pre-existing non-harness hook on an event it manages — a stray Stop
+hook from an older harness fights it over turn-ends and presents as "the orchestrator is
+mysteriously flaky". A wholesale copy discards the settings and silently drops the warning.
+
+And showrunner does **not** compare the rule files itself. It asks the harness, which answers
+about its own trees: which files are rules, which are notes, and whether this tree matches its
+parent. An earlier version hardcoded that list and was *already* drifting — it knew nothing of the
+harness's notes tier, so a diverged ledger was invisible to it. A verdict of drifted or
+undetermined aborts the spawn; "could not tell" and "matched" are never the same answer.
+
+> This paragraph described the deleted design for weeks after it was deleted — copying the hook
+> file, comparing rules here — which is the same stale-claim failure the boundary doc exists to
+> catch, in the human-facing doc rather than the machine-facing one.
 
 ## Docs
 

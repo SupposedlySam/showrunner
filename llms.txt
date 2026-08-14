@@ -4,13 +4,15 @@
 > `.showrunner/` directory, this file tells you how to operate it. Everything below is a command you
 > run, not a rule you remember.
 
-showrunner decomposes a quest into a dependency graph, sends a party of "Crawler" agents into separate
-git worktrees in parallel, enforces the party-wide rules no single agent can see (above all: a
+showrunner decomposes work into a dependency graph, sends a party of agents into separate git
+worktrees in parallel, enforces the party-wide rules no single agent can see (above all: a
 cross-process lock over shared single-consumer resources), and keeps the campaign coherent across
 sessions. It is the horizontal counterpart to **game_loop**'s vertical, single-session survival rails.
-Both game_loop and **br** are optional and neither knows showrunner exists. Theme: Dungeon Crawler
-Carl — Crawlers run the rooms, game_loop keeps each alive, the graph is the quest log, showrunner runs
-the production.
+Both game_loop and **br** are optional and neither knows showrunner exists.
+
+**Crawler** is the only term you need: one Claude Code session, in its own worktree, with its own
+scratch dir and its own brief, working one leaf. The naming is themed and the docs lean on it; the
+definition is the whole of what it means here.
 
 The design rule everything follows from, inherited from the layer below: **enforcement lives in tools
 and artifacts, never in instructions.** Test any guard by asking — *if I ignored every instruction,
@@ -29,8 +31,16 @@ install.
 ./.showrunner/bin/showrunner status     # ready / claimed / parked / locks / stale claims
 ```
 
-`doctor` exits non-zero on a lock root that is not one absolute shared path, or a worktree root
-outside the repo. Fix the config; do not route around it.
+`doctor` exits non-zero on anything that would degrade **silently**: no config at all (every check
+below it then runs against defaults nobody chose), a lock root that is not one absolute shared
+path, a worktree root outside the repo, a configured chat path that does not resolve, or a missing
+`.showrunner/bin/showrunner` — the binary every Crawler brief names. Fix the config; do not route
+around it.
+
+It also **warns** about the one thing a human has to do by hand: arming the harness's idle
+watchdog with `showrunner waiting`. It prints the exact line and the exact file. You cannot do
+this for the operator — a probe an agent can set is a watchdog an agent can switch off — so if
+you are running unattended, say that it is unarmed rather than proceeding quietly.
 
 ## If you are the ORCHESTRATOR
 
@@ -46,16 +56,22 @@ showrunner spawn <leaf> --launch     # ...and STARTS a real Claude Code session 
                                      # and stops, and you start the agent yourself.
 showrunner integrate                 # serial merge, checks re-run on each MERGED result
 
-# Optional: reach a Crawler while it works. Clone any chat tool and point config at it —
-# nothing is vendored. git clone https://github.com/SupposedlySam/llm_chat.git ../llm_chat
-# then dispatch.chat = {enabled, cli, installer}. Omit it and dispatch is unchanged.
-# Machine-specific paths go in .showrunner/config.local.json, an untracked overlay.
+# A chat room is NOT optional under --launch. A Crawler refused at its turn-end stays alive
+# and inert, and a message is the only thing that restarts it. Nothing is vendored:
+# git clone https://github.com/SupposedlySam/llm_chat.git ../llm_chat
+# then dispatch.chat = {enabled, cli, installer}. Without it, use spawn WITHOUT --launch and
+# drive the Crawlers yourself. Machine-specific paths go in .showrunner/config.local.json.
 showrunner reap                      # dry run; --apply to reclaim dead Crawlers' claims and locks,
                                      # close rooms they left open, and SIGTERM processes that
                                      # outlived their leaf. `close` already closed the room and
                                      # marked the Crawler finished; this catches what died badly.
-showrunner reconcile                 # on resume: merged / abandoned / live — ask this FIRST
+showrunner reconcile                 # on resume: merged / abandoned / live / BLOCKED — ask FIRST
 ```
+
+**A BLOCKED Crawler needs a message, not time.** It was refused at its turn-end, it is alive, and
+nothing here can prompt it — `reap` correctly proposes nothing and every other signal reads
+healthy. Send it something in its room. If chat is disabled you have no way to reach it, which is
+why the room is not optional under `--launch`.
 
 **Do not fan out past what `plan` allows.** Two leaves can be mutually unblocked and still be the same
 edit: the graph models dependencies, not files. A false collision costs one wave of latency; a missed
@@ -74,7 +90,11 @@ Supported. Do NOT read `ready` and claim its first entry — everyone gets the s
 
 ```
 showrunner claim --next --actor <you>    # atomically take any free leaf; exit 1 when dry
-showrunner waiting                       # exit 0 while dispatched work has a live owner
+showrunner waiting                       # exit 0 while dispatched work has a WORKING owner (a
+                                         # live PID that is not blocked) or an explicit park.
+                                         # A Crawler refused at a turn-end is live and counts as
+                                         # NEITHER — it is doing nothing and only a message
+                                         # restarts it. Reported separately; go prompt it.
 ```
 
 Losing a claim race is not an error; a sibling got there first. Integration and single-consumer
@@ -87,7 +107,9 @@ Your brief is in your scratch dir (`BRIEF.md`). The short version:
 
 **1. Verify the premise before you write anything.** The issue was written from an incident, and the
 incident may have happened in a different repo, a different harness, or a version of this code that no
-longer exists. Three of fourteen issues in one real run described something that was not true here.
+longer exists. Three of fourteen issues in one real run described something that was not true here;
+in a later batch of seven, all seven held. The rate is not the point — you cannot tell which batch
+you are in from the inside, and the two look identical until you read the source.
 
 **2. "Premise refuted" is a success.** Close it and stop; do not build a smaller version of the thing
 so you have something to show:
@@ -125,6 +147,18 @@ tracked files and nothing else — the harness's state directory, lock paths and
 gate may be reporting on a tree you do not own. `--no-verify` starts looking reasonable exactly when
 you are stuck under a mandate to finish, and that is the moment it is most wrong.
 
+**7. If your turn-end is refused, your leaf is still open — close it or say why.** That refusal is
+showrunner's own gate reading the graph, and it is telling you the truth. Do not treat it as a
+signal to stop: a headless session that stops there has nothing that can restart it from inside,
+and the orchestrator sees a live process on an open leaf with every artifact looking finished.
+One sat 44 minutes that way.
+
+**8. In your room, post what the orchestrator can ACT on — and no start notice.** It dispatched you
+seconds ago and wrote your brief; it has that content already. A refuted premise, a collision with
+another leaf, a blocker, a decision you cannot make alone, your verdict at close. Under a turn-end
+gate an announcement is indistinguishable from a question, so a wave of N Crawlers saying hello
+costs N blocked turn-ends on the one party whose attention is not parallel.
+
 ## Usage limits
 
 A Crawler parked at a usage limit is **not dead** and its claim must survive:
@@ -147,6 +181,13 @@ showrunner stop-gate                              # refuses a turn-end with clai
 
 `stop-gate` excludes epics (a container is expected to sit in progress while its children are worked)
 and parked leaves (accounted-for work, not abandoned work).
+
+**`spawn --launch` wires `stop-gate` into the Crawler's own tree** — merged into the harness's
+turn-end triggers, never replacing what is already there, and with no timeout of its own so the
+harness's budget governs. You do not wire it by hand. This section used to describe both gates as
+hooks with no path into a Crawler at all, which made the stop gate real, documented, and
+unreachable; a launched Crawler could end its session with its leaf still open. Wiring it then
+produced the BLOCKED state above — a refusal a headless session cannot act on alone.
 
 ## Checks: no NEW failures, never "all green"
 
@@ -176,8 +217,16 @@ file in an integration commit that **no Crawler ever touched**.
 ```
 showrunner add "<title>" [--id X] [--body-file F] [--label L] [--after <blocking-leaf>]
 showrunner dep <child> <parent>      # child is blocked by parent
+showrunner edit <leaf> [--title T] [--body-file F] [--paths P]
 showrunner list|show|ready|claim|release|park|unpark
 ```
+
+**`edit` exists because the body IS the brief.** A leaf's body is interpolated into the document a
+Crawler works from, so a wrong one dispatches a wrong task — and before this verb there was no way
+back: `add` refuses an existing id, and the only exit was to close the leaf, which spends the
+proof-of-done gate on a decision that never happened. It refuses on a leaf that is not open, so it
+cannot rewrite the instructions under a Crawler already working from them. Fix the body *before*
+you spawn.
 
 Backend is `auto`: an existing `br` graph is used when present, otherwise a vendored `sqlite3` graph.
 Everything else in showrunner talks to one interface and never learns which it got. Note that `br`
@@ -187,7 +236,7 @@ records no liveness on a claim, so `reap` cannot work against it and says so rat
 ## Verifying the tool itself
 
 ```
-python3 test/run.py        # 385 assertions; needs only Python 3 + git
+python3 test/run.py        # 395 assertions; needs only Python 3 + git
 bash prototype/demo.sh     # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 
