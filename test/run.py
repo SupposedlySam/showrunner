@@ -1151,6 +1151,60 @@ def test_harness_provisioning():
        "and 'its watchdog is unwired' are different, and only one is a warning about this repo",
        state is None, state)
 
+    # ---- how fresh is this report, and will anything look again? (RPT-01) ------------
+    # A crawler report says what is true at the instant it runs, and nothing on it let a reader
+    # tell a reading taken thirty seconds ago from one taken yesterday — nor whether walking
+    # away was safe. Both are facts about the harness's watchdog, and both are ASKED.
+    follow_states = {
+        "armed": ({"configured": True, "command": "/abs/showrunner waiting",
+                   "last": {"at": 1786000000, "waiting": True, "detail": "2 live"}}, True),
+        "unarmed": ({"configured": False, "set_it_by": ".game_loop/config.local.json -> x"},
+                    False),
+        "failing": ({"configured": True, "failing": True, "command": "relative/path"}, False),
+    }
+    for label, (payload, want_sched) in sorted(follow_states.items()):
+        H._porcelain = lambda b, v, _p=payload: (0, _p)
+        try:
+            fu = H.follow_up(post)
+        finally:
+            H._porcelain = _orig_porc
+        eq("a '%s' watchdog reports scheduled=%s" % (label, want_sched), fu["scheduled"],
+           want_sched)
+        if label == "armed":
+            eq("...and an armed one carries WHEN it last re-checked, which is the half a "
+               "reader uses to judge how stale the verdicts below it are", fu["last"],
+               1786000000)
+            eq("...and that re-check's verdict, so 'it looked' is distinguishable from 'it "
+               "looked and found work outstanding'", fu["waiting"], True)
+        else:
+            ok("...while a '%s' one says WHY nothing is scheduled, rather than reporting no "
+               "follow-up as though that were normal" % label, bool(fu["why"]), fu)
+    ok("a FAILING probe is not counted as scheduled — it rings and reports failing, so it is a "
+       "broken watchdog rather than a re-check that will happen",
+       not follow_states["failing"][1])
+
+    # THE INTERVAL IS ABSENT, AND THAT IS ASSERTED RATHER THAN ASSUMED. The harness's payload
+    # carries no period, so "next follow-up at HH:MM" cannot be computed from anything this
+    # layer may read — and a number invented here would be a promise about an event showrunner
+    # does not schedule. If the harness ever starts publishing one, this fails and someone
+    # decides deliberately instead of a stale limit going quiet.
+    H._porcelain = lambda b, v: (0, {"configured": True, "command": "x"})
+    try:
+        armed = H.follow_up(post)
+    finally:
+        H._porcelain = _orig_porc
+    ok("follow_up reports no interval, because the harness publishes none — so callers must "
+       "name the TRIGGER and never a time", "interval" not in armed, sorted(armed))
+
+    H._porcelain = lambda b, v: (0, None)
+    try:
+        none_fu = H.follow_up(post)
+    finally:
+        H._porcelain = _orig_porc
+    ok("a harness with no watchdog verb at all is 'nothing re-checks this', not 'unarmed' — "
+       "the same distinction waiting_probe draws, arriving one report out",
+       none_fu["scheduled"] is False and none_fu["harness"] is None, none_fu)
+
     # BLOCKED IS NOT WORKING (issue #24), and this is a defect showrunner helped build. Before
     # the turn-end gate was wired, a Crawler that could not finish EXITED with its leaf open —
     # loud, caught by one liveness poll. After, it stays alive and inert while every signal

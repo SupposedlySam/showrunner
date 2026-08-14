@@ -152,6 +152,15 @@ TARGETS = [
     ("the pin's stamp, read back", "pin.read_pin", "lib/showrunner/pin.py",
      r"(def read_pin\(dest\):\n)",
      "    return None\ndef _neutered_read_pin(dest):\n"),
+    # NOT auto-derived — both its returns are dicts, so it never answers "nothing" — and swept
+    # in the REASSURING direction, which is the one that matters here. A crawler report saying
+    # "something will re-check this" when nothing will is how a reader decides it is safe to
+    # walk away from a fan-out. The loud direction (always 'NONE SCHEDULED') would be noticed
+    # by the first person who read it; this one never would.
+    ("is anything re-checking this campaign", "harness.follow_up", "lib/showrunner/harness.py",
+     r"(def follow_up\(cfg\):\n)",
+     "    return {'harness': None, 'last': None, 'waiting': None, 'scheduled': True, 'why': ''}\n"
+     "def _neutered_follow_up(cfg):\n"),
     ("lock guard", "locks.LockSet.guard", "lib/showrunner/locks.py",
      r"(    def guard\(self, command, session=None\):\n)",
      "        return True, ''\n    def _neutered_guard(self, command, session=None):\n"),

@@ -87,6 +87,18 @@ The two join on `cursor`. `snapshot`'s cursor names the last event it could have
 de-duplicate and no gap to guess at. It is **not** a transaction: nothing freezes the graph, so
 parts can still disagree by milliseconds. What it removes is the four-call window.
 
+**How fresh is the crawler report, and will anything look again?** `reconcile` opens with
+`checked`, `last re-check` and `next re-check`, and `snapshot` carries the same as `follow_up`.
+A report says what is true at the instant it runs, and without these a reading taken thirty
+seconds ago is indistinguishable from one taken yesterday — and nothing tells you whether
+walking away from a fan-out is safe.
+
+Both facts are the **harness's** idle watchdog's, and both are asked rather than assumed. So
+`next re-check` names a **trigger, not a time**: the watchdog fires on idle and its porcelain
+answer publishes no interval, so a clock time here would be a number showrunner invented about
+an event it does not schedule. When no probe is armed — the default — it says `NONE SCHEDULED`
+and why, because a report with no follow-up must not look like one with a follow-up.
+
 `status` and `reconcile` answer **what is true now**. `watch` answers **what just happened** — a
 leaf claimed, a lock refused, a Crawler blocked, an integrate rewound. Ask these rather than
 reading `.showrunner/events.jsonl`: the file's name and layout are showrunner's business, and a
@@ -355,7 +367,7 @@ what is there now. Nothing hashes the contents.
 ## Verifying the tool itself
 
 ```
-python3 test/run.py        # 583 assertions; needs only Python 3 + git
+python3 test/run.py        # 593 assertions; needs only Python 3 + git
 bash prototype/demo.sh     # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 

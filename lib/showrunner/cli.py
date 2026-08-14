@@ -1046,14 +1046,42 @@ def cmd_reap(args):
     return 0
 
 
+def _print_follow_up(cfg):
+    """How fresh this report is, and whether anything will look again.
+
+    A crawler report says what is true at the instant it runs, and nothing on it distinguished
+    a reading taken thirty seconds ago from one taken yesterday — nor told the reader whether
+    walking away was safe. Both belong at the TOP, before the verdicts, because they say how
+    much the verdicts below are worth.
+    """
+    f = harness.follow_up(cfg)
+    print("%-14s %s" % ("checked", stamp(now())))
+    if f["last"]:
+        verdict = "" if f["waiting"] is None else (
+            " · it found this orchestrator %s" % ("WAITING on dispatched work"
+                                                  if f["waiting"] else "not waiting"))
+        print("%-14s %s%s" % ("last re-check", stamp(f["last"]), verdict))
+    if f["scheduled"]:
+        # NO TIME, ON PURPOSE. The harness's watchdog fires on IDLE, and its porcelain answer
+        # carries no interval — so a "next follow-up at HH:MM" here would be a number this
+        # layer invented about an event it does not schedule. Naming the trigger is the true
+        # statement; naming a time would be the convincing wrong one.
+        print("%-14s when this orchestrator next goes idle, via %s's watchdog (it does not "
+              "publish an interval, so this is a trigger, not a time)"
+              % ("next re-check", f["harness"]))
+    else:
+        print("%s%-14s NONE SCHEDULED — %s%s" % (YEL, "next re-check", f["why"], OFF))
+
+
 def cmd_reconcile(args):
     cfg = _cfg(args)
     findings = campaign.reconcile(cfg, _graph(cfg), base=args.base)
-    if not findings:
-        print("no Crawlers on record")
-        return 0
     if args.json:
         print(json.dumps(findings, indent=2, sort_keys=True))
+        return 0
+    _print_follow_up(cfg)
+    if not findings:
+        print("no Crawlers on record")
         return 0
     for f in findings:
         colour = RED if f["verdict"].startswith("ABANDONED") else (
@@ -1116,6 +1144,10 @@ def cmd_snapshot(args):
         # A journal this cannot read is NOT an idle campaign, and a snapshot that omitted the
         # distinction would be the exact failure `watch` refuses over.
         "journal_unreadable": unreadable,
+        # HOW FRESH THIS IS, AND WHETHER ANYTHING WILL LOOK AGAIN. `at` above says when the
+        # snapshot was taken; a viewer also needs to know whether walking away is safe, and
+        # nothing here answered that. Carries no interval on purpose — see harness.follow_up.
+        "follow_up": harness.follow_up(cfg),
         "ready": [{"id": x["id"], "title": x.get("title", ""),
                    "lane": lanes.route(cfg, x)["lane"]} for x in ready],
         "in_progress": [{"id": x["id"], "actor": x.get("actor"),

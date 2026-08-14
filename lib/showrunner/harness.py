@@ -387,6 +387,63 @@ def waiting_probe(cfg, dirname):
     return "unarmed", str(payload.get("set_it_by") or "")
 
 
+def follow_up(cfg):
+    """When did anything last re-check this campaign, and is another re-check coming?
+
+    THE QUESTION A CRAWLER REPORT LEAVES UNANSWERED. `reconcile` says what is true at the
+    instant it runs, and a reader cannot tell a report taken thirty seconds ago from one taken
+    yesterday — nor whether anything will look again if they walk away. Both halves are facts
+    about the HARNESS's idle watchdog, which is the only thing here that re-checks anything.
+
+    ASKED, NEVER ASSUMED, for the reason `waiting_probe` gives directly above: the interval and
+    the schedule belong to the layer below, and hardcoding its config key here is
+    `DEFAULT_RULE_FILES` again — a key of somebody else's that rots silently. So this reads only
+    what the harness's own porcelain answers.
+
+    Returns a dict, always. Keys:
+      harness    the harness dir that answered, or None if none did
+      last       epoch seconds of the last re-check, or None (armed but never run, or unarmed)
+      waiting    that re-check's verdict, or None
+      scheduled  True only when a probe is armed AND answering
+      why        why not, in the reader's terms, when scheduled is False
+
+    **`interval` is deliberately absent, and that is a finding rather than an omission.** The
+    harness's `watchdog --porcelain` payload carries `configured`, `command`, `armed_in`,
+    `last`, `failing` and `set_it_by` — and no period. So "the next follow-up is at T+n" cannot
+    be computed from anything this layer is entitled to read, and printing one would be a
+    promise about an event nothing here causes. Callers must say "when it next goes idle", not
+    a time. Closing this needs the harness to publish its interval; it is a cross-repo ask, not
+    a local fix, and inventing the number locally is the failure this docstring exists to stop.
+    """
+    out = {"harness": None, "last": None, "waiting": None, "scheduled": False,
+           "why": "no harness is present, so nothing re-checks this campaign on its own"}
+    for dirname in spec(cfg)["dirs"]:
+        rc, payload = _porcelain(bin_for(cfg.root, dirname), "watchdog")
+        if not isinstance(payload, dict):
+            continue
+        out["harness"] = dirname
+        last = payload.get("last")
+        if isinstance(last, dict):
+            out["last"] = last.get("at")
+            out["waiting"] = last.get("waiting")
+        if payload.get("failing"):
+            out["why"] = ("%s's waiting probe is CONFIGURED AND FAILING, so its re-checks "
+                          "report a broken watchdog rather than an answer about your Crawlers"
+                          % dirname)
+        elif payload.get("configured"):
+            out["scheduled"] = True
+            out["why"] = ""
+        else:
+            # THE ORDINARY STATE, and the one worth saying out loud: the watchdog exists, and
+            # nothing has told it how to ask about dispatched work. A report that stayed silent
+            # here would let "nothing is scheduled" look exactly like "something is".
+            out["why"] = ("%s's idle watchdog has no waiting probe, so nothing re-checks this "
+                          "campaign — arm it in %s" % (dirname, payload.get("set_it_by")
+                                                       or "the harness's local config"))
+        return out
+    return out
+
+
 def stop_gate(cfg, worktree_path, session):
     """Is this Crawler INERT at a refused turn-end rather than working? (issue #24)
 
