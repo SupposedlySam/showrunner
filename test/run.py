@@ -1499,6 +1499,14 @@ def test_publishable():
             continue
         # Assembled so this file's own explanation of the rule does not trip it.
         needle = "l" + "amp"
+        # THE PATH COUNTS TOO, and this scan read only contents until a fourth consumer found
+        # the gap in their own tree. A lockfile named after the tool contains ZERO occurrences
+        # of its name — it holds a wish number, a sha and the ORIGIN GIT URL of a private repo
+        # — so tracking one sailed past a guard written to stop exactly that disclosure. It
+        # was clean here because the file is untracked, which is the right answer reached
+        # without the check having looked.
+        if needle in rel_path.lower():
+            internal.append("%s: the FILENAME names it (contents need not)" % rel_path)
         for line in body.splitlines():
             low = line.lower()
             if needle in low and "internal" not in low and "example" not in low:
