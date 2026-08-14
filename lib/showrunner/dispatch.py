@@ -157,7 +157,8 @@ def wire_stop_gate(cfg, record):
     tf = os.path.join(wt, ".game_loop", "triggers.json")
     if not os.path.isdir(os.path.dirname(tf)):
         return False, "no harness dir in the worktree — nothing to wire a turn-end gate into"
-    sr = os.path.join(cfg.root, ".showrunner", "bin", "showrunner")
+    from .brief import sr_bin
+    sr = sr_bin(cfg)   # resolved, not assumed — the same dead-path bug lived here too
     # NO timeout_sec, deliberately. This ran with an explicit 30, and the harness honours an
     # explicit value uncapped — so showrunner was overriding a 10s default the layer below had
     # chosen for a reason it stated: this trigger runs on EVERY turn-end, and a timeout there

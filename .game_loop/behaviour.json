@@ -128,6 +128,15 @@
       "change": "the write guard now REFUSES Write/Edit to .game_loop/config.json, INVARIANTS.md and verify.yaml when the file already exists. LEDGER.md is unaffected \u2014 it is notes, not policy. Seeding a rule file that does NOT exist is still allowed, which is what keeps installers and worktree provisioning working.",
       "consequence": "a session can no longer edit the policy that governs it. If you have anything that rewrites config.json from inside a run \u2014 widening mcp_* lists, adding an allow_write_root, adjusting deploy_verbs \u2014 it now needs `game_loop authorize --path <the file> --reason \"<the human's words>\"`, which is single-use and logged. Provisioning that CREATES these files is untouched, deliberately: an orchestrator that provisions worktrees by running install.sh keeps working.",
       "why_it_qualifies": "a write that used to succeed now returns permissionDecision deny. It closes the case where a stuck agent widened its own MCP policy to unblock itself and reported the edit as a fix \u2014 the rule against that was a sentence in llms.txt, which is INV1's own example of what does not hold."
+    },
+    {
+      "seq": 11,
+      "sha": "a0a234a",
+      "notice": true,
+      "verb": "Write/Edit on config.local.json \u00b7 worktree --porcelain",
+      "change": "seq 10 denied the RULE files and left config.local.json open. A session could widen its own effective policy through it, because its keys merge with UNION semantics \u2014 read_roots, allow_write_roots, deploy_verbs, generated_globs and every mcp_* grant are additive there and cannot be narrowed by the project's own config. It is now denied too, whether or not the file exists. Separately, `worktree --porcelain` now COMPARES config.local.json and reports notes-drifted (exit 3) when both trees carry one and they disagree.",
+      "consequence": "a session can no longer author the local override; a human editing it, or a layer above writing it into a tree from its own process, never passes through the hook and is unaffected. For the compare: a worktree that simply has no local wiring while its parent does still reports clean \u2014 only a real disagreement is drift, and it warns at exit 3 rather than blocking.",
+      "why_it_qualifies": "a write that succeeded under seq 10 now returns deny, and a tree that certified clean can now report notes-drifted. Found by a consumer who verified seq 10 before depending on it and walked through the second door I had recommended to them for arming a waiting probe."
     }
   ],
   "schema": 1

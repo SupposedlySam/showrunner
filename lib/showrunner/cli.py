@@ -7,6 +7,7 @@ Every subcommand that can refuse does so with exit code 2 — the Claude Code Pr
 import argparse
 import json
 import os
+import shutil
 import sys
 
 from . import (__version__, brief, campaign, collide, config, dispatch, gates, graph as G, harness,
@@ -88,6 +89,18 @@ def cmd_init(args):
                      "graph.db\ngraph.db-*\nlocks/\nscratch/\ncampaign.json\n"
                      "routing.jsonl\nbaseline.json\nintegration-commit.json\n")
     worktree.ensure_root(cfg)
+    # PLACE THE BINARY EVERY BRIEF WILL NAME. install.sh copies it and then calls init, so this
+    # was only ever missing for someone who ran init directly — and what they got was a repo
+    # that reported ready while every brief it produced named a path that did not exist. The
+    # remedy `showrunner init` has to leave the person unstuck, not merely exit 0.
+    src = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "bin", "showrunner")
+    dst = os.path.join(cfg.state_dir, "bin", "showrunner")
+    if os.access(src, os.R_OK) and not os.access(dst, os.X_OK) and src != dst:
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src, dst)
+        os.chmod(dst, 0o755)
+        print("placed %s (the path every Crawler brief names)" % rel(dst, cfg.root))
     print("wrote %s" % rel(path, cfg.root))
     print("wrote %s" % rel(gi, cfg.root))
     print("created %s (gitignored — Crawler worktrees live INSIDE the repo, see issue #4)"
@@ -186,6 +199,19 @@ def cmd_doctor(args):
                 bad += 1
             else:
                 print("  %s chat %s resolves: %s" % (GRN + "ok   " + OFF, key, path))
+
+    # THE BINARY EVERY BRIEF NAMES. A Crawler's proof-of-done, its close, its stop-gate trigger
+    # all route through one absolute path, and this repo spent a week naming one that did not
+    # exist — `install.sh` places it and a development checkout never runs its own installer.
+    # Absolute and canonical and dead reads exactly like absolute and correct.
+    sr = brief.sr_bin(cfg)
+    if os.access(sr, os.X_OK):
+        print("  %s the binary every brief names resolves: %s" % (GRN + "ok   " + OFF, rel(sr, cfg.root)))
+    else:
+        print("  %s %s does not exist or is not executable, and every Crawler brief tells its "
+              "agent to run it. Run install.sh, or work from a checkout that carries "
+              "bin/showrunner." % (RED + "ERROR" + OFF, sr))
+        bad += 1
 
     if gates.load_baseline(cfg) is None:
         print("  %s no baseline recorded — `showrunner baseline` on a known-good tree, or "

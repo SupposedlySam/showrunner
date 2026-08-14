@@ -138,6 +138,17 @@ def make_repo(extra_config=None, files=None):
     data.update(extra_config or {})
     cfg = config.Config(data, os.path.realpath(d), os.path.join(d, ".showrunner", "config.json"))
     config.write(cfg)
+    # THE FIXTURE SUPPLIED LESS THAN PRODUCTION, which is the quieter direction of the usual
+    # warning. Both real entry points place this binary — install.sh copies it, and `init`
+    # copies it — and only this helper wrote a config straight to disk and skipped it. So every
+    # repo the suite exercised was one where the path all briefs name did not exist, and no
+    # assertion could have noticed because the fixture made the broken state universal.
+    src = os.path.join(ROOT, "bin", "showrunner")
+    dst = os.path.join(d, ".showrunner", "bin", "showrunner")
+    if os.access(src, os.R_OK):
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        shutil.copy2(src, dst)
+        os.chmod(dst, 0o755)
     return cfg
 
 
@@ -1939,6 +1950,22 @@ def test_filed_issues_15_to_21():
        os.path.join(cfg.root, ".showrunner", "bin", "showrunner") in text)
     ok("...and no bare `showrunner close` survives anywhere in it",
        "\n    showrunner close" not in text, text[:0])
+    # ABSOLUTE IS HALF THE JOB. #15 made the brief name the binary by full path, and that path
+    # is the copy install.sh places — which a DEVELOPMENT checkout never has, because a repo
+    # working on itself does not run its own installer. So this repo shipped a brief naming a
+    # binary that did not exist, canonical and absolute and dead, for a week. The remedy checks
+    # in test_cli read every `showrunner <verb>` and ask whether the VERB is real; not one of
+    # them asked whether the thing being invoked was.
+    real = brief.sr_bin(config.load(ROOT))
+    ok("the binary this repo's OWN briefs name actually exists and runs — not merely that it "
+       "was written absolutely", os.access(real, os.X_OK), real)
+    ok("...and it is resolved against the filesystem rather than assumed, so an installed copy "
+       "and a development checkout both name something real",
+       os.path.isabs(real) and os.path.basename(real) == "showrunner", real)
+    p = subprocess.run([sys.executable, real, "--version"], cwd=ROOT,
+                       capture_output=True, text=True)
+    ok("...and RUNNING it works, which is the half a path check does not establish",
+       p.returncode == 0, (p.returncode, p.stdout, p.stderr)[:3])
 
     # #19 — acceptEdits left a Crawler able to edit files and nothing else: every bash call
     # refused for want of a human, so it could not run its harness or close its own leaf.

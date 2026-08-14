@@ -189,7 +189,24 @@ def sr_bin(cfg):
     from where the Crawler actually stands, and the whole proof-of-done design routes through
     it. Nothing needs copying: `config.load` resolves the main checkout from --git-common-dir,
     so one binary serves every worktree, one graph, one campaign.
+
+    RESOLVED AGAINST THE FILESYSTEM, because naming it absolutely is only half the job and the
+    other half was missing here for a week. `install.sh` places that copy; a DEVELOPMENT
+    checkout — this repo working on itself — never runs its own installer, so the path was
+    absolute, canonical, and dead. Every Crawler launched from here was told to run a binary
+    that did not exist, in the highest-traffic remedy text this project ships. The check that
+    was supposed to catch this reads every `showrunner <verb>` and asks whether the VERB is
+    real; nothing asked whether the thing being invoked was.
+
+    The installed copy wins when both are present — it is the one a consumer has, and the one
+    `git worktree add` correctly does not carry. `bin/showrunner` is the fallback for a repo
+    that IS showrunner. When neither exists the canonical path is returned anyway, so the
+    message still names the right place, and `doctor` says it is missing.
     """
+    for path in (os.path.join(cfg.root, ".showrunner", "bin", "showrunner"),
+                 os.path.join(cfg.root, "bin", "showrunner")):
+        if os.access(path, os.X_OK):
+            return path
     return os.path.join(cfg.root, ".showrunner", "bin", "showrunner")
 
 

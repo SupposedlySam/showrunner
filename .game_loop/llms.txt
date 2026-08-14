@@ -223,11 +223,26 @@ instruction.
 #   value: a fallback degrades mid-run, so `changed` tells you the work finished on a different
 #   model than it started. Also written to sessions/<id>/model.json for a PARENT to read — you
 #   are the one party who cannot act on a model mismatch, so the file is the point, not the line.
+./.game_loop/bin/game_loop watchdog [--porcelain]                                    # is the WAITING
+#   seam armed, and what did it last say? An empty queue and a wedged run look identical from
+#   outside — the transcript stops growing either way — and watchdog.waiting_probe is what tells
+#   them apart. This reports whether one is configured, WHICH file arms it, its last verdict, and
+#   whether it is FAILING. READ ONLY: there is no verb that SETS it, because a wait a session can
+#   declare for itself is an off switch for its own watchdog, and this verb cannot tell a session
+#   from the orchestrator above it. Arm it in .game_loop/config.local.json — never config.json,
+#   which is a rule file byte-compared between a parent checkout and its worktrees.
 ./.game_loop/bin/game_loop limitprobe [--force] [--interval-only]                    # read the usage
 #   windows by SPAWNING a short session, on a host that renders no statusline (so limits.json never
 #   arrives on its own). Off unless the project enabled it — it costs ~24k input tokens per run —
 #   and the watchdog fires it automatically on an interval the reading implies. You do not normally
 #   run this: if `status` says usage protection is INERT, that is a config question for the human.
+#   A probe run also records what its FRESH session's render carried under `context_window` —
+#   total_input_tokens, context_window_size and a current_usage breakdown — into
+#   .game_loop/probe/context-window.json. CAPTURED, NOT INTERPRETED: nothing computes a token floor
+#   from it or decides anything with it. The probe already buys a fresh session for the usage
+#   windows, so the cheapest place to observe what a fresh session costs is the spawn you already
+#   paid for. Absent is written as an explicit null, because a missing file cannot say whether the
+#   probe ran.
 ```
 
 **The evidence family.** `claim`'s keystone — name a real file — only reaches evidence that is a

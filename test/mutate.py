@@ -479,6 +479,31 @@ def main():
         print("baseline suite did not report a RESULT line; fix that first")
         return 2
     baseline_failures = failing(b_out)
+    # REFUSE ON A RED BASELINE. This printed "baseline: 357 passed, 1 failed" and swept anyway,
+    # and the numbers it produced were wrong in the direction nobody checks: a kill is
+    # `failing(mutant) - baseline_failures`, so an assertion that was ALREADY failing can never
+    # count as one. Every producer covered only by such assertions reads UNPROTECTED — the
+    # instrument reporting a coverage hole it had just created itself.
+    #
+    # It happened here, on a copy: an edit landed after the last green run and the sweep, whose
+    # tree is a fresh copytree of this one, picked it up while the terminal still showed green.
+    # The tell was the one that always works — the number contradicted something already
+    # observed directly, a producer that had assertions written for it the same hour.
+    #
+    # WHAT THIS INSTRUMENT STILL CANNOT SEE, since a refusal is not a blind spot: a mutation
+    # killed by CRASHING rather than by being caught (a neutered producer must return the
+    # reassuring answer, not fail to return one); anything reached only through the two skipped
+    # groups; and any assertion whose subject is this file.
+    if b_fail:
+        print("REFUSING TO SWEEP — the baseline is not green (%d failing), so every number "
+              "below would be computed against it:" % b_fail)
+        for name in sorted(baseline_failures)[:10]:
+            print("  %s" % name[:100])
+        print("\nA kill is measured as 'fails under the mutant, did not fail before'. An "
+              "assertion already failing can never count as one, so a producer covered only "
+              "by those reads as UNPROTECTED and the tool reports a hole it invented.\n"
+              "Fix the suite, then sweep. A number from a red baseline is worse than none.")
+        return 2
     # Default-deny: a candidate nobody decided about fails the run. Without this the target
     # list is a denylist that nobody audits, which is this tool having the very defect it
     # exists to find — a producer nobody added is uncovered AND invisible as a gap.

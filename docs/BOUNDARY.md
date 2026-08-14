@@ -162,9 +162,20 @@ which files are rules, or reimplement the hooks merge.
 Exit codes from `worktree`, consumed exactly as defined: **0** clean · **1** drifted — a
 determined finding that the trees enforce different things, whether the difference is in the
 rule files or in the harness's own scripts (abort the spawn) · **2** undetermined (abort —
-"could not tell" must never read as "clean") · **3** notes drifted (warn). Nothing undetermined
+"could not tell" must never read as "clean") · **3** notes drifted (warn), which now also
+covers two trees that **both** carry local wiring and disagree about it. Nothing undetermined
 shares a code with anything compared, which is the property that makes asking better than
 guessing.
+
+3 is the weight showrunner asked for on that last case and the weight it depends on: `integrate`
+blocks on 1 and 2 and never on 3, so a per-tree local override warns rather than stopping a
+merge. A worktree with no local wiring while its parent has some stays **clean** — the ordinary
+adopted case, and flagging it would make every worktree notes-drifted on day one, which is a
+check people stop believing. All four states walked here rather than read: neither, parent only,
+both-and-disagreeing, both-and-agreeing. And a drifted harness **script** still wins over a
+local-override difference — verified by making both true at once and requiring `code-drifted`,
+because a widening that swallows the finding it was added beside is the failure both sides of
+this boundary have now shipped once each.
 
 **1 said "rule files drifted" here until game_loop #66, and that was a claim about the layer
 below outliving the thing it described.** A drifted harness SCRIPT had no entry in that map and
@@ -255,8 +266,8 @@ re-reading everything: the assumptions above cite `guard-writes-impl.sh`, `verif
 cannot have moved. That is the difference between a check being satisfied and a check being
 skipped, and it is worth writing down because the skip is the tempting one.
 
-<!-- game_loop-verified: fdea15d8 — payload digest. THIS is the gated value.
-     First carried by release ff74cb7d. That release name changes ONLY when the digest above
+<!-- game_loop-verified: ad1ac84f — payload digest. THIS is the gated value.
+     First carried by release 262a5a3e. That release name changes ONLY when the digest above
      changes: the two describe the same event, and a release where the digest did not move did
      not re-verify anything. Overwriting it on every upgrade was done twice here by updating
      both fields together out of habit — an ungated number drifting beside a gated one, inside
@@ -265,23 +276,30 @@ skipped, and it is worth writing down because the skip is the tempting one.
 
 
 - The commit gate resolves **per target tree** — the resolution lands in `commit_root` — and
-  denies in two cases: when that tree carries no harness (`guard-writes-impl.sh:749`), and
+  denies in two cases: when that tree carries no harness (`guard-writes-impl.sh:763`), and
   when the target is built from a **shell variable** so the gate cannot resolve it without
-  executing it (line 735). The second is newer than the first — it used to pass silently,
+  executing it (line 749). The second is newer than the first — it used to pass silently,
   which is the default shape under fan-out.
 - A **third** denial, newer than both and not on the commit path at all: a Write or Edit to
   `config.json`, `INVARIANTS.md` or `verify.yaml` **when the file already exists** (line 432).
   The discriminator is existence, so seeding an absent one is provisioning and passes —
   verified here in a real tree by moving the file aside and re-running the same payload, since
   an orchestrator that provisions worktrees is the party that breaks if that arm is wrong.
-  It does **not** cover `config.local.json`, which is merged into the same policy and whose
-  trust-list keys UNION rather than replace; that gap is reported upstream and showrunner is
-  deliberately not shadowing it with a comparison of its own.
+  It **now also covers `config.local.json`, and that one is denied whether or not it exists** —
+  nothing seeds it, so creating one is the same act as editing one. Written down because the
+  sentence here said the opposite for exactly one commit: showrunner found that file merged
+  into the same policy with UNION semantics on the trust lists, reported it upstream rather
+  than shadowing it with a comparison of its own, and game_loop closed it the same day. A
+  boundary note is a measurement, and this one aged in hours.
+
+  The asymmetry that makes it usable: the guard is a PreToolUse hook on a *session's* tool
+  calls, so showrunner writing that file into a worktree from its own process is unaffected.
+  Verified here, same path both ways — the orchestrator's write lands, the session's is denied.
 - The edited-file set is scoped to the **session**, not the tree — one session is one session
   however many trees it touches. (`EDITED_F` at line 263.)
 - The blast-radius check is a **warning, never a denial** — `blast_note` reaches `commit_note`
-  and nothing else (lines 826, 1318) — and is silent when the session's `edited` set is empty,
-  which is no evidence rather than a clean bill (line 841).
+  and nothing else (lines 840, 1332) — and is silent when the session's `edited` set is empty,
+  which is no evidence rather than a clean bill (line 855).
 - `install.sh` seeds user-owned files **only if absent** (line 649), and ships
   `templates/verify.yaml` empty — 0 non-comment lines, re-measured rather than recopied.
   Verified end to end here, not read: a parent repo with a distinctive marker in its

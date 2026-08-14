@@ -415,11 +415,20 @@ case "$tool" in
 import os
 d = os.path.realpath(os.environ["GAMELOOP_DIR"])
 real = os.path.realpath(os.environ["FP"])
+# RULE FILES: denied once they EXIST, because an installer seeds absent ones and that is
+# provisioning rather than a session rewriting its own gate.
 for n in ("config.json", "INVARIANTS.md", "verify.yaml"):
     p = os.path.join(d, n)
     if real == p and os.path.exists(p):
         print(n)
         break
+else:
+    # THE LOCAL OVERRIDE: denied whether or not it exists. Its keys MERGE WITH UNION semantics, so
+    # anything written here is strictly additive and cannot be narrowed by the project's own config
+    # — which is correct for a machine-wide file a human maintains and exactly wrong for a file the
+    # session can author. Nothing in game_loop writes it, so there is no provisioning arm to keep.
+    if real == os.path.join(d, "config" + ".local.json"):
+        print("config" + ".local.json")
 PY
 )
     if [ -n "$policy_hit" ]; then
@@ -442,8 +451,13 @@ evidence that the refusal ever happened.
 If the human has authorized this specific edit, record their words and try again:
   $GAMELOOP_DIR/bin/game_loop authorize --path $pol_real --reason \"<their exact words>\"
 
-Seeding a policy file that does not exist yet is provisioning and is NOT blocked — this fires only
-because the file is already there."
+For a RULE file this fires only because it already exists — seeding an absent one is provisioning
+and is not blocked. For config.local.json it fires either way: its keys merge with UNION semantics,
+so a grant written there cannot be narrowed by the project's own config, and creating one is the
+same act as editing one.
+
+THE GUARD ONLY SEES THIS SESSION'S TOOL CALLS. A human editing the file, or a layer above writing it
+into this tree from its own process, does not pass through here and is unaffected."
     fi
     # Prints "yes" when the target is inside an allow root, else the resolved realpath — which is
     # what an authorization is matched against (authorize records real prefixes, not raw tool input).
