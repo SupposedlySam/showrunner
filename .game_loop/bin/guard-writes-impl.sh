@@ -402,6 +402,49 @@ case "$tool" in
   Write|Edit|NotebookEdit)
     fp=$(printf '%s' "$payload" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tool_input",{}).get("file_path",""))' 2>/dev/null)
     [ -z "$fp" ] && exit 0
+    # THE PROJECT'S POLICY IS NOT THE SESSION'S TO EDIT (#65). Checked BEFORE the allow-roots
+    # verdict, because these files are INSIDE the repo and every allow root would wave them through
+    # — which is how an agent came to widen its own MCP policy to unblock itself and report it as a
+    # fix. Rule files only: LEDGER.md is notes and is written in the ordinary course of work.
+    #
+    # ONLY WHEN THE FILE ALREADY EXISTS. Seeding an absent policy file is provisioning — an
+    # installer creating a fresh tree — and denying that breaks the orchestrators that provision
+    # worktrees by running install.sh. Editing one that is already there is the session rewriting
+    # the gate that governs it. No flag and no caller identity needed to tell those apart.
+    policy_hit=$(GAMELOOP_DIR="$GAMELOOP_DIR" FP="$fp" python3 <<'PY' 2>/dev/null
+import os
+d = os.path.realpath(os.environ["GAMELOOP_DIR"])
+real = os.path.realpath(os.environ["FP"])
+for n in ("config.json", "INVARIANTS.md", "verify.yaml"):
+    p = os.path.join(d, n)
+    if real == p and os.path.exists(p):
+        print(n)
+        break
+PY
+)
+    if [ -n "$policy_hit" ]; then
+      pol_real=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$fp" 2>/dev/null)
+      consumed=$(consume_authorization "$pol_real")
+      if [ "$consumed" = "yes" ]; then
+        record_edit "$fp"
+        exit 0
+      fi
+      deny "BLOCKED: .game_loop/$policy_hit is the PROJECT'S POLICY, not this session's.
+
+This is the file that decides what you are allowed to do. A session that can widen it has no
+guardrail — it has a suggestion. The edit that prompted this gate added ten MCP verbs and a
+whole-server prefix, and was reported in the agent's own summary as a fix it had applied.
+
+IF A CALL YOU NEED IS REFUSED, that is a config question for the human, not a thing to route around.
+Say which tool was refused and what you were trying to do; widening the policy yourself removes the
+evidence that the refusal ever happened.
+
+If the human has authorized this specific edit, record their words and try again:
+  $GAMELOOP_DIR/bin/game_loop authorize --path $pol_real --reason \"<their exact words>\"
+
+Seeding a policy file that does not exist yet is provisioning and is NOT blocked — this fires only
+because the file is already there."
+    fi
     # Prints "yes" when the target is inside an allow root, else the resolved realpath — which is
     # what an authorization is matched against (authorize records real prefixes, not raw tool input).
     verdict=$(REPO_REAL="$REPO_REAL" SLUG="$SLUG" CONFIG_F="$CONFIG_F" CONFIG_MERGED="$CONFIG_MERGED" FP="$fp" python3 <<'PY'

@@ -255,8 +255,8 @@ re-reading everything: the assumptions above cite `guard-writes-impl.sh`, `verif
 cannot have moved. That is the difference between a check being satisfied and a check being
 skipped, and it is worth writing down because the skip is the tempting one.
 
-<!-- game_loop-verified: 47760e94 — payload digest. THIS is the gated value.
-     First carried by release 54a78bf6. That release name changes ONLY when the digest above
+<!-- game_loop-verified: fdea15d8 — payload digest. THIS is the gated value.
+     First carried by release ff74cb7d. That release name changes ONLY when the digest above
      changes: the two describe the same event, and a release where the digest did not move did
      not re-verify anything. Overwriting it on every upgrade was done twice here by updating
      both fields together out of habit — an ungated number drifting beside a gated one, inside
@@ -264,17 +264,30 @@ skipped, and it is worth writing down because the skip is the tempting one.
      `.game_loop/VERSION` answers that and is not prose. -->
 
 
-- The commit gate resolves **per target tree** and denies in two cases: when that tree carries
-  no harness (`guard-writes-impl.sh:706`), and when the target is built from a **shell
-  variable** so the gate cannot resolve it without executing it (line 692). The second is
-  newer than the first — it used to pass silently, which is the default shape under fan-out.
+- The commit gate resolves **per target tree** — the resolution lands in `commit_root` — and
+  denies in two cases: when that tree carries no harness (`guard-writes-impl.sh:749`), and
+  when the target is built from a **shell variable** so the gate cannot resolve it without
+  executing it (line 735). The second is newer than the first — it used to pass silently,
+  which is the default shape under fan-out.
+- A **third** denial, newer than both and not on the commit path at all: a Write or Edit to
+  `config.json`, `INVARIANTS.md` or `verify.yaml` **when the file already exists** (line 432).
+  The discriminator is existence, so seeding an absent one is provisioning and passes —
+  verified here in a real tree by moving the file aside and re-running the same payload, since
+  an orchestrator that provisions worktrees is the party that breaks if that arm is wrong.
+  It does **not** cover `config.local.json`, which is merged into the same policy and whose
+  trust-list keys UNION rather than replace; that gap is reported upstream and showrunner is
+  deliberately not shadowing it with a comparison of its own.
 - The edited-file set is scoped to the **session**, not the tree — one session is one session
-  however many trees it touches. (`EDITED_F` at line 263; stated at line 801.)
-- The blast-radius check is a **warning, never a denial** — `blast_note` reaches `note` and
-  nothing else (lines 783, 1275) — and is silent when the session recorded no edits (line 798).
-- `install.sh` seeds user-owned files **only if absent** (line 516), and ships
-  `templates/verify.yaml` empty — 0 non-comment lines.
-- Hooks are merged into `<project>/.claude/settings.json` (line 591), so a worktree
+  however many trees it touches. (`EDITED_F` at line 263.)
+- The blast-radius check is a **warning, never a denial** — `blast_note` reaches `commit_note`
+  and nothing else (lines 826, 1318) — and is silent when the session's `edited` set is empty,
+  which is no evidence rather than a clean bill (line 841).
+- `install.sh` seeds user-owned files **only if absent** (line 649), and ships
+  `templates/verify.yaml` empty — 0 non-comment lines, re-measured rather than recopied.
+  Verified end to end here, not read: a parent repo with a distinctive marker in its
+  `verify.yaml`, a bare worktree, `install.sh --same-as`, and the marker arrives in the
+  worktree — so the seed is the parent's rules and not the blank template.
+- Hooks are merged into `<project>/.claude/settings.json` (line 726), so a worktree
   without one has no rails at all.
 
 If any of these stops being true, `lib/showrunner/harness.py` and the shared-state audit in

@@ -2172,6 +2172,63 @@ def test_claims_about_the_layer_below():
            "emits — this is the only thing standing between that warning and going quiet",
            "false_clean_before_fix" in payload_text, binp)
 
+    # THE LINE NUMBERS, which the stamp above does not check. It fires when the payload moves
+    # and says so — it never says WHICH citation is now wrong, and the answer has twice been
+    # "most of them": one insertion of fifty lines shifted six numbers at once, and every
+    # sentence around them stayed fluent and specific. A citation that has slid onto an
+    # unrelated line reads exactly like one that was re-read this morning.
+    #
+    # The anchor is taken from the PROSE rather than from a table kept here, because a table of
+    # expected tokens is one more thing to rot beside the thing it is checking. Each bullet
+    # already names its subject in backticks — `blast_note`, `EDITED_F`, `config.local.json` —
+    # so the rule is: that identifier must appear within a few lines of the number the bullet
+    # cites. A bullet naming no identifier is not wrong, it is unanchored, and those are
+    # COUNTED rather than skipped in silence.
+    impl = os.path.join(ROOT, ".game_loop", "bin", "guard-writes-impl.sh")
+    with open(os.path.join(ROOT, "docs", "BOUNDARY.md")) as fh:
+        boundary = fh.read()
+    impl_lines = []
+    if os.path.exists(impl):
+        with open(impl, errors="ignore") as fh:
+            impl_lines = fh.read().splitlines()
+    # Only bullets governed by the vendored guard. install.sh lives in game_loop's own repo and
+    # is not vendored here, so its citations cannot be checked from this side at all — named as
+    # a hole rather than quietly passing with the rest.
+    governed = [b for b in re.split(r"\n- ", boundary)
+                if "guard-writes-impl.sh" in b or "blast_note" in b or "EDITED_F" in b]
+    def lands_near(num, anchors):
+        window = "\n".join(impl_lines[max(0, num - 4):num + 3])
+        return any(a in window for a in anchors)
+
+    checked, unanchored, wrong = 0, 0, []
+    for bullet in governed:
+        anchors = [t for t in re.findall(r"`([A-Za-z_][A-Za-z0-9_.]{2,})`", bullet)
+                   if not t.endswith(".md")]
+        for num in [int(n) for n in re.findall(r"(?:guard-writes-impl\.sh:|lines? )(\d+)", bullet)]:
+            if not anchors:
+                unanchored += 1
+                continue
+            checked += 1
+            if not lands_near(num, anchors):
+                wrong.append("line %d cites %s, window has none of them" % (num, anchors))
+    if not impl_lines:
+        skip("the cited-line check", "no vendored guard-writes-impl.sh to read")
+    else:
+        ok("every line this repo cites into the guard still lands within reach of the thing "
+           "the sentence is about — a number that slid is a citation nobody can follow back",
+           not wrong, wrong)
+        ok("...and it checked citations rather than finding none, which is what a regex that "
+           "stopped matching also returns", checked >= 4, (checked, unanchored))
+        # The positive control, because the assertion above passes identically whether the rule
+        # works or the window is so wide that everything lands in it. Same rule, same anchor,
+        # a number known to be wrong.
+        real = next((i + 1 for i, l in enumerate(impl_lines) if l.startswith("EDITED_F=")), None)
+        ok("the rule finds the anchor at the line that really holds it", real and
+           lands_near(real, ["EDITED_F"]), real)
+        ok("...and REPORTS A MISS when pointed somewhere else — without this, a window that "
+           "matched everything would read exactly like citations that were all correct",
+           real and not lands_near(real + 200, ["EDITED_F"]), real)
+
 
 def test_cli():
     group("CLI surface")

@@ -113,12 +113,21 @@
     },
     {
       "seq": 9,
-      "sha": "PENDING",
+      "sha": "54a78bf",
       "verb": "worktree --porcelain",
       "notice": true,
       "change": "two exit codes moved. A harness SCRIPT that could not be compared now reports status 'unreadable' at exit 2 \u2014 it previously fell through every branch to 'clean' at exit 0, with a detail sentence claiming every script was byte-identical. And 'code-drifted' now exits 1 rather than falling to the default 2: the scripts were read and they differ, which is a determined finding, not an inability to tell.",
       "consequence": "if you branch on this verb's exit code you will see trees you were told were clean now reported as undetermined. That is the point: the old answer was wrong. An orchestrator refusing to integrate on drifted-or-undetermined was walked through by a false clean, putting a drifted worktree's branch on trunk. The JSON now carries false_clean_before_fix:true exactly when the old code would have said clean, so a consumer can scan trees and find what was mis-certified \u2014 nothing else records it, and it cannot be re-derived after a merge.",
       "why_it_qualifies": "a consumer who changed nothing gets different exit codes from the same verb on the same tree, and at least one consumer's merge gate branches on exactly those codes. The behaviour gate did NOT fire \u2014 no refusal line matched its regex \u2014 so this entry is a judgement rather than a forced one, on the file's own test: would somebody who changed nothing notice?"
+    },
+    {
+      "seq": 10,
+      "sha": "cd2fd70",
+      "verb": "Write/Edit on the project's rule files",
+      "notice": true,
+      "change": "the write guard now REFUSES Write/Edit to .game_loop/config.json, INVARIANTS.md and verify.yaml when the file already exists. LEDGER.md is unaffected \u2014 it is notes, not policy. Seeding a rule file that does NOT exist is still allowed, which is what keeps installers and worktree provisioning working.",
+      "consequence": "a session can no longer edit the policy that governs it. If you have anything that rewrites config.json from inside a run \u2014 widening mcp_* lists, adding an allow_write_root, adjusting deploy_verbs \u2014 it now needs `game_loop authorize --path <the file> --reason \"<the human's words>\"`, which is single-use and logged. Provisioning that CREATES these files is untouched, deliberately: an orchestrator that provisions worktrees by running install.sh keeps working.",
+      "why_it_qualifies": "a write that used to succeed now returns permissionDecision deny. It closes the case where a stuck agent widened its own MCP policy to unblock itself and reported the edit as a fix \u2014 the rule against that was a sentence in llms.txt, which is INV1's own example of what does not hold."
     }
   ],
   "schema": 1
