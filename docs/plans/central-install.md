@@ -1,6 +1,14 @@
 # Plan — `install.sh --central`: one copy of the code, every project's own config
 
-**Status:** plan, not built. Nothing below is implemented.
+**Status:** steps 1 and 2 of the build order are BUILT (CI-01, CI-02). Steps 3–5 are not, and
+step 3 carries an unresolved objection recorded below — a central shim's fail-open posture is
+disputed by the sibling session, which holds that central mode should REFUSE rather than fall
+back. That is not settled, and CI-03 should not be built as though it were.
+
+**Also unresolved and more basic:** this plan lost its strongest argument (see the section
+below) and nobody has re-decided whether the rest is worth building. CI-02 was built anyway
+because it is self-contained, useful on its own as a provenance mechanism, and commits nothing:
+a pin that nothing points at can simply be deleted.
 **Default is unchanged.** Per-project install stays the default and the documented path. Central is
 opt-in, one flag, reversible by re-running the installer without it.
 
@@ -222,6 +230,12 @@ keeps the guarantee.
 1. Fix the ignore hole in `install.sh`. Independent of everything else, a live bug today, and worth
    landing whatever happens to the rest of this.
 2. `showrunner self --pin --dest`, plus `VERSION`/`PINNED` stamping. Nothing consumes it yet.
+   **DONE.** Two things the plan did not specify, decided at the point of building: the stamp
+   got a READ side (`pin.read_pin`) written beside the write side rather than left for steps 4
+   and 5 to infer a format — this repo shipped a lock field with no read side and printed "?"
+   in the one report it existed for. And `VERSION`/`PINNED` disagreeing is surfaced as a
+   refusal, not reconciled, because it is the only observable trace of the content-drift this
+   plan already admits it does not otherwise detect.
 3. The shim template and the `install.sh --central` branch, including the ignore lines and the revert
    path. Shares its resolver with the lease plan's hook shim.
 4. `doctor`: mode, resolved path, reachability, pinned SHA — error when configured and unreachable.

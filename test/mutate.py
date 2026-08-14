@@ -137,6 +137,21 @@ TARGETS = [
     ("guard registration", "lease.register_guard", "lib/showrunner/lease.py",
      r"(def register_guard\(cfg\):\n)",
      "    return False, ''\ndef _neutered_register_guard(cfg):\n"),
+    # NOT auto-derived as a candidate — it has one return and no "nothing" branch — and swept
+    # anyway, because it is the most dangerous predicate in this repo: it decides whether `pin`
+    # may DELETE its destination wholesale. Always-True turns a mistyped --dest into rm -rf on
+    # somebody's directory. The derivation finds producers that can answer 'nothing'; it cannot
+    # find one whose wrong answer is 'yes'.
+    ("is this destination ours to delete", "pin.looks_pinned", "lib/showrunner/pin.py",
+     r"(def looks_pinned\(dest\):\n)",
+     "    return True\ndef _neutered_looks_pinned(dest):\n"),
+    # The READ side of the stamp. Always-None means every consumer reports "no pin here" about
+    # a directory that is correctly pinned — which reads as 'not configured', the reassuring
+    # answer, and is the exact write-side-with-no-read-side defect this module was written to
+    # avoid repeating.
+    ("the pin's stamp, read back", "pin.read_pin", "lib/showrunner/pin.py",
+     r"(def read_pin\(dest\):\n)",
+     "    return None\ndef _neutered_read_pin(dest):\n"),
     ("lock guard", "locks.LockSet.guard", "lib/showrunner/locks.py",
      r"(    def guard\(self, command, session=None\):\n)",
      "        return True, ''\n    def _neutered_guard(self, command, session=None):\n"),
@@ -460,6 +475,11 @@ NOT_SWEPT = {
                               "the payload plumbing between stdin and lease.guard — a bug that "
                               "read the wrong key would allow everything, and the shim tests "
                               "supply a well-formed payload, so they would not see it.",
+    "cli.cmd_self": "CLI wrapper over pin.pin / pin.read_pin, both of which ARE swept. Its own "
+                    "decisions are exit codes, and both branches are asserted THROUGH the CLI: "
+                    "0 on a clean pin, 2 on a directory edited since it was pinned. WHAT THAT "
+                    "DOES NOT COVER: the two argument refusals (--pin without --dest, --dest "
+                    "without either), which are asserted nowhere.",
     "lease._guard_registration": "private; reached only through guard_health, which IS swept, "
                                  "and both of its answers (registered / not) are asserted there",
     "cli.cmd_integrate": "CLI wrapper over campaign.integrate, which is asserted directly",

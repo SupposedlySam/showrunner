@@ -11,7 +11,7 @@ import shutil
 import sys
 
 from . import (__version__, brief, campaign, collide, config, dispatch, events, gates,
-               graph as G, harness, lanes, lease, locks, worktree)
+               graph as G, harness, lanes, lease, locks, pin, worktree)
 from .util import (Refused, die, eprint, now, rel, run, short_session, slug, stamp)
 
 BOLD, DIM, RED, GRN, YEL, OFF = "\033[1m", "\033[2m", "\033[31m", "\033[32m", "\033[33m", "\033[0m"
@@ -576,6 +576,52 @@ def cmd_worktree_fork(args):
     for line in d.get("warnings") or []:
         print("  note    %s" % line)
     return 0
+
+
+def cmd_self(args):
+    """`showrunner self` — pin the tool's own code at a git ref, for a central install.
+
+    NOTHING CONSUMES THIS YET, and that is said plainly rather than left for a reader to infer
+    from the absence of callers: `install.sh --central` and the dispatcher shim are CI-03, and
+    a pin with no consumer is a populated directory, not a working central install.
+    """
+    cfg = _cfg(args)
+    if not args.pin:
+        # THE READ SIDE, reachable on its own. A stamp that can only be written by the command
+        # that writes it is one nobody checks between upgrades.
+        if not args.dest:
+            die("self: --dest names the pinned checkout to report on, or pass --pin <ref> "
+                "--dest <path> to create one.", code=64)
+        found = pin.read_pin(os.path.abspath(os.path.expanduser(args.dest)))
+        if not found:
+            print("no pinned checkout at %s (no readable %s)" % (args.dest, pin.PINNED_FILE))
+            return 1
+        print("pinned  %s (%s)" % (found["sha"][:12], found.get("ref")))
+        print("  at    %s" % _stamp_or(found.get("at")))
+        if not found.get("consistent"):
+            # Only reachable if something edited the directory after the pin, which is the one
+            # thing this module admits it cannot otherwise see. Loud, not reconciled.
+            print("  %sVERSION (%s) and %s (%s) DISAGREE — this directory was modified after "
+                  "it was pinned, so neither names what is actually here.%s"
+                  % (RED, found.get("version"), pin.PINNED_FILE, found["sha"][:12], OFF))
+            return 2
+        return 0
+
+    if not args.dest:
+        die("self --pin: --dest is required. The only consumer of a pin today is a machine-wide "
+            "central install, which is somewhere you name; there is no default that would be "
+            "right for it.", code=64)
+    d = pin.pin(cfg, args.pin, args.dest)
+    print("pinned %s (%s) → %s" % (d["ref"], d["sha"][:12], d["dest"]))
+    print("  stamped %s and %s, so 'what is central running' answers with a commit rather than "
+          "with whoever last copied a working tree" % (pin.VERSION_FILE, pin.PINNED_FILE))
+    print("  NOTHING POINTS AT IT YET — wiring consumer repos to a central copy is CI-03 "
+          "(`install.sh --central`). This populated a directory; it did not switch anything over.")
+    return 0
+
+
+def _stamp_or(ts):
+    return stamp(ts) if ts else "?"
 
 
 def _hook_payload():
@@ -1420,6 +1466,12 @@ def build_parser():
     t.add_argument("--tool", help="the tool name; defaults to the payload's")
     t.add_argument("--command", help="a Bash command to judge, instead of reading stdin")
     t.set_defaults(func=cmd_worktree_guard)
+
+    s = sub.add_parser("self", help="pin showrunner's own code at a git ref, for a central "
+                                    "install (nothing consumes it yet — see CI-03)")
+    s.add_argument("--pin", help="the git ref to extract: a commit, tag or branch")
+    s.add_argument("--dest", help="where the pinned checkout lands, or which one to report on")
+    s.set_defaults(func=cmd_self)
 
     s = sub.add_parser("lock", help="single-consumer resource locks")
     lsub = s.add_subparsers(dest="lockcmd")

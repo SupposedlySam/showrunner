@@ -332,10 +332,30 @@ Everything else in showrunner talks to one interface and never learns which it g
 records no liveness on a claim, so `reap` cannot work against it and says so rather than reporting
 "nothing is stale".
 
+## Pinning the tool's own code
+
+```
+showrunner self --pin <ref> --dest <path>   # extract bin/ and lib/ at a git ref, stamped
+showrunner self --dest <path>               # what is pinned there; exit 2 if it was edited since
+```
+
+**Nothing consumes this yet.** Wiring consumer repos at a central copy is a later leaf
+(`install.sh --central`); this populates a directory and switches nothing over. Said plainly
+because an unwired mechanism that looks installed is the failure this repo keeps finding.
+
+Pinned to a **named ref**, never copied from a working tree, so "what is central running" answers
+with a commit that can be checked out and diffed. `VERSION` holds the resolved SHA and `PINNED`
+holds the ref, SHA and time; if the two ever disagree, something edited the directory after the
+pin and `self --dest` refuses rather than picking one.
+
+It will only ever overwrite a destination it recognises as its own pin — a mistyped `--dest` is
+refused, not emptied. What it does **not** establish: `VERSION` names what was *extracted*, not
+what is there now. Nothing hashes the contents.
+
 ## Verifying the tool itself
 
 ```
-python3 test/run.py        # 563 assertions; needs only Python 3 + git
+python3 test/run.py        # 583 assertions; needs only Python 3 + git
 bash prototype/demo.sh     # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 

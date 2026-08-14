@@ -35,7 +35,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from showrunner import brief, campaign, collide, config, dispatch, gates, graph as G, lanes, lease, locks, util, worktree  # noqa: E402
+from showrunner import brief, campaign, collide, config, dispatch, gates, graph as G, lanes, lease, locks, pin, util, worktree  # noqa: E402
 from showrunner.util import Refused, boot_token as boot_token_for_test  # noqa: E402
 
 VERBOSE = "-v" in sys.argv or "--verbose" in sys.argv
@@ -2100,6 +2100,110 @@ def test_worktree_guard_from_inside_a_worktree():
        and "additionalContext" in res.stdout, res.stdout[:200])
 
 
+def test_self_pin():
+    group("Pinning the tool's own code at a ref (CI-02)")
+    if not have("git"):
+        skip("the self --pin group", "git is not installed")
+        return
+
+    # AGAINST THE REAL REPO, because `git archive` needs a repo that actually carries bin/ and
+    # lib/ — and a fixture that faked them would be asserting against the fake. Nothing here
+    # writes to ROOT: `git archive` reads, and every destination is a temp dir.
+    cfg = config.load(start=ROOT)
+    head = sh(["git", "rev-parse", "HEAD"], ROOT).stdout.strip()
+
+    dest = os.path.join(tmpdir("central"), "central")
+    d = pin.pin(cfg, "HEAD", dest)
+    eq("a symbolic ref is RESOLVED to a sha before anything is stamped — git cannot recover "
+       "what 'HEAD' meant at this instant afterwards", d["sha"], head)
+    with open(os.path.join(dest, pin.VERSION_FILE)) as fh:
+        eq("...and VERSION carries that sha, not the ref it was asked for", fh.read().strip(),
+           head)
+
+    # THE ASSERTION THIS REPO LEARNED TWICE. `sr_bin` named a path that was absolute,
+    # canonical and dead; `init` placed a binary without the library beside it, so what it left
+    # was executable and died on every invocation. Asserting the file EXISTS reproduces both.
+    ran = subprocess.run([d["binary"], "--version"], cwd=dest, capture_output=True, text=True)
+    eq("the pinned copy RUNS — a central install that exists and cannot execute is the shape "
+       "this project has now shipped twice (%s)" % (ran.stderr or ran.stdout).strip()[:40],
+       ran.returncode, 0)
+
+    # THE READ SIDE, exercised. A stamp nobody can read back is a comment in a file — this
+    # repo shipped a lock field with a write side and no read side, and the one caller that
+    # needed it printed "?" in the report the field existed for.
+    back = pin.read_pin(dest)
+    eq("the stamp reads back", (back or {}).get("sha"), head)
+    eq("...naming the ref it was asked for, beside the sha that ref resolved to",
+       (back or {}).get("ref"), "HEAD")
+    ok("...and reports the two files AGREE, which is the only thing that can distinguish a "
+       "clean pin from a directory somebody edited afterwards", (back or {}).get("consistent"),
+       back)
+    ok("...and a directory that was never pinned reads as nothing, rather than as an empty pin",
+       pin.read_pin(tmpdir("notapin")) is None)
+
+    # The consumer's own state must not ride along. A central copy carrying one project's
+    # config is the misread that makes a shared install report on the wrong repo.
+    ok("the pinned payload carries the TOOL and not the project — no .showrunner/ comes with "
+       "it", not os.path.exists(os.path.join(dest, ".showrunner")), sorted(os.listdir(dest)))
+
+    # DISAGREEMENT IS SURFACED, not reconciled. Reachable only by editing the directory after
+    # the pin, which is the one thing this module admits it cannot otherwise see.
+    with open(os.path.join(dest, pin.VERSION_FILE), "w") as fh:
+        fh.write("0" * 40 + "\n")
+    edited = pin.read_pin(dest)
+    ok("a VERSION edited after the pin makes the stamp report INCONSISTENT rather than quietly "
+       "preferring one of the two files", edited and not edited.get("consistent"), edited)
+
+    # Re-pinning over our OWN pin is allowed — that is the upgrade path.
+    d2 = pin.pin(cfg, head, dest)
+    eq("re-pinning over an existing pin works, which is the whole upgrade path", d2["sha"], head)
+    ok("...and it repaired the edited stamp, so an upgrade is also the remedy for a modified "
+       "central directory", (pin.read_pin(dest) or {}).get("consistent"))
+
+    # THROUGH THE CLI, because `consistent` being False is only useful if something ACTS on it.
+    # A flag computed correctly and reported as success is the shape of a check nobody notices.
+    sr = os.path.join(ROOT, "bin", "showrunner")
+    good = subprocess.run([sys.executable, sr, "self", "--dest", dest],
+                          capture_output=True, text=True, cwd=ROOT)
+    eq("`self --dest` on a clean pin exits 0", good.returncode, 0)
+    with open(os.path.join(dest, pin.VERSION_FILE), "w") as fh:
+        fh.write("0" * 40 + "\n")
+    bad = subprocess.run([sys.executable, sr, "self", "--dest", dest],
+                         capture_output=True, text=True, cwd=ROOT)
+    eq("...and on a directory edited since it was pinned it exits NON-ZERO, so the "
+       "inconsistency is a refusal and not a line in a report", bad.returncode, 2)
+    ok("...naming both values, because 'they disagree' without them is a fact the reader "
+       "cannot act on", "DISAGREE" in bad.stdout, bad.stdout[-200:])
+    pin.pin(cfg, head, dest)
+
+    # THE DELETION SAFETY. `pin` removes its destination wholesale, so the question "is this
+    # mine?" is deciding a deletion. A mistyped --dest must not eat a directory.
+    stranger = tmpdir("stranger")
+    keep = os.path.join(stranger, "someones-work.txt")
+    with open(keep, "w") as fh:
+        fh.write("the only copy\n")
+    raises("a destination that is not a pin is REFUSED rather than deleted — a pin overwrites "
+           "wholesale, so it only ever overwrites something it recognises as its own",
+           lambda: pin.pin(cfg, "HEAD", stranger), "refusing to delete")
+    ok("...and the file that was there is still there", os.path.exists(keep))
+    ok("...and an empty directory is not mistaken for a pin either, since 'exists' is the test "
+       "that would make a typo destructive", not pin.looks_pinned(tmpdir("empty")))
+
+    raises("an unresolvable ref is refused before anything is created",
+           lambda: pin.pin(cfg, "no-such-ref-here", os.path.join(tmpdir("d2"), "c")),
+           "cannot resolve")
+
+    # A HALF-WRITTEN PIN IS WORSE THAN NONE: it is a directory that exists, looks installed to
+    # anything checking for a path, and cannot run. A fixture repo carries no bin/ or lib/, so
+    # the extraction genuinely fails — this is not a simulated error.
+    empty_repo = make_repo()
+    doomed = os.path.join(tmpdir("doomed"), "central")
+    raises("a commit that carries no bin/ and lib/ is refused",
+           lambda: pin.pin(empty_repo, "HEAD", doomed), "self --pin")
+    ok("...and leaves NOTHING behind — a half-extracted central directory would read as "
+       "installed to anything that checks for a path", not os.path.exists(doomed))
+
+
 def test_installer_leaves_no_vendored_copy():
     group("What install.sh leaves behind in somebody ELSE's repo")
     if not have("git"):
@@ -3976,7 +4080,7 @@ def main():
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_waiting, test_concurrency,
                test_integration, test_worktree_lease, test_worktree_guard_from_inside_a_worktree,
-               test_installer_leaves_no_vendored_copy,
+               test_self_pin, test_installer_leaves_no_vendored_copy,
                test_publishable, test_dispatch, test_filed_issues_15_to_21,
                test_claims_about_the_layer_below, test_observability,
                test_hook_verbs_never_fail_open_in_silence,
