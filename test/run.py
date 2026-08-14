@@ -2216,6 +2216,14 @@ def test_claims_about_the_layer_below():
         "docs/DESIGN.md": "a retracted claim about the gate, and what replaced it",
         "README.md": "the per-tree gate and the blank-verify.yaml consequence",
         ".gitignore": "tracking .game_loop/ is JUSTIFIED by the per-tree gate holding",
+        # A PLAN, and it still states the layer below as fact — the fail-open posture of
+        # game_loop's central shim, quoted as the model showrunner's would copy. Planned
+        # rather than built is not an excuse: the claim is what rots, and a design decided
+        # against a posture that has since changed is wrong before a line of it is written.
+        # Its own "read against" line names where that was verified, and names the limit —
+        # the shim lives in game_loop's INSTALLER, which this digest does not cover.
+        "docs/plans/central-install.md": "game_loop's central-shim fail-open posture, taken "
+                                         "as the model for showrunner's",
     }
     # Matched the tokens but assert nothing about how game_loop behaves.
     not_claims = {

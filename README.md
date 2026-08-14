@@ -10,7 +10,7 @@ single Crawler can see, and keeps the campaign coherent across sessions.
 > Status: **implemented and self-hosting.** The orchestration loop is real code
 > ([`lib/showrunner/`](lib/showrunner/)), it installs in one line with no packages, and it has been
 > run against its own issue list — see [Dogfooding](#dogfooding-showrunner-on-its-own-issues).
-> `python3 test/run.py` → **399 assertions, no setup beyond Python 3 and git.**
+> `python3 test/run.py` → **401 assertions, no setup beyond Python 3 and git.**
 
 ## Requirements
 
@@ -295,7 +295,7 @@ gone, and nothing but running it finds them.
 ## Verifying it
 
 ```bash
-python3 test/run.py            # 399 CORE assertions — Python 3 + git, nothing else
+python3 test/run.py            # 401 CORE assertions — Python 3 + git, nothing else
 bash prototype/demo.sh         # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 
@@ -399,3 +399,11 @@ undetermined aborts the spawn; "could not tell" and "matched" are never the same
   standing direction for cross-repo fixes, and what showrunner currently assumes about the layer
   below (with the line numbers it was verified against).
 - [`llms.txt`](llms.txt) — the operational brief, if you are an agent.
+
+Planned, not built — open for comment:
+
+- [`docs/plans/worktree-lease.md`](docs/plans/worktree-lease.md) — one session per worktree,
+  enforced by a lease and a PreToolUse guard rather than described by the campaign record.
+- [`docs/plans/central-install.md`](docs/plans/central-install.md) — opt-in `install.sh --central`:
+  one machine-wide copy of the code, every project keeping its own config. Answers this repo's own
+  recorded rejection of `--central` (`8a51bf1`) point by point.
