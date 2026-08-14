@@ -236,7 +236,7 @@ Stated so it can be re-checked rather than trusted, each re-read against the har
 installed here. `test/run.py` fails when that version moves, so this list cannot quietly
 describe a release nobody is running.
 
-<!-- game_loop-verified: 177698dd — payload digest, gated. First shipped in release 24a0af05,
+<!-- game_loop-verified: 177698dd — payload digest, gated. First shipped in release f1285b9f,
      which is a past measurement and stays true; it is NOT a claim about what is installed now. -->
 
 
