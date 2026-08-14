@@ -300,13 +300,27 @@ skipped, and it is worth writing down because the skip is the tempting one.
 - The blast-radius check is a **warning, never a denial** — `blast_note` reaches `commit_note`
   and nothing else (lines 840, 1332) — and is silent when the session's `edited` set is empty,
   which is no evidence rather than a clean bill (line 855).
-- `install.sh` seeds user-owned files **only if absent** (line 649), and ships
-  `templates/verify.yaml` empty — 0 non-comment lines, re-measured rather than recopied.
-  Verified end to end here, not read: a parent repo with a distinctive marker in its
-  `verify.yaml`, a bare worktree, `install.sh --same-as`, and the marker arrives in the
-  worktree — so the seed is the parent's rules and not the blank template.
-- Hooks are merged into `<project>/.claude/settings.json` (line 726), so a worktree
-  without one has no rails at all.
+**The two below cite `install.sh` by ANCHOR, not by line, and that is a correction.** It is
+the one file here that is not vendored — it lives in game_loop's own checkout — so the payload
+digest does not move when it changes and the cited-line check cannot read it. They carried line
+numbers anyway, which claimed a precision nothing on this side could maintain, and one of them
+slid on the very next upgrade: the hooks citation was three lines off within a day and no check
+here noticed. A number you cannot verify is not more precise than a phrase you can grep, it is
+only more confident.
+
+- `install.sh` seeds user-owned files **only if absent** — the comment beginning `Seed the
+  user-owned files only if absent` — and ships `templates/verify.yaml` empty: 0 non-comment
+  lines, re-measured rather than recopied. Verified end to end here, not read: a parent repo
+  with a distinctive marker in its `verify.yaml`, a bare worktree, install, and the marker
+  arrives — so the seed is the parent's rules and not the blank template.
+- Hooks are merged into `<project>/.claude/settings.json` — the block beginning `Merge the
+  hooks into .claude/settings.json` — so a worktree without one has no rails at all.
+- Adopting a parent also carries that parent's **own** `.game_loop/bin/` project scripts, with
+  the executable bit, because a `verify.yaml` rule naming a command absent from the tree is a
+  gate that cannot run. Extras only: a divergent parent payload does **not** overwrite the
+  shipped one. Tested by diverging a parent's `bin/game_loop` deliberately and confirming the
+  worktree took the installer's copy while the project script still crossed — the first check
+  compared two trees already on the same version and would have passed either way.
 
 If any of these stops being true, `lib/showrunner/harness.py` and the shared-state audit in
 `lib/showrunner/worktree.py` are the two places that need re-reading.
