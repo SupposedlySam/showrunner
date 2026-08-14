@@ -236,8 +236,13 @@ Stated so it can be re-checked rather than trusted, each re-read against the har
 installed here. `test/run.py` fails when that version moves, so this list cannot quietly
 describe a release nobody is running.
 
-<!-- game_loop-verified: 177698dd — payload digest, gated. First shipped in release f1285b9f,
-     which is a past measurement and stays true; it is NOT a claim about what is installed now. -->
+<!-- game_loop-verified: 177698dd — payload digest. THIS is the gated value.
+     First carried by release 24a0af05. That release name changes ONLY when the digest above
+     changes: the two describe the same event, and a release where the digest did not move did
+     not re-verify anything. Overwriting it on every upgrade was done twice here by updating
+     both fields together out of habit — an ungated number drifting beside a gated one, inside
+     the marker whose own caveat says not to. Neither is a claim about what is installed now;
+     `.game_loop/VERSION` answers that and is not prose. -->
 
 
 - The commit gate resolves **per target tree** and denies in two cases: when that tree carries
