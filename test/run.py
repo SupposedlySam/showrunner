@@ -1369,6 +1369,62 @@ def test_publishable():
     eq("...while keys it does not mention are untouched, so an overlay cannot silently drop "
        "half a config", merged.get("worktree_root"), ".worktrees")
 
+    # NOTHING ASSEMBLES A SHELL COMMAND FROM DATA. `util.run` runs a STRING through a shell and
+    # a LIST through argv — deliberate, because a configured check is a shell command and a
+    # leaf title is not. The hazard is the shape that blurs them: `run("git log %s" % branch)`
+    # is one convenience edit away and turns any leaf title, branch name or crawler name into
+    # shell. This repo takes leaf titles from issue trackers, so that is attacker-adjacent
+    # input. A neighbouring project lost three words out of a message to this exact shape and
+    # the command still reported success, which is why the tell is worth asserting.
+    #
+    # The discrimination matters as much as the rule: `[path] + args` and `["git"] + list(a)`
+    # are LIST concatenation and go to argv untouched. A first version flagged every `+` and
+    # reported both as injectable — too wide, and noise is how a guard gets ignored before it
+    # ever catches anything.
+    def builds_a_string(node):
+        if isinstance(node, ast.JoinedStr):          # f"..."
+            return True
+        if not isinstance(node, ast.BinOp):
+            return False
+        if isinstance(node.op, ast.Mod):             # "..." % x — Mod implies a string
+            return True
+        if not isinstance(node.op, ast.Add):
+            return False
+        for side in (node.left, node.right):         # `+` is safe when a list is extended
+            if isinstance(side, (ast.List, ast.ListComp)):
+                return False
+            if isinstance(side, ast.Call) and getattr(side.func, "id", "") == "list":
+                return False
+        return True
+
+    injectable = []
+    for name in ("campaign.py", "cli.py", "collide.py", "dispatch.py", "gates.py",
+                 "graph.py", "harness.py", "locks.py", "util.py", "worktree.py"):
+        with open(os.path.join(ROOT, "lib", "showrunner", name)) as fh:
+            tree = ast.parse(fh.read())
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and getattr(node.func, "id", "") == "run"):
+                continue
+            if not node.args:
+                continue
+            first = node.args[0]
+            if builds_a_string(first):
+                injectable.append("%s:%d" % (name, node.lineno))
+    ok("no run() argument is BUILT by interpolation — a list goes to argv and a bare config "
+       "string is an intended shell command, but a formatted string is data becoming code",
+       not injectable, injectable)
+    # Both directions pinned, because this rule is one edit from useless in either. Too wide
+    # and it flags every list concat and gets switched off; too narrow and it misses the
+    # f-string that turns a leaf title into shell.
+    for src, want in [('run(["git"] + list(a))', False),        # list concat — argv
+                      ('run([path] + args)', False),            # list concat — argv
+                      ('run(chk["cmd"])', False),               # config string — intended
+                      ('run("git log %s" % branch)', True),     # data becoming code
+                      ('run(f"git log {branch}")', True),       # same, newer syntax
+                      ('run("git " + branch)', True)]:          # same, plainest
+        call = ast.parse(src).body[0].value
+        eq("interpolation rule: %s" % src, builds_a_string(call.args[0]), want)
+
     # REFERENCE COUNTS AS DESIGN FACTS — game_loop's instrument, and it covers the gap the
     # payload stamp cannot reach. A stamp compares prose against a dependency that moved; it is
     # blind inside one file, where a comment, its code and its digest all change together. A
