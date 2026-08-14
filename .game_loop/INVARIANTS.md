@@ -170,6 +170,50 @@ Cite the file, in the sibling repo, at the version you read. `docs/BOUNDARY.md` 
 what showrunner currently assumes about game_loop and the line numbers it was verified against, so
 the next reader re-checks instead of re-deriving.
 
+## INV24 — A true answer to the wrong question is the most convincing kind of wrong
+
+Written after counting: EIGHT times in one day I asked something of evidence, got an accurate
+answer to a different question, and acted on it. Not one of them looked like an error. The
+command succeeded, the output was correct, and only the conclusion did not follow.
+
+- `git ls-files --error-unmatch` failed, and I labelled it "gitignored". It measures TRACKED.
+- a short sha resolved to "not a commit" in the repo I was standing in; it was another repo's,
+  and I nearly reported that a neighbour's shipped fixes did not exist.
+- a packager's install verb answered "already installed at its bound SHA" and returned before
+  the installer ran. I read a short-circuit as proof a guard had been fixed.
+- a marker file I had deleted came back. I checked it against my leak guard, got the answer I
+  wanted, and never asked what had rewritten it — which was the whole mechanism.
+- a corrupt-pid lock test also carried a stale boot token. Boot is checked first, so the
+  verdict was real and said nothing about the parse I was testing.
+- "First shipped in release X" beside a gated digest, rewritten twice because I updated
+  adjacent fields together.
+- an injection guard flagged `[path] + args`: a true report of a `+` that was list concat.
+- a split-remedy subject that was too wide, then too narrow, passing green at both extremes.
+
+THE TELL IS THAT THERE IS NO TELL. An error announces itself; this does not. So the question
+has to be asked deliberately, and it is cheap: **what would this output look like if my
+hypothesis were FALSE?** If the answer is "the same", what I am holding is not evidence. A
+short-circuit, a lookup in a foreign namespace, a label that claims more than the command
+measured, and a branch that returns before the one under test — all four produce identical
+output for a true and a false hypothesis.
+
+This is [INV15]'s instrument moved to a different moment. There, a non-event ASSERTION is
+paired with the case where the event happens. Here the same pairing is applied while READING,
+before anything is written down. The pairing is what makes an absence mean something, whether
+the absence is in a test or in a terminal.
+
+Rung 6 for the reading habit, and honestly so — no artifact can know which question I meant.
+Rung 4 wherever the evidence is a check I control, which is [INV15] and already enforced.
+
+**Calibration, measured rather than felt.** 21 of 77 commits here are fixes (27%); 3 of 9 in
+the day this was written (33%). Today was not an anomaly, it is the rate — so "am I shipping
+too fast" has an answer, and the answer is no more than usual. Of the twelve most recent
+fixes, roughly eight to ten were surfaced by another project rather than by anything here.
+That attribution is noisy in both directions — one commit crediting a neighbour was my own
+measurement, one crediting nobody came from a neighbour's aside — so the magnitude survives
+and the precise number does not. Stated with its error bar because a retro that launders a
+grep into a statistic would be this invariant, one level up.
+
 ## INV23 — A test is falsifiable only by something that did not share the belief
 
 The limit on every instrument in this repo, and it took a second repo to state.
