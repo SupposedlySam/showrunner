@@ -467,6 +467,26 @@ def cmd_spawn(args):
     if not decision["matched"]:
         eprint("%sNOTE: %s%s" % (YEL, decision["why"], OFF))
 
+    # A REHEARSAL THAT BUILDS THE ROOM POISONS THE RUN IT REHEARSED. `--dry-run` documented
+    # itself as "see the command and start nothing", and started no SESSION while still
+    # creating the worktree, the branch, the scratch dir and the claim — so the honest first
+    # move (rehearse, read the argv, then launch) left the room already built and the real
+    # spawn refused it. The preview now previews.
+    if getattr(args, "dry_run", False) and not getattr(args, "launch", False):
+        die("--dry-run applies to --launch; it shows the command a launch WOULD run.\n"
+            "Without --launch there is nothing to rehearse.", code=64)
+    if getattr(args, "dry_run", False):
+        session = args.session or dispatch.new_session_id()
+        model = dispatch.resolve_model(cfg, decision)
+        cmd = dispatch.build_command(cfg, {"crawler": worktree.crawler_name(leaf["id"], args.actor)},
+                                     model, session, "<brief>")
+        print("%sDispatch (dry run — NOTHING created: no worktree, branch, scratch, brief or "
+              "claim)%s" % (BOLD, OFF))
+        print("  lane     %s" % decision["lane"])
+        print("  model    %s" % (model or "(inherited)"))
+        print("  command  %s" % " ".join(cmd))
+        return 0
+
     record = worktree.spawn(cfg, leaf, actor=args.actor, base=args.base, branch=args.branch)
     # The channel is named before the brief is written, so the brief can TELL the Crawler
     # where to reach the orchestrator. A room the agent is never told about is a room it
@@ -514,6 +534,12 @@ def cmd_spawn(args):
                 "nobody is watching it." % record["harness_gap"], code=2)
         out = dispatch.launch(cfg, record, decision, text, session,
                               dry_run=bool(getattr(args, "dry_run", False)))
+        # THE CLAIM'S LIVENESS MUST NAME THE SESSION, NOT THE SHELL. The claim is taken before
+        # the process exists, so until now it recorded whichever shell ran `spawn` — which is
+        # gone seconds later, making `reap --apply` release a leaf whose Crawler is still
+        # working. Rebind it the moment the real pid is known.
+        if out.get("launched") and out.get("pid") and not args.no_claim:
+            g.rebind_claim(leaf["id"], out["pid"])
         print("\n%sDispatch%s" % (BOLD, OFF))
         print("  model    %s" % (out["model"] or "(inherited — no lane model declared)"))
         print("  session  %s" % out["session"])
@@ -527,6 +553,21 @@ def cmd_spawn(args):
         else:
             print("  command  %s" % " ".join(out["cmd"][:2] + ["<brief>"] + out["cmd"][3:]))
             print("  (dry run — nothing started)")
+    return 0
+
+
+def cmd_edit(args):
+    cfg = _cfg(args)
+    g = _graph(cfg)
+    body = args.body
+    if args.body_file:
+        with open(args.body_file) as fh:
+            body = fh.read()
+    leaf = g.edit(args.id, title=args.title, body=body,
+                  paths=(args.path.split(",") if args.path else None))
+    print("edited %s" % leaf["id"])
+    print("  title %s" % leaf.get("title"))
+    print("  body  %d chars" % len(leaf.get("body") or ""))
     return 0
 
 
@@ -754,6 +795,14 @@ def build_parser():
     s.add_argument("--status")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_list)
+
+    s = sub.add_parser("edit", help="correct a leaf's title, body or paths (the body IS the brief)")
+    s.add_argument("id")
+    s.add_argument("--title")
+    s.add_argument("--body")
+    s.add_argument("--body-file")
+    s.add_argument("--path")
+    s.set_defaults(func=cmd_edit)
 
     s = sub.add_parser("show", help="show one leaf")
     s.add_argument("id")

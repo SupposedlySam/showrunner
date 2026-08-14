@@ -45,7 +45,7 @@ fourteen issues in one real run described something that was not true here.**
 Read the actual source this issue is about and decide whether its premise holds. Then say
 so — it is a required field when you close, not an optional aside:
 
-    showrunner close {leaf_id} --premise holds|partial|refuted|unverifiable \\
+    {sr} close {leaf_id} --premise holds|partial|refuted|unverifiable \\
         --premise-read <the file you checked it against> ...
 
 **"Premise refuted" is a successful outcome**, distinct from both done and failed. A run
@@ -53,7 +53,7 @@ that correctly declines to build something has produced real value. If you concl
 premise does not hold, close it as refuted with the evidence and stop — do not build a
 smaller version of the thing to have something to show:
 
-    showrunner close {leaf_id} --refuted --evidence <file> --reason "<what is actually true>"
+    {sr} close {leaf_id} --refuted --evidence <file> --reason "<what is actually true>"
 
 Why this matters more here than in a solo session: a Crawler that quietly implements a
 fix for a bug that is not there is **indistinguishable** from one that did the work — same
@@ -128,7 +128,7 @@ converge on the same obvious filename far more often than independent actors wou
 You cannot close by asserting it. Name a real, non-empty artifact that proves the work —
 a passing test, a golden, a committed file — and it must be newer than your claim:
 
-    showrunner close {leaf_id} --proof <path> --premise <verdict> \\
+    {sr} close {leaf_id} --proof <path> --premise <verdict> \\
         --premise-read <path> --reason "<what you did>"
 
 Prefer to keep your edits inside the files this leaf is about. Your siblings are working
@@ -172,12 +172,25 @@ This leaf is serialized behind the single-consumer resource **{resource}**. Do n
 consuming command directly. Run it through the lock so the lock is held by the process
 that actually consumes the resource:
 
-    showrunner lock run {resource} --holder {crawler} -- <your command>
+    {sr} lock run {resource} --holder {crawler} -- <your command>
 
 A guard that merely checks the lock is only as good as its verb matcher; the lock is the
 guarantee only where the consumer itself takes it.
 
 """
+
+
+def sr_bin(cfg):
+    """The showrunner binary, named ABSOLUTELY, because the brief is read inside a worktree.
+
+    `showrunner` is not a global command — it is `.showrunner/bin/showrunner`, and
+    `.showrunner/` is runtime state that `git worktree add` does not carry, since that copies
+    TRACKED files only. So a bare command in the brief names something that cannot resolve
+    from where the Crawler actually stands, and the whole proof-of-done design routes through
+    it. Nothing needs copying: `config.load` resolves the main checkout from --git-common-dir,
+    so one binary serves every worktree, one graph, one campaign.
+    """
+    return os.path.join(cfg.root, ".showrunner", "bin", "showrunner")
 
 
 def build(cfg, leaf, spawn_record, decision=None, orchestrator_findings=None,
@@ -186,7 +199,7 @@ def build(cfg, leaf, spawn_record, decision=None, orchestrator_findings=None,
 
     lock_block = ""
     if decision.get("lane") == lanes.SERIALIZED and decision.get("resource"):
-        lock_block = LOCK_BLOCK.format(resource=decision["resource"],
+        lock_block = LOCK_BLOCK.format(sr=sr_bin(cfg), resource=decision["resource"],
                                        crawler=spawn_record["crawler"])
 
     chat_block = ""
@@ -230,7 +243,7 @@ def build(cfg, leaf, spawn_record, decision=None, orchestrator_findings=None,
         leaf_id=leaf["id"],
         title=leaf.get("title", ""),
         body=(leaf.get("body") or "_(no description on the leaf)_").strip(),
-        chat_block=chat_block, lane_line=lane_line,
+        sr=sr_bin(cfg), chat_block=chat_block, lane_line=lane_line,
         lock_block=lock_block,
         orchestrator_block=orchestrator_block,
         shared_block=shared_block,

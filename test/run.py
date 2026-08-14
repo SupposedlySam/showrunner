@@ -1847,6 +1847,64 @@ def test_dispatch():
        "not mistaken for one nobody has messaged yet", out["channel"], "sr_crawler-a")
 
 
+def test_filed_issues_15_to_21():
+    group("Issues 15-21, filed from a real --launch in a consuming repo")
+    if not have("git"):
+        skip("the filed-issues group", "git is not installed")
+        return
+    cfg = make_repo({"dispatch": {"default_model": "sonnet"}})
+    g = new_graph(cfg)
+
+    # #15 — the brief named a bare `showrunner`, which does not resolve inside a worktree:
+    # .showrunner/ is runtime state and `git worktree add` carries tracked files only.
+    leaf = g.show(g.add("a leaf", leaf_id="L15"))
+    rec = worktree.spawn(cfg, leaf, actor="c")
+    text = brief.build(cfg, leaf, rec)
+    ok("the brief names the showrunner binary by ABSOLUTE path — a bare command cannot resolve "
+       "from a worktree, and the whole proof-of-done design routes through it",
+       os.path.join(cfg.root, ".showrunner", "bin", "showrunner") in text)
+    ok("...and no bare `showrunner close` survives anywhere in it",
+       "\n    showrunner close" not in text, text[:0])
+
+    # #19 — acceptEdits left a Crawler able to edit files and nothing else: every bash call
+    # refused for want of a human, so it could not run its harness or close its own leaf.
+    cmd = dispatch.build_command(cfg, {"crawler": "c"}, "sonnet", "s", "b")
+    eq("a launched Crawler can actually run commands — the narrow permission mode did not "
+       "narrow the blast radius, it removed the work",
+       cmd[cmd.index("--permission-mode") + 1], "bypassPermissions")
+
+    # #18 — a brief's out-of-scope section was read as a list of targets, so the better the
+    # brief the more collision-prone the leaf. 9815 paths for a one-file leaf.
+    scoped = {"title": "t", "body": "Edit NOTES.md.\n\n## Out of scope\n\nDo not touch "
+                                    "lib/showrunner/graph.py or test/run.py.\n\n## After\n\n"
+                                    "Also README.md.\n"}
+    txt = collide._text_of(scoped)
+    ok("the blast-radius estimator drops an explicitly out-of-scope SECTION",
+       "graph.py" not in txt and "test/run.py" not in txt, txt)
+    ok("...while keeping what the brief does name, before and after that section",
+       "NOTES.md" in txt and "README.md" in txt, txt)
+
+    # #17 — the body IS the brief, and a bad one was permanent: add refused an existing id and
+    # the only exit spent the proof-of-done gate on a decision that never happened.
+    g.add("bad", leaf_id="L17", body="")
+    g.edit("L17", body="the real brief")
+    eq("a leaf's body can be corrected rather than closed to escape it",
+       g.show("L17")["body"], "the real brief")
+    g.claim("L17", "someone", pid=os.getpid())
+    raises("...but not once it is claimed — that would rewrite the instructions under a Crawler "
+           "already working from them", lambda: g.edit("L17", body="x"), "not open")
+
+    # #20 — the claim's liveness named the shell that ran spawn, gone seconds later, while the
+    # session it launched ran for fifteen minutes. reap --apply would release a live leaf.
+    g.add("live", leaf_id="L20")
+    g.claim("L20", "c", pid=999999)
+    g.rebind_claim("L20", os.getpid())
+    eq("a claim can be rebound to the process really doing the work", 
+       g.show("L20")["claim_pid"], os.getpid())
+    ok("...so it is no longer reported stale while its Crawler is alive",
+       "L20" not in [l["id"] for l, _ in g.stale_claims()])
+
+
 def test_claims_about_the_layer_below():
     group("Claims about game_loop, and whether they still describe what is installed")
     if not have("git"):
@@ -2296,7 +2354,7 @@ def main():
     for fn in (test_locks, test_config_refusals, test_every_rule_can_fail, test_graph, test_lifecycle, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_waiting, test_concurrency,
-               test_integration, test_publishable, test_dispatch,
+               test_integration, test_publishable, test_dispatch, test_filed_issues_15_to_21,
                test_claims_about_the_layer_below,
                test_cli, test_optional):
         try:

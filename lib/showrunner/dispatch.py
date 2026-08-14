@@ -27,6 +27,7 @@ clears. One failure is invisible and the other is loud, so the order is chosen f
 failure you get, not for which is tidier.
 """
 
+import json
 import os
 import subprocess
 import uuid
@@ -34,11 +35,17 @@ import uuid
 from . import campaign
 from .util import Refused, boot_token, die, eprint, now, pid_alive, rel
 
-# game_loop's hooks gate writes, commits and deploy verbs regardless of this, and they are the
-# actual rails. This only decides whether Claude Code stops to ASK, which no one is present to
-# answer under fan-out. `bypassPermissions` is deliberately not the default: it is a wider door
-# than the problem needs, and the guard being the real protection is not a reason to open it.
-DEFAULT_PERMISSION_MODE = "acceptEdits"
+# MEASURED, AND THE OPPOSITE OF WHAT I FIRST REASONED. This was `acceptEdits`, chosen because
+# bypassPermissions "is a wider door than the problem needs". The prediction was wrong: under
+# acceptEdits a launched Crawler can edit files and do NOTHING else — every bash call is refused
+# for want of a human who is not there, so it cannot run its harness, cannot commit, and cannot
+# close its own leaf. The narrow door did not narrow the blast radius; it removed the work.
+#
+# The reasoning that survives is the second half: game_loop's PreToolUse hooks gate writes,
+# commits and deploy verbs REGARDLESS of this setting, and they are the actual rails. This
+# only decides whether Claude Code stops to ask a question nobody is present to answer.
+# Configurable via dispatch.permission_mode for anyone who wants the prompt back.
+DEFAULT_PERMISSION_MODE = "bypassPermissions"
 
 
 def dispatch_config(cfg):
@@ -132,6 +139,42 @@ def provision_chat(cfg, record, channel):
     return True, channel
 
 
+def wire_stop_gate(cfg, record):
+    """Give the Crawler's own tree a turn-end trigger that runs showrunner's stop gate.
+
+    `stop-gate` refuses a turn-end while this Crawler's leaf is still claimed and open, and it
+    has existed since the beginning — presented in llms.txt under "The gates, as hooks", which
+    is a claim about wiring that had no path into a Crawler at all. The gate was real and
+    unreachable, so a launched Crawler could end its session with its leaf open and nothing
+    would stop it. A gate nobody can wire is documentation.
+
+    Written into the WORKTREE's harness triggers, merged rather than replaced, because the
+    harness's trigger file is its own and a project may already have one. Reports rather than
+    raises: a Crawler that starts without a turn-end gate is degraded, not broken, and refusing
+    to dispatch over it would be the guard doing more damage than the gap.
+    """
+    wt = cfg.abspath(record["worktree"])
+    tf = os.path.join(wt, ".game_loop", "triggers.json")
+    if not os.path.isdir(os.path.dirname(tf)):
+        return False, "no harness dir in the worktree — nothing to wire a turn-end gate into"
+    sr = os.path.join(cfg.root, ".showrunner", "bin", "showrunner")
+    entry = {"name": "showrunner-stop-gate",
+             "command": "%s stop-gate" % sr,
+             "timeout_sec": 30}
+    try:
+        data = {}
+        if os.path.exists(tf):
+            with open(tf) as fh:
+                data = json.load(fh) or {}
+        stops = [t for t in (data.get("stop") or []) if t.get("name") != entry["name"]]
+        data["stop"] = stops + [entry]
+        with open(tf, "w") as fh:
+            json.dump(data, fh, indent=2, sort_keys=True)
+    except (OSError, ValueError) as exc:
+        return False, "could not wire the turn-end gate: %s" % exc
+    return True, entry["command"]
+
+
 def build_command(cfg, record, model, session_id, prompt):
     """The argv for one Crawler. Separated from launching so it can be asserted without
     starting a real session, which costs money and a worktree."""
@@ -177,6 +220,8 @@ def launch(cfg, record, decision, brief, session_id, dry_run=False):
     campaign.set_state(cfg, record["crawler"], "dispatching",
                        session=session_id, model_declared=model, channel=channel)
 
+    gate_ok, gate_detail = wire_stop_gate(cfg, record)
+
     chat_ok, chat_detail = (False, "disabled")
     if channel:
         chat_ok, chat_detail = provision_chat(cfg, record, channel)
@@ -194,7 +239,7 @@ def launch(cfg, record, decision, brief, session_id, dry_run=False):
     campaign.set_state(cfg, record["crawler"], "running", pid=proc.pid, dispatched_at=now())
     return {"session": session_id, "model": model, "channel": channel if chat_ok else None,
             "chat": chat_detail, "cmd": cmd, "pid": proc.pid, "log": rel(log, cfg.root),
-            "launched": True}
+            "stop_gate": gate_detail if gate_ok else None, "launched": True}
 
 
 def observed_models(cfg, entry):

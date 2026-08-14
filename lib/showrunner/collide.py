@@ -52,8 +52,34 @@ def tracked_files(root):
     return [line for line in out.splitlines() if line.strip()]
 
 
+# A brief's most useful section is the one that says what NOT to touch, and to a scanner that
+# reads prose for filenames it looks exactly like a list of targets. Measured in a consuming
+# repo: a leaf whose real blast radius was one markdown file estimated at 9815 paths, because
+# its brief responsibly listed every directory it must leave alone. The better the brief, the
+# more collision-prone the leaf — the estimator was rewarding vagueness.
+_EXCLUSION_HEADING = re.compile(
+    r"^\s{0,3}#{1,6}\s*.*\b(out of scope|do not touch|non-goals?|not in scope|excluded)\b",
+    re.I | re.M)
+
+
 def _text_of(leaf):
-    return "\n".join([str(leaf.get("title") or ""), str(leaf.get("body") or "")])
+    """Title plus body, with any explicitly out-of-scope SECTION removed.
+
+    Cut at the heading and resume at the next heading of the same or higher level, so a brief
+    that names its exclusions is not punished for saying so. Only whole sections are dropped:
+    an inline "do not touch x" mid-paragraph still contributes, because guessing at sentence
+    scope in prose is how a scanner starts being wrong in the other direction.
+    """
+    body = str(leaf.get("body") or "")
+    out, i = [], 0
+    for m in _EXCLUSION_HEADING.finditer(body):
+        out.append(body[i:m.start()])
+        level = len(m.group(0)) - len(m.group(0).lstrip("# \t"))
+        nxt = re.compile(r"^\s{0,3}#{1,%d}\s" % max(1, body[m.start():m.end()].count("#")),
+                         re.M).search(body, m.end())
+        i = nxt.start() if nxt else len(body)
+    out.append(body[i:])
+    return "\n".join([str(leaf.get("title") or ""), "".join(out)])
 
 
 def _declared_paths(leaf, root, files):

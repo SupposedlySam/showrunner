@@ -314,6 +314,59 @@ class SqliteGraph:
                 continue          # somebody else won it, or it stopped being ready
         return None
 
+    def edit(self, leaf_id, title=None, body=None, paths=None):
+        """Correct a leaf's title, body or paths. The BODY IS THE BRIEF a Crawler is dispatched
+        with, so a typo in it is not cosmetic — it is the whole instruction set for an agent.
+
+        Before this, `add` refused an existing id and there was no other verb, so a bad body
+        was permanent: the only exit was to close the leaf, which spends the proof-of-done gate
+        on nothing and records a decision that never happened. Correcting the instructions is
+        not an outcome and must not have to be laundered through one.
+
+        Refuses on a leaf that is no longer open, because rewriting the brief under a Crawler
+        that is already working from it is a different and worse thing than a typo.
+        """
+        leaf = self.show(leaf_id)
+        if leaf["status"] != OPEN:
+            die("%s is %s, not open — its brief is already in somebody's hands. Editing it now "
+                "would change the instructions under a Crawler working from them."
+                % (leaf_id, leaf["status"]), code=2)
+        sets, args = [], []
+        for col, val in (("title", title), ("body", body)):
+            if val is not None:
+                sets.append("%s=?" % col)
+                args.append(val)
+        if paths is not None:
+            sets.append("paths=?")
+            args.append(",".join(paths))
+        if not sets:
+            die("nothing to edit — pass --title, --body/--body-file or --path", code=64)
+        with self.db:
+            self.db.execute("UPDATE leaves SET %s WHERE id=?" % ", ".join(sets),
+                            args + [leaf_id])
+            self._event(leaf_id, "edited", ", ".join(s.split("=")[0] for s in sets))
+        return self.show(leaf_id)
+
+    def rebind_claim(self, leaf_id, pid):
+        """Point an existing claim's liveness at the process that is really doing the work.
+
+        A claim is taken BEFORE the Crawler's session exists — it has to be, because the
+        session id must be recorded first (see dispatch). So the pid it records is whichever
+        short-lived shell ran `spawn`, and that shell exits seconds later. Every liveness
+        question then answers about a process that is already gone: `stale_claims` calls the
+        leaf abandoned, and `reap --apply` RELEASES it while the Crawler is still working.
+
+        Measured in a consuming repo: claim pid 4635 (the shell, gone) against a `claude -p`
+        at 4784 alive for fifteen minutes, both naming the same session. One Crawler, and the
+        record said nobody was there.
+        """
+        with self.db:
+            self.db.execute(
+                "UPDATE leaves SET claim_pid=?, claim_boot=?, heartbeat_ts=? "
+                "WHERE id=? AND status=?",
+                (pid, boot_token(), now(), leaf_id, IN_PROGRESS))
+        return self.show(leaf_id)
+
     def heartbeat(self, leaf_id):
         self.db.execute("UPDATE leaves SET heartbeat_ts=? WHERE id=?", (now(), leaf_id))
         self.db.commit()
