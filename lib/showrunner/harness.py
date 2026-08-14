@@ -18,13 +18,22 @@ so a diverged ledger was invisible to it. The harness now answers both questions
     <harness>/bin/<name> owned --porcelain      # the owned set, each flagged rule or not
     <harness>/bin/<name> worktree --porcelain   # this tree vs its parent
         exit 0  clean          every owned file is byte-identical
-        exit 1  rules drifted  the trees enforce different things  -> ABORT the spawn
+        exit 1  drifted        a DETERMINED finding that the trees enforce different things,
+                               whether the difference is in the rule files or in the harness's
+                               own scripts  -> ABORT the spawn
         exit 2  undetermined   unreadable / not a worktree / no parent harness -> ABORT
         exit 3  notes drifted  ordinary for per-tree notes  -> warn, carry on
 
 Exit 2 never shares a code with anything that was actually compared, so "could not tell"
 cannot be mistaken for "clean" — which is the whole reason to ask the harness rather than
 guess.
+
+**1 means drifted, not "rules drifted", and that is a correction.** A drifted harness SCRIPT
+used to have no entry in the harness's exit map and fell to the default 2, so showrunner
+aborted for the right reason under the wrong name — it reported that the tool could not tell,
+when the tool had read both files and found them different. The action was already correct
+here, which is why nothing broke and why nothing surfaced it either. Anything downstream that
+reads 2 as "abort, could not tell" now needs 1 to mean "abort, and we know why".
 
 **What it verifies grew, and this module used to overstate the limit rather than the reach.**
 It once appended "not checked: that both trees run the same harness CODE — bin/ is not in the
@@ -64,7 +73,13 @@ from .util import run
 KNOWN_HARNESS_DIRS = (".game_loop", ".loop")
 HOOK_REGISTRATION = ".claude/settings.json"
 
-CLEAN, RULES_DRIFTED, UNDETERMINED, NOTES_DRIFTED = 0, 1, 2, 3
+CLEAN, DRIFTED, UNDETERMINED, NOTES_DRIFTED = 0, 1, 2, 3
+
+# Which verdict wins when a tree carries more than one harness directory. "Could not tell"
+# outranks every determined finding, because a determined finding about the files that WERE
+# read says nothing about the one that was not — the harness ranks its own branches that way,
+# and a consumer that ranked them differently would report the milder half of a mixed tree.
+SEVERITY = {CLEAN: 0, NOTES_DRIFTED: 1, DRIFTED: 2, UNDETERMINED: 3}
 
 FALLBACK_RUNTIME = [
     "state.json", "sessions/", "edited.txt", "log.jsonl", "verified.json", "probe/",
@@ -178,7 +193,7 @@ def _install(cfg, sp, worktree_path):
     return None
 
 
-CONTRACT_CODES = (CLEAN, RULES_DRIFTED, UNDETERMINED, NOTES_DRIFTED)
+CONTRACT_CODES = (CLEAN, DRIFTED, UNDETERMINED, NOTES_DRIFTED)
 
 
 def _verify_with_harness(worktree_path, dirname):
@@ -205,24 +220,39 @@ def check_tree(cfg, worktree_path):
     orchestrator's owes. The whole point of the byte-compare is that the party plays by one
     rule set, and checking only at t=0 verifies that for exactly one instant.
 
-    Returns (status, detail) where status is one of 'clean', 'rules-drifted',
+    Returns (status, detail, mis_certified) where status is one of 'clean', 'drifted',
     'notes-drifted', 'undetermined', or None when no harness applies here.
+
+    `mis_certified` is the harness's own `false_clean_before_fix`: this tree is one that a
+    harness before game_loop #66 would have reported CLEAN, exit 0. It is retrospective and
+    it is not re-derivable — the verb is stateless and compares trees as they are now, so
+    once a branch is merged the evidence is gone. Carried out of here rather than left in
+    the payload because the tree in front of you being blocked today says nothing about
+    whether an earlier version of it already walked through this gate onto trunk.
+
+    Ranked by SEVERITY rather than by a chain of pairwise comparisons. The chain that used to
+    live here let a notes-drifted second harness lose to a clean first one, so the milder
+    verdict won and the finding it was added to surface never reached a caller.
     """
-    names = {CLEAN: "clean", RULES_DRIFTED: "rules-drifted",
+    names = {CLEAN: "clean", DRIFTED: "drifted",
              NOTES_DRIFTED: "notes-drifted", UNDETERMINED: "undetermined"}
     worst = None
     detail = ""
+    mis_certified = False
     for dirname in spec(cfg)["dirs"]:
         rc, payload = _verify_with_harness(worktree_path, dirname)
         if rc is None:
             continue
-        if worst is None or rc in (RULES_DRIFTED, UNDETERMINED) and worst == CLEAN:
+        # OR'd across harness directories on purpose: any one of them reporting a false clean
+        # means the tree as a whole was let through, and the others agreeing proves nothing.
+        if (payload or {}).get("false_clean_before_fix") is True:
+            mis_certified = True
+        if worst is None or SEVERITY[rc] > SEVERITY[worst]:
             worst = rc
             detail = (payload or {}).get("detail", "")
-        elif rc != CLEAN and worst == NOTES_DRIFTED:
-            worst = rc
-            detail = (payload or {}).get("detail", "")
-    return (names.get(worst), detail) if worst is not None else (None, "")
+    if worst is None:
+        return None, "", False
+    return names.get(worst), detail, mis_certified
 
 
 def provision(cfg, worktree_path):
@@ -278,7 +308,7 @@ def provision(cfg, worktree_path):
             # its own here: guessing which files are rules is exactly the hardcoded list
             # this module was rewritten to delete, and it would rot the same way.
             problems.append(
-                "%s does not answer `%s worktree --porcelain` (exit 0 clean / 1 rules drifted / "
+                "%s does not answer `%s worktree --porcelain` (exit 0 clean / 1 drifted / "
                 "2 undetermined / 3 notes drifted). showrunner will not guess which of its files "
                 "are rules — that list belongs to the harness and drifts silently anywhere else.\n"
                 "See the harness's embedding contract, or set harness.require=false to accept a "
@@ -291,7 +321,7 @@ def provision(cfg, worktree_path):
                            "hook-registration file, which lives outside the harness directory "
                            "— showrunner refuses a spawn without one, which is a different "
                            "check by a different party." % (dirname, detail))
-        elif rc == RULES_DRIFTED:
+        elif rc == DRIFTED:
             problems.append(
                 "%s: %s\nThe Crawler would enforce different things than the orchestrator, and "
                 "nothing downstream would report it." % (dirname, detail))
@@ -302,6 +332,12 @@ def provision(cfg, worktree_path):
                 "%s: the harness could not determine whether this tree matches (%s). Refusing "
                 "rather than reading it as clean — 'could not tell' and 'matched' must never be "
                 "the same answer." % (dirname, detail or "exit %s" % rc))
+        if (payload or {}).get("false_clean_before_fix") is True:
+            problems.append(
+                "%s: and a harness before game_loop #66 would have called this exact tree CLEAN. "
+                "Nothing re-derives that after the fact — the verb compares trees as they are "
+                "now — so if this branch has been integrated before, that merge was certified "
+                "by a gate answering about files it never opened." % dirname)
 
         if not installed and not _hooks_present(worktree_path):
             problems.append(

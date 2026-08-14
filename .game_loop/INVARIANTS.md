@@ -439,6 +439,29 @@ months" is a bug you go and find. So state limits with an instance attached, not
 Note that theirs never went stale: an accurate limit that reads as decoration is a second and
 worse failure than INV20's, because there is nothing to detect.
 
+**EXISTING IS NOT THE SAME AS WORKING, and the whole invariant above only ever established the
+first.** A neighbouring project's phrasing, carried over from a shared learnings channel: a
+remedy is complete only if RUNNING it leaves the person unstuck. A
+command can be real, exit 0, and return you to the refusal that sent you there — the symptom
+addressed while the cause stands. So one remedy is now executed end to end: a bare repo, the
+refusal, the exact command it printed, and the original verb required to SUCCEED afterwards.
+
+Running it found a defect none of the string checks could have. `doctor` on a repo with no
+config validated the DEFAULTS, printed every check passing, and exited 0 — with the remedy
+sitting in the header as decoration. The prose was right, the verb was real, and the exit code
+told a CI step or an agent reading `$?` that an unconfigured repo was healthy. INV24's shape,
+reached through INV21's door. It is an error-level finding now, and doctor still runs pre-init
+and still prints the whole report; what it no longer does is call that success.
+
+Executing exactly one is stated in the test rather than implied, because a sweep that does not
+name its reach is the kind that gets mistaken for a complete one.
+
+And the guard that flags a remedy ASSEMBLED across nodes was keyed on the `+` operator, so
+`[finding] + list(rest)` — a list concatenation, no more a sentence than a list is — failed the
+build over a message it had no business reading. Second false positive of the same shape in the
+same guard, which makes it a shape: the operator is not the subject, the operand type is. Both
+list cases are now in the table that proves this rule can tell prose from assembly.
+
 ## INV20 — A stated LIMIT ages exactly like a stated PREMISE
 
 INV14 says to verify premises about our own repos. A premise is a claim I *act* on, so it gets

@@ -140,9 +140,14 @@ TARGETS = [
     # the real function against a fixture harness. Padding this number by un-stubbing a test
     # that is right to stub would be gaming the metric, which is the same rounding-up the
     # sweep exists to catch.
+    # The mutant returns the CURRENT arity on purpose. When check_tree grew a third element the
+    # old two-tuple mutant started raising instead of lying, and a mutant that crashes is caught
+    # by every test that merely touches the call — so the sweep would still have scored this
+    # green while no longer testing the thing it names. A neutered producer has to be plausible
+    # to be evidence: it must report the reassuring answer, not fail to report at all.
     ("harness drift check", "harness.check_tree", "lib/showrunner/harness.py",
      r"(def check_tree\(cfg, worktree_path\):\n)",
-     "    return 'clean', ''\ndef _neutered_check_tree(cfg, worktree_path):\n"),
+     "    return 'clean', '', False\ndef _neutered_check_tree(cfg, worktree_path):\n"),
     # Added by applying the RECENCY lens: the most recently argued producer is the one with
     # the least behind it, because the argument is fresh and feels like evidence.
     ("waiting (orchestrator liveness)", "campaign.waiting", "lib/showrunner/campaign.py",

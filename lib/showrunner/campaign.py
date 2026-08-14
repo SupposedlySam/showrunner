@@ -210,9 +210,10 @@ def reconcile(cfg, graph, base="HEAD"):
 
         if f["worktree_exists"]:
             from . import harness
-            f["harness"], f["harness_detail"] = harness.check_tree(cfg, wt)
+            f["harness"], f["harness_detail"], f["harness_mis_certified"] = \
+                harness.check_tree(cfg, wt)
         else:
-            f["harness"], f["harness_detail"] = None, ""
+            f["harness"], f["harness_detail"], f["harness_mis_certified"] = None, "", False
 
         leaf = None
         try:
@@ -222,11 +223,11 @@ def reconcile(cfg, graph, base="HEAD"):
         f["leaf_status"] = leaf.get("status") if leaf else "unknown"
         f["parked"] = bool(leaf.get("parked")) if leaf else False
 
-        if f["harness"] == "rules-drifted":
+        if f["harness"] == "drifted":
             # Louder than LIVE: this tree's gate is answering a different question than the
             # orchestrator's, so anything it certifies means less than it appears to.
-            f["verdict"] = ("RULES DRIFTED — this Crawler's harness no longer matches the "
-                            "project's; its commit gate owes something else")
+            f["verdict"] = ("HARNESS DRIFTED — this Crawler's rules or its harness scripts no "
+                            "longer match the project's; its commit gate owes something else")
         elif f["harness"] == "undetermined":
             f["verdict"] = "HARNESS UNDETERMINED — cannot tell whether its rules match"
         elif f["alive"]:
@@ -536,11 +537,18 @@ def _integrate_locked(cfg, graph, base=None, only=None, dry_run=False):
         wt = cfg.abspath(entry.get("worktree"))
         if wt and os.path.isdir(wt):
             from . import harness
-            status, detail = harness.check_tree(cfg, wt)
-            if status in ("rules-drifted", "undetermined"):
+            status, detail, mis_certified = harness.check_tree(cfg, wt)
+            if status in ("drifted", "undetermined"):
                 entry = dict(entry)
                 entry["_harness_block"] = status
                 entry["_harness_detail"] = detail
+                if mis_certified:
+                    # The gate that is refusing this branch today is the one that would have
+                    # WAVED IT THROUGH before game_loop #66. Said here rather than only in the
+                    # doctor, because this is the moment somebody is deciding about this branch.
+                    entry["_harness_detail"] += (
+                        "\nA harness before game_loop #66 reported this tree as clean, exit 0. "
+                        "If this branch was ever integrated, check what that merge certified.")
         candidates.append(entry)
 
     # Deterministic order: oldest spawn first. Order has to be *owned* by something.

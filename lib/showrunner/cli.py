@@ -104,6 +104,16 @@ def cmd_doctor(args):
                             "" if os.path.exists(cfg.path) else "  (MISSING — run `showrunner init`)"))
     findings = cfg.validate()
     bad = 0
+    if not os.path.exists(cfg.path):
+        # EXIT 2, not a decorated header line. doctor validated the DEFAULTS and reported every
+        # check passing, in a repo nobody had configured — a true answer to a question the
+        # person asking had not asked. The remedy was printed and the exit code said go, so
+        # anything gating on this verb (a CI step, an agent reading `$?`) read an uninitialised
+        # repo as a healthy one. Running pre-init is still supported and still prints the whole
+        # report; what it no longer does is call that success.
+        findings = [("error", "no config at %s — every check below ran against DEFAULTS, not "
+                              "against anything you chose. Run `showrunner init`."
+                              % rel(cfg.path, cfg.root))] + list(findings)
     for level, msg in findings:
         mark = {"error": RED + "ERROR" + OFF, "warn": YEL + "warn " + OFF, "ok": GRN + "ok   " + OFF}[level]
         print("  %s %s" % (mark, msg))
@@ -632,6 +642,11 @@ def cmd_reconcile(args):
         if f["scratch_files"]:
             print("    scratch holds %d file(s): %s" % (len(f["scratch_files"]),
                                                         ", ".join(f["scratch_files"][:5])))
+        if f.get("harness_mis_certified"):
+            # Retrospective and unrecoverable elsewhere: the harness verb is stateless, so once
+            # a branch is merged nothing can be asked about the tree it was merged from.
+            eprint("    %sMIS-CERTIFIED: a harness before game_loop #66 called this tree clean, "
+                   "exit 0. Check whether this branch was ever integrated.%s" % (YEL, OFF))
     return 0
 
 

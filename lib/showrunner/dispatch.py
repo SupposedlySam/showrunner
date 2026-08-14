@@ -158,9 +158,14 @@ def wire_stop_gate(cfg, record):
     if not os.path.isdir(os.path.dirname(tf)):
         return False, "no harness dir in the worktree — nothing to wire a turn-end gate into"
     sr = os.path.join(cfg.root, ".showrunner", "bin", "showrunner")
+    # NO timeout_sec, deliberately. This ran with an explicit 30, and the harness honours an
+    # explicit value uncapped — so showrunner was overriding a 10s default the layer below had
+    # chosen for a reason it stated: this trigger runs on EVERY turn-end, and a timeout there
+    # fails open, which is a turn ending unchecked rather than a refusal. How long a turn-end
+    # may be held is the harness's concept and its budget to spend. Omitting the key means a
+    # retune there reaches every Crawler here without anyone remembering to follow it.
     entry = {"name": "showrunner-stop-gate",
-             "command": "%s stop-gate" % sr,
-             "timeout_sec": 30}
+             "command": "%s stop-gate" % sr}
     try:
         data = {}
         if os.path.exists(tf):

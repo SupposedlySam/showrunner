@@ -159,10 +159,23 @@ which files are rules, or reimplement the hooks merge.
 | `game_loop attribute --merge <ref>` | declare an integration commit's provenance |
 | `.game_loop/.gitignore` | the authoritative declaration of what is runtime state |
 
-Exit codes from `worktree`, consumed exactly as defined: **0** clean · **1** rule files drifted
-(abort the spawn) · **2** undetermined (abort — "could not tell" must never read as "clean") ·
-**3** notes drifted (warn). Nothing undetermined shares a code with anything compared, which is
-the property that makes asking better than guessing.
+Exit codes from `worktree`, consumed exactly as defined: **0** clean · **1** drifted — a
+determined finding that the trees enforce different things, whether the difference is in the
+rule files or in the harness's own scripts (abort the spawn) · **2** undetermined (abort —
+"could not tell" must never read as "clean") · **3** notes drifted (warn). Nothing undetermined
+shares a code with anything compared, which is the property that makes asking better than
+guessing.
+
+**1 said "rule files drifted" here until game_loop #66, and that was a claim about the layer
+below outliving the thing it described.** A drifted harness SCRIPT had no entry in that map and
+fell to the default 2, so showrunner aborted for the right reason under the wrong name. The
+suite now reads `WORKTREE_EXIT` back out of the installed payload and fails when this table and
+that map disagree, because a number this side branches on is not something to keep in prose
+alone. The same release added `false_clean_before_fix` to the JSON: true exactly when a harness
+before the fix would have called the tree clean at exit 0. It is retrospective and it cannot be
+re-derived — the verb compares trees as they are now, so once a branch is merged the tree that
+was certified is gone. showrunner carries it out of `check_tree` and into `reconcile` and
+`integrate` for that reason.
 
 ## Closed asks
 
@@ -236,8 +249,14 @@ Stated so it can be re-checked rather than trusted, each re-read against the har
 installed here. `test/run.py` fails when that version moves, so this list cannot quietly
 describe a release nobody is running.
 
-<!-- game_loop-verified: 177698dd — payload digest. THIS is the gated value.
-     First carried by release 24a0af05. That release name changes ONLY when the digest above
+The re-read that stamp forces is scoped by `git diff` over the vendored payload, not by
+re-reading everything: the assumptions above cite `guard-writes-impl.sh`, `verify` and
+`install.sh` by line, so when those files are byte-identical across an upgrade the citations
+cannot have moved. That is the difference between a check being satisfied and a check being
+skipped, and it is worth writing down because the skip is the tempting one.
+
+<!-- game_loop-verified: 47760e94 — payload digest. THIS is the gated value.
+     First carried by release 54a78bf6. That release name changes ONLY when the digest above
      changes: the two describe the same event, and a release where the digest did not move did
      not re-verify anything. Overwriting it on every upgrade was done twice here by updating
      both fields together out of habit — an ungated number drifting beside a gated one, inside

@@ -1045,19 +1045,63 @@ def test_harness_provisioning():
     gp.add("tamper", leaf_id="h8", labels=["backend"])
     rec8 = worktree.spawn(post, gp.show("h8"), actor="tamperer")
     campaign.record_spawn(post, rec8, pid=os.getpid())
-    status, _ = H.check_tree(post, rec8["worktree"])
+    status, _, mis = H.check_tree(post, rec8["worktree"])
     eq("a freshly spawned tree checks clean", status, "clean")
+    ok("...and is not retroactively flagged as mis-certified when nothing was unreadable",
+       mis is False, mis)
 
     with open(os.path.join(rec8["worktree"], ".game_loop", "TESTMODE"), "w") as fh:
         fh.write("drifted\n")
-    status, _ = H.check_tree(post, rec8["worktree"])
+    status, _, _ = H.check_tree(post, rec8["worktree"])
     eq("post-spawn rule drift is caught by RE-asking the harness, not assumed away",
-       status, "rules-drifted")
+       status, "drifted")
     finding = next(f for f in campaign.reconcile(post, gp)
                    if f["crawler"] == rec8["crawler"])
     ok("...and reconcile reports it above every other verdict — a gate answering a different "
        "question makes everything it certified mean less",
-       finding["verdict"].startswith("RULES DRIFTED"), finding["verdict"])
+       finding["verdict"].startswith("HARNESS DRIFTED"), finding["verdict"])
+
+    # RANKING, and it is showrunner's own bug rather than the harness's. A tree may carry more
+    # than one harness directory, and the chain of pairwise comparisons that used to pick the
+    # verdict let a notes-drifted second harness lose to a clean first one. The milder answer
+    # winning is the direction nobody notices, because the output looks like agreement.
+    class _TwoHarnesses(object):
+        root = ROOT
+
+        def get(self, key, default=None):
+            return {"dirs": [".game_loop", ".loop"]} if key == "harness" else default
+
+    def _ranked(canned):
+        orig = H._verify_with_harness
+        H._verify_with_harness = lambda wt, d: canned[d]
+        try:
+            return H.check_tree(_TwoHarnesses(), "/does/not/need/to/exist")
+        finally:
+            H._verify_with_harness = orig
+
+    status, detail, _ = _ranked({".game_loop": (H.CLEAN, {"detail": "the first is clean"}),
+                                 ".loop": (H.NOTES_DRIFTED, {"detail": "the second took notes"})})
+    eq("a second harness's notes drift is not swallowed by a first one reporting clean",
+       status, "notes-drifted")
+    ok("...and the detail carried out is the one that raised the verdict, not the one that passed",
+       "took notes" in detail, detail)
+
+    status, _, _ = _ranked({".game_loop": (H.DRIFTED, {"detail": "rules differ"}),
+                            ".loop": (H.UNDETERMINED, {"detail": "one file was unreadable"})})
+    eq("'could not tell' outranks a determined finding — what was proved about the files that "
+       "WERE read says nothing about the one that was not", status, "undetermined")
+
+    status, _, mis = _ranked(
+        {".game_loop": (H.CLEAN, {"detail": "this one matched"}),
+         ".loop": (H.UNDETERMINED, {"detail": "unreadable script",
+                                    "false_clean_before_fix": True})})
+    ok("a tree that ANY harness would once have called clean is flagged mis-certified, even "
+       "with another harness passing — the one that agreed never opened the file in question",
+       mis is True and status == "undetermined", (status, mis))
+    ok("...and the flag is off by default rather than absent, so a harness that does not "
+       "report it cannot read as a confession", _ranked(
+           {".game_loop": (H.CLEAN, {"detail": "matched"}),
+            ".loop": (H.CLEAN, {"detail": "matched"})})[2] is False)
 
     off = make_repo(extra_config={"harness": {"provision": "off", "require": False}})
     _seed_harness(off.root)
@@ -1275,7 +1319,7 @@ def test_integration():
     real_check = campaign.harness.check_tree if hasattr(campaign, "harness") else None
     from showrunner import harness as _H
     _orig = _H.check_tree
-    _H.check_tree = lambda c, w: ("rules-drifted", "test: this tree enforces different things")
+    _H.check_tree = lambda c, w: ("drifted", "test: this tree enforces different things", False)
     try:
         res_d, ok_d = campaign.integrate(cfg, g, base="main", only=["m5"])
     finally:
@@ -1660,6 +1704,36 @@ def test_dispatch():
     ok("...and is None when chat is switched off, so nothing half-wires",
        dispatch.channel_for(nochat, rec) is None)
 
+    # WHERE the chat tool lives, which the sweep found nothing noticed at all: neuter chat_path
+    # to return None and every assertion still passed. None is how this function says "nobody
+    # configured one", so a broken resolver and an empty config are the same answer — and the
+    # difference matters, because doctor's reciprocal check only fires on a path that RESOLVES
+    # and then does not exist. A neighbour who moves their checkout cannot fail this suite;
+    # they do not know we point at them. This is the only place it can show.
+    def cli_doctor_lines(c):
+        p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                           cwd=c.root, capture_output=True, text=True,
+                           env=dict(os.environ, NO_COLOR="1"))
+        return (p.stdout + p.stderr).splitlines()
+
+    tool = os.path.join(ROOT, "bin", "showrunner")     # any real file will do as a stand-in
+    chatty = make_repo({"dispatch": {"chat": {"enabled": True, "cli": tool, "installer": tool}}})
+    eq("an ABSOLUTE chat path is returned as given", dispatch.chat_path(chatty, "cli"), tool)
+    relative = make_repo({"dispatch": {"chat": {"enabled": True, "cli": "vendor/chat"}}})
+    eq("...and a relative one resolves against the repo root, not the caller's cwd",
+       dispatch.chat_path(relative, "cli"), os.path.join(relative.root, "vendor", "chat"))
+    ok("...while an unconfigured key stays None, which is a different thing from unresolvable",
+       dispatch.chat_path(relative, "installer") is None)
+    lines = "\n".join(cli_doctor_lines(chatty))
+    ok("doctor reports a configured chat path that RESOLVES — the happy path speaks, so a "
+       "silent pass cannot be mistaken for a check that ran", "chat cli resolves" in lines, lines)
+    gone = make_repo({"dispatch": {"chat": {"enabled": True,
+                                            "cli": os.path.join(ROOT, "no", "such", "tool")}}})
+    lines = "\n".join(cli_doctor_lines(gone))
+    ok("...and ERRORS on one that resolves to nothing, rather than warning it away — every "
+       "Crawler would spawn unreachable and only this repo can see it",
+       "which does not exist" in lines, lines)
+
     # game_loop's own warning, asserted rather than trusted: `changed: false` means the model
     # did not MOVE, never that it matched what was asked for — and an absent file means nobody
     # looked. Both must read as UNKNOWN, because an absence that reads as agreement is the
@@ -1904,6 +1978,41 @@ def test_filed_issues_15_to_21():
     ok("...so it is no longer reported stale while its Crawler is alive",
        "L20" not in [l["id"] for l, _ in g.stale_claims()])
 
+    # #21 — `stop-gate` was documented under "The gates, as hooks" with no path into a Crawler,
+    # so a launched one could end its session with its leaf still open. This wiring was the fix
+    # and it went in untested; the assertions below were added when the harness's turn-end
+    # budget turned out to be something showrunner had been overriding.
+    tf = os.path.join(rec["worktree"], ".game_loop", "triggers.json")
+    os.makedirs(os.path.dirname(tf), exist_ok=True)
+    with open(tf, "w") as fh:
+        json.dump({"stop": [{"name": "the project's own", "command": "true"}],
+                   "commit": [{"name": "unrelated", "command": "true"}]}, fh)
+    wired, what = dispatch.wire_stop_gate(cfg, rec)
+    with open(tf) as fh:
+        triggers = json.load(fh)
+    ok("the turn-end gate is wired into the Crawler's own tree", wired, what)
+    names = [t["name"] for t in triggers["stop"]]
+    ok("...MERGED into the trigger file rather than replacing it — the file is the harness's "
+       "and a project may already have attached to that moment",
+       "the project's own" in names and "showrunner-stop-gate" in names, triggers)
+    ok("...leaving moments showrunner knows nothing about untouched",
+       [t["name"] for t in triggers["commit"]] == ["unrelated"], triggers)
+    mine = next(t for t in triggers["stop"] if t["name"] == "showrunner-stop-gate")
+    ok("...naming the binary absolutely, for the same reason #15 did — the trigger fires "
+       "inside the worktree, where a bare `showrunner` resolves to nothing",
+       mine["command"].startswith(os.path.join(cfg.root, ".showrunner", "bin", "showrunner")),
+       mine)
+    ok("...and setting NO timeout, so the harness's own turn-end budget governs. An explicit "
+       "value is honoured uncapped there, and this ran with one three times the default the "
+       "layer below had chosen — for a trigger that fires on EVERY turn-end and fails open",
+       "timeout_sec" not in mine, mine)
+    wire_again, _ = dispatch.wire_stop_gate(cfg, rec)
+    with open(tf) as fh:
+        again = json.load(fh)
+    ok("...and wiring twice leaves one gate, not two — a spawn retried is not a Crawler gated "
+       "twice per turn", wire_again and
+       [t["name"] for t in again["stop"]].count("showrunner-stop-gate") == 1, again)
+
 
 def test_claims_about_the_layer_below():
     group("Claims about game_loop, and whether they still describe what is installed")
@@ -2019,6 +2128,49 @@ def test_claims_about_the_layer_below():
     # brief.py — the one file whose claim had actually rotted.
     ok("every tracked file stating game_loop's behaviour is either stamped or excused with a "
        "reason — a new one cannot join silently", not unclassified, unclassified)
+
+    # A NUMBER showrunner branches on, read back from the layer that owns it. The digest above
+    # catches a payload move but says nothing about WHAT moved, and this is the case that
+    # proved the difference: game_loop shipped a `code-drifted` verdict with no entry in its
+    # exit map, so it fell to the default 2. showrunner aborted — the right action — while
+    # reporting that the harness could not tell, about a comparison the harness had made and
+    # won. A wrong reason is what somebody reads when deciding whether to override.
+    from showrunner import harness as H
+    binp = os.path.join(ROOT, ".game_loop", "bin", "game_loop")
+    payload_text = ""
+    exit_map = None
+    if os.path.exists(binp):
+        with open(binp, errors="ignore") as fh:
+            payload_text = fh.read()
+        m = re.search(r"WORKTREE_EXIT\s*=\s*(\{.*?\})", payload_text, re.S)
+        if m:
+            try:
+                exit_map = ast.literal_eval(m.group(1))
+            except (ValueError, SyntaxError):
+                exit_map = None
+    if not isinstance(exit_map, dict) or not exit_map:
+        skip("the exit-map agreement check",
+             "the installed harness declares no readable WORKTREE_EXIT")
+    else:
+        ok("every code the installed harness can exit with is one showrunner has a meaning "
+           "for — an unmapped code reads as 'could not tell', which blocks, and says nothing",
+           set(exit_map.values()) <= set(H.CONTRACT_CODES), exit_map)
+        ok("...and 'clean' is the only status that exits 0, so nothing that found a difference "
+           "can arrive here as a pass",
+           sorted(s for s, c in exit_map.items() if c == H.CLEAN) == ["clean"], exit_map)
+        ok("...and a drifted harness SCRIPT arrives as a determined finding (1), not as the "
+           "default 2 — showrunner blocks on either, but only one of them is true",
+           exit_map.get("code-drifted") == H.DRIFTED, exit_map)
+        for status, code in sorted(exit_map.items()):
+            ok("the harness's '%s' is let past only if it means clean or per-tree notes" % status,
+               (code in (H.CLEAN, H.NOTES_DRIFTED)) == (status in ("clean", "notes-drifted")),
+               (status, code))
+        # The flag is retrospective and nothing else records it, so if game_loop dropped the
+        # field showrunner's mis-certified warning would simply stop firing — and a warning
+        # that stopped firing reads exactly like a tree that was never mis-certified.
+        ok("the retrospective flag showrunner surfaces is one the installed harness still "
+           "emits — this is the only thing standing between that warning and going quiet",
+           "false_clean_before_fix" in payload_text, binp)
 
 
 def test_cli():
@@ -2275,14 +2427,33 @@ def test_cli():
         return False
 
     assembled = []
+    def _string_assembly(node):
+        """A `+` that joins TEXT. `[finding] + list(rest)` is a list concatenation and no more
+        a split remedy than a list is a sentence — but it unparses to source containing the
+        remedy, so a rule keyed on the operator alone flags it. This guard has now produced
+        that false positive twice, in two different forms, which is what makes it a shape
+        rather than a slip: the operator is not the subject, the operand type is."""
+        if isinstance(node, ast.JoinedStr):
+            return True
+        if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)):
+            return False
+        def texty(side):
+            if isinstance(side, ast.Constant):
+                return isinstance(side.value, str)
+            if isinstance(side, ast.JoinedStr):
+                return True
+            if isinstance(side, ast.BinOp):
+                return _string_assembly(side)
+            return False   # a call, a name, a list — unknown, and not evidence of text
+        return texty(node.left) or texty(node.right)
+
     for rel_path in scanned:
         if not rel_path.endswith(".py"):
             continue
         with open(os.path.join(ROOT, rel_path)) as fh:
             tree = ast.parse(fh.read())
         for node in ast.walk(tree):
-            if isinstance(node, ast.JoinedStr) or (
-                    isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)):
+            if _string_assembly(node):
                 try:
                     txt = ast.unparse(node)
                 except Exception:
@@ -2294,6 +2465,41 @@ def test_cli():
                 # zero says nothing when it is a count of the wrong thing.
                 if dynamic_command(txt) or any(v in verbs for v, _ in commands_in(txt)):
                     assembled.append("%s:%d" % (rel_path, node.lineno))
+    # EXECUTING one, which is a different question from every check above. Those confirm a
+    # printed remedy names a verb the CLI accepts; none of them confirms that RUNNING it leaves
+    # the person unstuck. A remedy can name a real command, exit 0, and return you to the same
+    # refusal — a symptom fixed while the cause stands. So this takes the one refusal every new
+    # user meets first, runs exactly what it prints, and requires the original command to work
+    # afterwards. Only one remedy is executed here; the rest remain checked for existence alone,
+    # which is stated rather than implied because a sweep that names its own reach is the only
+    # kind that cannot be mistaken for a complete one.
+    bare = tempfile.mkdtemp(prefix="sr-remedy-")
+    try:
+        sh(["git", "init", "-q"], bare)
+        sh(["git", "config", "user.email", "t@t"], bare)
+        sh(["git", "config", "user.name", "t"], bare)
+        first = subprocess.run([sys.executable, exe, "doctor"], cwd=bare,
+                               capture_output=True, text=True, env=env)
+        printed = first.stdout + first.stderr
+        ok("a repo with no config refuses rather than inventing defaults",
+           first.returncode != 0, printed[:200])
+        m = re.search(r"`showrunner ([a-z\-]+)`", printed)
+        ok("...and the refusal prints a remedy to run", m is not None, printed[:200])
+        if m:
+            fix = subprocess.run([sys.executable, exe, m.group(1)], cwd=bare,
+                                 capture_output=True, text=True, env=env)
+            eq("...the remedy it prints actually runs (`%s`)" % m.group(1), fix.returncode, 0)
+            after = subprocess.run([sys.executable, exe, "doctor"], cwd=bare,
+                                   capture_output=True, text=True, env=env)
+            ok("...and running it leaves the person UNSTUCK — the command that refused now "
+               "works, which is the half that a remedy naming a real verb does not establish",
+               after.returncode == 0, (after.stdout + after.stderr)[-400:])
+            ok("...and the same refusal does not simply reappear",
+               "run `showrunner %s`" % m.group(1) not in (after.stdout + after.stderr),
+               (after.stdout + after.stderr)[-200:])
+    finally:
+        shutil.rmtree(bare, ignore_errors=True)
+
     ok("no remedy is assembled across AST nodes — the scan reads one literal at a time, so a "
        "command split over an f-string or a concatenation leaves its range silently. Keep the "
        "command in ONE literal, or teach the scan to join the pieces",
@@ -2301,8 +2507,7 @@ def test_cli():
 
     def is_assembled(src):
         for node in ast.walk(ast.parse(src)):
-            if isinstance(node, ast.JoinedStr) or (
-                    isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)):
+            if _string_assembly(node):
                 txt = ast.unparse(node)
                 if dynamic_command(txt) or any(v in verbs for v, _ in commands_in(txt)):
                     return True
@@ -2317,7 +2522,12 @@ def test_cli():
                       ('B = "showrunner " + w + " orchestrates"', False),   # prose, name then +
                       ('Z = f"run `showrunner lock {s}` now"', True),       # arg interpolated
                       ('V = f"run `showrunner {v}` now"', True),            # VERB interpolated
-                      ('W = "run `showrunner " + v + " now`"', True)]:      # verb concatenated
+                      ('W = "run `showrunner " + v + " now`"', True),       # verb concatenated
+                      # A LIST concatenation whose element happens to hold a remedy. Flagged
+                      # by the operator-keyed version of this rule, which is how the guard
+                      # came to fail the build over a message it had no business reading.
+                      ('L = [("error", "Run `showrunner init`.")] + list(rest)', False),
+                      ('M = paths + ["showrunner close"]', False)]:
         eq("the split-remedy subject separates prose from assembly: %s" % src.split(" = ")[1][:38],
            is_assembled(src), want)
 
