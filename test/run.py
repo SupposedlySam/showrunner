@@ -149,6 +149,23 @@ def make_repo(extra_config=None, files=None):
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copy2(src, dst)
         os.chmod(dst, 0o755)
+    # THE SAME RULE, ONE LEAF LATER. Both real entry points place the worktree guard's shim
+    # and register it — install.sh copies both, `init` copies the shim — so a fixture without
+    # them is again a repo in a state no real install produces, and `doctor` would report a
+    # fault every test inherited from the helper rather than from anything under test.
+    shim_src = os.path.join(ROOT, ".showrunner", "hooks", "worktree-guard.sh")
+    shim_dst = os.path.join(d, ".showrunner", "hooks", "worktree-guard.sh")
+    if os.access(shim_src, os.R_OK):
+        os.makedirs(os.path.dirname(shim_dst), exist_ok=True)
+        shutil.copy2(shim_src, shim_dst)
+        os.chmod(shim_dst, 0o755)
+    os.makedirs(os.path.join(d, ".claude"), exist_ok=True)
+    with open(os.path.join(d, ".claude", "settings.json"), "w") as fh:
+        json.dump({"hooks": {"PreToolUse": [
+            {"matcher": "Write|Edit|NotebookEdit|Bash",
+             "hooks": [{"type": "command",
+                        "command": "$CLAUDE_PROJECT_DIR/.showrunner/hooks/worktree-guard.sh"}]}
+        ]}}, fh)
     return cfg
 
 
@@ -1782,6 +1799,305 @@ def test_worktree_lease():
     eq("...and fork uses it with no --base, landing on the commit the held tree started at",
        d3["base"], first)
     ok("...which is not the tip, so that assertion can tell the two apart", first != head)
+
+    # ---- worktree guard (WL-05): the teeth -------------------------------------------
+    # EVERY ALLOW IS PAIRED WITH THE CASE WHERE IT DENIES. An allow-only suite passes
+    # identically against a guard that does nothing, and a permission — unlike a refusal — can
+    # be produced by absence. That asymmetry is the whole reason this group is shaped this way.
+    gt = "guard-probe"
+    gpath = os.path.join(cfg.worktree_root, gt)
+    os.makedirs(gpath, exist_ok=True)
+    held = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        lease.Lease(cfg, gt).acquire("sess-HOLDER-long", who="crawler-g", pid=held.pid,
+                                     basis="dispatch-recorded")
+        write_in = {"file_path": os.path.join(gpath, "lib", "x.py")}
+
+        allow, msg, det = lease.guard(cfg, "sess-INTRUDER", tool="Write",
+                                      tool_input=write_in, cwd=gpath)
+        ok("a DIFFERENT live session writing into a held tree is DENIED — the refusal `enter` "
+           "deliberately does not make", not allow, msg[:120])
+        eq("...naming the tree it is protecting", det.get("tree"), gt)
+        ok("...and naming the HOLDER, because a refusal a reader cannot act on is one they "
+           "work around", "crawler-g" in msg, msg[:200])
+        ok("...with a readable timestamp rather than the raw epoch second it printed on its "
+           "first real run — a number the reader has to go and convert, in the line telling "
+           "them how long somebody has held this",
+           "since    2" in msg and not re.search(r"since\s+17\d{8}", msg), msg[:300])
+        ok("...and the session id marked as ABBREVIATED, so two ids that differ past the cut "
+           "are never shown as the same id", "sess-HOLDER-…" in msg or "…" in msg, msg[:300])
+
+        # THE PAIR. Same tree, same lease, same call — only the session differs.
+        allow, msg, _ = lease.guard(cfg, "sess-HOLDER-long", tool="Write",
+                                    tool_input=write_in, cwd=gpath)
+        ok("...while the HOLDER's own write is allowed, which is the difference between a "
+           "guard and a lock nobody can open", allow, msg)
+
+        # Jurisdiction, from the guard's side rather than tree_for's.
+        allow, msg, det = lease.guard(cfg, "sess-INTRUDER", tool="Write",
+                                      tool_input={"file_path": os.path.join(cfg.root, "a.py")},
+                                      cwd=cfg.root)
+        ok("a write in the MAIN checkout is never guarded by a lease — integrate already "
+           "serialises it with its own file lock, and a second answer here would be one rule "
+           "in two places", allow, msg)
+        eq("...and it says so by finding no tree at all, not by finding a free one",
+           det.get("trees"), [])
+
+        # THE CROSS-TREE WRITE. cwd is somewhere harmless; the PATH is what lands in the held
+        # tree. Without this the guard would only ever see the tree a session stands in.
+        allow, _, det = lease.guard(cfg, "sess-INTRUDER", tool="Write",
+                                    tool_input=write_in, cwd=cfg.root)
+        ok("a write whose PATH lands in a held tree is denied even from outside it — the "
+           "target is checked, not only where the session happens to be standing",
+           not allow, det)
+
+        # THE CARVE-OUT. The refusal's first remedy is `worktree fork`; a guard that denies its
+        # own remedy is a guard that gets switched off, and then nothing is guarded at all.
+        fork_cmd = "%s worktree fork --from %s" % (os.path.join(cfg.root, "bin", "showrunner"),
+                                                   gt)
+        allow, msg, det = lease.guard(cfg, "sess-INTRUDER", tool="Bash",
+                                      tool_input={"command": fork_cmd}, cwd=gpath)
+        ok("showrunner's own worktree verb passes inside a tree somebody else holds — it is "
+           "the remedy the refusal prints", allow, msg)
+        eq("...by the carve-out, not by accident of the lease being free",
+           det.get("carve_out"), "own-verb")
+
+        # And the carve-out fails CLOSED, because a hole shaped like the thing being guarded
+        # is worse than no carve-out. `&& rm -rf` must not ride in on a fork.
+        ok("the carve-out matches a bare showrunner worktree verb", lease.own_command(fork_cmd))
+        ok("...and REFUSES to cover a chained command, so appending `&&` is not a bypass "
+           "anybody can find", not lease.own_command(fork_cmd + " && rm -rf /"))
+        ok("...nor one that merely mentions the verb inside something else",
+           not lease.own_command("echo %s" % fork_cmd))
+        allow, _, _ = lease.guard(cfg, "sess-INTRUDER", tool="Bash",
+                                  tool_input={"command": fork_cmd + " && rm -rf x"}, cwd=gpath)
+        ok("...and the chained one is actually DENIED, which is what makes the three "
+           "assertions above more than a statement about a regex", not allow)
+
+        # AN UNIDENTIFIABLE SESSION ALLOWS, LOUDLY. Denying would refuse the holder's own
+        # writes — the guard blocking the work it was taken out for. Allowing in SILENCE would
+        # be indistinguishable from a guard that ran and was content.
+        allow, msg, det = lease.guard(cfg, "", tool="Write", tool_input=write_in, cwd=gpath)
+        ok("a call carrying no session id is allowed rather than denied — with no id there is "
+           "no way to tell the holder from an intruder", allow, msg[:120])
+        eq("...and it is flagged as DEGRADED rather than reported as a pass",
+           det.get("degraded"), "no-session")
+        ok("...and says the guard did not run, because a silent allow is the one failure this "
+           "posture cannot afford", "DID NOT RUN" in msg, msg[:160])
+    finally:
+        held.terminate()
+        held.wait()
+
+    # STALE AND UNREADABLE BOTH ALLOW, and neither is an oversight. Paired with the deny above:
+    # without that pair these two pass against a guard that allows unconditionally.
+    lease.Lease(cfg, gt).release(force=True)
+    lease.Lease(cfg, gt).acquire("sess-dead-g", who="ghost", pid=999999, basis="b")
+    allow, msg, _ = lease.guard(cfg, "sess-INTRUDER", tool="Write",
+                                tool_input={"file_path": os.path.join(gpath, "x")}, cwd=gpath)
+    ok("a tree whose holder is provably DEAD stops being defended — a crashed session must not "
+       "wedge a tree against everyone forever", allow, msg)
+    with open(os.path.join(lease.Lease(cfg, gt).lock.dir, "pid"), "wb") as fh:
+        fh.write(b"\x00rubbish")
+    allow, msg, _ = lease.guard(cfg, "sess-INTRUDER", tool="Write",
+                                tool_input={"file_path": os.path.join(gpath, "x")}, cwd=gpath)
+    ok("an UNREADABLE lease allows too — turning 'I cannot tell' into a refusal would wedge a "
+       "tree on a partial write, which is exactly what locks.py refuses to do one layer down",
+       allow, msg)
+    shutil.rmtree(lease.Lease(cfg, gt).lock.dir, ignore_errors=True)
+
+    # ---- is the guard WIRED? (the check one level out from 'does it work') -----------
+    # A guard verb nobody registers has never once run. That was true of `lock guard` for this
+    # repo's entire life, and it is the row that shaped this plan.
+    # The fixture supplies what a real install supplies, so the UNREGISTERED state is
+    # CONSTRUCTED here rather than inherited. That is the right way round: it makes the
+    # assertion below about the check, and not about a fixture that happened to be incomplete.
+    claude_dir = os.path.join(cfg.root, ".claude")
+    shim_rel = lease.GUARD_SHIM
+    shim_dst = os.path.join(cfg.root, shim_rel)
+    os.remove(os.path.join(claude_dir, "settings.json"))
+    errs = [m for l, m in lease.guard_health(cfg) if l == "error"]
+    ok("a repo with no hook registration reports the guard as an ERROR, not a warning — an "
+       "unregistered guard is indistinguishable from one that ran and was content",
+       any("registers no worktree-guard" in m or "nothing registers" in m for m in errs),
+       errs[:2])
+
+    with open(os.path.join(claude_dir, "settings.json"), "w") as fh:
+        json.dump({"hooks": {"PreToolUse": [
+            {"matcher": "Write|Edit|NotebookEdit|Bash",
+             "hooks": [{"type": "command",
+                        "command": "$CLAUDE_PROJECT_DIR/" + shim_rel}]}]}}, fh)
+    after = [m for l, m in lease.guard_health(cfg) if l == "error"]
+    ok("...and once the shim is present and registered, that error clears — so the assertion "
+       "above is about the registration and not about the check always failing",
+       not any("registers no worktree-guard" in m for m in after), after[:2])
+
+    # The matcher is part of the registration: an entry on Write alone leaves Bash unguarded,
+    # which reads as 'registered' to anything that only asks whether an entry exists.
+    with open(os.path.join(claude_dir, "settings.json"), "w") as fh:
+        json.dump({"hooks": {"PreToolUse": [
+            {"matcher": "Write", "hooks": [{"type": "command",
+                                            "command": "$CLAUDE_PROJECT_DIR/" + shim_rel}]}]}},
+                  fh)
+    warns = [m for l, m in lease.guard_health(cfg) if l == "warn"]
+    ok("a registration whose matcher misses Bash is reported — 'an entry exists' is not the "
+       "same question as 'this tool is covered'",
+       any("does not cover" in m and "Bash" in m for m in warns), warns[:2])
+
+    os.remove(shim_dst)
+    gone = [m for l, m in lease.guard_health(cfg) if l == "error"]
+    ok("a MISSING shim is an error even while the registration is intact — the registration "
+       "would then name a file that is not there, which denies nothing",
+       any("MISSING" in m for m in gone), gone[:2])
+
+    # ---- registering it, without eating anybody else's hooks -------------------------
+    # SHIPPING THE REGISTRATION IS THE POINT: `lock guard` has been correct and unregistered
+    # for this repo's whole life, which is the row that shaped this plan. But the file belongs
+    # to Claude Code and to whoever else registered a hook in it, so the interesting assertions
+    # are all about what registration LEAVES ALONE.
+    settings = os.path.join(claude_dir, "settings.json")
+    with open(settings, "w") as fh:
+        json.dump({"hooks": {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": "somebody-elses.sh"}]}],
+            "Stop": [{"hooks": [{"type": "command", "command": "their-stop.sh"}]}]},
+            "statusLine": {"type": "command", "command": "their-statusline"}}, fh)
+    changed, note = lease.register_guard(cfg)
+    ok("registering the guard reports that it changed something", changed, note)
+    with open(settings) as fh:
+        merged = json.load(fh)
+    ok("...and the guard is now registered", lease._guard_registration(settings)[0], merged)
+    ok("...WITHOUT displacing a PreToolUse hook somebody else registered — showrunner is a "
+       "fourth entry beside the others, not the owner of this file",
+       any(h.get("command") == "somebody-elses.sh"
+           for e in merged["hooks"]["PreToolUse"] for h in e.get("hooks", [])), merged)
+    eq("...nor their hooks on other events", merged["hooks"]["Stop"][0]["hooks"][0]["command"],
+       "their-stop.sh")
+    eq("...nor unrelated top-level keys", merged.get("statusLine", {}).get("command"),
+       "their-statusline")
+
+    changed2, _ = lease.register_guard(cfg)
+    ok("...and registering twice is a no-op, so an installer that runs on every upgrade does "
+       "not accumulate duplicate entries", not changed2)
+    with open(settings) as fh:
+        twice = json.load(fh)
+    eq("...asserted on the entry COUNT, because 'returns False' and 'appended silently' are "
+       "the same observation from outside", len(twice["hooks"]["PreToolUse"]),
+       len(merged["hooks"]["PreToolUse"]))
+
+    # THE FILE IT CANNOT READ. Rewriting one we could not parse is how somebody's hooks
+    # disappear — and the person would have no way to know it was us.
+    with open(settings, "w") as fh:
+        fh.write("{ this is not json")
+    changed3, why = lease.register_guard(cfg)
+    ok("an unparseable settings file is NOT rewritten", not changed3, why)
+    with open(settings) as fh:
+        ok("...and is left byte-for-byte as it was, with the reason reported instead",
+           fh.read() == "{ this is not json", why)
+
+
+def test_worktree_guard_from_inside_a_worktree():
+    group("The worktree guard, asserted from INSIDE a real linked worktree (WL-05)")
+    # THE ONLY PLACE THE SHIM'S RESOLVER CAN BE WRONG. Asserting it from the main checkout
+    # tests nothing: `--git-common-dir` answers with the repo's own .git there, so a resolver
+    # that is broken for worktrees passes. That is the exact shape of the dead path `sr_bin`
+    # carried for a week — absolute, canonical, and never resolved from where the reader stood.
+    if not have("git"):
+        skip("the worktree-guard shim group", "git is not installed")
+        return
+    shim_src = os.path.join(ROOT, lease.GUARD_SHIM)
+    if not os.path.exists(shim_src):
+        skip("the worktree-guard shim group", "%s does not exist" % lease.GUARD_SHIM)
+        return
+
+    cfg = make_repo()
+    shim_dst = os.path.join(cfg.root, lease.GUARD_SHIM)
+    os.makedirs(os.path.dirname(shim_dst), exist_ok=True)
+    shutil.copy2(shim_src, shim_dst)
+    os.chmod(shim_dst, 0o755)
+
+    # make_repo COPIES bin/showrunner, so realpath resolves beside the copy and no lib is
+    # there — the binary exits 70. A symlink resolves to this checkout's real binary and its
+    # library. What is under test is the SHIM's resolver, not Python's import path.
+    real_bin = os.path.join(cfg.root, ".showrunner", "bin", "showrunner")
+    if os.path.exists(real_bin):
+        os.remove(real_bin)
+    os.symlink(os.path.join(ROOT, "bin", "showrunner"), real_bin)
+
+    # COMMITTED, because that is what makes it cross. `git worktree add` copies from HEAD, not
+    # from the working tree — an untracked shim is present here and absent in every worktree,
+    # which is the one place it exists to run. Observed: the first probe worktree had no shim.
+    sh(["git", "add", "-f", lease.GUARD_SHIM], cfg.root)
+    sh(["git", "commit", "-q", "-m", "shim"], cfg.root)
+
+    tree = "shim-probe"
+    wt = os.path.join(cfg.worktree_root, tree)
+    os.makedirs(cfg.worktree_root, exist_ok=True)
+    sh(["git", "worktree", "add", "-q", wt, "-b", "showrunner/shim-probe"], cfg.root)
+    ok("the shim CROSSES into a linked worktree, which is the property the whole design turns "
+       "on — a hook that does not cross cannot guard the tree it was written for",
+       os.path.exists(os.path.join(wt, lease.GUARD_SHIM)),
+       sorted(os.listdir(os.path.join(wt, ".showrunner"))) if
+       os.path.isdir(os.path.join(wt, ".showrunner")) else "no .showrunner at all")
+
+    def run_shim(session, cwd, path):
+        payload = json.dumps({"session_id": session, "cwd": cwd, "tool_name": "Write",
+                              "tool_input": {"file_path": path}})
+        return subprocess.run(["bash", os.path.join(wt, lease.GUARD_SHIM)],
+                              cwd=cwd, input=payload, capture_output=True, text=True)
+
+    holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        lease.Lease(cfg, tree).acquire("sess-A", who="crawler-shim", pid=holder.pid,
+                                       basis="dispatch-recorded")
+        target = os.path.join(wt, "lib", "x.py")
+
+        # RUN FROM INSIDE THE WORKTREE, through the copy that crossed. Every earlier assertion
+        # in this file calls the Python directly; this one is the only one that exercises the
+        # resolver, the exec and the exit code together.
+        res = run_shim("sess-B", wt, target)
+        eq("a second session's Write inside a held worktree EXITS 2 — resolved through the "
+           "shim that crossed, from the cwd a hijacking session would actually have",
+           res.returncode, 2)
+        ok("...and the reason reaches stderr, which is the channel the agent reads on a "
+           "denial", "DENIED" in res.stderr and "crawler-shim" in res.stderr,
+           (res.stderr or res.stdout)[:200])
+
+        # THE PAIR, through the same shim, differing only in who is asking.
+        res = run_shim("sess-A", wt, target)
+        eq("...while the HOLDER's own Write through the same shim exits 0", res.returncode, 0)
+
+        # LOGGED. A denial visible only in one session's scrollback is not an observation, and
+        # every gate in this repo owes the journal the fact that it fired.
+        events_path = os.path.join(cfg.state_dir, "events.jsonl")
+        kinds = []
+        if os.path.exists(events_path):
+            for line in open(events_path):
+                try:
+                    kinds.append(json.loads(line))
+                except ValueError:
+                    pass
+        denied = [e for e in kinds if e.get("kind") == "lease.denied"]
+        ok("the refusal is JOURNALLED, naming the tree and the session it refused",
+           len(denied) == 1 and denied[0].get("tree") == tree
+           and denied[0].get("intruder_session") == "sess-B", denied[:1])
+    finally:
+        holder.terminate()
+        holder.wait()
+        lease.Lease(cfg, tree).release(force=True)
+
+    # THE FAIL-OPEN HALF, exercised rather than asserted from the source text. A shim that
+    # cannot find a binary must ALLOW — a PreToolUse that hard-fails on its own plumbing blocks
+    # every write including the one that repairs it — and must SAY so, because an allow nobody
+    # is told about is indistinguishable from a guard that ran and was content.
+    os.remove(real_bin)
+    res = subprocess.run(["bash", os.path.join(wt, lease.GUARD_SHIM)], cwd=wt,
+                         input=json.dumps({"session_id": "sess-B", "cwd": wt,
+                                           "tool_name": "Write", "tool_input": {}}),
+                         capture_output=True, text=True)
+    eq("a shim that can find no binary ALLOWS — hard-failing on our own plumbing would block "
+       "every write including the one that repairs it", res.returncode, 0)
+    ok("...and SAYS the guard did not run, in the structured field that actually reaches the "
+       "agent on an allow", "DID NOT RUN" in res.stdout
+       and "additionalContext" in res.stdout, res.stdout[:200])
 
 
 def test_installer_leaves_no_vendored_copy():
@@ -3659,7 +3975,8 @@ def main():
     for fn in (test_locks, test_config_refusals, test_every_rule_can_fail, test_graph, test_lifecycle, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_waiting, test_concurrency,
-               test_integration, test_worktree_lease, test_installer_leaves_no_vendored_copy,
+               test_integration, test_worktree_lease, test_worktree_guard_from_inside_a_worktree,
+               test_installer_leaves_no_vendored_copy,
                test_publishable, test_dispatch, test_filed_issues_15_to_21,
                test_claims_about_the_layer_below, test_observability,
                test_hook_verbs_never_fail_open_in_silence,

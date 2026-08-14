@@ -31,9 +31,10 @@ print it rather than re-derive it.
 """
 
 import os
+import re
 
 from . import locks
-from .util import now, session_pid
+from .util import now, session_pid, short_session, stamp
 
 PREFIX = "worktree:"
 INTERACTIVE = "interactive"
@@ -142,22 +143,12 @@ class Lease:
         return True, "released"
 
 
-OPTIONS = """\
-This worktree is held by another live session.
-
-  holder   {who}  (session {session}, pid {pid}, alive, this boot)
-  since    {since}
-  basis    {basis}
-
-Nothing is stopping your writes yet — the guard that will is WL-05, and it is deliberately
-not built until a real hijack has been observed rather than imagined. Treat this as the
-warning it is:
-
+REMEDIES = """\
   1. Your own tree, same starting point — the usual answer:
        {sr} worktree fork --from {tree}
      New worktree and branch off the same base commit.
 
-  2. Read-only. Stay, read, do not write. Nothing further needed.
+  2. Read-only. Stay, read, do not write. Reads are never guarded.
 
   3. Take it over — NOT BUILT YET (WL-06). Said plainly rather than printed as though it
      works: a remedy naming a command that does not exist is worse than no remedy, and this
@@ -165,6 +156,33 @@ warning it is:
      `{sr} lease status` to confirm the state, then by hand.
 
   4. Leave."""
+
+# ONE list of remedies, formatted into both the prompt and the refusal. They were written as
+# two copies and the second sentence of each disagreed within a day — INV: two layers must
+# never disagree about the rules silently, and a remedy list is a rule the reader acts on.
+OPTIONS = """\
+This worktree is held by another live session.
+
+  holder   {who}  (session {session}, pid {pid}, alive, this boot)
+  since    {since}
+  basis    {basis}
+
+Your writes here will be DENIED while that holds: `worktree guard` is registered on
+PreToolUse and refuses exactly this case. Pick one:
+
+""" + REMEDIES
+
+DENIED = """\
+showrunner: DENIED — {what} inside worktree {tree}, which another LIVE session holds.
+
+  holder   {who}  (session {session}, pid {pid}, alive, this boot)
+  since    {since}
+  basis    {basis}
+
+Two sessions editing one tree lose work silently — the second write wins and neither session
+is told. This is the lease refusing, not a permissions error, and retrying will not help.
+
+""" + REMEDIES
 
 
 def enter(cfg, session, path=None, who=None):
@@ -225,6 +243,283 @@ def enter(cfg, session, path=None, who=None):
     events.emit(cfg, "lease.acquired", {"tree": tree, "session": session,
                                         "basis": (holder or {}).get("pid_basis")})
     return verdict, {"tree": tree, "holder": holder or {}, "previous": h or {}}
+
+
+# The carve-out, spelled tightly. `showrunner worktree fork` is the FIRST remedy the refusal
+# prints, and a guard that denies its own remedy is a guard that gets switched off (INV5) —
+# so these verbs pass even inside a tree somebody else holds.
+#
+# Tight on purpose, in the direction that fails CLOSED. `rm -rf x && showrunner worktree fork`
+# is not a fork, and a carve-out that matched it would be a hole shaped exactly like the thing
+# being guarded. So anything that could introduce a second command — a separator, a
+# substitution, a newline — disqualifies the whole string, and the operator runs the verb on
+# its own. Being refused once and retyping it plainly is the cost; the alternative is a
+# bypass anybody can find by appending `&&`.
+_OWN_VERB = re.compile(r"^\s*(?:[A-Za-z_][A-Za-z_0-9]*=\S*\s+)*"    # leading FOO=bar
+                       r"(?:[^\s;|&]*/)?showrunner\s+(?:worktree|lease)\b")
+_CHAINED = re.compile(r"[;&|\n]|\$\(|`")
+
+
+def own_command(command):
+    """True when `command` is a showrunner worktree/lease invocation AND NOTHING ELSE.
+
+    Both halves matter. Matching the verb alone would pass any command that mentions it
+    anywhere; requiring the whole string to be one simple command is what makes "it starts
+    with our binary" mean "it IS our binary".
+    """
+    if not command or _CHAINED.search(command):
+        return False
+    return bool(_OWN_VERB.match(command))
+
+
+def guard(cfg, session, tool=None, tool_input=None, cwd=None, sr=None):
+    """PreToolUse verdict: (allow, message, detail). The teeth `enter` deliberately lacks.
+
+    Denies on exactly one condition — `held_by_other` — which is the narrowest of the four
+    states and the only one that licenses refusing somebody. FREE, STALE and UNREADABLE all
+    ALLOW, and that is not an oversight in any of the three: a free tree has no holder to
+    protect, a stale one's holder is proved dead, and an UNREADABLE one cannot be adjudicated
+    from here at all. Turning "I cannot tell" into a refusal would wedge a tree on a partial
+    write, which is the failure `locks.py` refuses to make and this must not re-make one layer
+    up (INV: two layers must never disagree about the rules silently).
+
+    **WHAT IT LOOKS AT, and what that misses.** The tree of every path the payload names, plus
+    the tree the session is standing in. So a `Bash` command that names an absolute path into
+    somebody's tree from OUTSIDE it is NOT caught — the command string is not parsed for paths,
+    deliberately, because a path built from a shell variable is exactly the blindness
+    game_loop's own write guard names rather than pretends to cover. The lease stops a session
+    that is WORKING in a tree, not every conceivable route into it.
+
+    **An unidentifiable session ALLOWS, loudly.** With no session id there is no way to tell
+    the holder from an intruder, and denying would refuse the holder's own writes — the guard
+    blocking the work it was taken out for. So it allows and says the guard did not run, on
+    the same posture as every other degraded guard here: fail open, never in silence.
+    """
+    tool_input = tool_input or {}
+    command = tool_input.get("command") if (tool or "") == "Bash" else None
+
+    if own_command(command):
+        return True, ("allow: showrunner's own worktree/lease verb — the refusal's first "
+                      "remedy is `worktree fork`, and a guard that denies its own remedy is "
+                      "one that gets switched off"), {"carve_out": "own-verb"}
+
+    targets = [tool_input[k] for k in ("file_path", "notebook_path", "path")
+               if isinstance(tool_input.get(k), str) and tool_input.get(k)]
+    if cwd:
+        targets.append(cwd)
+
+    trees = []
+    for target in targets:
+        tree = tree_for(cfg, target)
+        if tree and tree not in trees:
+            trees.append(tree)
+
+    if not trees:
+        # The main checkout and everything outside the managed worktree root. Stated as a
+        # LIMIT rather than left to look like coverage: `campaign.integrate` serialises the
+        # main checkout with its own file lock, and a second answer here would be a rule in
+        # two places. A lease covers trees this orchestrator PLACED and nothing else.
+        return True, "allow: not inside a managed worktree", {"trees": []}
+
+    if not session:
+        return True, ("showrunner: THE WORKTREE GUARD DID NOT RUN — no session id reached it, "
+                      "so it cannot tell the holder of %s from an intruder and will not refuse "
+                      "the holder's own writes. This tree is UNGUARDED for this call; that is "
+                      "said out loud rather than left to look like a pass."
+                      % ", ".join(trees)), {"trees": trees, "degraded": "no-session"}
+
+    for tree in trees:
+        hijack, h = Lease(cfg, tree).held_by_other(session)
+        if not hijack:
+            continue
+        h = h or {}
+        if sr is None:
+            from .brief import sr_bin
+            sr = sr_bin(cfg)
+        what = ("this command runs" if command else
+                "this write lands" if targets else "this call acts")
+        return False, DENIED.format(
+            what=what, tree=tree, sr=sr,
+            who=h.get("who") or "?", session=short_session(h.get("session")),
+            pid=h.get("pid"), since=stamp(h.get("ts")),
+            basis=h.get("pid_basis") or "unrecorded"), {"tree": tree, "holder": h}
+
+    return True, "allow: %s held by nobody else" % ", ".join(trees), {"trees": trees}
+
+
+GUARD_SHIM = os.path.join(".showrunner", "hooks", "worktree-guard.sh")
+GUARD_TOOLS = ("Write", "Edit", "NotebookEdit", "Bash")
+
+
+def guard_health(cfg):
+    """Is the guard actually WIRED? Returns [(level, message)] for `doctor`.
+
+    THE CHECK ONE LEVEL OUT FROM THE ONE THAT ALREADY EXISTS. `doctor` errors when the binary
+    every brief names is missing; this asks the same question about the guard — not "does the
+    verb work" but "would it ever run". A guard verb nobody registers has never once run, and
+    that was true of `lock guard` for the whole life of this repo: it exists, it is correct,
+    and `.claude/settings.json` names three game_loop hooks and none of ours.
+
+    Nothing here is a runtime dependency. The guard fails OPEN and says so; this verb is where
+    the loudness lives instead, because a PreToolUse hook cannot carry it without blocking the
+    repair.
+    """
+    from .util import git
+
+    out = []
+    shim = os.path.join(cfg.root, GUARD_SHIM)
+    if not os.path.exists(shim):
+        out.append(("error", "the worktree guard's shim is MISSING (%s). Nothing is registered "
+                             "to deny a write into a tree another session holds." % GUARD_SHIM))
+    elif not os.access(shim, os.X_OK):
+        out.append(("error", "%s exists but is not executable, so the hook cannot run it — the "
+                             "guard is inert. `chmod +x %s`" % (GUARD_SHIM, GUARD_SHIM)))
+    else:
+        out.append(("ok", "worktree guard shim present and executable: %s" % GUARD_SHIM))
+
+    # THE CROSSING, WHICH IS THE WHOLE POINT OF THE SHIM AND IS NOT IMPLIED BY ITS EXISTENCE.
+    # `git worktree add` copies files from HEAD, not from the working tree — so a shim that is
+    # untracked, or tracked but uncommitted, is present HERE and absent in every worktree made
+    # from now on, which is precisely where the guard is for. Observed while building WL-05:
+    # the first probe worktree came up with no shim in it at all. Same failure the harness
+    # payload has, checked in the same place, for the same reason.
+    if os.path.exists(shim):
+        rc, tracked, _ = git(["ls-files", "--error-unmatch", GUARD_SHIM], cwd=cfg.root)
+        if rc != 0 or not (tracked or "").strip():
+            # WARN, NOT ERROR, and the severity is copied rather than chosen: `doctor` already
+            # reports "the harness payload is upgraded but NOT COMMITTED" as a warning, and
+            # that is the identical failure — a worktree gets HEAD's copy, so an uncommitted
+            # file is absent in every tree made from now on. Two checks about one mechanism
+            # answering at two severities is the two-layers-disagree failure in miniature.
+            # It is also the state EVERY fresh install passes through: install.sh places this
+            # file and tells the consumer to commit it, so erroring here would make a correct
+            # install's first `doctor` red for something it had just been told to do.
+            out.append(("warn", "%s is not tracked by git yet. `git worktree add` copies "
+                                "tracked files only, so until it is committed the guard is "
+                                "present here and ABSENT in every worktree — the one place it "
+                                "exists to run. `git add %s`" % (GUARD_SHIM, GUARD_SHIM)))
+        else:
+            rc, pending, _ = git(["diff", "HEAD", "--name-only", "--", GUARD_SHIM], cwd=cfg.root)
+            if rc == 0 and (pending or "").strip():
+                out.append(("warn", "%s is tracked but its committed copy DIFFERS from the "
+                                    "working one. A new worktree gets HEAD's version, so the "
+                                    "guard that crosses is not the guard you are reading."
+                                    % GUARD_SHIM))
+
+    # THE REGISTRATION. Absence is an error, not a warning: the guard is exactly as present as
+    # this entry, and the remedy is printed as literal JSON rather than as a command, because a
+    # remedy naming a command that does not exist is worse than no remedy and no verb writes
+    # this file today.
+    settings = os.path.join(cfg.root, ".claude", "settings.json")
+    registered, matcher = _guard_registration(settings)
+    if registered is None:
+        out.append(("error", "no %s, so nothing registers the worktree guard. It will never "
+                             "run. Add a PreToolUse entry:\n      {\"matcher\": \"%s\", "
+                             "\"hooks\": [{\"type\": \"command\", \"command\": \"$CLAUDE_PROJECT_"
+                             "DIR/%s\"}]}"
+                             % (rel_or(settings, cfg.root), "|".join(GUARD_TOOLS), GUARD_SHIM)))
+    elif not registered:
+        out.append(("error", "%s registers no worktree-guard hook. The verb exists and has "
+                             "never once run — which is exactly what was true of `lock guard` "
+                             "for this repo's whole life. Add a PreToolUse entry on \"%s\" "
+                             "whose command is $CLAUDE_PROJECT_DIR/%s"
+                             % (rel_or(settings, cfg.root), "|".join(GUARD_TOOLS), GUARD_SHIM)))
+    else:
+        missing = [t for t in GUARD_TOOLS if t not in (matcher or "")]
+        if missing:
+            out.append(("warn", "the worktree guard is registered but its matcher (%r) does not "
+                                "cover %s — writes through those tools are UNGUARDED."
+                                % (matcher, ", ".join(missing))))
+        else:
+            out.append(("ok", "worktree guard registered on PreToolUse (%s)" % matcher))
+    return out
+
+
+def register_guard(cfg):
+    """Add the guard's PreToolUse entry to .claude/settings.json. Returns (changed, message).
+
+    SHIPS ITS OWN REGISTRATION, because the alternative is documented: `lock guard` has existed
+    and been correct for this repo's whole life and has never once run, since nothing ever
+    registered it. A guard verb whose registration is left as an instruction inherits that.
+
+    Additive and idempotent. Every other key, and every other hook, is preserved — the file
+    belongs to Claude Code and to whoever else registered a hook in it, and showrunner is a
+    fourth entry beside them, not the owner. An unparseable file is REPORTED and left exactly
+    as it is: silently rewriting a file we could not read is how somebody's hooks disappear.
+    """
+    import json
+
+    path = os.path.join(cfg.root, ".claude", "settings.json")
+    entry = {"matcher": "|".join(GUARD_TOOLS),
+             "hooks": [{"type": "command",
+                        "command": "\"$CLAUDE_PROJECT_DIR\"/" + GUARD_SHIM,
+                        "timeout": 10,
+                        "statusMessage": "showrunner: is this tree held by another session?"}]}
+
+    data = {}
+    if os.path.exists(path):
+        try:
+            with open(path) as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as exc:
+            return False, ("%s could not be read (%s) and was NOT modified — add the worktree "
+                           "guard's PreToolUse entry by hand, or `doctor` will keep reporting "
+                           "it missing." % (rel_or(path, cfg.root), exc))
+        if not isinstance(data, dict):
+            return False, ("%s is not a JSON object and was NOT modified."
+                           % rel_or(path, cfg.root))
+
+    registered, _ = _guard_registration(path)
+    if registered:
+        return False, ""
+
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        return False, ("%s has a non-object \"hooks\" key and was NOT modified."
+                       % rel_or(path, cfg.root))
+    pre = hooks.setdefault("PreToolUse", [])
+    if not isinstance(pre, list):
+        return False, ("%s has a non-list \"hooks.PreToolUse\" and was NOT modified."
+                       % rel_or(path, cfg.root))
+    pre.append(entry)
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    return True, ("registered the worktree guard in %s (PreToolUse on %s)"
+                  % (rel_or(path, cfg.root), "|".join(GUARD_TOOLS)))
+
+
+def rel_or(path, root):
+    try:
+        return os.path.relpath(path, root)
+    except ValueError:
+        return path
+
+
+def _guard_registration(settings_path):
+    """(registered, matcher) for the guard's PreToolUse entry.
+
+    `registered` is None when the settings file is absent or unreadable — a state kept
+    distinct from False, because "nobody configured hooks here" and "hooks are configured and
+    ours is not among them" are different problems with different remedies.
+    """
+    import json
+    try:
+        with open(settings_path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None, None
+    if not isinstance(data, dict):
+        return None, None
+    for entry in (data.get("hooks") or {}).get("PreToolUse") or []:
+        if not isinstance(entry, dict):
+            continue
+        for hook in entry.get("hooks") or []:
+            if isinstance(hook, dict) and "worktree-guard" in str(hook.get("command") or ""):
+                return True, entry.get("matcher") or ""
+    return False, None
 
 
 def base_sha_of(cfg, tree):

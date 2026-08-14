@@ -110,6 +110,33 @@ TARGETS = [
      r"(def enter\(cfg, session, path=None, who=None\):\n)",
      "    return 'not-a-worktree', {}\n"
      "def _neutered_enter(cfg, session, path=None, who=None):\n"),
+    # THE TEETH. An always-allow guard is the exact failure this file exists for: every
+    # assertion about a lease being HELD still passes, `enter` still detects and prints, the
+    # journal still fills with hijack events — and nothing is ever refused. "Allowed" and
+    # "never looked" are the same observation from outside, which is why the plan named this
+    # mutant specifically before the guard was written.
+    ("worktree guard (the teeth)", "lease.guard", "lib/showrunner/lease.py",
+     r"(def guard\(cfg, session, tool=None, tool_input=None, cwd=None, sr=None\):\n)",
+     "    return True, '', {}\n"
+     "def _neutered_guard(cfg, session, tool=None, tool_input=None, cwd=None, sr=None):\n"),
+    # The carve-out, in the direction that switches the guard OFF rather than the one that
+    # blocks a remedy. Always-True means every Bash command reads as showrunner's own verb.
+    ("guard carve-out", "lease.own_command", "lib/showrunner/lease.py",
+     r"(def own_command\(command\):\n)",
+     "    return True\ndef _neutered_own_command(command):\n"),
+    # Is the guard WIRED? An always-empty answer removes every one of doctor's three checks
+    # AND the line `worktree enter` prints when the guard is inert — so a repo with no
+    # registration at all would report clean, which is precisely the state this leaf found the
+    # repo in and the state nothing could see.
+    ("guard wiring checks", "lease.guard_health", "lib/showrunner/lease.py",
+     r"(def guard_health\(cfg\):\n)",
+     "    return []\ndef _neutered_guard_health(cfg):\n"),
+    # An always-no-op registration is the SILENT half of shipping one: `init` prints nothing,
+    # exits 0, and the guard it just placed is never wired to anything. That is the state this
+    # leaf found `lock guard` in after the repo's entire life, reproduced by a stub.
+    ("guard registration", "lease.register_guard", "lib/showrunner/lease.py",
+     r"(def register_guard\(cfg\):\n)",
+     "    return False, ''\ndef _neutered_register_guard(cfg):\n"),
     ("lock guard", "locks.LockSet.guard", "lib/showrunner/locks.py",
      r"(    def guard\(self, command, session=None\):\n)",
      "        return True, ''\n    def _neutered_guard(self, command, session=None):\n"),
@@ -427,6 +454,14 @@ NOT_SWEPT = {
     "cli.cmd_claim": "CLI wrapper over graph.claim; exit code asserted",
     "cli.cmd_lock_acquire": "CLI wrapper; lock state asserted directly",
     "cli.cmd_lock_guard": "CLI wrapper; exit 2/0 asserted in the CLI group",
+    "cli.cmd_worktree_guard": "CLI wrapper over lease.guard, which IS swept. Its exit 2 and its "
+                              "fail-open exit 0 are BOTH asserted end to end through the shim, "
+                              "from inside a real linked worktree. WHAT THAT DOES NOT COVER: "
+                              "the payload plumbing between stdin and lease.guard — a bug that "
+                              "read the wrong key would allow everything, and the shim tests "
+                              "supply a well-formed payload, so they would not see it.",
+    "lease._guard_registration": "private; reached only through guard_health, which IS swept, "
+                                 "and both of its answers (registered / not) are asserted there",
     "cli.cmd_integrate": "CLI wrapper over campaign.integrate, which is asserted directly",
     "cli.cmd_integration_commit": "CLI wrapper over declare_integration, asserted directly",
 

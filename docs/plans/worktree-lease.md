@@ -1,6 +1,16 @@
 # Plan — the worktree lease: one session per tree, enforced
 
-**Status:** plan, not built. Nothing below is implemented.
+**Status:** steps 1–5 of the build order are BUILT (WL-01…WL-05). Step 6 (`worktree takeover`,
+WL-06) is not. The guard denies, from a tracked shim, registered, with `doctor` checking all
+three — asserted from inside a real linked worktree, which is the only place its resolver can
+be wrong.
+
+Two things below were wrong and are corrected in place rather than left to read as design:
+the plan assumed the registration could name `$CLAUDE_PROJECT_DIR/.showrunner/...` only for
+*runtime* state (true) and did not notice that a TRACKED file under `.showrunner/` crosses
+perfectly well — which is why the shim can be spelled that way after all. And it did not
+anticipate that a tracked-but-**uncommitted** shim is absent in every worktree, because
+`git worktree add` copies from HEAD; that is now its own `doctor` check.
 **Owner:** showrunner. See "Which layer owns this" for why it is not a game_loop ask.
 
 Cited by symbol, not by line. Six of these files moved between drafting this and pushing it, and
@@ -254,7 +264,11 @@ purpose — only three tracked docs are gated on that number, and a fourth would
 3. `worktree enter` and its options text. No teeth — observe it against a real second session and
    check the hijack is detected at all before anything is denied.
 4. `worktree fork`.
-5. The tracked shim + `worktree guard` + registration + `doctor` checks.
+5. The tracked shim + `worktree guard` + registration + `doctor` checks. **DONE.** The
+   registration is SHIPPED, not documented: `init` writes the PreToolUse entry into
+   `.claude/settings.json` additively, preserving every other hook and key. Leaving it as an
+   instruction would have reproduced the premise row that shaped this plan — `lock guard` is
+   correct, has always been correct, and has never once run.
 6. `worktree takeover`, last, because it is the one verb that acts on somebody else's work.
 
 Steps 5 and 6 are the only ones that refuse anything, and neither should be written before step 3

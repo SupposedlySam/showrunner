@@ -124,12 +124,30 @@ feeding has actually taken the frames — that turns at-least-once into at-most-
 
 ```
 showrunner lease status [<tree>]     # which trees are held, by whom, and on what evidence
+showrunner worktree enter            # SessionStart: take this tree's lease, or report who holds it
+showrunner worktree fork --from <t>  # your own tree, off the same base commit as a held one
+showrunner worktree guard            # PreToolUse: DENY a write into a tree another live session holds
 ```
 
-**Read-only today — there is no `lease take` and no `lease release`.** The module can acquire and
-release; nothing has wired a verb to it yet, so a lease is taken by whatever integrates with it
-and this is how you see the result. Said plainly rather than left for you to discover by typing a
-command that does not exist.
+`enter` never blocks — a SessionStart hook cannot — so it is where the *prompt* lives. `guard` is
+where the *enforcement* lives, and it denies on exactly one condition: the lease is HELD by a
+**different live session**. FREE, STALE and UNREADABLE all allow, and none of the three is an
+oversight — a stale holder is proved dead, and an unreadable one cannot be adjudicated at all, so
+refusing on it would wedge a tree on somebody's partial write.
+
+**The guard is exactly as present as its registration.** It runs from a tracked shim,
+`.showrunner/hooks/worktree-guard.sh`, registered as a PreToolUse hook — tracked because
+`git worktree add` copies tracked files only, and a hook that does not cross into a worktree
+cannot guard one. `init` places it and registers it; **commit it**, or it is absent in every
+worktree made from then on. `showrunner doctor` reports the shim, its tracking and its
+registration separately, because a guard nobody registered has never once run.
+
+**It fails OPEN and says so.** No binary, no payload, an exception — all allow, and all print
+that the call was allowed without being checked. A PreToolUse that hard-fails on its own plumbing
+blocks every write including the one that would repair it.
+
+There is still no `lease take` and no `lease release` verb: a lease is acquired by `enter` and
+`fork`, and `lease status` is how you read the result.
 
 A worktree had an owner on paper (`campaign.json`) and no holder in fact — nothing consulted that
 record when a second session opened the directory and started editing. A lease's holder is a live
@@ -317,7 +335,7 @@ records no liveness on a claim, so `reap` cannot work against it and says so rat
 ## Verifying the tool itself
 
 ```
-python3 test/run.py        # 522 assertions; needs only Python 3 + git
+python3 test/run.py        # 563 assertions; needs only Python 3 + git
 bash prototype/demo.sh     # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 

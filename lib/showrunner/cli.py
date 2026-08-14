@@ -12,7 +12,7 @@ import sys
 
 from . import (__version__, brief, campaign, collide, config, dispatch, events, gates,
                graph as G, harness, lanes, lease, locks, worktree)
-from .util import Refused, die, eprint, now, rel, run, slug
+from .util import (Refused, die, eprint, now, rel, run, short_session, slug, stamp)
 
 BOLD, DIM, RED, GRN, YEL, OFF = "\033[1m", "\033[2m", "\033[31m", "\033[32m", "\033[33m", "\033[0m"
 if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
@@ -127,6 +127,24 @@ def cmd_init(args):
         os.chmod(dst, 0o755)
         print("placed %s and its library (the path every Crawler brief names)"
               % rel(dst, cfg.root))
+    # AND THE GUARD'S SHIM, for the same reason and with the same history. `doctor` reports a
+    # missing shim as an error, so an `init` that placed everything except it would hand the
+    # person a repo that reports a fault they did not cause and cannot fix by reading the
+    # message. install.sh copies it too; both real entry points place it or neither should.
+    shim_src = os.path.join(here, lease.GUARD_SHIM)
+    shim_dst = os.path.join(cfg.root, lease.GUARD_SHIM)
+    if os.access(shim_src, os.R_OK) and not os.path.exists(shim_dst) \
+            and os.path.realpath(shim_src) != os.path.realpath(shim_dst):
+        os.makedirs(os.path.dirname(shim_dst), exist_ok=True)
+        shutil.copy2(shim_src, shim_dst)
+        os.chmod(shim_dst, 0o755)
+        print("placed %s — COMMIT IT: `git worktree add` copies tracked files only, so an "
+              "uncommitted shim is absent in every worktree" % lease.GUARD_SHIM)
+
+    changed, note = lease.register_guard(cfg)
+    if note:
+        print(note if changed else "  ⚠ %s" % note)
+
     print("wrote %s" % rel(path, cfg.root))
     print("wrote %s" % rel(gi, cfg.root))
     print("created %s (gitignored — Crawler worktrees live INSIDE the repo, see issue #4)"
@@ -205,6 +223,17 @@ def cmd_doctor(args):
             print("  %s the harness payload is upgraded but NOT COMMITTED (%s). A worktree gets "
                   "HEAD's copy, so every spawn will refuse until this is committed — commit "
                   "first, then fan out." % (YEL + "warn " + OFF, ", ".join(pending[:3])))
+
+    # THE WORKTREE GUARD'S WIRING. Not "does the verb work" — the suite answers that — but
+    # "would it ever run". The guard fails OPEN by design, so nothing at runtime can be loud
+    # about its own absence without blocking the repair it needs; this is where that loudness
+    # lives instead. An unregistered guard is an ERROR because it is indistinguishable, from
+    # every other angle, from a guard that ran and was content.
+    for level, msg in lease.guard_health(cfg):
+        mark = {"error": RED + "ERROR" + OFF, "warn": YEL + "warn " + OFF,
+                "ok": GRN + "ok   " + OFF}[level]
+        print("  %s %s" % (mark, msg))
+        bad += level == "error"
 
     # THE RECIPROCAL HALF: showrunner's config names paths into a NEIGHBOUR's tree, and only
     # this repo can see whether they still resolve. A neighbour who moves or uninstalls their
@@ -452,27 +481,6 @@ def cmd_lock_status(args):
     return 0
 
 
-def _stamp(ts):
-    """An epoch second is a number a reader has to go and convert. `since 1786738962` was
-    printed to a human deciding whether to take somebody's worktree, which is a decision about
-    how long ago something happened."""
-    try:
-        import datetime
-        return datetime.datetime.fromtimestamp(int(ts)).isoformat(timespec="seconds")
-    except (TypeError, ValueError):
-        return str(ts or "?")
-
-
-def _short(sid):
-    """Abbreviate a session id, and SAY that it is abbreviated. `sess-AAAA` came out as
-    `sess-AAA` — eight characters of a nine-character id, indistinguishable from the whole
-    thing, in a report whose entire job is telling two sessions apart."""
-    sid = sid or ""
-    if not sid:
-        return "?"
-    return sid if len(sid) <= 12 else sid[:12] + "…"
-
-
 def cmd_worktree_enter(args):
     """SessionStart hook shape. ALWAYS exits 0 — see below.
 
@@ -516,10 +524,24 @@ def cmd_worktree_enter(args):
         return 0
     elif verdict == "hijack":
         print(lease.OPTIONS.format(
-            who=h.get("who") or "?", session=_short(h.get("session")),
-            pid=h.get("pid"), since=_stamp(h.get("ts")),
+            who=h.get("who") or "?", session=short_session(h.get("session")),
+            pid=h.get("pid"), since=stamp(h.get("ts")),
             basis=h.get("pid_basis") or "unrecorded",
             sr=brief.sr_bin(cfg), tree=tree))
+
+    # THE GUARD'S OWN ABSENCE, said where the reader is standing. The guard fails OPEN, so it
+    # cannot announce that it is missing — it is not running. `doctor` reports it, but a
+    # Crawler entering a tree never runs `doctor`, and a caveat filed where the reader does not
+    # stand is a caveat they never had. One line, only when something is actually wrong.
+    # EVERY non-ok finding, not only the errors. An untracked shim is a WARNING in `doctor` —
+    # correctly, since the main checkout is still guarded — but from inside a WORKTREE it is
+    # total absence, and this is the one reader standing in a worktree.
+    inert = [m for level, m in lease.guard_health(cfg) if level != "ok"]
+    if inert:
+        print("\n  %sThe write guard for this tree is NOT ACTIVE:%s" % (YEL, OFF))
+        for msg in inert:
+            print("    - %s" % msg.split("\n")[0])
+        print("    Your writes here are not checked against the lease. Nothing below denies.")
 
     # WHAT A WORKTREE DOES NOT ISOLATE, printed from the audit rather than restated here.
     # Restating it is how the two copies drift, and worktree.audit_shared is the one that gets
@@ -554,6 +576,111 @@ def cmd_worktree_fork(args):
     for line in d.get("warnings") or []:
         print("  note    %s" % line)
     return 0
+
+
+def _hook_payload():
+    """The PreToolUse JSON on stdin. Returns (payload, problem).
+
+    Never raises and never blocks: `problem` carries what went wrong so the CALLER can decide,
+    and the caller's only safe decision is to allow. A guard that dies reading its own input
+    exits non-zero, and a non-zero PreToolUse blocks every write including the one that would
+    repair it.
+    """
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return {}, "no stdin (not running as a hook)"
+        raw = sys.stdin.read()
+    except (OSError, ValueError) as exc:
+        return {}, "stdin could not be read (%s)" % exc
+    if not (raw or "").strip():
+        return {}, "empty stdin"
+    try:
+        payload = json.loads(raw)
+    except ValueError as exc:
+        return {}, "stdin was not JSON (%s)" % exc
+    return (payload, None) if isinstance(payload, dict) else ({}, "stdin JSON was not an object")
+
+
+def _allow_loudly(notice):
+    """Exit 0, and SAY the guard did not run — the posture, and never the silent half of it.
+
+    Allowing without a word is indistinguishable from a guard that ran and was content, which
+    is how a rail goes quiet exactly where it is blind. The structured form is used rather than
+    a bare print because `additionalContext` is what actually reaches the agent on an allow —
+    this is the shape `.game_loop/bin/guard-writes.sh` uses for the same purpose, in this repo,
+    on every tool call, which makes it the mechanism with observed evidence behind it.
+    """
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                             "additionalContext": notice}}))
+    return 0
+
+
+def cmd_worktree_guard(args):
+    """PreToolUse: refuse a write into a tree another LIVE session holds. Exit 2 denies.
+
+    THE TEETH. `worktree enter` detects a hijack and prints; this is the half that refuses,
+    and it is deliberately the last thing built — WL-03 produced two real `lease.hijack`
+    events in the journal first, because no gate is built without a logged, observed failure.
+
+    **Exit 2 rather than the structured `permissionDecision: "deny"` form.** Both are valid
+    hook contracts; this one keeps ONE convention inside showrunner, beside `lock guard` which
+    already exits 2, rather than having two of our own guards answer the same event in two
+    shapes. The structured form is still used for the fail-open notice, where it is the only
+    thing that reaches the agent.
+
+    **Every failure path here allows.** Unreadable payload, missing config, an exception from
+    anywhere below — all exit 0 with a notice. This verb runs before every Write, Edit and
+    Bash in the repo, so a bug in it that exited non-zero would lock the repo against its own
+    repair (INV5). `doctor` carries the loudness that this cannot.
+    """
+    payload, problem = _hook_payload()
+    if problem and not (args.session or args.path or args.command):
+        return _allow_loudly(
+            "⚠ THE WORKTREE GUARD DID NOT RUN — it could not read its PreToolUse payload (%s), "
+            "so this tool call was ALLOWED WITHOUT BEING CHECKED. A worktree held by another "
+            "live session is NOT protected right now. Check `showrunner doctor`." % problem)
+
+    try:
+        cfg = _cfg(args)
+        session = (args.session or payload.get("session_id")
+                   or os.environ.get("SHOWRUNNER_SESSION") or "")
+        tool = args.tool or payload.get("tool_name") or ""
+        tool_input = payload.get("tool_input") or {}
+        if args.command is not None:
+            tool, tool_input = "Bash", {"command": args.command}
+        if args.path:
+            tool_input = dict(tool_input, file_path=args.path)
+        cwd = payload.get("cwd") or os.getcwd()
+        allow, message, detail = lease.guard(cfg, session, tool=tool, tool_input=tool_input,
+                                             cwd=cwd)
+    except Exception as exc:                                    # noqa: BLE001 — see docstring
+        return _allow_loudly(
+            "⚠ THE WORKTREE GUARD DID NOT RUN — it raised %s: %s. This tool call was ALLOWED "
+            "WITHOUT BEING CHECKED, and a worktree held by another live session is NOT "
+            "protected. Repair it, do not work around it: `showrunner doctor`."
+            % (type(exc).__name__, exc))
+
+    if allow:
+        if detail.get("degraded"):
+            return _allow_loudly(message)
+        print(message)
+        return 0
+
+    # LOGGED. The refusal is the event a later reader needs — that the gate fired at all, and
+    # against whom. A denial visible only in one session's scrollback is not an observation.
+    try:
+        events.emit(cfg, "lease.denied", {
+            "tree": detail.get("tree"), "intruder_session": session, "tool": tool,
+            "holder_session": (detail.get("holder") or {}).get("session"),
+            "holder_pid": (detail.get("holder") or {}).get("pid"),
+            "holder": (detail.get("holder") or {}).get("who")})
+    except Exception:                                           # noqa: BLE001
+        # A journal that will not accept a line must not turn a correct refusal into a crash,
+        # and must not turn it into an allow either. The denial stands; the record is what is
+        # lost, and the message below is still on the channel the agent reads.
+        eprint("showrunner: (the denial below could not be journalled)")
+    eprint(message)
+    return 2
 
 
 def cmd_lease_status(args):
@@ -1285,6 +1412,14 @@ def build_parser():
     t.add_argument("--base", help="override the base commit; refuses rather than guess one")
     t.add_argument("--name", help="a name for the new tree")
     t.set_defaults(func=cmd_worktree_fork)
+
+    t = wsub.add_parser("guard", help="PreToolUse: deny a write into a tree another live "
+                                      "session holds. Exit 2 denies")
+    t.add_argument("--session", help="override the session id the payload carries")
+    t.add_argument("--path", help="the path being written; defaults to the payload's")
+    t.add_argument("--tool", help="the tool name; defaults to the payload's")
+    t.add_argument("--command", help="a Bash command to judge, instead of reading stdin")
+    t.set_defaults(func=cmd_worktree_guard)
 
     s = sub.add_parser("lock", help="single-consumer resource locks")
     lsub = s.add_subparsers(dest="lockcmd")

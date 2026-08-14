@@ -34,6 +34,37 @@ def now():
     return int(time.time())
 
 
+def stamp(ts):
+    """An epoch second is a number a reader has to go and convert. `since 1786738962` was
+    printed to a human deciding whether to take somebody's worktree, which is a decision about
+    how long ago something happened.
+
+    HERE rather than in cli.py, because the lease's REFUSAL prints the same field and shipped
+    the raw epoch again the first time it ran — the fix had been made one layer away and could
+    not be reached. One formatter, so the prompt and the refusal cannot disagree about what a
+    timestamp looks like.
+    """
+    try:
+        import datetime
+        return datetime.datetime.fromtimestamp(int(ts)).isoformat(timespec="seconds")
+    except (TypeError, ValueError):
+        return str(ts or "?")
+
+
+def short_session(sid):
+    """Abbreviate a session id, and SAY that it is abbreviated.
+
+    `sess-AAAA` came out as `sess-AAA` — eight characters of a nine-character id,
+    indistinguishable from the whole thing, in a report whose entire job is telling two
+    sessions apart. Then the lease's refusal re-made it with a bare slice, printing
+    `session-HOLDER` as `session-HOLD`, which is why this lives beside `stamp` now.
+    """
+    sid = sid or ""
+    if not sid:
+        return "?"
+    return sid if len(sid) <= 12 else sid[:12] + "…"
+
+
 def boot_token():
     """Identify this boot of this machine.
 

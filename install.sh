@@ -33,6 +33,16 @@ cp "$SRC/bin/showrunner" "$TARGET/.showrunner/bin/showrunner"
 chmod +x "$TARGET/.showrunner/bin/showrunner"
 echo "  copied  .showrunner/bin/showrunner + .showrunner/lib/showrunner/"
 
+# THE ONE PART OF THE PAYLOAD THAT IS MEANT TO BE COMMITTED. bin/ and lib/ above are the tool
+# and are ignored; this is a few lines of machine-agnostic bash that must be TRACKED, because
+# `git worktree add` copies tracked files only and a hook that does not cross into a worktree
+# cannot guard one. It names no absolute path and no machine, so it is safe to commit — that
+# is the whole reason the registration points at a shim instead of at the binary.
+mkdir -p "$TARGET/.showrunner/hooks"
+cp "$SRC/.showrunner/hooks/worktree-guard.sh" "$TARGET/.showrunner/hooks/worktree-guard.sh"
+chmod +x "$TARGET/.showrunner/hooks/worktree-guard.sh"
+echo "  copied  .showrunner/hooks/worktree-guard.sh (COMMIT THIS — it must cross into worktrees)"
+
 if [ ! -f "$TARGET/.showrunner/.gitignore" ]; then
   cat >"$TARGET/.showrunner/.gitignore" <<'EOF'
 # showrunner RUNTIME state — not source. config.json IS source; commit it.
@@ -129,7 +139,13 @@ echo "       checks     — the commands integration re-runs after EACH merge"
 echo "  2. ./.showrunner/bin/showrunner doctor"
 echo "       It REFUSES a config that would degrade silently — a worktree-relative lock root,"
 echo "       or worktrees outside the repo. A mutex that is quietly a no-op is worse than none."
-echo "  3. ./.showrunner/bin/showrunner baseline    # on a known-good tree"
+echo "  3. Register the worktree guard in .claude/settings.json, or it never runs:"
+echo "       PreToolUse → {\"matcher\": \"Write|Edit|NotebookEdit|Bash\","
+echo "                     \"hooks\": [{\"type\": \"command\","
+echo "                       \"command\": \"\\\$CLAUDE_PROJECT_DIR/.showrunner/hooks/worktree-guard.sh\"}]}"
+echo "       Then commit .showrunner/hooks/. doctor reports both as errors until you do —"
+echo "       an unregistered guard is indistinguishable from one that ran and was content."
+echo "  4. ./.showrunner/bin/showrunner baseline    # on a known-good tree"
 echo "       The gate is 'no NEW failures', never 'all green' — a repo with pre-existing"
 echo "       failures cannot satisfy 'all green', so that version gets switched off on contact."
 echo

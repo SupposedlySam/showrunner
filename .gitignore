@@ -22,3 +22,7 @@ __pycache__/
 # machine-local hook config (absolute paths)
 .claude/settings.local.json
 
+
+# Session handoff docs — local only. `.claude/` is tracked here so settings.json crosses
+# into every Crawler worktree; handoff notes must NOT ride along into them or into a public clone.
+.claude/handoff/
