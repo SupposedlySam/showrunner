@@ -48,6 +48,49 @@ EOF
   echo "  wrote   .showrunner/.gitignore (runtime state ignored; config.json is source)"
 fi
 
+# THE TOOL IS NOT THE PROJECT'S SOURCE, and until now nothing said so in a place git reads.
+# bin/ and lib/ were neither tracked nor ignored, which is the one combination with no visible
+# state: `git status` lists them as untracked and the next `git add -A` commits them. Measured
+# on a fresh install into an empty repo — 31 paths staged, showrunner's whole library among
+# them. A consumer ends up carrying a vendored copy they never chose, and the copy is what
+# then drifts.
+#
+# `lib/` also covers __pycache__/, and that is the only thing that can: this script deleting
+# the copied bytecode was tried and is theatre, because the `init` below imports the library
+# and Python writes it straight back — as does the consumer's very first showrunner run. An
+# ignore rule holds for the whole lifetime; a delete holds until the next import.
+#
+# APPENDED, not written only on creation, because the guard above fires once per repo and
+# every already-installed consumer is exactly the population that has the hole. Each line is
+# added only if absent, so re-running is idempotent and a consumer who deliberately deleted
+# one gets it back — noted rather than hidden, since the alternative is an installer that
+# silently honours an edit that re-opens the hole.
+sr_ignore="$TARGET/.showrunner/.gitignore"
+sr_added=0
+for entry in "bin/" "lib/"; do
+  if ! grep -qxF "$entry" "$sr_ignore" 2>/dev/null; then
+    if [ "$sr_added" = 0 ]; then
+      printf '\n# The TOOL, not this project. Installed by install.sh and replaced wholesale on\n# upgrade — committing it vendors a copy that drifts from the one you installed.\n# `--central` (when it lands) makes this the only thing here.\n' >>"$sr_ignore"
+    fi
+    printf '%s\n' "$entry" >>"$sr_ignore"
+    sr_added=$((sr_added + 1))
+  fi
+done
+if [ "$sr_added" -gt 0 ]; then
+  echo "  ignored .showrunner/bin/ and lib/ — the tool is not your project's source"
+fi
+
+# OUTSIDE the block above, and a test is why. Nesting this under "we just added the rule" meant
+# a consumer whose ignore file was already correct — every upgrade after the first — was never
+# told, even while git went on tracking the tool. Being tracked is the condition that matters,
+# not the instant the rule arrived, and an ignore rule does NOT untrack what is already
+# committed. Saying "ignored" without saying this is a remedy that silently does nothing.
+if git -C "$TARGET" ls-files --error-unmatch .showrunner/bin >/dev/null 2>&1; then
+  echo "  ⚠ .showrunner/bin is ALREADY TRACKED here, and an ignore rule does not untrack it."
+  echo "    git keeps updating it on every pull, and your copy keeps drifting. To stop:"
+  echo "      git -C $TARGET rm -r --cached .showrunner/bin .showrunner/lib"
+fi
+
 if [ -f "$TARGET/.showrunner/config.json" ]; then
   echo "  kept    .showrunner/config.json (already present — not clobbered)"
 else

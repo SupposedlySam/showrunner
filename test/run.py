@@ -1491,6 +1491,96 @@ def test_integration():
 
 
 # ======================================================== CORE: the CLI
+def test_installer_leaves_no_vendored_copy():
+    group("What install.sh leaves behind in somebody ELSE's repo")
+    if not have("git"):
+        skip("the installer group", "git is not installed")
+        return
+    installer = os.path.join(ROOT, "install.sh")
+    if not os.path.exists(installer):
+        skip("the installer group", "install.sh is not present")
+        return
+
+    def fresh_repo():
+        d = tmpdir("consumer")
+        sh(["git", "init", "-q", "-b", "main"], d)
+        sh(["git", "config", "user.email", "test@example.com"], d)
+        sh(["git", "config", "user.name", "showrunner test"], d)
+        sh(["git", "commit", "-q", "--allow-empty", "-m", "init"], d)
+        return d
+
+    def would_stage(d):
+        out = sh(["git", "add", "-A", "--dry-run"], d).stdout
+        return sorted(l.split("'")[1] for l in out.splitlines() if "'" in l)
+
+    consumer = fresh_repo()
+    sh([installer, consumer], ROOT)
+    staged = would_stage(consumer)
+
+    # THE COMBINATION WITH NO VISIBLE STATE. Neither tracked nor ignored means `git status`
+    # lists them as untracked and the next `git add -A` commits them — measured at 31 paths,
+    # showrunner's whole library, into a repo whose owner never chose to vendor it. And a
+    # vendored copy is precisely the thing that then drifts from the one they installed.
+    tool = [p for p in staged if p.startswith(".showrunner/bin/")
+            or p.startswith(".showrunner/lib/")]
+    ok("a fresh install leaves NOTHING of the tool stageable in the consumer's repo — the "
+       "code is installed, not vendored", not tool, tool[:5])
+
+    # Paired with the case where it DOES stage, because "nothing was staged" and "nothing was
+    # examined" are the same observation from outside. This asserts the scan sees real paths.
+    ok("...and the check is not vacuous: the consumer's OWN source files are still staged, so "
+       "an empty verdict above means ignored rather than unexamined",
+       ".showrunner/config.json" in staged, staged)
+    ok("...and config.json is among them, because config IS the consumer's source and must "
+       "stay committable", ".showrunner/config.json" in staged, staged)
+
+    # Bytecode. This script deleting the copied __pycache__ was tried and is theatre: `init`
+    # below imports the library and Python writes it straight back, as does the consumer's
+    # first run. Only an ignore rule holds for the whole lifetime, so assert the rule's reach
+    # rather than the directory's absence — which would pass for the wrong reason.
+    pyc = os.path.join(consumer, ".showrunner", "lib", "showrunner", "__pycache__")
+    if os.path.isdir(pyc):
+        ok("...including the bytecode Python regenerates on every import, which no amount of "
+           "deleting at install time can cover",
+           not [p for p in staged if "__pycache__" in p], staged[:5])
+    else:
+        skip("the bytecode reach assertion", "no __pycache__ was produced by this install")
+
+    # THE UPGRADE PATH, which is where every already-installed consumer actually lives. The
+    # template is written only when the file is absent, so a guard that fires once per repo
+    # would leave exactly the population that has the hole still holding it.
+    legacy = fresh_repo()
+    os.makedirs(os.path.join(legacy, ".showrunner"), exist_ok=True)
+    with open(os.path.join(legacy, ".showrunner", ".gitignore"), "w") as fh:
+        fh.write("# showrunner RUNTIME state — not source.\ngraph.db\nlocks/\nscratch/\n")
+    sh([installer, legacy], ROOT)
+    leftover = [p for p in would_stage(legacy)
+                if p.startswith(".showrunner/bin/") or p.startswith(".showrunner/lib/")]
+    ok("upgrading a repo whose .gitignore PREDATES this rule still closes the hole — the "
+       "entries are appended, not written only on creation",
+       not leftover, leftover[:5])
+
+    with open(os.path.join(legacy, ".showrunner", ".gitignore")) as fh:
+        before = fh.read()
+    sh([installer, legacy], ROOT)
+    with open(os.path.join(legacy, ".showrunner", ".gitignore")) as fh:
+        after = fh.read()
+    ok("...and re-running the installer appends nothing a second time", before == after,
+       "%d -> %d bytes" % (len(before), len(after)))
+
+    # An ignore rule does NOT untrack what is already committed, and a consumer who followed
+    # the old installer's implicit invitation has it committed. Saying "ignored" to them
+    # without saying that would be a remedy that silently does nothing.
+    tracked_repo = fresh_repo()
+    sh([installer, tracked_repo], ROOT)
+    sh(["git", "add", "-A", "-f"], tracked_repo)
+    sh(["git", "commit", "-q", "-m", "vendored"], tracked_repo)
+    out = sh([installer, tracked_repo], ROOT).stdout
+    ok("a consumer who ALREADY committed the tool is told the ignore rule does not untrack "
+       "it, and given the command that does",
+       "ALREADY TRACKED" in out and "rm -r --cached" in out, out[-400:])
+
+
 def test_publishable():
     group("What a stranger gets when they clone this repo")
     if not have("git"):
@@ -2885,7 +2975,8 @@ def main():
     for fn in (test_locks, test_config_refusals, test_every_rule_can_fail, test_graph, test_lifecycle, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_waiting, test_concurrency,
-               test_integration, test_publishable, test_dispatch, test_filed_issues_15_to_21,
+               test_integration, test_installer_leaves_no_vendored_copy,
+               test_publishable, test_dispatch, test_filed_issues_15_to_21,
                test_claims_about_the_layer_below, test_retracted_doc_claims,
                test_cli, test_optional):
         try:
