@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Dispatches to the CENTRAL showrunner install (this repo was wired with `install.sh --central`).
+#
+# MACHINE-AGNOSTIC ON PURPOSE: no baked absolute path, so this file is byte-identical in every
+# project on every machine. That is what makes it safe for a consumer to commit — and some will,
+# whatever the installer's ignore rules say.
+#
+# ONE shim, not five. game_loop needs one per hook entrypoint; showrunner has exactly one
+# executable, and every verb goes through it.
+#
+# NO "SHOWRUNNER_HOME" EQUIVALENT, and its absence is the design rather than an omission:
+# `config.load` resolves the project from the cwd's git root (via --git-common-dir), so the
+# central binary run from inside a consumer repo — or inside one of its worktrees — already
+# reads THAT repo's .showrunner/config.json, graph and locks. Only the CODE is shared. Passing
+# a home would be a second source of truth for a question that already has one.
+#
+# FAIL POSTURE, BY VERB. The hook verbs fail OPEN: there is a live tool call or turn-end waiting
+# on the exit code, and blocking every write over a missing central install would block the
+# write that repairs it. Everything else is typed by a human or an agent expecting a real
+# answer, so it fails LOUD rather than returning nothing and exiting 0.
+#
+# BUT NEVER OPEN IN SILENCE. game_loop's own shim exits 0 for its hook verbs and says nothing,
+# and that is the one thing not copied here: an allow nobody is told about is indistinguishable
+# from a guard that ran and was content. `lock guard` is the sharp case — it is only an
+# OPTIMISATION (routing), and `lock run` is the guarantee, which is not a hook and still fails
+# loud below. So the notice is actionable, not just honest: it tells the reader to take the lock
+# themselves.
+set -u
+
+central="${SHOWRUNNER_CENTRAL:-$HOME/.claude/showrunner-central}"
+
+if [ -x "$central/bin/showrunner" ]; then
+  exec "$central/bin/showrunner" "$@"
+fi
+
+unchecked() {
+  echo "showrunner: ALLOWED WITHOUT BEING CHECKED — no central install at $central, so \`$*\`" >&2
+  echo "  did not run. This is not a guard reporting that it was content; it is the guard" >&2
+  echo "  being absent. Routing and guarding are optimisations here; the guarantee is" >&2
+  echo "  \`showrunner lock run <resource> --holder <who> -- <cmd>\`, which is not a hook and" >&2
+  echo "  still fails loud. Take the lock yourself, or repair central:" >&2
+  echo "    showrunner self --pin <ref> --dest $central" >&2
+}
+
+# The verb pair, so `lock guard` is matched without also matching `lock run`.
+case "${1:-}:${2:-}" in
+  lock:guard|worktree:guard|worktree:enter|stop-gate:*)
+    unchecked "${1:-}" "${2:-}"; exit 0 ;;
+  *)
+    echo "showrunner: no central install at $central" >&2
+    echo "  This repo dispatches to a shared copy of the tool and there is not one there." >&2
+    echo "  Populate it:  showrunner self --pin <ref> --dest $central" >&2
+    echo "  Or point elsewhere with SHOWRUNNER_CENTRAL, or re-run install.sh WITHOUT" >&2
+    echo "  --central to go back to a local copy of the code in this repo." >&2
+    exit 1 ;;
+esac

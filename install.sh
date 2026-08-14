@@ -7,7 +7,23 @@
 set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
-TARGET="${1:-.}"
+CENTRAL=0
+TARGET="."
+for arg in "$@"; do
+  case "$arg" in
+    --central) CENTRAL=1 ;;
+    -h|--help)
+      echo "usage: ./install.sh [--central] /path/to/your/project"
+      echo
+      echo "  --central   do not copy the tool's code into the project at all. Write one tiny"
+      echo "              dispatcher shim that execs a shared, machine-wide install instead."
+      echo "              Populate that with \`showrunner self --pin <ref> --dest <path>\`."
+      echo "              Opt-in and REVERSIBLE: re-run without --central to restore local copies."
+      exit 0 ;;
+    -*) echo "install.sh: unknown option $arg" >&2; exit 64 ;;
+    *)  TARGET="$arg" ;;
+  esac
+done
 
 if [ ! -d "$TARGET" ]; then
   echo "install.sh: no such directory: $TARGET" >&2
@@ -27,11 +43,46 @@ fi
 TARGET="$(git -C "$TARGET" rev-parse --show-toplevel)"
 
 echo "Installing showrunner into: $TARGET"
-mkdir -p "$TARGET/.showrunner/bin" "$TARGET/.showrunner/lib"
-cp -R "$SRC/lib/showrunner" "$TARGET/.showrunner/lib/"
-cp "$SRC/bin/showrunner" "$TARGET/.showrunner/bin/showrunner"
-chmod +x "$TARGET/.showrunner/bin/showrunner"
-echo "  copied  .showrunner/bin/showrunner + .showrunner/lib/showrunner/"
+mkdir -p "$TARGET/.showrunner/bin"
+
+# WAS this repo centrally wired BEFORE this run? Decided HERE, before anything below overwrites
+# the evidence. A central install writes the shim and deliberately leaves no lib/, so lib/'s
+# absence beside an existing binary is the signal — the same shape game_loop uses, keyed on the
+# file its own central branch never writes.
+WAS_CENTRAL=0
+if [ -f "$TARGET/.showrunner/bin/showrunner" ] && [ ! -d "$TARGET/.showrunner/lib/showrunner" ]; then
+  WAS_CENTRAL=1
+fi
+
+SRC_CENTRAL="${SHOWRUNNER_CENTRAL:-$HOME/.claude/showrunner-central}"
+if [ "$CENTRAL" = 1 ]; then
+  # Do not copy the tool at all — write one dispatcher shim that execs a shared copy. The shim
+  # is machine-agnostic, so it is byte-identical in every project wired this way.
+  cp "$SRC/templates/central-shims/showrunner" "$TARGET/.showrunner/bin/showrunner"
+  chmod +x "$TARGET/.showrunner/bin/showrunner"
+  # REMOVE WHAT A PRIOR LOCAL INSTALL LEFT. Switching modes must not leave a dead copy of the
+  # library sitting beside a shim that ignores it: two copies of the code where one is
+  # unreferenced is exactly the drift this mode exists to end, arriving inside the fix.
+  rm -rf "$TARGET/.showrunner/lib"
+  echo "  wrote   .showrunner/bin/showrunner — ONE dispatcher shim, no local copy of the tool"
+  if [ -x "$SRC_CENTRAL/bin/showrunner" ]; then
+    echo "  central install found at $SRC_CENTRAL — reachable right now"
+  else
+    echo "  ⚠ NO central install at $SRC_CENTRAL yet. Until one exists, every non-hook verb in"
+    echo "    this repo exits 1, and the hook verbs allow AND SAY they did not run."
+    echo "    Populate it:  $SRC/bin/showrunner self --pin <ref> --dest $SRC_CENTRAL"
+  fi
+else
+  mkdir -p "$TARGET/.showrunner/lib"
+  cp -R "$SRC/lib/showrunner" "$TARGET/.showrunner/lib/"
+  cp "$SRC/bin/showrunner" "$TARGET/.showrunner/bin/showrunner"
+  chmod +x "$TARGET/.showrunner/bin/showrunner"
+  echo "  copied  .showrunner/bin/showrunner + .showrunner/lib/showrunner/"
+  if [ "$WAS_CENTRAL" = 1 ]; then
+    echo "  reverted from central dispatch to a local copy — this repo no longer depends on"
+    echo "  a central install. Reversibility is the whole reason --central is safe to try."
+  fi
+fi
 
 # THE ONE PART OF THE PAYLOAD THAT IS MEANT TO BE COMMITTED. bin/ and lib/ above are the tool
 # and are ignored; this is a few lines of machine-agnostic bash that must be TRACKED, because
@@ -125,7 +176,13 @@ fi
 if [ -f "$TARGET/.showrunner/config.json" ]; then
   echo "  kept    .showrunner/config.json (already present — not clobbered)"
 else
-  (cd "$TARGET" && "$TARGET/.showrunner/bin/showrunner" init >/dev/null)
+  # RUN THE INSTALLER'S OWN BINARY, not the one just placed in the target. Under --central the
+  # placed file is a shim, and if no central install exists yet it exits 1 — so a fresh
+  # `--central` install would abort here, on `set -e`, having written everything correctly.
+  # The source binary always works, and `init` resolves the project from the CWD, so it writes
+  # the target's config either way. It also declines to place a binary over one that is already
+  # executable, so this does not undo the shim.
+  (cd "$TARGET" && "$SRC/bin/showrunner" init >/dev/null)
   echo "  seeded  .showrunner/config.json"
 fi
 

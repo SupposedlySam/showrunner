@@ -1,6 +1,9 @@
 # Plan — `install.sh --central`: one copy of the code, every project's own config
 
-**Status:** steps 1 and 2 of the build order are BUILT (CI-01, CI-02). Steps 3–5 are not.
+**Status:** steps 1, 2 and 3 of the build order are BUILT (CI-01, CI-02, CI-03). Central mode
+works end to end and is reversible; steps 4 and 5 — `doctor`'s central checks and the campaign
+record's central SHA — are not built, so a mid-campaign `self --pin` is still invisible to a
+running campaign.
 
 **The fail-posture objection is SETTLED, and a handoff said otherwise.** A session note carried
 it forward as "the sibling still holds that central mode should refuse rather than fall back,
@@ -253,9 +256,21 @@ keeps the guarantee.
    `lock guard` and `stop-gate` must exit 0 **and say** the guard did not run — for `lock guard`
    that is actionable, since routing is off and the agent should take the lock itself with
    `lock run`. `worktree guard`'s shim already does exactly this and is the worked example.
-   The test for it is written and currently SKIPS: *"the fail-open-in-silence check against a
-   REAL shim"* in `test/run.py`. It becomes live the moment a shim containing "CENTRAL" appears
-   at `templates/central-shims/showrunner`, and it was deliberately written first.
+   The test for it was written first and SKIPPED until a shim existed. **DONE**, and building
+   the shim revealed why a written-but-never-run test is not the same as a passing one: the
+   branch it takes against a real shim called a bare `rel()` that does not exist in that
+   module, so it raised NameError the first time it ever executed. Fixed, and noted here
+   because "written before the thing it guards" is a real safeguard that this repo now has one
+   worked example of BOTH halves of — it caught the silent fail-open, and it hid a NameError
+   for as long as it never ran.
+
+   Two details the plan did not specify, decided while building. The `--central` branch must
+   also DELETE `.showrunner/lib/` left by a prior local install, or a dead copy sits beside a
+   shim that ignores it — the drift this mode exists to end, reappearing inside the fix. And
+   `install.sh` must run the INSTALLER's binary for `init`, not the one it just placed: under
+   `--central` the placed file is a shim, and on a machine with no central install yet it
+   exits 1, so a correct first `--central` install aborted on `set -e` having written
+   everything properly.
 4. `doctor`: mode, resolved path, reachability, pinned SHA — error when configured and unreachable.
 5. Central SHA in the campaign record; `reconcile` reports; `integrate` refuses.
 

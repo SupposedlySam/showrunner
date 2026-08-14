@@ -344,16 +344,41 @@ Everything else in showrunner talks to one interface and never learns which it g
 records no liveness on a claim, so `reap` cannot work against it and says so rather than reporting
 "nothing is stale".
 
-## Pinning the tool's own code
+## One copy of the code, every project's own config
+
+Per-project install is the **default** and stays the documented path. Central is opt-in, one
+flag, and reversible in both directions:
 
 ```
-showrunner self --pin <ref> --dest <path>   # extract bin/ and lib/ at a git ref, stamped
-showrunner self --dest <path>               # what is pinned there; exit 2 if it was edited since
+./install.sh --central /path/to/project      # write ONE dispatcher shim, no local copy of the code
+showrunner self --pin <ref> --dest <path>    # populate central: extract bin/ and lib/ at a git ref
+showrunner self --dest <path>                # what is pinned there; exit 2 if it was edited since
+./install.sh /path/to/project                # revert: restore the local copy, drop the dependency
 ```
 
-**Nothing consumes this yet.** Wiring consumer repos at a central copy is a later leaf
-(`install.sh --central`); this populates a directory and switches nothing over. Said plainly
-because an unwired mechanism that looks installed is the failure this repo keeps finding.
+Under `--central`, `.showrunner/bin/showrunner` stops being the tool and becomes ~20 lines of
+bash that exec a shared copy at `$SHOWRUNNER_CENTRAL` (default `~/.claude/showrunner-central`).
+The shim is machine-agnostic and byte-identical in every project, so a consumer who commits it
+anyway is not committing anything about their machine.
+
+**Only the CODE is shared.** There is no `SHOWRUNNER_HOME` equivalent and none is needed:
+`config.load` resolves the project from the cwd's git root, so the central binary run inside a
+consumer repo — or inside one of its worktrees — reads THAT repo's config, graph and locks.
+
+**When central is missing, the fail posture splits.** Hook verbs (`lock guard`,
+`worktree guard`, `worktree enter`, `stop-gate`) exit 0, because a PreToolUse that hard-fails on
+its own plumbing blocks the write that would repair it — **and they say `ALLOWED WITHOUT BEING
+CHECKED`**, because an allow nobody is told about is indistinguishable from a guard that ran and
+was content. Every other verb exits 1 naming the populate command.
+
+`lock run` is deliberately **not** a hook verb. Routing and guarding are optimisations; `lock
+run` is the guarantee, and it still fails loud. A missing central install costs the optimisation
+and keeps the guarantee — which is the whole reason this fail posture is acceptable.
+
+**This does not make showrunner a global command.** The entrypoint is still
+`./.showrunner/bin/showrunner`; central changes what that file *is*, not where you type it. And
+`VERSION` names what was *extracted* — nothing hashes the central directory afterwards, so one
+bad pin still reaches every project on the machine at once.
 
 Pinned to a **named ref**, never copied from a working tree, so "what is central running" answers
 with a commit that can be checked out and diffed. `VERSION` holds the resolved SHA and `PINNED`
@@ -367,7 +392,7 @@ what is there now. Nothing hashes the contents.
 ## Verifying the tool itself
 
 ```
-python3 test/run.py        # 593 assertions; needs only Python 3 + git
+python3 test/run.py        # 625 assertions; needs only Python 3 + git
 bash prototype/demo.sh     # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 

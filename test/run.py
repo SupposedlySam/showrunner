@@ -2258,6 +2258,126 @@ def test_self_pin():
        "installed to anything that checks for a path", not os.path.exists(doomed))
 
 
+def test_central_install():
+    group("Central install: one copy of the code, every project's own config (CI-03)")
+    if not have("git"):
+        skip("the central-install group", "git is not installed")
+        return
+    installer = os.path.join(ROOT, "install.sh")
+    template = os.path.join(ROOT, "templates", "central-shims", "showrunner")
+    if not (os.path.exists(installer) and os.path.exists(template)):
+        skip("the central-install group", "install.sh or the shim template is missing")
+        return
+
+    def consumer_repo():
+        d = tmpdir("central-consumer")
+        sh(["git", "init", "-q", "-b", "main"], d)
+        sh(["git", "config", "user.email", "test@example.com"], d)
+        sh(["git", "config", "user.name", "showrunner test"], d)
+        with open(os.path.join(d, "README.md"), "w") as fh:
+            fh.write("seed\n")
+        sh(["git", "add", "-A"], d)
+        sh(["git", "commit", "-q", "-m", "seed"], d)
+        return d
+
+    def run_sr(repo, args, central, cwd=None):
+        env = dict(os.environ, SHOWRUNNER_CENTRAL=central)
+        return subprocess.run([os.path.join(repo, ".showrunner", "bin", "showrunner")] + args,
+                              cwd=cwd or repo, capture_output=True, text=True, env=env)
+
+    repo = consumer_repo()
+    nowhere = os.path.join(tmpdir("nowhere"), "absent")
+    env = dict(os.environ, SHOWRUNNER_CENTRAL=nowhere)
+    subprocess.run([installer, "--central", repo], cwd=ROOT, capture_output=True, text=True,
+                   env=env)
+
+    placed = os.path.join(repo, ".showrunner", "bin", "showrunner")
+    with open(template) as fh:
+        want = fh.read()
+    with open(placed) as fh:
+        got = fh.read()
+    ok("--central writes the shim BYTE-IDENTICAL to the template — 'machine-agnostic' is the "
+       "property that lets a consumer commit it, and it is only true if nothing is baked in "
+       "per install", got == want, "%d vs %d bytes" % (len(got), len(want)))
+    ok("...and no absolute path from THIS machine is baked into it",
+       ROOT not in got and os.path.expanduser("~") not in got, got[:200])
+    ok("--central leaves NO local copy of the library — that is the entire point, and a lib "
+       "sitting beside a shim that ignores it is the drift this mode exists to end",
+       not os.path.isdir(os.path.join(repo, ".showrunner", "lib", "showrunner")))
+    ok("...while config.json IS seeded, so `init` ran even though the shim it would have "
+       "called cannot reach a central install yet",
+       os.path.exists(os.path.join(repo, ".showrunner", "config.json")))
+
+    # ---- CENTRAL ABSENT: both directions, because an absence-only suite passes against a
+    # build that does nothing at all.
+    for verb in (["lock", "guard"], ["worktree", "guard"], ["stop-gate"], ["worktree", "enter"]):
+        res = run_sr(repo, verb, nowhere)
+        eq("with no central install, the HOOK verb `%s` exits 0 — a PreToolUse that hard-fails "
+           "on missing plumbing blocks the write that would repair it" % " ".join(verb),
+           res.returncode, 0)
+        ok("...and SAYS it was not checked, which is the one thing game_loop's own shim does "
+           "not do and the only change the retracted fail-posture objection left behind",
+           "ALLOWED WITHOUT BEING CHECKED" in res.stderr, res.stderr[:120])
+
+    for verb in (["status"], ["doctor"], ["integrate"], ["lock", "run", "device"]):
+        res = run_sr(repo, verb, nowhere)
+        eq("...while the NON-hook verb `%s` fails LOUD — it was typed by someone expecting a "
+           "real answer" % " ".join(verb), res.returncode, 1)
+        ok("...naming the command that populates central, so the refusal is actionable",
+           "self --pin" in res.stderr, res.stderr[:160])
+
+    # `lock run` IS THE GUARANTEE and must never be on the fail-open side. This is the whole
+    # reason Objection C's answer holds: a missing central install costs the OPTIMISATION
+    # (routing, `lock guard`) and keeps the guarantee, because `run` is not a hook.
+    ok("`lock run` is NOT treated as a hook verb — routing is the optimisation, `lock run` is "
+       "the guarantee, and a central install that silently switched IT off would be INV8's "
+       "prohibition for real",
+       run_sr(repo, ["lock", "run", "device"], nowhere).returncode == 1)
+
+    # ---- CENTRAL PRESENT ----------------------------------------------------------
+    central = os.path.join(tmpdir("central-code"), "code")
+    pin.pin(config.load(start=ROOT), "HEAD", central)
+    res = run_sr(repo, ["--version"], central)
+    eq("with a central install present the shim dispatches to it and the tool runs",
+       res.returncode, 0)
+    ok("...and it is genuinely the CENTRAL copy answering, not a local one — there is no local "
+       "copy left to answer", "showrunner" in res.stdout.lower(), res.stdout[:60])
+
+    res = run_sr(repo, ["doctor"], central)
+    ok("the central binary resolves THIS repo's config, not central's — only the CODE is "
+       "shared, which is why no SHOWRUNNER_HOME equivalent is needed",
+       os.path.realpath(repo) in res.stdout.replace("/private", "", 1)
+       or os.path.realpath(repo) in res.stdout, res.stdout[:200])
+
+    # FROM INSIDE A LINKED WORKTREE, which is the case `--git-common-dir` exists for and the
+    # only place a resolver that looks at the cwd's toplevel would silently answer wrongly.
+    wt = os.path.join(repo, ".worktrees", "central-probe")
+    os.makedirs(os.path.join(repo, ".worktrees"), exist_ok=True)
+    sh(["git", "worktree", "add", "-q", wt, "-b", "showrunner/central-probe"], repo)
+    res = run_sr(repo, ["doctor"], central, cwd=wt)
+    ok("...asserted from INSIDE a linked worktree, where the code is central, the cwd is the "
+       "worktree, and the config must still resolve to the MAIN checkout",
+       os.path.realpath(repo) in res.stdout.replace("/private", "", 1)
+       or os.path.realpath(repo) in res.stdout, res.stdout[:200])
+    ok("...and it did NOT resolve to the worktree, which is the wrong answer that would look "
+       "identical from the main checkout", os.path.realpath(wt) not in res.stdout)
+
+    # ---- REVERSIBILITY. A claim, so it gets asserted. -----------------------------
+    out = subprocess.run([installer, repo], cwd=ROOT, capture_output=True, text=True, env=env)
+    ok("re-installing WITHOUT --central restores the local library",
+       os.path.isdir(os.path.join(repo, ".showrunner", "lib", "showrunner")))
+    with open(placed) as fh:
+        reverted = fh.read()
+    ok("...and replaces the shim with the real binary", reverted != want
+       and "python" in reverted[:40], reverted[:60])
+    ok("...and SAYS it reverted, because a mode change nobody is told about is one nobody can "
+       "reason about later", "reverted from central dispatch" in out.stdout, out.stdout[-300:])
+    standalone = subprocess.run([placed, "--version"], cwd=repo, capture_output=True, text=True,
+                                env=dict(os.environ, SHOWRUNNER_CENTRAL=nowhere))
+    eq("...and the reverted repo runs with NO central install at all, which is what 'no longer "
+       "depends on it' has to mean", standalone.returncode, 0)
+
+
 def test_installer_leaves_no_vendored_copy():
     group("What install.sh leaves behind in somebody ELSE's repo")
     if not have("git"):
@@ -3595,7 +3715,12 @@ def test_hook_verbs_never_fail_open_in_silence():
         return
     for path, text in shims:
         ok("%s: a hook verb that exits 0 without running the guard also says so — a silent "
-           "allow is indistinguishable from a guard that ran and was content" % rel(path, ROOT),
+           # `rel` NOT the bare name: this line called a function that does not exist in this
+           # module's namespace, and nothing noticed because the branch had never executed —
+           # the group returned early via skip() on every run since it was written. A test
+           # written before the thing it guards is still a test nobody has run.
+           "allow is indistinguishable from a guard that ran and was content"
+           % util.rel(path, ROOT),
            not silently_fails_open(text), text[:400])
         ok("...and `lock run` is NOT on the fail-open side: it is where the consumer takes the "
            "lock, which is the guarantee rather than the optimisation",
@@ -4134,7 +4259,7 @@ def main():
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_waiting, test_concurrency,
                test_integration, test_worktree_lease, test_worktree_guard_from_inside_a_worktree,
-               test_self_pin, test_installer_leaves_no_vendored_copy,
+               test_self_pin, test_central_install, test_installer_leaves_no_vendored_copy,
                test_publishable, test_dispatch, test_filed_issues_15_to_21,
                test_claims_about_the_layer_below, test_observability,
                test_hook_verbs_never_fail_open_in_silence,
