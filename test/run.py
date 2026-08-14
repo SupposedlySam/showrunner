@@ -1425,6 +1425,31 @@ def test_publishable():
         call = ast.parse(src).body[0].value
         eq("interpolation rule: %s" % src, builds_a_string(call.args[0]), want)
 
+    # A CHECK THAT FAILS SAFE CANNOT BE OBSERVED WORKING. `model_finding` answers "unknown"
+    # when it cannot read the harness's model.json — deliberately, because absence must never
+    # read as agreement. That safe direction is also perfectly silent: if the PATH were wrong,
+    # every Crawler would report unknown forever and nothing would look broken. A neighbouring
+    # project shipped exactly that and it was inert in every real consumer from the moment it
+    # landed, with a green suite, because their fixture was the one environment where the path
+    # resolved as assumed.
+    #
+    # My fixtures write model.json themselves, so they prove the reader can read what the test
+    # wrote — not that it can read what the HARNESS writes. This is the missing half: the two
+    # sides of that path, compared against the installed harness's own source.
+    gl_bin = os.path.join(ROOT, ".game_loop", "bin", "game_loop")
+    if os.path.exists(gl_bin):
+        with open(gl_bin, errors="ignore") as fh:
+            gl_src = fh.read()
+        ok("the harness still calls its per-session directory `sessions/` — the segment this "
+           "repo builds its model.json path from", 'os.path.join(ROOT, "sessions")' in gl_src)
+        ok("...and still names the file model.json, so a rename fails HERE loudly instead of "
+           "turning every model verdict into a silent `unknown`",
+           'MODEL_F = "model.json"' in gl_src)
+        with open(os.path.join(ROOT, "lib", "showrunner", "dispatch.py")) as fh:
+            disp = fh.read()
+        ok("...and this repo builds that same path rather than a remembered one",
+           '"sessions"' in disp and '"model.json"' in disp, )
+
     # THE SWEEP MUST NEVER MUTATE THIS TREE, and prose alone has not held that anywhere it has
     # been tried. Two neighbours lost real time to the alternative: one mutated in place, took
     # a SIGKILL that skipped its restore, and left four broken files in a live tree looking
