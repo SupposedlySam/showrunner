@@ -42,7 +42,7 @@ import time
 
 from .util import (atomic_write_json, boot_token, die, eprint, file_lock, git, now,
                    pid_alive, rel, run, try_file_lock)
-from . import gates, locks, worktree
+from . import events, gates, locks, worktree
 
 RECORD = "campaign.json"
 
@@ -98,17 +98,27 @@ def _record_spawn_locked(cfg, spawn_record, pid=None, session=None):
     data["crawlers"] = [c for c in data.get("crawlers", []) if c.get("crawler") != entry["crawler"]]
     data["crawlers"].append(entry)
     save(cfg, data)
+    events.emit(cfg, "crawler.spawned", {"crawler": entry["crawler"], "leaf": entry.get("leaf"),
+                "branch": entry.get("branch"), "worktree": entry.get("worktree"),
+                "session": entry.get("session"), "pid": entry.get("pid")})
     return entry
 
 
 def set_state(cfg, crawler, state, **extra):
     with _exclusive(cfg):
         data = load(cfg)
+        was = None
         for c in data.get("crawlers", []):
             if c.get("crawler") == crawler:
+                was = c.get("state")
                 c["state"] = state
                 c.update(extra)
         save(cfg, data)
+        # THE one chokepoint for a Crawler's lifecycle: spawned -> running -> finished/retired/
+        # abandoned all pass through here, so a viewer sees every transition without this module
+        # having to remember to announce each one at its call site.
+        events.emit(cfg, "crawler.state", {"crawler": crawler, "state": state, "was": was,
+                    "why": extra.get("finished_why")})
         return data
 
 

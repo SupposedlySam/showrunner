@@ -153,6 +153,18 @@ TARGETS = [
     # the same report as `return None`. Two are new; two have been in this file since the
     # harness contract was written, uncovered AND unlisted, which is the exact defect this tool
     # exists to find, in the tool.
+    # `return False` is how emit reports a journal it could not write. Neutered, every event
+    # silently vanishes and a viewer shows a busy campaign as idle — the exact failure the
+    # module exists to make loud, so it owes a sweep rather than an exclusion.
+    # `(None, None)` is "no cursor given, no error" — so neutered, EVERY cursor reads as absent
+    # and a cross-instance one resumes from the start of the wrong campaign in silence. That is
+    # the whole failure the cursor exists to prevent, which is why it owes a sweep.
+    ("cursor scoping (whose seq is this?)", "events.parse_cursor", "lib/showrunner/events.py",
+     r"(def parse_cursor\(cfg, raw\):\n)",
+     "    return None, None\ndef _neutered_parse_cursor(cfg, raw):\n"),
+    ("the event journal", "events.emit", "lib/showrunner/events.py",
+     r"(def emit\(cfg, kind, fields=None\):\n)",
+     "    return False\ndef _neutered_emit(cfg, kind, fields=None):\n"),
     ("blocked-vs-working (a refused turn-end)", "harness.stop_gate", "lib/showrunner/harness.py",
      r"(def stop_gate\(cfg, worktree_path, session\):\n)",
      "    return None, ''\ndef _neutered_stop_gate(cfg, worktree_path, session):\n"),

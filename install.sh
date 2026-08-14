@@ -42,6 +42,9 @@ locks/
 scratch/
 campaign.json
 routing.jsonl
+waiting.jsonl
+events.jsonl
+*.lock
 baseline.json
 integration-commit.json
 EOF
@@ -85,6 +88,24 @@ fi
 # told, even while git went on tracking the tool. Being tracked is the condition that matters,
 # not the instant the rule arrived, and an ignore rule does NOT untrack what is already
 # committed. Saying "ignored" without saying this is a remedy that silently does nothing.
+# The same idempotent append for RUNTIME state added since this file was first written, kept
+# separate from the block above because that one's header says "the TOOL, not this project" and
+# these are neither — they are observations a campaign regenerates by running. An
+# already-installed consumer is again the population with the hole.
+sr_rt=0
+for entry in "waiting.jsonl" "events.jsonl" "*.lock"; do
+  if ! grep -qxF "$entry" "$sr_ignore" 2>/dev/null; then
+    if [ "$sr_rt" = 0 ]; then
+      printf '\n# Runtime state added after this file was first written.\n' >>"$sr_ignore"
+    fi
+    printf '%s\n' "$entry" >>"$sr_ignore"
+    sr_rt=$((sr_rt + 1))
+  fi
+done
+if [ "$sr_rt" -gt 0 ]; then
+  echo "  ignored $sr_rt runtime path(s) added since this repo was installed"
+fi
+
 if git -C "$TARGET" ls-files --error-unmatch .showrunner/bin >/dev/null 2>&1; then
   echo "  ⚠ .showrunner/bin is ALREADY TRACKED here, and an ignore rule does not untrack it."
   echo "    git keeps updating it on every pull, and your copy keeps drifting. To stop:"

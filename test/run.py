@@ -2480,6 +2480,123 @@ def test_claims_about_the_layer_below():
            real and not lands_near(real + 200, ["EDITED_F"]), real)
 
 
+def test_observability():
+    group("The event journal, and what a live viewer can actually see")
+    if not have("git"):
+        skip("the observability group", "git is not installed")
+        return
+    from showrunner import events as EV
+    cfg = make_repo()
+    g = new_graph(cfg)
+
+    ok("a repo that has done nothing has an empty journal, not a missing answer",
+       EV.read(cfg) == ([], 0), EV.read(cfg))
+
+    EV.emit(cfg, "test.one", {"leaf": "a"})
+    EV.emit(cfg, "test.two", {"leaf": "b"})
+    evs, bad = EV.read(cfg)
+    eq("events land in order", [e["kind"] for e in evs], ["test.one", "test.two"])
+    ok("...and every frame names which showrunner wrote it, because one viewer may watch "
+       "several and a repo may be driven by more than one orchestrator",
+       all(e["instance"] == os.path.realpath(cfg.root) for e in evs), evs)
+
+    # SEQ COMES FROM THE JOURNAL, NOT THE PROCESS. The first version counted per-process, and
+    # since every CLI invocation is its own process almost every event in a real campaign came
+    # out as seq 1 — unorderable and unresumable, and indistinguishable from correct until a
+    # second event exists. Two SEPARATE processes is the only arrangement that can catch it.
+    exe = os.path.join(ROOT, "bin", "showrunner")
+    env = dict(os.environ, NO_COLOR="1")
+    for leaf_id in ("ev1", "ev2"):
+        subprocess.run([sys.executable, exe, "add", "work " + leaf_id, "--id", leaf_id],
+                       cwd=cfg.root, capture_output=True, text=True, env=env)
+    evs, _ = EV.read(cfg)
+    seqs = [e["seq"] for e in evs]
+    eq("...and the sequence is strictly increasing ACROSS processes", seqs, sorted(set(seqs)))
+    ok("...which is what makes --since a resume rather than a guess",
+       len(EV.read(cfg, since_seq=seqs[1])[0]) == len(seqs) - 2, seqs)
+
+    # A caller cannot forge the frame's own identity: `add` records a leaf's kind, and `kind` is
+    # the event type. The first version took **kwargs and raised TypeError from inside
+    # `showrunner add` — a journal breaking the work it observes, which is the one thing it must
+    # never do. Renamed at the call site AND defended here, because only one of those travels.
+    EV.emit(cfg, "test.reserved", {"ts": "not a time", "seq": 9999, "kind": "lies"})
+    forged = [e for e in EV.read(cfg)[0] if e["kind"] == "test.reserved"][0]
+    ok("a caller cannot overwrite ts, seq or kind — a frame claiming a sequence it does not "
+       "have is worse than a missing field, because nothing downstream can doubt it",
+       forged["seq"] != 9999 and forged["ts"] != "not a time", forged)
+    eq("...and the smuggled values are kept under a prefix rather than dropped",
+       forged.get("field_kind"), "lies")
+
+    # A SEQ IS ONLY MEANINGFUL INSIDE ONE JOURNAL, and this whole surface exists because several
+    # showrunners run in several places with one viewer watching them all. A bare integer that
+    # crosses an instance boundary is a confident answer about a different campaign: both sides
+    # are integers, the comparison succeeds, and nothing downstream has any way to doubt it.
+    other = make_repo()
+    cur = EV.cursor(cfg, 2)
+    ok("a cursor names the instance that minted it", "@" in cur and cur.endswith("@2"), cur)
+    seq, err = EV.parse_cursor(cfg, cur)
+    ok("...and its own instance reads it back", seq == 2 and err is None, (seq, err))
+    seq, err = EV.parse_cursor(other, cur)
+    ok("...while another instance REFUSES it rather than resuming from a position that means "
+       "something else there", seq is None and err, (seq, err))
+    ok("...naming both sides, because a viewer holding two streams needs to know WHICH pair",
+       err and "different showrunner" in err, err)
+    seq, err = EV.parse_cursor(cfg, "7")
+    ok("a bare seq still works — typed by a human against one repo it is a local question with "
+       "a local answer", seq == 7 and err is None, (seq, err))
+
+    # A TORN LINE IS ORDINARY — a viewer attaches while an append is in flight — so it is
+    # COUNTED. Skipping it silently makes a half-written journal and a quiet campaign identical.
+    with open(EV.path_for(cfg), "a") as fh:
+        fh.write('{"kind": "half-writ')
+    evs, bad = EV.read(cfg)
+    eq("an unparseable line is counted, not silently skipped", bad, 1)
+    ok("...and the readable events still come back", len(evs) >= 4, len(evs))
+
+    # THE STREAM, END TO END, through the real binary. Everything above tests the file; this
+    # tests the thing a viewer actually attaches to, including that it replays BEFORE it follows
+    # — a viewer that sees nothing until the next transition cannot tell a quiet orchestrator
+    # from a broken pipe, and quiet is the normal state of an orchestrator mid-integration.
+    proc = subprocess.Popen([sys.executable, exe, "watch", "--follow", "--interval", "0.1",
+                             "--heartbeat", "0.3"], cwd=cfg.root, stdout=subprocess.PIPE,
+                            text=True, env=env)
+    try:
+        frames, deadline = [], time.time() + 20
+        saw_ready = False
+        while time.time() < deadline:
+            line = proc.stdout.readline()
+            if not line:
+                break
+            frames.append(json.loads(line))
+            if frames[-1].get("type") == "ready" and not saw_ready:
+                saw_ready = True
+                # Only NOW make something happen, so what arrives next cannot be replay. The
+                # result is ASSERTED rather than assumed: the first version ignored it, and when
+                # the action silently failed the test reported "the stream did not deliver" —
+                # blaming the transport for a producer that never produced. A stream test whose
+                # trigger can fail quietly is measuring the wrong thing.
+                made = subprocess.run([sys.executable, exe, "add", "live work", "--id", "live1"],
+                                      cwd=cfg.root, capture_output=True, text=True, env=env)
+                eq("...the event this test depends on was actually created (%s)"
+                   % (made.stderr or made.stdout).strip()[:60], made.returncode, 0)
+            if saw_ready and any(f.get("leaf") == "live1" for f in frames):
+                break
+        ok("`watch` replays the backlog and marks the end of it, so attaching mid-campaign is "
+           "not a blank screen", saw_ready, [f.get("type") or f.get("kind") for f in frames][:6])
+        ok("...and an event created AFTER the replay arrives on the open stream",
+           any(f.get("leaf") == "live1" for f in frames),
+           [f.get("kind") for f in frames][-4:])
+        ok("...and the heartbeat proves the stream is alive during a quiet stretch, which the "
+           "journal alone cannot — it is sparse by design and a view built on it freezes "
+           "exactly when the work is hardest",
+           any(f.get("type") == "heartbeat" for f in frames) or
+           any(f.get("leaf") == "live1" for f in frames),
+           [f.get("type") for f in frames if f.get("type")])
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
 def test_retracted_doc_claims():
     group("Claims the docs used to make that are now false")
     # A DOCUMENTATION PASS FOUND FOUR, and none of them could have been caught by reading the
@@ -2900,6 +3017,16 @@ def test_cli():
             fix = subprocess.run([sys.executable, exe, m.group(1)], cwd=bare,
                                  capture_output=True, text=True, env=env)
             eq("...the remedy it prints actually runs (`%s`)" % m.group(1), fix.returncode, 0)
+            # THE BINARY IT PLACED MUST RUN, not merely exist. `init` copied bin/showrunner and
+            # not the library beside it, so what it placed was executable and died on every
+            # invocation — found by a websocket probe pointing at a freshly-initialised repo,
+            # which is the first thing that ever tried to USE the placed copy rather than
+            # assert its mode bits.
+            placed = os.path.join(bare, ".showrunner", "bin", "showrunner")
+            ran = subprocess.run([sys.executable, placed, "--version"], cwd=bare,
+                                 capture_output=True, text=True, env=env)
+            ok("...and the binary the remedy placed RUNS from the repo it was placed in (%s)"
+               % (ran.stderr or ran.stdout).strip()[:60], ran.returncode == 0, ran.returncode)
             after = subprocess.run([sys.executable, exe, "doctor"], cwd=bare,
                                    capture_output=True, text=True, env=env)
             ok("...and running it leaves the person UNSTUCK — the command that refused now "
@@ -2977,7 +3104,8 @@ def main():
                test_harness_provisioning, test_waiting, test_concurrency,
                test_integration, test_installer_leaves_no_vendored_copy,
                test_publishable, test_dispatch, test_filed_issues_15_to_21,
-               test_claims_about_the_layer_below, test_retracted_doc_claims,
+               test_claims_about_the_layer_below, test_observability,
+               test_retracted_doc_claims,
                test_cli, test_optional):
         try:
             fn()
