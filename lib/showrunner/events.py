@@ -195,6 +195,45 @@ def emit(cfg, kind, fields=None):
         return False
 
 
+def latest(cfg, kinds, field, value, tail_bytes=64 * 1024):
+    """The most recent event of one of `kinds` whose `field` equals `value`. None if there is none.
+
+    EDGE DETECTION WITHOUT A SECOND STORE. A transition — a Crawler going from working to
+    blocked — is only worth journalling when it CHANGES, or a viewer gets one identical line
+    per poll and the signal drowns in its own repetition. Something has to remember the last
+    state, and the obvious place is a new field in the campaign record.
+
+    The journal already knows. Asking it costs a bounded read of the tail and keeps the answer
+    in exactly one place; a remembered copy beside it is a second record that can disagree with
+    the first, which is the shape this project keeps finding at the bottom of its own bugs.
+
+    Bounded on purpose: a campaign's journal only grows, and a scan that walks all of it turns a
+    cheap poll into an expensive one exactly when a campaign has been running longest. The cost
+    of the bound is stated rather than hidden — a transition older than the tail reads as "no
+    previous state", so the next change re-announces itself. A duplicate event is survivable; a
+    poll that degrades over a long campaign is not.
+    """
+    p = path_for(cfg)
+    try:
+        size = os.path.getsize(p)
+        with open(p, "rb") as fh:
+            fh.seek(max(0, size - tail_bytes))
+            lines = fh.read().decode("utf-8", "ignore").splitlines()
+    except OSError:
+        return None
+    for raw in reversed(lines):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            ev = json.loads(raw)
+        except ValueError:
+            continue
+        if ev.get("kind") in kinds and ev.get(field) == value:
+            return ev
+    return None
+
+
 def dropped():
     """How many events this process failed to write. `doctor` asks; nothing else should."""
     return _state["failed"]

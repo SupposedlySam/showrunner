@@ -190,6 +190,12 @@ TARGETS = [
     ("cursor scoping (whose seq is this?)", "events.parse_cursor", "lib/showrunner/events.py",
      r"(def parse_cursor\(cfg, raw\):\n)",
      "    return None, None\ndef _neutered_parse_cursor(cfg, raw):\n"),
+    # `return None` is "this crawler has no previous transition". Neutered, EVERY poll looks
+    # like a first sighting, so `crawler.blocked` is re-emitted on every reconcile and a viewer
+    # drowns in identical lines — the edge detection silently becoming state reporting.
+    ("transition edge detection", "events.latest", "lib/showrunner/events.py",
+     r"(def latest\(cfg, kinds, field, value, tail_bytes=64 \* 1024\):\n)",
+     "    return None\ndef _neutered_latest(cfg, kinds, field, value, tail_bytes=0):\n"),
     ("the event journal", "events.emit", "lib/showrunner/events.py",
      r"(def emit\(cfg, kind, fields=None\):\n)",
      "    return False\ndef _neutered_emit(cfg, kind, fields=None):\n"),

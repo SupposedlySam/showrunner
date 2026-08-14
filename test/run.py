@@ -2918,6 +2918,83 @@ def test_observability():
        "path that also journals, so forgetting is impossible rather than unlikely",
        not appends, [getattr(a, "lineno", "?") for a in appends])
 
+    # A TRANSITION, NOT A STATE. reconcile computes `blocked` fresh on every call and a watchdog
+    # may call it every few seconds, so journalling the STATE would give a viewer one identical
+    # line per poll — the signal drowning in its own repetition. Edge detection needs somewhere
+    # to remember the last answer, and the journal already knows: a second store beside it is a
+    # record that can disagree with the first.
+    tr = make_repo()
+    EV.emit(tr, "crawler.blocked", {"crawler": "c1", "leaf": "L1"})
+    EV.emit(tr, "crawler.blocked", {"crawler": "c2", "leaf": "L2"})
+    EV.emit(tr, "crawler.unblocked", {"crawler": "c1", "leaf": "L1"})
+    # `or {}` throughout: a neutered `latest` returns None, and subscripting it would CRASH the
+    # group rather than fail these assertions — which the sweep counts as nothing noticing.
+    # A mutant killed by an exception is a mutant the sweep cannot score, and my own docstring
+    # says so; this is the first place it bit.
+    last = EV.latest(tr, ("crawler.blocked", "crawler.unblocked"), "crawler", "c1") or {}
+    eq("the journal answers what a crawler's last transition was", last.get("kind"),
+       "crawler.unblocked")
+    eq("...for the crawler asked about, not whichever came last overall",
+       (EV.latest(tr, ("crawler.blocked", "crawler.unblocked"), "crawler", "c2") or {}).get("kind"),
+       "crawler.blocked")
+    ok("...and a crawler with no transition reads as None rather than as unblocked — 'never "
+       "seen' and 'seen and fine' are different, and only one of them is evidence",
+       EV.latest(tr, ("crawler.blocked",), "crawler", "never-heard-of") is None)
+    ok("...and a kind it was not asked about is not returned",
+       EV.latest(tr, ("crawler.unblocked",), "crawler", "c2") is None)
+
+    # THE CONSEQUENCE, which is what actually matters and what the three above do not reach.
+    # Everything so far tests the helper; none of it would notice the helper being right and
+    # reconcile calling it wrongly. A watchdog polls reconcile every few seconds, so the failure
+    # is not a missing event — it is the same event forever.
+    gt = new_graph(tr)
+    gt.add("blocked work", leaf_id="B1", labels=["backend"])
+    rec_b = worktree.spawn(tr, gt.show("B1"), actor="stuck")
+    campaign.record_spawn(tr, rec_b, pid=os.getpid(), session="sess-b")
+    gt.claim("B1", "stuck", pid=os.getpid(), tree=tr.root)
+    import showrunner.harness as _HB
+    _orig_sg = _HB.stop_gate
+    _HB.stop_gate = lambda c, w, s: (True, "refused at turn-end")
+    try:
+        campaign.reconcile(tr, gt)
+        mine = lambda k: [e for e in EV.read(tr)[0]
+                          if e["kind"] == k and e.get("crawler") == rec_b["crawler"]]
+        after_one = mine("crawler.blocked")
+        campaign.reconcile(tr, gt)
+        campaign.reconcile(tr, gt)
+        after_three = mine("crawler.blocked")
+        eq("a Crawler going blocked is journalled once", len(after_one), 1)
+        eq("...and STAYS one across repeated reconciles — a watchdog polls this every few "
+           "seconds, so journalling the state rather than the transition would bury a viewer "
+           "in identical lines", len(after_three), 1)
+        # And the other edge: coming back must be seen, or a viewer shows a rescued Crawler as
+        # permanently stuck. An edge detector that only fires one way is half a detector.
+        _HB.stop_gate = lambda c, w, s: (False, "")
+        campaign.reconcile(tr, gt)
+        unblocked = mine("crawler.unblocked")
+        eq("...and the return to working is journalled too, so a rescued Crawler stops looking "
+           "stuck", len(unblocked), 1)
+    finally:
+        _HB.stop_gate = _orig_sg
+
+    # THE SNAPSHOT: the world in one call. A viewer attaching needs the picture before a stream
+    # of deltas means anything, and assembling it from four verbs hands back a composite of
+    # instants that never co-existed.
+    snap_p = subprocess.run([sys.executable, exe, "snapshot"], cwd=cfg.root,
+                            capture_output=True, text=True, env=env)
+    eq("`snapshot` succeeds (%s)" % (snap_p.stderr or "").strip()[:60], snap_p.returncode, 0)
+    snap = json.loads(snap_p.stdout)
+    for key in ("project", "instance", "cursor", "ready", "in_progress", "crawlers",
+                "resources", "waiting", "journal_unreadable"):
+        ok("...and carries %s, so a viewer needs no second call to draw the picture" % key,
+           key in snap, sorted(snap))
+    ok("its cursor is the JOIN to the stream — a viewer resumes from exactly what this "
+       "already reflects rather than guessing an overlap",
+       "@" in snap["cursor"] and snap["cursor"].startswith(
+           EV.cursor(cfg, 0).split("@")[0]), snap["cursor"])
+    ok("...and it reports an unreadable journal rather than folding it into an empty one",
+       snap["journal_unreadable"] is False, snap["journal_unreadable"])
+
     # A FAILED READ IS NOT A FACT ABOUT THE CAMPAIGN. `read` used to catch OSError and return
     # the events it had, so a journal that could not be opened came back as ([], 0) —
     # indistinguishable from an orchestrator that has genuinely done nothing, and a viewer would

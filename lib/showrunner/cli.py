@@ -12,7 +12,7 @@ import sys
 
 from . import (__version__, brief, campaign, collide, config, dispatch, events, gates,
                graph as G, harness, lanes, lease, locks, worktree)
-from .util import Refused, die, eprint, rel, run, slug
+from .util import Refused, die, eprint, now, rel, run, slug
 
 BOLD, DIM, RED, GRN, YEL, OFF = "\033[1m", "\033[2m", "\033[31m", "\033[32m", "\033[33m", "\033[0m"
 if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
@@ -902,6 +902,64 @@ def cmd_reconcile(args):
     return 0
 
 
+def cmd_snapshot(args):
+    """The world as it is, in one call. JSON on stdout.
+
+    A viewer attaching to a campaign needs the current state before the stream means anything —
+    an event saying `leaf.closed` is not a picture, it is a delta against one. Today that picture
+    costs four calls (`status`, `reconcile --json`, `waiting --porcelain`, `plan --json`), each
+    of which opens the graph and re-reads the record separately, so a fan-out landing between
+    them hands the viewer a composite of two different instants that never existed.
+
+    WHAT THIS DOES NOT PROMISE. It is not a transaction. Nothing here freezes the graph, and a
+    Crawler can close a leaf while this is being assembled — so the parts can still disagree by
+    milliseconds. What it removes is the four-round-trip window and the reader's belief that
+    they were looking at one moment. The `cursor` is the honest join: it names the last event
+    this snapshot could have seen, so a viewer can `watch --since` that and know exactly which
+    events are already reflected here rather than guessing an overlap.
+    """
+    cfg = _cfg(args)
+    g = _graph(cfg)
+    ready = g.ready()
+    in_prog = [x for x in g.list(status=G.IN_PROGRESS) if not x.is_epic]
+    findings = campaign.reconcile(cfg, g, base=args.base)
+    is_waiting, waiting_detail = campaign.waiting(cfg, g, base=args.base)
+    _, _, unreadable = events.read(cfg, limit=1)
+    backlog, _, _ = events.read(cfg)
+    seq = backlog[-1]["seq"] if backlog else 0
+
+    ls = locks.LockSet(cfg)
+    resources = []
+    for name in ls.names():
+        state, h = locks.Lock(ls.root, name).state()
+        resources.append({"resource": name, "state": state,
+                          "holder": (h or {}).get("who"), "pid": (h or {}).get("pid")})
+
+    snap = {
+        "project": cfg.project_name,
+        "instance": events.instance_id(cfg),
+        "cursor": events.cursor(cfg, seq),
+        "at": now(),
+        # A journal this cannot read is NOT an idle campaign, and a snapshot that omitted the
+        # distinction would be the exact failure `watch` refuses over.
+        "journal_unreadable": unreadable,
+        "ready": [{"id": x["id"], "title": x.get("title", ""),
+                   "lane": lanes.route(cfg, x)["lane"]} for x in ready],
+        "in_progress": [{"id": x["id"], "actor": x.get("actor"),
+                         "parked": bool(x.get("parked"))} for x in in_prog],
+        "crawlers": [{"crawler": f["crawler"], "leaf": f["leaf"], "branch": f["branch"],
+                      "verdict": f["verdict"], "alive": f["alive"], "blocked": f["blocked"],
+                      "harness": f["harness"]} for f in findings],
+        "resources": resources,
+        "waiting": {"waiting": is_waiting,
+                    "live": len(waiting_detail["live_crawlers"]),
+                    "parked": len(waiting_detail["parked_crawlers"]),
+                    "blocked": len(waiting_detail.get("blocked_crawlers") or [])},
+    }
+    print(json.dumps(snap, indent=2, sort_keys=True, default=str))
+    return 0
+
+
 def cmd_watch(args):
     """Replay the event journal, then follow it. One JSON object per line, on stdout.
 
@@ -1306,6 +1364,11 @@ def build_parser():
     s.add_argument("--base", default="HEAD")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_reconcile)
+
+    s = sub.add_parser("snapshot", help="the whole campaign in ONE call and one instant — what "
+                                        "a viewer needs before a stream of deltas means anything")
+    s.add_argument("--base", default="HEAD")
+    s.set_defaults(func=cmd_snapshot)
 
     s = sub.add_parser("watch", help="stream this campaign's events as JSON lines: replay, then "
                                      "follow. The read side of the observability boundary — a "

@@ -71,15 +71,39 @@ showrunner reconcile                 # on resume: merged / abandoned / live / BL
 ## Watching a campaign live
 
 ```
-showrunner watch                     # replay every event, then stop
-showrunner watch --follow            # ...and keep streaming. One JSON object per line.
-showrunner watch --since <cursor>    # resume: only what came after. The cursor is in `ready`.
+showrunner snapshot                  # the whole world, ONE call, one instant
+showrunner watch --follow            # ...then the deltas. One JSON object per line.
+showrunner watch --since <cursor>    # resume: only what came after
 ```
 
-`status` and `reconcile` answer **what is true now**. This answers **what just happened** — a
-leaf claimed, a Crawler spawned or blocked, a leaf closed. Ask this rather than reading
-`.showrunner/events.jsonl`: the file's name and layout are showrunner's business, and a consumer
-that reaches past the verb breaks the next time either changes.
+**Snapshot first, then watch.** An event saying `leaf.closed` is not a picture, it is a delta
+against one — so a viewer needs the state before the stream means anything. `snapshot` carries
+ready leaves, in-progress leaves, every Crawler with its verdict, every resource with its
+holder, and the waiting verdict. Assembling that from `status` + `reconcile` + `waiting` + `plan`
+costs four round trips and hands you a composite of instants that never co-existed.
+
+The two join on `cursor`. `snapshot`'s cursor names the last event it could have seen, so
+`watch --since <that>` gives you exactly what is not already reflected — no overlap to
+de-duplicate and no gap to guess at. It is **not** a transaction: nothing freezes the graph, so
+parts can still disagree by milliseconds. What it removes is the four-call window.
+
+`status` and `reconcile` answer **what is true now**. `watch` answers **what just happened** — a
+leaf claimed, a lock refused, a Crawler blocked, an integrate rewound. Ask these rather than
+reading `.showrunner/events.jsonl`: the file's name and layout are showrunner's business, and a
+consumer that reaches past the verb breaks the next time either changes.
+
+The event kinds, and what each is for:
+
+| kind | why a view needs it |
+|---|---|
+| `leaf.added` · `claimed` · `released` · `parked` · `unparked` · `closed` | the work moving |
+| `crawler.spawned` · `crawler.state` | a Crawler's lifecycle, every transition through one chokepoint |
+| `crawler.blocked` · `crawler.unblocked` | alive and doing nothing. The state that most needs a human, and the only one every other signal reads as healthy |
+| `lock.acquired` · `released` · **`refused`** · **`reclaimed`** | the serialization point no single Crawler can see. A refusal is how you draw a QUEUE; without it a contended resource and an idle one are the same picture. `reclaimed` is a reaper taking a resource off a dead holder — not the holder letting go |
+| `integrate.*` | the riskiest verb, one kind per outcome: integrated, conflict, would-merge, checks-failed-on-merged-result, harness-drifted |
+
+`crawler.blocked` is journalled on the **transition**, not on the state — `reconcile` recomputes
+it every call, so a poller would otherwise get one identical line per poll.
 
 Frames carry their own type. `ready` marks the end of the replay, so attaching to a running
 campaign is never a blank screen. `heartbeat` proves the stream is alive — the journal is sparse
@@ -293,7 +317,7 @@ records no liveness on a claim, so `reap` cannot work against it and says so rat
 ## Verifying the tool itself
 
 ```
-python3 test/run.py        # 504 assertions; needs only Python 3 + git
+python3 test/run.py        # 522 assertions; needs only Python 3 + git
 bash prototype/demo.sh     # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 

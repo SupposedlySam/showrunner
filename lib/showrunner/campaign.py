@@ -240,6 +240,22 @@ def reconcile(cfg, graph, base="HEAD"):
         if f["alive"] and f["worktree_exists"]:
             from . import harness as _h
             f["blocked"], f["blocked_detail"] = _h.stop_gate(cfg, wt, entry.get("session"))
+            # JOURNALLED AS A TRANSITION, not as a state. reconcile computes `blocked` fresh on
+            # every call and a watchdog may call it every few seconds, so emitting the state
+            # would give a viewer one identical line per poll — the signal drowning in its own
+            # repetition. Only a CHANGE is an event.
+            #
+            # This makes a read verb write, which is worth naming: reconcile documents itself as
+            # reporting rather than acting, and that still holds — an observation of a campaign
+            # is not a mutation of it, and `waiting` already appends its own verdict log for the
+            # same reason. What reconcile still never does is change a claim, a branch or a tree.
+            if f["blocked"] is not None:
+                kind = "crawler.blocked" if f["blocked"] else "crawler.unblocked"
+                prev = events.latest(cfg, ("crawler.blocked", "crawler.unblocked"),
+                                     "crawler", f["crawler"])
+                if (prev or {}).get("kind") != kind:
+                    events.emit(cfg, kind, {"crawler": f["crawler"], "leaf": f["leaf"],
+                                            "why": f["blocked_detail"] or None})
 
         if f["harness"] == "drifted":
             # Louder than LIVE: this tree's gate is answering a different question than the

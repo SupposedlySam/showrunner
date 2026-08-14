@@ -10,7 +10,7 @@ single Crawler can see, and keeps the campaign coherent across sessions.
 > Status: **implemented and self-hosting.** The orchestration loop is real code
 > ([`lib/showrunner/`](lib/showrunner/)), it installs in one line with no packages, and it has been
 > run against its own issue list — see [Dogfooding](#dogfooding-showrunner-on-its-own-issues).
-> `python3 test/run.py` → **504 assertions, no setup beyond Python 3 and git.**
+> `python3 test/run.py` → **522 assertions, no setup beyond Python 3 and git.**
 
 ## Requirements
 
@@ -295,7 +295,7 @@ gone, and nothing but running it finds them.
 ## Verifying it
 
 ```bash
-python3 test/run.py            # 504 CORE assertions — Python 3 + git, nothing else
+python3 test/run.py            # 522 CORE assertions — Python 3 + git, nothing else
 bash prototype/demo.sh         # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 
@@ -323,8 +323,15 @@ that cancels out between polls. So every state change is appended to a journal, 
 streams it:
 
 ```bash
-showrunner watch --follow      # replay, then follow. One JSON object per line.
+showrunner snapshot            # the whole world in one call and one instant
+showrunner watch --follow      # then the deltas. One JSON object per line.
 ```
+
+The two are a pair. An event saying `leaf.closed` is a **delta against a picture**, so a viewer
+needs the picture first — and building it from `status` + `reconcile` + `waiting` + `plan` costs
+four round trips and returns a composite of instants that never co-existed. They join on a
+`cursor`: `snapshot`'s names the last event it could have seen, so `watch --since <that>` gives
+exactly what is not already reflected, with no overlap and no gap.
 
 ```jsonc
 {"kind":"leaf.claimed","seq":2,"leaf":"gh-15","actor":"crawler-a","instance":"/path/to/repo"}
@@ -343,7 +350,13 @@ Three properties, each with a reason:
   without writing one event. A view built on the journal alone freezes exactly when the work is
   hardest, which is when someone is most likely watching it. The heartbeat also carries the count
   of events that could **not** be written and lines that could not be parsed, so "nothing is
-  happening" and "I have not been able to see" stay different answers.
+  happening" and "I have not been able to see" stay different answers. A journal that cannot be
+  read at all is a **refusal**, not an empty replay.
+- **Refusals are events too.** `lock.refused` is what lets a view draw a *queue*; with only
+  `lock.acquired` a contended resource and an idle one are the same picture — and the
+  serialization point is the thing no single Crawler can observe, which is why showrunner owns it
+  at all. `lock.reclaimed` stays distinct from `lock.released`: a reaper taking a resource off a
+  dead holder is not the holder handing it back, and only one of them says something went wrong.
 
 The cursor names the instance that minted it, and `--since` refuses one from a different
 showrunner: a sequence number counts within one journal, and several showrunners in several repos
