@@ -190,12 +190,29 @@ command succeeded, the output was correct, and only the conclusion did not follo
 - an injection guard flagged `[path] + args`: a true report of a `+` that was list concat.
 - a split-remedy subject that was too wide, then too narrow, passing green at both extremes.
 
-THE TELL IS THAT THERE IS NO TELL. An error announces itself; this does not. So the question
-has to be asked deliberately, and it is cheap: **what would this output look like if my
-hypothesis were FALSE?** If the answer is "the same", what I am holding is not evidence. A
-short-circuit, a lookup in a foreign namespace, a label that claims more than the command
-measured, and a branch that returns before the one under test — all four produce identical
-output for a true and a false hypothesis.
+THE PRIMARY DEFENCE IS A QUESTION, because mostly there is no tell. An error announces
+itself; this does not. So it has to be asked deliberately, and it is cheap: **what would this
+output look like if my hypothesis were FALSE?** If the answer is "the same", what I am holding
+is not evidence. A short-circuit, a lookup in a foreign namespace, a label that claims more
+than the command measured, and a branch that returns before the one under test — all four
+produce identical output for a true and a false hypothesis.
+
+**Two tells do exist, and both were found within a day of writing "there is no tell" here.**
+This entry originally claimed there were none; that was too strong, and the correction is the
+useful part.
+
+*Uniformity across varied inputs.* A neighbouring project ran a visibility check over seven
+repositories and got seven identical answers, because a `sed` expression BSD rejects had emptied the slug and every call
+fell back to the current directory. Seven rows, one subject, and the result was one paste from
+being used to correct a measurement that was right. **An answer that does not vary across
+varied inputs is measuring something other than the inputs** — and that is checkable without
+knowing the right answer, which is what makes it worth more than most tells.
+
+*A discussion that quotes implications but never a value.* Four agents argued a disclosure
+question across an afternoon; every message reasoned about what a repository's visibility
+would IMPLY, and not one quoted a visibility. The input cost one second. When a thread turns
+on a fact, the tell is that nobody has pasted the fact — positions arriving before inputs is
+observable from inside the conversation, unlike the reasoning error underneath it.
 
 This is [INV15]'s instrument moved to a different moment. There, a non-event ASSERTION is
 paired with the case where the event happens. Here the same pairing is applied while READING,
