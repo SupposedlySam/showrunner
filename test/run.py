@@ -1501,10 +1501,17 @@ def test_publishable():
         needle = "l" + "amp"
         # THE PATH COUNTS TOO, and this scan read only contents until a fourth consumer found
         # the gap in their own tree. A lockfile named after the tool contains ZERO occurrences
-        # of its name — it holds a wish number, a sha and the ORIGIN GIT URL of a private repo
-        # — so tracking one sailed past a guard written to stop exactly that disclosure. It
-        # was clean here because the file is untracked, which is the right answer reached
-        # without the check having looked.
+        # of its name — so tracking one sailed past a guard written to stop exactly that
+        # disclosure. It was clean here because the file is untracked, which is the right
+        # answer reached without the check having looked.
+        #
+        # The disclosure that matters is the NAME, not the contents. An earlier version of this
+        # comment said the file leaks "the origin git URL of a private repo"; measured, every
+        # dependency URL in it is public and only the package manager itself is private. So a
+        # cloner learns which private tool this project uses — real, and the reason the human
+        # asked for it — while the addresses inside are reachable by anyone. Four of us argued
+        # about that disclosure for an afternoon and none checked the visibility that decides
+        # whether it is one; `gh repo view --json visibility` answers it in a second.
         if needle in rel_path.lower():
             internal.append("%s: the FILENAME names it (contents need not)" % rel_path)
         for line in body.splitlines():
