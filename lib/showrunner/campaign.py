@@ -223,6 +223,14 @@ def reconcile(cfg, graph, base="HEAD"):
         f["leaf_status"] = leaf.get("status") if leaf else "unknown"
         f["parked"] = bool(leaf.get("parked")) if leaf else False
 
+        # BLOCKED IS NOT WORKING (issue #24). Asked only of a tree that is still alive, because
+        # a refused turn-end matters exactly while the process is up: that is the state where
+        # every other signal here reads healthy and the Crawler is doing nothing.
+        f["blocked"], f["blocked_detail"] = (None, "")
+        if f["alive"] and f["worktree_exists"]:
+            from . import harness as _h
+            f["blocked"], f["blocked_detail"] = _h.stop_gate(cfg, wt, entry.get("session"))
+
         if f["harness"] == "drifted":
             # Louder than LIVE: this tree's gate is answering a different question than the
             # orchestrator's, so anything it certifies means less than it appears to.
@@ -230,6 +238,11 @@ def reconcile(cfg, graph, base="HEAD"):
                             "longer match the project's; its commit gate owes something else")
         elif f["harness"] == "undetermined":
             f["verdict"] = "HARNESS UNDETERMINED — cannot tell whether its rules match"
+        elif f["blocked"]:
+            # Ranked ABOVE live, because it is live — and that is the whole problem. Nothing
+            # else in this report can tell it apart from a Crawler mid-thought.
+            f["verdict"] = ("BLOCKED — alive but refused at a turn-end and nothing here can "
+                            "prompt it; send it a message or it stays inert")
         elif f["alive"]:
             f["verdict"] = "LIVE — do not disturb"
         elif f["parked"]:
@@ -440,9 +453,18 @@ def waiting(cfg, graph, base="HEAD"):
     most of showrunner: when in doubt it reports NOT waiting, because a false "waiting"
     silences a watchdog that exists to catch a genuinely wedged run.
     """
-    live, parked = [], []
+    live, parked, blocked = [], [], []
     for f in reconcile(cfg, graph, base):
-        if f["alive"]:
+        if f["blocked"]:
+            # NOT WAITING. This orchestrator is not waiting on work it cannot hurry — it is
+            # sitting next to a session that stopped and can only be restarted from outside.
+            # Counting it as legitimate waiting is a false "waiting", which silences the
+            # watchdog on the one run that needs it, and this verb exists to prevent exactly
+            # that. Reported separately rather than dropped: the Crawler is real, it is alive,
+            # and somebody has to go and prompt it.
+            blocked.append({"crawler": f["crawler"], "leaf": f["leaf"],
+                            "why": f["blocked_detail"]})
+        elif f["alive"]:
             live.append({"crawler": f["crawler"], "leaf": f["leaf"], "branch": f["branch"]})
         elif f["parked"]:
             parked.append({"crawler": f["crawler"], "leaf": f["leaf"],
@@ -451,8 +473,11 @@ def waiting(cfg, graph, base="HEAD"):
         "waiting": bool(live or parked),
         "live_crawlers": live,
         "parked_crawlers": parked,
+        "blocked_crawlers": blocked,
         "basis": "a live owning PID recorded at spawn, or an explicit park — never a guess "
-                 "about activity",
+                 "about activity. A Crawler refused at a turn-end is counted in neither: it "
+                 "is alive and doing nothing, and calling that waiting silences the watchdog "
+                 "on the run that needs it most",
     }
     # Log every verdict. Whether this ever silences a watchdog, and for how long, has to be
     # a FACT rather than a hunch — otherwise the first time someone argues the ring cap is
@@ -468,7 +493,9 @@ def waiting(cfg, graph, base="HEAD"):
                 "waiting": detail["waiting"],
                 "live": len(live),
                 "parked": len(parked),
+                "blocked": len(blocked),
                 "leaves": [c["leaf"] for c in live + parked],
+                "blocked_leaves": [c["leaf"] for c in blocked],
             }, sort_keys=True) + "\n")
     except OSError:
         pass

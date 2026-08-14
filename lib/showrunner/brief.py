@@ -156,14 +156,22 @@ once, as yourself, before you start:
 
     llm_chat join {channel} --as {crawler}
 
-Then say what you are about to do, and say it again if the premise turns out not to hold.
 Messages arrive in your context automatically; you do not poll.
 
-**This is how you ask instead of guessing.** You are one of several Crawlers who cannot see
-each other, working from an issue that may describe a different repo. If the premise looks
-refuted, if two leaves seem to want the same file, or if you are about to do something wide
-and irreversible, say so in the channel and keep working on what is unambiguous. The
-orchestrator is reading. A question costs a sentence; the wrong guess costs a merge.
+**Do not post a start notice.** The orchestrator dispatched you seconds ago and already knows
+what you are doing — it wrote this brief. Under a turn-end gate that blocks on unanswered
+messages, an announcement is indistinguishable from a question, so a wave of N Crawlers each
+saying hello costs N blocked turn-ends on the one session whose attention is not parallel.
+
+**Post when you have something the orchestrator can act on.** You are one of several Crawlers
+who cannot see each other, working from an issue that may describe a different repo. Say it
+when the premise looks refuted, when two leaves seem to want the same file, when you are
+blocked, or when you are about to do something wide and irreversible — then keep working on
+what is unambiguous. Post your verdict when you close. The orchestrator is reading. A question
+costs a sentence; the wrong guess costs a merge.
+
+**This is how you ask instead of guessing** — and saying nothing else is how the asking stays
+cheap enough to be worth answering.
 
 """
 

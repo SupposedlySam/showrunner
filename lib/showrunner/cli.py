@@ -200,6 +200,36 @@ def cmd_doctor(args):
             else:
                 print("  %s chat %s resolves: %s" % (GRN + "ok   " + OFF, key, path))
 
+    # THE WATCHDOG THAT CANNOT SEE A SUBAGENT (issue #23). `showrunner waiting` was built for
+    # exactly one consumer and nothing connects them, so the default state of a two-layer
+    # install is: the guard exists, the answer exists, and they are not talking. The failure is
+    # silent in the direction that trains people to ignore alarms — an orchestrator that has
+    # correctly dispatched a full wave gets rung, then pages the human, and the operator raises
+    # the idle threshold until the genuinely wedged run is invisible too.
+    for dirname in harness.spec(cfg)["dirs"]:
+        state, detail = harness.waiting_probe(cfg, dirname)
+        if state is None:
+            continue
+        if state == "armed":
+            print("  %s %s's idle watchdog is wired to an answer about dispatched work: %s"
+                  % (GRN + "ok   " + OFF, dirname, detail))
+        elif state == "failing":
+            print("  %s %s's waiting probe is CONFIGURED AND FAILING (%s). 'could not answer' "
+                  "rings and reports failing, so this reads as a broken watchdog rather than "
+                  "as the config error it is — check the path is absolute and executable."
+                  % (RED + "ERROR" + OFF, dirname, detail or "no command"))
+            bad += 1
+        else:
+            print("  %s %s's idle watchdog has NO waiting probe, so a fanned-out orchestrator "
+                  "waiting on Crawlers it cannot hurry looks identical to one that fell asleep "
+                  "— it gets rung, and at the ring cap it pages a human for a healthy run.\n"
+                  "        A human arms this once per install, deliberately: a verb showrunner "
+                  "could call would be callable by the sessions being watched, and a probe of "
+                  "`true` is the watchdog switched off by the thing it watches.\n"
+                  "        Set %s to:\n            %s waiting"
+                  % (YEL + "warn " + OFF, dirname, detail or "the harness's waiting-probe key",
+                     brief.sr_bin(cfg)))
+
     # THE BINARY EVERY BRIEF NAMES. A Crawler's proof-of-done, its close, its stop-gate trigger
     # all route through one absolute path, and this repo spent a week naming one that did not
     # exist — `install.sh` places it and a development checkout never runs its own installer.
@@ -691,6 +721,12 @@ def cmd_waiting(args):
                 print("  parked %s (%s) — %s" % (c["crawler"], c["leaf"], c["why"]))
         else:
             print("not waiting — no dispatched work has a live owner or an explicit park")
+        # PRINTED ON BOTH BRANCHES, because a blocked Crawler is the reason this can say NOT
+        # waiting while Crawlers are alive, and a verdict whose cause is invisible is one the
+        # reader argues with. These are the sessions somebody has to go and prompt.
+        for c in detail.get("blocked_crawlers") or []:
+            eprint("  %sBLOCKED%s %s (%s) — %s. Alive and doing nothing; it needs a message, "
+                   "not time." % (YEL, OFF, c["crawler"], c["leaf"], c["why"]))
     return 0 if is_waiting else 1
 
 

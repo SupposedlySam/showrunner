@@ -148,6 +148,23 @@ TARGETS = [
     ("harness drift check", "harness.check_tree", "lib/showrunner/harness.py",
      r"(def check_tree\(cfg, worktree_path\):\n)",
      "    return 'clean', '', False\ndef _neutered_check_tree(cfg, worktree_path):\n"),
+    # All four below were invisible until the candidate scan learned that `return None, ""` is
+    # the same report as `return None`. Two are new; two have been in this file since the
+    # harness contract was written, uncovered AND unlisted, which is the exact defect this tool
+    # exists to find, in the tool.
+    ("blocked-vs-working (a refused turn-end)", "harness.stop_gate", "lib/showrunner/harness.py",
+     r"(def stop_gate\(cfg, worktree_path, session\):\n)",
+     "    return None, ''\ndef _neutered_stop_gate(cfg, worktree_path, session):\n"),
+    ("the unarmed watchdog", "harness.waiting_probe", "lib/showrunner/harness.py",
+     r"(def waiting_probe\(cfg, dirname\):\n)",
+     "    return None, ''\ndef _neutered_waiting_probe(cfg, dirname):\n"),
+    ("the harness answering its contract", "harness._verify_with_harness",
+     "lib/showrunner/harness.py",
+     r"(def _verify_with_harness\(worktree_path, dirname\):\n)",
+     "    return None, None\ndef _neutered_verify_with(worktree_path, dirname):\n"),
+    ("the porcelain read itself", "harness._porcelain", "lib/showrunner/harness.py",
+     r"(def _porcelain\(binary, verb\):\n)",
+     "    return None, None\ndef _neutered_porcelain(binary, verb):\n"),
     # Added by applying the RECENCY lens: the most recently argued producer is the one with
     # the least behind it, because the argument is fresh and feels like evidence.
     ("waiting (orchestrator liveness)", "campaign.waiting", "lib/showrunner/campaign.py",
@@ -189,6 +206,14 @@ def _is_nothing(ret):
     if isinstance(v, ast.Constant) and v.value in (None, False, ""):
         return True
     if isinstance(v, EMPTY_LITERALS) and not (getattr(v, "elts", None) or getattr(v, "keys", None)):
+        return True
+    # A TUPLE OF NOTHINGS is the same report with more punctuation. `return None, ""` says "I have
+    # no answer" exactly as `return None` does, and this scan could not see it — so two producers
+    # added the same afternoon, both answering questions about whether a Crawler is in trouble,
+    # joined the source without appearing as candidates. The detector was blind in precisely the
+    # direction it exists to see, and the accounting said 0 unaccounted the whole time.
+    if isinstance(v, ast.Tuple) and v.elts and all(
+            isinstance(e, ast.Constant) and e.value in (None, False, "") for e in v.elts):
         return True
     return False
 

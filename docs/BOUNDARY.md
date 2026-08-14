@@ -79,6 +79,15 @@ names filenames is a plausible string, which is the one thing a model produces f
 `--premise unverifiable`. None of them have an env-var override, because an advertised bypass
 is a bypass.
 
+**And a brief is not a human** (game_loop#68). Every Crawler here is dispatched by a document
+showrunner wrote, so the text telling it what to do is another agent's — and a Crawler spending
+`authorize` on the strength of its brief would put a bypass in the log reading as
+human-sanctioned. game_loop's refusal now says so itself. Nothing in `brief.py` points a Crawler
+at that hatch and nothing should; the correct move for a blocked Crawler is to report upward,
+because whoever briefed it is who must ask. This is the sharpest case of the escape-hatch rule
+above: under fan-out, the party most able to produce a convincing authorization is the one with
+the least standing to give one.
+
 **Verify premises about our own other repo, too.** showrunner shipped a paragraph asserting
 game_loop behaviour that game_loop had already fixed, and briefed it into every Crawler. Being
 the same author is not evidence. An orchestrator carrying a stale model of the layer below
@@ -266,8 +275,8 @@ re-reading everything: the assumptions above cite `guard-writes-impl.sh`, `verif
 cannot have moved. That is the difference between a check being satisfied and a check being
 skipped, and it is worth writing down because the skip is the tempting one.
 
-<!-- game_loop-verified: ad1ac84f — payload digest. THIS is the gated value.
-     First carried by release 262a5a3e. That release name changes ONLY when the digest above
+<!-- game_loop-verified: 5d50efbc — payload digest. THIS is the gated value.
+     First carried by release 77845b44. That release name changes ONLY when the digest above
      changes: the two describe the same event, and a release where the digest did not move did
      not re-verify anything. Overwriting it on every upgrade was done twice here by updating
      both fields together out of habit — an ungated number drifting beside a gated one, inside
@@ -298,7 +307,7 @@ skipped, and it is worth writing down because the skip is the tempting one.
 - The edited-file set is scoped to the **session**, not the tree — one session is one session
   however many trees it touches. (`EDITED_F` at line 263.)
 - The blast-radius check is a **warning, never a denial** — `blast_note` reaches `commit_note`
-  and nothing else (lines 840, 1332) — and is silent when the session's `edited` set is empty,
+  and nothing else (lines 840, 1335) — and is silent when the session's `edited` set is empty,
   which is no evidence rather than a clean bill (line 855).
 **The two below cite `install.sh` by ANCHOR, not by line, and that is a correction.** It is
 the one file here that is not vendored — it lives in game_loop's own checkout — so the payload

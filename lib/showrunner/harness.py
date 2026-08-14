@@ -356,6 +356,96 @@ def _hooks_present(worktree_path):
     return os.path.exists(os.path.join(worktree_path, HOOK_REGISTRATION))
 
 
+def waiting_probe(cfg, dirname):
+    """Is the harness's idle watchdog wired to an answer about dispatched work? (issue #23)
+
+    ASKED, NEVER ASSUMED. showrunner does not name the harness's config key, does not write its
+    file, and does not know where it keeps this — it asks a verb and reports what comes back.
+    The tempting version writes `watchdog.waiting_probe` into the harness's config, and that is
+    `DEFAULT_RULE_FILES` again: a key belonging to the layer below, hardcoded here, rotting the
+    same way. The harness's own answer carries the path to paste it into.
+
+    Nor is there an `--arm` verb to call, and the reason is the harness's rather than mine: a
+    verb is callable by the session being WATCHED, and it cannot tell an orchestrator from the
+    Crawler it dispatched. A probe of `true` always exits 0, which reads as always waiting,
+    which is the watchdog disarmed by the thing it watches. So the arming stays a human's, once
+    per install, and showrunner's whole job here is to make sure nobody discovers the gap by
+    being paged for a run that was behaving perfectly.
+
+    Returns (state, detail) — 'armed', 'unarmed', 'failing', or None when the harness answers
+    no such verb. `failing` matters as much as `unarmed`: the probe contract's third state is
+    "could not answer", which still rings AND reports failing, so a relative path or a missing
+    executable bit presents as a broken watchdog rather than as the config error it is.
+    """
+    rc, payload = _porcelain(bin_for(cfg.root, dirname), "watchdog")
+    if not isinstance(payload, dict):
+        return None, ""
+    if payload.get("failing"):
+        return "failing", str(payload.get("command") or "")
+    if payload.get("configured"):
+        return "armed", str(payload.get("command") or "")
+    return "unarmed", str(payload.get("set_it_by") or "")
+
+
+def stop_gate(cfg, worktree_path, session):
+    """Is this Crawler INERT at a refused turn-end rather than working? (issue #24)
+
+    The failure this exists for is one showrunner helped build. Before its turn-end gate was
+    wired, a Crawler that could not finish exited with its leaf open — loud, and caught by one
+    poll of process liveness. After, it stays alive and inert, and every signal reads healthy:
+    a live pid, an open leaf, `waiting` exiting 0, the watchdog quiet, `reap` correctly
+    proposing nothing, and the report already on disk. One sat 44 minutes that way and then
+    woke, reported and closed correctly the moment a chat message reached it.
+
+    So this is a false "waiting" — the exact failure `campaign.waiting` exists to prevent,
+    arriving through a door neither layer was watching.
+
+    ASKED, PER SESSION. The harness records the block in its own state and showrunner assigns
+    the session id at spawn, so the question is answerable from outside without reading another
+    layer's state file. GAME_LOOP_SESSION selects which session is reported; without it the
+    harness answers about whichever session the environment implies, which under an orchestrator
+    is showrunner's own and not the Crawler's.
+
+    Returns (blocked, detail) — or (None, "") when the harness does not answer this contract,
+    which is NOT the same as "not blocked" and must never be read as reassurance. An older
+    harness has no seam here and a consumer that read its silence as healthy would be making
+    the same mistake one layer up.
+
+    WHAT THIS DOES NOT TELL YOU: whether the inert time is the block. The harness reports that
+    a turn-end was refused and when; it cannot report that nothing has happened since, and the
+    session that experienced it could not tell from inside either. `blocked` plus a stale
+    transcript is evidence; `blocked` alone is a fact about the past.
+    """
+    if not session:
+        return None, ""
+    for dirname in spec(cfg)["dirs"]:
+        binary = bin_for(worktree_path, dirname)
+        if not os.access(binary, os.X_OK):
+            continue
+        env = dict(os.environ, GAME_LOOP_SESSION=session)
+        rc, out, _ = run([binary, "watchdog", "--porcelain"], cwd=os.path.dirname(binary),
+                         timeout=60, env=env)
+        try:
+            seam = (json.loads(out) or {}).get("stop_gate")
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(seam, dict) or "blocked" not in seam:
+            continue
+        if not seam.get("blocked"):
+            return False, ""
+        att = seam.get("attachments") or {}
+        who = ", ".join(sorted(att)) or "an unnamed attachment"
+        # `limit` bounds REPEATED blocking by one attachment. It does not bound a single block:
+        # a session that never attempts another turn-end never increments again, so the
+        # stand-down is never reached. The harness says so in `bound_covers`; repeated here
+        # because a reader who sees "1 of 3" will otherwise assume something is counting down.
+        return True, ("refused at turn-end by %s (%d block(s) total; the harness's limit of %s "
+                      "bounds REPEATED blocking by one attachment and does not bound this — a "
+                      "session that never tries another turn-end never increments again)"
+                      % (who, seam.get("blocks_total") or 0, seam.get("limit")))
+    return None, ""
+
+
 def report(cfg):
     """Doctor-facing summary of what a Crawler would get."""
     sp = spec(cfg)

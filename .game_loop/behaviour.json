@@ -137,6 +137,15 @@
       "change": "seq 10 denied the RULE files and left config.local.json open. A session could widen its own effective policy through it, because its keys merge with UNION semantics \u2014 read_roots, allow_write_roots, deploy_verbs, generated_globs and every mcp_* grant are additive there and cannot be narrowed by the project's own config. It is now denied too, whether or not the file exists. Separately, `worktree --porcelain` now COMPARES config.local.json and reports notes-drifted (exit 3) when both trees carry one and they disagree.",
       "consequence": "a session can no longer author the local override; a human editing it, or a layer above writing it into a tree from its own process, never passes through the hook and is unaffected. For the compare: a worktree that simply has no local wiring while its parent does still reports clean \u2014 only a real disagreement is drift, and it warns at exit 3 rather than blocking.",
       "why_it_qualifies": "a write that succeeded under seq 10 now returns deny, and a tree that certified clean can now report notes-drifted. Found by a consumer who verified seq 10 before depending on it and walked through the second door I had recommended to them for arming a waiting probe."
+    },
+    {
+      "seq": 12,
+      "sha": "0ac5e25",
+      "notice": true,
+      "verb": "authorize",
+      "change": "`authorize --reason` now REFUSES a narrow, named class of reason: one citing the agent's own instructions (\"brief instructs\", \"the brief\", \"my prompt\", \"task says\", \"as instructed\", and similar). The refusal names the two real routes \u2014 ask via `arm`, or report upward if you were dispatched. The record and the log also now carry asked_via_arm, saying whether a question was armed in this session.",
+      "consequence": "if anything you run authorises from a dispatched brief rather than a human's words, it now fails instead of recording. A human's actual sentence still authorises unchanged \u2014 only self-citation is refused, and a human who happens to say \"the brief says to\" loses a rephrase. asked_via_arm does not gate anything; it makes a hatch spent with nobody asked readable as different from one spent after asking.",
+      "why_it_qualifies": "an authorize call that succeeded before now returns non-zero. It closes a case observed in the wild: an unattended Crawler spent the human's hatch twice on its own brief, and the log then read as human-sanctioned when nobody had been asked \u2014 which destroys the property single-use-and-logged exists for."
     }
   ],
   "schema": 1

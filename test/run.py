@@ -1072,6 +1072,94 @@ def test_harness_provisioning():
        "question makes everything it certified mean less",
        finding["verdict"].startswith("HARNESS DRIFTED"), finding["verdict"])
 
+    # THE UNARMED WATCHDOG (issue #23). `showrunner waiting` was built for one consumer and
+    # nothing connected them, so a two-layer install defaults to the guard and the answer not
+    # talking — and the failure is the kind that trains people to disable alarms: a correctly
+    # fanned-out orchestrator gets rung, then pages a human, then somebody raises the threshold
+    # until the genuinely wedged run is invisible too.
+    #
+    # Every state walked, because three of the four are silences that look alike from the call
+    # site, and because showrunner must never NAME the harness's config key — it asks a verb
+    # and repeats the path the answer carries.
+    probe_states = {
+        "armed": ({"configured": True, "command": "/abs/showrunner waiting"}, "armed"),
+        "unarmed": ({"configured": False, "set_it_by": ".game_loop/config.local.json -> x"},
+                    "unarmed"),
+        # `failing` outranks `configured`: the probe contract's third state is "could not
+        # answer", which RINGS and reports failing, so a relative path or a lost executable bit
+        # presents as a broken watchdog rather than as the config error it is.
+        "failing": ({"configured": True, "failing": True, "command": "relative/path"},
+                    "failing"),
+    }
+    _orig_porc = H._porcelain
+    for label, (payload, want) in sorted(probe_states.items()):
+        H._porcelain = lambda b, v, _p=payload: (0, _p)
+        try:
+            state, detail = H.waiting_probe(post, ".game_loop")
+        finally:
+            H._porcelain = _orig_porc
+        eq("the harness's waiting probe reads as '%s'" % label, state, want)
+        if label == "unarmed":
+            ok("...and the remedy repeats the path the HARNESS gave, so showrunner never names "
+               "a config key belonging to the layer below", "config.local.json" in detail, detail)
+    H._porcelain = lambda b, v: (0, None)
+    try:
+        state, _ = H.waiting_probe(post, ".game_loop")
+    finally:
+        H._porcelain = _orig_porc
+    ok("a harness answering no such verb reads as None, not as unarmed — 'it has no watchdog' "
+       "and 'its watchdog is unwired' are different, and only one is a warning about this repo",
+       state is None, state)
+
+    # BLOCKED IS NOT WORKING (issue #24), and this is a defect showrunner helped build. Before
+    # the turn-end gate was wired, a Crawler that could not finish EXITED with its leaf open —
+    # loud, caught by one liveness poll. After, it stays alive and inert while every signal
+    # reads healthy, and one sat that way for 44 minutes before a chat message woke it.
+    #
+    # The fixture harness answers the seam so the states can be walked; the real one was
+    # exercised by hand first, per session, with a fabricated block and two negative controls.
+    def _seam(payload):
+        orig = H._porcelain
+        H._porcelain = lambda b, v, _p=payload: (0, _p)
+        try:
+            return payload
+        finally:
+            H._porcelain = orig
+
+    _orig_run = H.run
+    def _canned_run(out):
+        return lambda cmd, cwd=None, check=False, timeout=None, env=None: (0, out, "")
+
+    H.run = _canned_run(json.dumps({"stop_gate": {
+        "blocked": True, "blocks_total": 1, "limit": 3,
+        "attachments": {"showrunner-stop-gate": {"verdict": "blocked", "consecutive": 1}}}}))
+    try:
+        blocked, why = H.stop_gate(post, rec8["worktree"], "some-session-id")
+    finally:
+        H.run = _orig_run
+    ok("a Crawler refused at a turn-end is reported BLOCKED", blocked is True, (blocked, why))
+    ok("...and the detail says the harness's limit does NOT bound this — a reader who sees "
+       "'1 of 3' would otherwise assume something is counting down",
+       "never increments again" in why, why)
+
+    H.run = _canned_run(json.dumps({"stop_gate": {"blocked": False, "attachments": {}}}))
+    try:
+        blocked, _ = H.stop_gate(post, rec8["worktree"], "some-session-id")
+    finally:
+        H.run = _orig_run
+    ok("a working Crawler is not", blocked is False, blocked)
+
+    H.run = _canned_run("not json at all")
+    try:
+        blocked, _ = H.stop_gate(post, rec8["worktree"], "some-session-id")
+    finally:
+        H.run = _orig_run
+    ok("a harness with no such seam answers None, NOT False — an older harness's silence is "
+       "not evidence that its Crawler is fine, and reading it as such is the same mistake one "
+       "layer up", blocked is None, blocked)
+    ok("...and so is a Crawler whose session was never recorded, rather than being assumed "
+       "healthy", H.stop_gate(post, rec8["worktree"], None)[0] is None)
+
     # RANKING, and it is showrunner's own bug rather than the harness's. A tree may carry more
     # than one harness directory, and the chain of pairwise comparisons that used to pick the
     # verdict let a notes-drifted second harness lose to a clean first one. The milder answer
@@ -1950,6 +2038,17 @@ def test_filed_issues_15_to_21():
        os.path.join(cfg.root, ".showrunner", "bin", "showrunner") in text)
     ok("...and no bare `showrunner close` survives anywhere in it",
        "\n    showrunner close" not in text, text[:0])
+    # #25 — the brief told every Crawler to announce what it was about to do, and with a
+    # turn-end gate that blocks on unanswered messages an announcement is indistinguishable
+    # from a question. A 3-leaf wave cost three blocked turn-ends before any Crawler had
+    # produced a finding, on the one session whose attention is not parallel.
+    chatty_leaf = g.show(g.add("with a room", leaf_id="L25"))
+    rec25 = worktree.spawn(cfg, chatty_leaf, actor="c25")
+    t25 = brief.build(cfg, chatty_leaf, rec25, chat_channel="sr_c25")
+    ok("the brief tells a Crawler NOT to post a start notice — the orchestrator wrote the brief "
+       "and already has that content", "not post a start notice" in t25.lower(), t25[:0])
+    ok("...while keeping the ask-rather-than-guess property that makes the room worth its cost",
+       "refuted" in t25 and "same file" in t25, t25[:0])
     # ABSOLUTE IS HALF THE JOB. #15 made the brief name the binary by full path, and that path
     # is the copy install.sh places — which a DEVELOPMENT checkout never has, because a repo
     # working on itself does not run its own installer. So this repo shipped a brief naming a

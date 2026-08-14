@@ -10,7 +10,7 @@ single Crawler can see, and keeps the campaign coherent across sessions.
 > Status: **implemented and self-hosting.** The orchestration loop is real code
 > ([`lib/showrunner/`](lib/showrunner/)), it installs in one line with no packages, and it has been
 > run against its own issue list — see [Dogfooding](#dogfooding-showrunner-on-its-own-issues).
-> `python3 test/run.py` → **370 assertions, no setup beyond Python 3 and git.**
+> `python3 test/run.py` → **382 assertions, no setup beyond Python 3 and git.**
 
 ## Requirements
 
@@ -159,8 +159,17 @@ git clone https://github.com/SupposedlySam/llm_chat.git ../llm_chat
 ```
 
 `spawn --launch` then opens a room per Crawler, installs the tool into its worktree, and tells
-it in its brief to join and to ask rather than guess. Leave `chat` out entirely and dispatch
-works exactly the same, minus the conversation.
+it in its brief to join and to ask rather than guess.
+
+**This said "leave `chat` out entirely and dispatch works exactly the same, minus the
+conversation", and that was wrong.** A Crawler whose turn-end is refused by the stop gate stays
+alive and inert until something external prompts it, and the room is the only thing that can.
+One sat for 44 minutes — live pid, open leaf, report already on disk — and woke, reported and
+closed correctly the moment a message arrived. So with `chat` disabled, "inert until rung"
+becomes "inert", and every signal still reads healthy: `waiting` returns 0, the watchdog stays
+quiet, `reap` correctly proposes nothing. Chat is load-bearing for **correctness** under
+`--launch`, not a convenience. Without it, prefer `spawn` without `--launch` and drive the
+Crawlers yourself.
 
 **`.showrunner/config.local.json` is an untracked overlay** merged over `config.json` by
 top-level key. Machine-specific values — an absolute path only you have — belong there, not in
@@ -262,7 +271,7 @@ things worth reporting because they are evidence rather than claims:
 ## Verifying it
 
 ```bash
-python3 test/run.py            # 370 CORE assertions — Python 3 + git, nothing else
+python3 test/run.py            # 382 CORE assertions — Python 3 + git, nothing else
 bash prototype/demo.sh         # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 
