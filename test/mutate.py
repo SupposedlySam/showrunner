@@ -451,6 +451,20 @@ def main():
     if "--target" in sys.argv:
         only = sys.argv[sys.argv.index("--target") + 1]
 
+    # THE COPY IS THE SAFETY PROPERTY, NOT AN IMPLEMENTATION DETAIL. Every mutation lands in a
+    # throwaway tree, so there is no restore step for a SIGKILL to skip and no window in which
+    # this repo holds a deliberately broken file. llm_chat lost hours to the other design: a
+    # sweep that mutated in place, a kill that missed the `finally`, and four broken files left
+    # in a live tree looking like ordinary work.
+    #
+    # It also makes staleness UNREACHABLE rather than merely detected — the tree under test is
+    # copied from source at the moment of the run, so a mutant can never be measured against
+    # bytes that no longer exist. A neighbouring project lost a day to the detected-too-late
+    # version of that: three false conclusions in a row, each reporting a real change as having
+    # had no effect, every one of them against a green suite.
+    #
+    # The tempting edit is "why copy the whole repo 21 times, just mutate and restore" — it
+    # reads as a speedup and it is how both of those failures are reintroduced.
     base_dir = tempfile.mkdtemp(prefix="mutate-base-")
     shutil.copytree(ROOT, os.path.join(base_dir, "s"), symlinks=True,
                     ignore=shutil.ignore_patterns(".worktrees", "*.db", "scratch"))

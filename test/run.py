@@ -1425,6 +1425,26 @@ def test_publishable():
         call = ast.parse(src).body[0].value
         eq("interpolation rule: %s" % src, builds_a_string(call.args[0]), want)
 
+    # THE SWEEP MUST NEVER MUTATE THIS TREE, and prose alone has not held that anywhere it has
+    # been tried. Two neighbours lost real time to the alternative: one mutated in place, took
+    # a SIGKILL that skipped its restore, and left four broken files in a live tree looking
+    # like ordinary work; the other measured mutants against a stale binary and drew three
+    # false conclusions in a day, each reporting a real change as having had no effect.
+    #
+    # The tempting edit is "why copy the whole repo per target, just mutate and restore" — it
+    # reads as a speedup and reintroduces both. A comment saying so is what the neighbours had.
+    # This is the part that fails.
+    with open(os.path.join(ROOT, "test", "mutate.py")) as fh:
+        sweep = fh.read()
+    eq("the mutation sweep copies the tree for the baseline AND for every target — mutating in "
+       "place is one edit away and its failure mode is a broken file left in a live repo by a "
+       "kill that skipped the restore", sweep.count("shutil.copytree("), 2)
+    eq("...into throwaway directories, so there is no restore step to skip and no window where "
+       "this repo holds a deliberately broken file", sweep.count("tempfile.mkdtemp("), 2)
+    ok("...and the reason is stated where the edit would happen, because a property nobody "
+       "explains is one somebody optimises away",
+       "THE COPY IS THE SAFETY PROPERTY" in sweep)
+
     # REFERENCE COUNTS AS DESIGN FACTS — game_loop's instrument, and it covers the gap the
     # payload stamp cannot reach. A stamp compares prose against a dependency that moved; it is
     # blind inside one file, where a comment, its code and its digest all change together. A
