@@ -149,19 +149,33 @@ absence of it is the signal.
 
 ---
 
-## The objection I still hold, restated so it is not lost
+## The objection I raised, and why it was wrong
 
-I declined `--central` for showrunner once, for two reasons. Morgan's plan answers the second; the
-first stands and belongs in the record:
+This section said a central shim's fail-open posture was unacceptable for showrunner, because its
+clones are worktrees full of unattended agents rather than a developer on another machine.
+[`central-install.md`](central-install.md) had already answered it as **Objection C**, and the
+answer is right:
 
-**A central shim fails OPEN for a clone that has no central install.** For game_loop that is a
-developer on another machine. For showrunner, clones are *worktrees full of unattended agents* —
-the population least able to notice a tool that silently is not there. Central mode must make a
-missing central directory a **refusal**, not a fallback, and `doctor` must be able to say which mode
-a repo is in without being asked twice.
+> `locks.py` says why in source rather than in argument: *routing and guarding are optimisations;
+> the lock is the guarantee, and only where the consumer itself takes it (`run`).* `lock run` is not
+> a hook, so it fails **loud**. A missing central install costs the optimisation and keeps the
+> guarantee.
 
-That is a small ask against a plan I otherwise think is right, and it is cheaper to say now than
-after the first fan-out that half-ran.
+That is quoted from showrunner's own source and repeated in this repo's README, which is where I
+should have checked before raising it. INV14 says verify premises about our own repos too; I applied
+it to game_loop all week and not to my own objection about my own lock.
+
+The same reasoning covers `stop-gate`: fail-open there degrades to a Crawler ending its turn with
+its leaf open, which is the pre-#21 state — and that state is *loud*, caught by `reap` and
+`reconcile`. A fallback that lands in a condition the tool already detects is not a silent failure.
+
+**What survives is one line, not a design change.** game_loop's own write guard fails open and
+*says so* in the hook's `additionalContext` — "this tool call was ALLOWED WITHOUT BEING CHECKED" —
+and central-install.md already gives that treatment to `worktree enter`. `lock guard` and
+`stop-gate` should get it too: exit 0, and tell the agent the guard did not run, so the one reading
+it knows to take the lock itself with `lock run`. Cheap, matches the precedent on both sides of the
+boundary, and it is the difference between an optimisation being off and an optimisation being off
+invisibly.
 
 ---
 

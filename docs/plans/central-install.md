@@ -163,6 +163,16 @@ keeps the guarantee.
 
 - **Hook verbs** exit 0 when central is unreachable. A PreToolUse that hard-fails blocks its own fix
   (INV5), and a wedged agent under a mandate is how a bypass starts looking reasonable.
+- **…and they say so, rather than exiting 0 in silence.** Added by the repo owner, and it is the
+  only change this objection survived — the argument above is right and the reading of `lock guard`
+  as INV8's prohibition was wrong. But INV8's other half still applies to *how* it fails: a
+  PreToolUse hook can emit `additionalContext` alongside exit 0, and game_loop's own
+  `guard-writes.sh` does exactly this when its implementation will not parse — "this tool call was
+  ALLOWED WITHOUT BEING CHECKED", a fixed string with no interpolation so the fallback can never
+  itself be the thing that breaks. `lock guard` and `stop-gate` owe the same line. For `lock guard`
+  it is *actionable*, not just honest: routing is off, so the agent should take the lock itself with
+  `lock run` — the verb that is still the guarantee and still fails loud. This plan already grants
+  `worktree enter` that courtesy; the other two hooks should not be the quiet ones.
 - **Every other verb** fails loud, naming the missing path and the command that populates it.
 - **`doctor` carries the loudness the hooks cannot.** It reports the mode, the resolved central path,
   reachability and the pinned SHA — and **errors** when central mode is configured and unreachable.

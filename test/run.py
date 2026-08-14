@@ -2755,6 +2755,63 @@ def test_observability():
         proc.wait(timeout=10)
 
 
+def test_hook_verbs_never_fail_open_in_silence():
+    group("A hook that allows without checking must say so")
+    # WRITTEN BEFORE THE THING IT GUARDS EXISTS. `install.sh --central` is a plan; when it lands,
+    # `.showrunner/bin/showrunner` stops being the tool and becomes a shim that execs a central
+    # copy — and on a machine with no central install the hook verbs exit 0 without running.
+    # That posture is correct and was argued out in docs/plans/central-install.md: `lock guard` is
+    # an optimisation, and `lock run` is the guarantee that still fails loud.
+    #
+    # What is NOT correct is exiting 0 in silence. game_loop's own guard-writes.sh fails open and
+    # prints "ALLOWED WITHOUT BEING CHECKED" for exactly this reason, and a guard whose absence
+    # produces no output is one nobody discovers until two Crawlers are in the same room.
+    #
+    # A test written after the shim would be a test written by whoever wrote the shim, which is
+    # the reader least able to notice the omission. This one is cheap while there is no shim and
+    # becomes real the moment one appears.
+    shim_paths = [os.path.join(ROOT, "templates", "central-shims", "showrunner"),
+                  os.path.join(ROOT, ".showrunner", "bin", "showrunner")]
+    shims = []
+    for p in shim_paths:
+        if not os.path.exists(p):
+            continue
+        with open(p, errors="ignore") as fh:
+            text = fh.read()
+        # The tool itself is Python and long; a dispatcher shim is short bash naming a central
+        # path. Only the second is what this is about.
+        if "CENTRAL" in text.upper() and len(text) < 8000:
+            shims.append((p, text))
+    def silently_fails_open(text):
+        hook_exit = re.search(r"(lock[ |)]*guard|stop-?gate)[^\n]*\n?[^\n]*exit 0", text)
+        said = re.search(r"WITHOUT BEING CHECKED|did not run|not running", text)
+        return bool(hook_exit) and not said
+
+    # THE POSITIVE CONTROL, run whether or not a shim exists. Every assertion below passes by
+    # finding nothing, which is also what a regex that stopped matching the shape a real shim is
+    # written in returns — and the shim does not exist yet, so there is nothing else to catch it.
+    bad = 'case "$1" in\n  lock|guard|stop-gate) exit 0 ;;\nesac\n'
+    good = ('case "$1" in\n  lock|guard|stop-gate)\n'
+            '    echo "showrunner: ALLOWED WITHOUT BEING CHECKED — no central install" >&2\n'
+            '    exit 0 ;;\nesac\n')
+    ok("the rule flags a shim that exits 0 for a hook verb and says nothing",
+       silently_fails_open(bad), bad)
+    ok("...and passes one that allows and announces it", not silently_fails_open(good), good)
+
+    if not shims:
+        skip("the fail-open-in-silence check against a REAL shim",
+             "no central dispatcher shim exists yet — this becomes real when `--central` lands, "
+             "and is registered now so the shim cannot arrive without meeting it")
+        return
+    for path, text in shims:
+        ok("%s: a hook verb that exits 0 without running the guard also says so — a silent "
+           "allow is indistinguishable from a guard that ran and was content" % rel(path, ROOT),
+           not silently_fails_open(text), text[:400])
+        ok("...and `lock run` is NOT on the fail-open side: it is where the consumer takes the "
+           "lock, which is the guarantee rather than the optimisation",
+           not re.search(r"\brun\b[^\n]*\)\s*exit 0", text), text[:400])
+
+
 def test_retracted_doc_claims():
     group("Claims the docs used to make that are now false")
     # A DOCUMENTATION PASS FOUND FOUR, and none of them could have been caught by reading the
@@ -3263,6 +3320,7 @@ def main():
                test_integration, test_worktree_lease, test_installer_leaves_no_vendored_copy,
                test_publishable, test_dispatch, test_filed_issues_15_to_21,
                test_claims_about_the_layer_below, test_observability,
+               test_hook_verbs_never_fail_open_in_silence,
                test_retracted_doc_claims,
                test_cli, test_optional):
         try:
