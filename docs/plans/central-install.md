@@ -1,14 +1,22 @@
 # Plan — `install.sh --central`: one copy of the code, every project's own config
 
-**Status:** steps 1 and 2 of the build order are BUILT (CI-01, CI-02). Steps 3–5 are not, and
-step 3 carries an unresolved objection recorded below — a central shim's fail-open posture is
-disputed by the sibling session, which holds that central mode should REFUSE rather than fall
-back. That is not settled, and CI-03 should not be built as though it were.
+**Status:** steps 1 and 2 of the build order are BUILT (CI-01, CI-02). Steps 3–5 are not.
 
-**Also unresolved and more basic:** this plan lost its strongest argument (see the section
+**The fail-posture objection is SETTLED, and a handoff said otherwise.** A session note carried
+it forward as "the sibling still holds that central mode should refuse rather than fall back,
+unresolved, contradicting Objection C". It is not unresolved: `observability.md`'s section is
+titled *"The objection I raised, and why it was wrong"* and retracts it, on the grounds that
+`lock run` — not `lock guard` — is the guarantee, and it is not a hook and still fails loud.
+This paragraph exists because that stale claim was briefly written into this header as fact:
+a retracted objection propagating as a live one is how a settled decision gets re-litigated,
+and it costs nothing to say which it is. What survived the retraction is one line, not a design
+change, and it is folded into step 3 below.
+
+**What IS unresolved is more basic:** this plan lost its strongest argument (see the section
 below) and nobody has re-decided whether the rest is worth building. CI-02 was built anyway
 because it is self-contained, useful on its own as a provenance mechanism, and commits nothing:
-a pin that nothing points at can simply be deleted.
+a pin that nothing points at can simply be deleted. Steps 3–5 do not have that property — they
+change how every consumer resolves its code — so they want a decision first.
 **Default is unchanged.** Per-project install stays the default and the documented path. Central is
 opt-in, one flag, reversible by re-running the installer without it.
 
@@ -237,7 +245,17 @@ keeps the guarantee.
    refusal, not reconciled, because it is the only observable trace of the content-drift this
    plan already admits it does not otherwise detect.
 3. The shim template and the `install.sh --central` branch, including the ignore lines and the revert
-   path. Shares its resolver with the lease plan's hook shim.
+   path. Shares its resolver with the lease plan's hook shim — **which now exists**:
+   `.showrunner/hooks/worktree-guard.sh` (WL-05) resolves the main checkout via
+   `--git-common-dir` and picks the binary in `brief.sr_bin`'s order. Build the dispatcher from
+   that one rather than growing a second.
+   Carries the one line that survived the retracted fail-posture objection: under central,
+   `lock guard` and `stop-gate` must exit 0 **and say** the guard did not run — for `lock guard`
+   that is actionable, since routing is off and the agent should take the lock itself with
+   `lock run`. `worktree guard`'s shim already does exactly this and is the worked example.
+   The test for it is written and currently SKIPS: *"the fail-open-in-silence check against a
+   REAL shim"* in `test/run.py`. It becomes live the moment a shim containing "CENTRAL" appears
+   at `templates/central-shims/showrunner`, and it was deliberately written first.
 4. `doctor`: mode, resolved path, reachability, pinned SHA — error when configured and unreachable.
 5. Central SHA in the campaign record; `reconcile` reports; `integrate` refuses.
 
