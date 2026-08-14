@@ -165,8 +165,13 @@ def wire_stop_gate(cfg, record):
     # fails open, which is a turn ending unchecked rather than a refusal. How long a turn-end
     # may be held is the harness's concept and its budget to spend. Omitting the key means a
     # retune there reaches every Crawler here without anyone remembering to follow it.
+    # --leaf IS THE WHOLE POINT OF WRITING IT PER TREE. Without it the gate asks "is any leaf
+    # open in this campaign" and every Crawler in a wave is gated on every sibling, so with N
+    # dispatched, N-1 are structurally guaranteed to be refused — and a headless Crawler has no
+    # next turn in which to act on the refusal. This file already writes an absolute path here;
+    # naming the leaf costs nothing and is the exact answer to "whose turn-end is this".
     entry = {"name": "showrunner-stop-gate",
-             "command": "%s stop-gate" % sr}
+             "command": "%s stop-gate --leaf %s" % (sr, record["leaf"])}
     try:
         data = {}
         if os.path.exists(tf):

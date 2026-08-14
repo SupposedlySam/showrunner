@@ -176,18 +176,26 @@ Both exit **2**, which is the Claude Code PreToolUse deny code:
 
 ```
 showrunner lock guard -- <the proposed command>   # blocks a single-consumer verb while held
-showrunner stop-gate                              # refuses a turn-end with claimed-open LEAF work
+showrunner stop-gate [--leaf <id>] [--tree <path>] # refuses a turn-end while YOUR leaf is open
 ```
 
 `stop-gate` excludes epics (a container is expected to sit in progress while its children are worked)
 and parked leaves (accounted-for work, not abandoned work).
 
-**`spawn --launch` wires `stop-gate` into the Crawler's own tree** — merged into the harness's
-turn-end triggers, never replacing what is already there, and with no timeout of its own so the
-harness's budget governs. You do not wire it by hand. This section used to describe both gates as
-hooks with no path into a Crawler at all, which made the stop gate real, documented, and
-unreachable; a launched Crawler could end its session with its leaf still open. Wiring it then
-produced the BLOCKED state above — a refusal a headless session cannot act on alone.
+**`spawn --launch` wires `stop-gate --leaf <id>` into the Crawler's own tree** — merged into the
+harness's turn-end triggers, never replacing what is already there, and with no timeout of its
+own so the harness's budget governs. You do not wire it by hand.
+
+**The `--leaf` is load-bearing.** Without it the gate asks "is *any* leaf open in this campaign",
+and since the same gate is written into every Crawler's triggers, each one is gated on all of its
+siblings: with N dispatched, N−1 are structurally guaranteed to be refused at least once, the
+refusal advises them to close work in worktrees they cannot reach, and a headless Crawler has no
+next turn in which to act on it. Given no `--leaf`, the gate falls back to matching the caller's
+worktree against `claim_tree`, which is why a manual `claim` records the tree it was made from.
+
+Both of those defects came from wiring this gate at all: this section once described both gates as
+hooks with no path into a Crawler, which made the stop gate real, documented and unreachable.
+Reaching it produced the BLOCKED state above, and reaching it *unscoped* produced this.
 
 ## Checks: no NEW failures, never "all green"
 
@@ -236,7 +244,7 @@ records no liveness on a claim, so `reap` cannot work against it and says so rat
 ## Verifying the tool itself
 
 ```
-python3 test/run.py        # 395 assertions; needs only Python 3 + git
+python3 test/run.py        # 399 assertions; needs only Python 3 + git
 bash prototype/demo.sh     # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 

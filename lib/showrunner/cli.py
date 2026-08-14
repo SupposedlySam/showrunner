@@ -389,7 +389,12 @@ def cmd_close(args):
 
 def cmd_stop_gate(args):
     cfg = _cfg(args)
-    ok, msg = gates.stop_gate(cfg, _graph(cfg))
+    # WHOSE turn-end is this? --leaf is exact and spawn bakes it into each Crawler's trigger.
+    # Falling back to the tree: GAME_LOOP_REPO is set by the harness that invokes this trigger
+    # and names the tree it is running in, which beats cwd because a trigger's working directory
+    # belongs to whoever runs it. cwd last, for a hand-wired setup with no harness.
+    tree = args.tree or os.environ.get("GAME_LOOP_REPO") or os.getcwd()
+    ok, msg = gates.stop_gate(cfg, _graph(cfg), leaf_id=args.leaf, tree=tree)
     (print if ok else eprint)(msg)
     return 0 if ok else 2
 
@@ -926,7 +931,10 @@ def build_parser():
     s.add_argument("--stale-proof-reason", help="why an artifact older than the claim is the proof")
     s.set_defaults(func=cmd_close)
 
-    s = sub.add_parser("stop-gate", help="refuse a turn-end while a claimed leaf is open")
+    s = sub.add_parser("stop-gate", help="refuse a turn-end while YOUR claimed leaf is open")
+    s.add_argument("--leaf", help="the leaf this caller holds; exact, and what spawn bakes in")
+    s.add_argument("--tree", help="the caller's tree, matched against claim_tree "
+                                  "(default: $GAME_LOOP_REPO, then cwd)")
     s.set_defaults(func=cmd_stop_gate)
 
     # locks

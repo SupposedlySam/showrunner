@@ -98,8 +98,9 @@ TARGETS = [
      r"(    def stale_claims\(self\):\n)",
      "        return []\n    def _neutered_stale(self):\n"),
     ("stop gate", "gates.stop_gate", "lib/showrunner/gates.py",
-     r"(def stop_gate\(cfg, graph\):\n)",
-     "    return True, 'stop OK'\ndef _neutered_stop_gate(cfg, graph):\n"),
+     r"(def stop_gate\(cfg, graph, leaf_id=None, tree=None\):\n)",
+     "    return True, 'stop OK'\n"
+     "def _neutered_stop_gate(cfg, graph, leaf_id=None, tree=None):\n"),
     ("no-new-failures comparison", "gates.compare_to_baseline", "lib/showrunner/gates.py",
      r"(def compare_to_baseline\(cfg, current, baseline\):\n)",
      "    return True, []\ndef _neutered_compare(cfg, current, baseline):\n"),

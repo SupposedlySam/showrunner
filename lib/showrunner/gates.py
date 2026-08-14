@@ -150,32 +150,101 @@ def _ts(epoch):
 
 
 # ---------------------------------------------------------------- stop gate
-def stop_gate(cfg, graph):
-    """Refuse a turn-end while a claimed LEAF is open. Returns (ok, message).
+def stop_gate(cfg, graph, leaf_id=None, tree=None):
+    """Refuse a turn-end while THIS CALLER's claimed LEAF is open. Returns (ok, message).
 
     Epics are containers — expected to sit in progress while their children are worked —
     so they are excluded. Parked leaves are excluded too: a Crawler parked at a usage
     limit is not abandoned work, it is accounted-for work, and blocking on it would make
     the expected pause look like a fault.
+
+    **SCOPED TO THE CALLER, and it was not.** This asked "is ANY leaf open in this campaign",
+    and `spawn` writes it into EVERY Crawler's turn-end triggers — so each Crawler was gated on
+    all of its siblings. With N dispatched, N-1 are structurally guaranteed to be refused at
+    least once, and a headless Crawler has no next turn in which to act on a refusal, so it
+    stops there. Three went inert that way in one afternoon. The refusal then advised the
+    Crawler to "finish it through the close gate, or release it" about leaves in two other
+    worktrees it cannot reach — advice that, if followed, has one Crawler closing another's work.
+
+    The unscoped answer was wrong for BOTH parties, which is why scoping is the whole fix rather
+    than an exemption for Crawlers. For an orchestrator, other agents' leaves being open is not
+    a reason to refuse a turn-end at all — it is the definition of waiting on dispatched work,
+    and `showrunner waiting` is the verb that reports it. For a Crawler it is somebody else's
+    work. One rule covers both: block on what this caller holds.
+
+    IDENTITY, most precise first. `leaf_id` is exact and `spawn` bakes it into the trigger
+    command it writes into each worktree. Otherwise the caller's TREE decides: a claim records
+    `claim_tree` at spawn, so leaves claimed for a Crawler carry its worktree and leaves an
+    orchestrator claimed for itself carry the main checkout. A caller whose tree holds no open
+    leaf passes — which is exactly the case that used to fail, since a Crawler that has already
+    closed its own leaf still saw every sibling's.
+
+    A claim with NO recorded tree cannot be attributed to anyone. Those are reported and do not
+    block: silently blocking every caller on an unattributable leaf is the bug above, and
+    silently ignoring it would hide the only evidence that a claim was made outside `spawn`.
     """
-    open_leaves = graph.list(status="in_progress")
-    blocking = [x for x in open_leaves if not x.is_epic and not x.get("parked")]
-    parked = [x for x in open_leaves if not x.is_epic and x.get("parked")]
+    # Symmetrical with `claim`, which records the claiming process's cwd when given no tree.
+    # "Where am I standing" has to mean the same thing on both sides of this comparison, or the
+    # gate silently matches nothing and reports a clean pass.
+    tree = tree or os.getcwd()
+
+    def top(path):
+        """The WORKTREE root containing `path` — not the path itself.
+
+        A raw path comparison makes the gate depend on which subdirectory each side happened
+        to be in: an agent that claimed from `lib/` and ends its turn from the repo root holds
+        the leaf and is told it does not. `git rev-parse --show-toplevel` is per-worktree, so a
+        Crawler's worktree and the main checkout still resolve to different roots — which is
+        the distinction this whole scoping rests on.
+        """
+        if not path:
+            return None
+        rc, out, _ = git(["rev-parse", "--show-toplevel"], cwd=path)
+        if rc == 0 and out.strip():
+            return os.path.realpath(out.strip())
+        return os.path.realpath(path)
+
+    def same_tree(a, b):
+        if not a or not b:
+            return False
+        return top(a) == top(b)
+
+    open_leaves = [x for x in graph.list(status="in_progress") if not x.is_epic]
+    parked = [x for x in open_leaves if x.get("parked")]
+    claimed = [x for x in open_leaves if not x.get("parked")]
+
+    if leaf_id:
+        mine = [x for x in claimed if x["id"] == leaf_id]
+        theirs = [x for x in claimed if x["id"] != leaf_id]
+        unattributable = []
+        basis = "leaf %s, named by the trigger this caller runs" % leaf_id
+    else:
+        mine = [x for x in claimed if same_tree(x.get("claim_tree"), tree)]
+        unattributable = [x for x in claimed if not x.get("claim_tree")]
+        theirs = [x for x in claimed if x not in mine and x not in unattributable]
+        basis = "claims recorded against %s" % (tree or "(no tree given)")
 
     lines = []
     if parked:
         lines.append("parked (not blocking): " +
                      ", ".join("%s [%s]" % (x["id"], x.get("park_reason") or "?") for x in parked))
-    if blocking:
+    if theirs:
+        lines.append("open but NOT yours (%d): %s" % (
+            len(theirs), ", ".join("%s [%s]" % (x["id"], x.get("actor") or "?") for x in theirs)))
+    if unattributable:
+        lines.append("open with no recorded tree, so nobody can be gated on them (%s) — these "
+                     "were claimed outside `spawn`" % ", ".join(x["id"] for x in unattributable))
+
+    if mine:
         detail = "\n".join("  - %s (%s) — %s" % (x["id"], x.get("actor") or "?", x.get("title", ""))
-                           for x in blocking)
-        msg = ("STOP REFUSED: claimed-but-open leaf work still in progress:\n%s\n"
+                           for x in mine)
+        msg = ("STOP REFUSED: YOUR claimed-but-open leaf work is still in progress:\n%s\n"
                "  Either finish it through the close gate, or release it, or explicitly "
-               "checkpoint and hand back." % detail)
+               "checkpoint and hand back.\n  Scope: %s" % (detail, basis))
         if lines:
             msg += "\n  " + "\n  ".join(lines)
         return False, msg
-    msg = "stop OK: no claimed-open leaf work"
+    msg = "stop OK: no claimed-open leaf work of YOURS (%s)" % basis
     if lines:
         msg += "\n  " + "\n  ".join(lines)
     return True, msg

@@ -2505,10 +2505,31 @@ def test_cli():
 
     g = new_graph(cfg)
     g.add("open work", leaf_id="cli1")
-    g.claim("cli1", "someone")
+    # tree= is what production records: the claiming process is in the repo it orchestrates.
+    # This fixture claimed from the showrunner checkout while operating on a temp repo, which
+    # made the two sides of the gate's scope comparison genuinely different trees.
+    g.claim("cli1", "someone", tree=cfg.root)
     p = subprocess.run([sys.executable, exe, "stop-gate"], cwd=cfg.root, capture_output=True,
                        text=True, env=env)
     eq("`stop-gate` exits 2 while a claimed leaf is open", p.returncode, 2)
+    # #27 — the gate asked "is ANY leaf open in this campaign" and spawn writes it into EVERY
+    # Crawler's triggers, so each was gated on its siblings: with N dispatched, N-1 refused at
+    # least once, and a headless Crawler has no next turn in which to act on a refusal.
+    g.add("a sibling's work", leaf_id="cli2")
+    g.claim("cli2", "sibling", tree=os.path.join(cfg.root, ".worktrees", "sibling"))
+    p = subprocess.run([sys.executable, exe, "stop-gate", "--leaf", "cli1"], cwd=cfg.root,
+                       capture_output=True, text=True, env=env)
+    eq("...still 2 for the caller that HOLDS the open leaf", p.returncode, 2)
+    p = subprocess.run([sys.executable, exe, "stop-gate", "--leaf", "cli2"], cwd=cfg.root,
+                       capture_output=True, text=True, env=env)
+    eq("...and 2 for the sibling about ITS own leaf", p.returncode, 2)
+    g.close("cli2", "closed", "README.md", "the sibling finished")
+    p = subprocess.run([sys.executable, exe, "stop-gate", "--leaf", "cli2"], cwd=cfg.root,
+                       capture_output=True, text=True, env=env)
+    eq("a Crawler whose OWN leaf is closed passes while a sibling's is still open — the case "
+       "that sent three Crawlers inert in one afternoon", p.returncode, 0)
+    ok("...and says whose the open ones are, rather than telling this caller to close work it "
+       "cannot reach", "NOT yours" in (p.stdout + p.stderr), p.stdout + p.stderr)
 
     # A REFUSAL MUST BE VISIBLE ON THE STREAM AGENTS FILTER. Every consumer of this CLI is an
     # agent, the Crawler brief tells them to run `showrunner close ...`, and agents pipe stdout

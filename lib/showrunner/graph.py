@@ -265,7 +265,12 @@ class SqliteGraph:
             "claim_tree=?, claim_session=?, claim_ts=?, heartbeat_ts=?, parked=0, park_reason=NULL "
             "WHERE id=? AND status=?",
             (IN_PROGRESS, actor, pid or os.getpid(), boot_token(), os.uname().nodename,
-             tree, session, now(), now(), leaf_id, OPEN))
+             # A CLAIM WITH NO TREE CANNOT BE ATTRIBUTED, and the turn-end gate is scoped by
+             # exactly this column — so an unrecorded tree is a leaf nobody can be gated on.
+             # `spawn` always passes the Crawler's worktree; every OTHER path (a manual claim,
+             # `claim --next` from an orchestrator) passed nothing, which is the common case
+             # and would have left the gate silently inert for the party that claims for itself.
+             tree or os.getcwd(), session, now(), now(), leaf_id, OPEN))
         if cur.rowcount != 1:
             self.db.rollback()
             current = self.show(leaf_id)
