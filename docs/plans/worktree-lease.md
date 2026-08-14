@@ -78,22 +78,43 @@ Four states, inherited whole and non-negotiable:
 - **UNREADABLE** — a partial write by a *live* holder reads exactly like a dead one. Refuse, never
   reclaim, make a human adjudicate. `locks.py` already says this better than a paraphrase would.
 
-### Finding the PID, honestly
+### Finding the PID, honestly — ANSWERED (WL-01)
 
 A dispatched Crawler is easy: `dispatch.launch` already records `proc.pid`.
 
-An interactive session is the interesting one. Claude Code hands a hook a session id and a cwd, not
-a PID. The plan: walk the hook process's ancestor chain (`ps -o ppid=,comm=`) until a process named
-`claude` is found, and record that PID.
+An interactive session was the open question, and it is now closed. **No PID is available**, from
+two independent directions:
 
-When the walk fails, **do not guess.** Record the hook's own parent and set `pid_basis` to
-`"ppid-fallback"`, and have `lease status` print that basis. A lease whose liveness rests on a
-weaker fact must say so; the field exists so "we could not find the session process" can never read
-as "we found it".
+- The hooks reference states it outright, and lists what a hook does get: `session_id`,
+  `prompt_id`, `transcript_path`, `cwd`, `permission_mode`, `hook_event_name`, plus `tool_name` /
+  `tool_input` / `tool_use_id` on PreToolUse, `model` on SessionStart, and `agent_id` / `agent_type`
+  inside a subagent. Environment carries `CLAUDE_PROJECT_DIR`, not a PID.
+- game_loop — a mature consumer with hooks on every event — reads eleven payload fields across its
+  guards and never a PID, and does no ancestor discovery of its own.
 
-**T2 item before any of this is written:** confirm what Claude Code actually puts on a hook's stdin
-and in its environment. If a session PID is available directly, the ancestor walk is dead code and
-should not be born.
+So the ancestor walk is **required**, not contingent. Measured in a live session: two hops from the
+hook's shell to `claude`, `ps -o ppid=,comm=`, no ambiguity.
+
+```
+pid=17354 comm=zsh
+pid=37158 comm=claude   <- found
+```
+
+**Its named failure mode, since one measurement on one machine is not a property.** The match is on
+the process name, and here `claude` is a native binary whose `argv` is literally `claude`. An
+install that launches through a wrapper — `npx`, a node shim — presents as `node` and the walk finds
+nothing. That is not hypothetical enough to ignore and not common enough to block on, so it is
+handled rather than assumed away: when the walk fails, record the hook's own parent and set
+`pid_basis` to `"ppid-fallback"`, which `lease status` prints. A lease whose liveness rests on a
+weaker fact says so, and "we could not find the session process" never reads as "we found it".
+
+**What the walk does not establish:** that the process it found is *this* session rather than
+another `claude` in the same ancestry. Nothing observed suggests that shape, and nothing here would
+detect it. `session_id` is recorded beside the PID for exactly that reason — the PID answers
+"alive?", the session id answers "who?", and neither is asked to do the other's job.
+
+**Also settled, and it lands on WL-05:** `CLAUDE_PROJECT_DIR` is the *worktree* for a session opened
+in one. That confirms the registration analysis below rather than leaving it as reasoning.
 
 ---
 
