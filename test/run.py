@@ -1160,6 +1160,32 @@ def test_harness_provisioning():
     ok("...and so is a Crawler whose session was never recorded, rather than being assumed "
        "healthy", H.stop_gate(post, rec8["worktree"], None)[0] is None)
 
+    # THE WIRING, not just the reader. Everything above proves stop_gate answers correctly and
+    # says nothing about whether the two verbs that decide anything ever ask it. A verified
+    # diagnosis is not a verified fix.
+    gp.add("blocked work", leaf_id="h9", labels=["backend"])
+    rec9 = worktree.spawn(post, gp.show("h9"), actor="stuck")
+    campaign.record_spawn(post, rec9, pid=os.getpid(), session="a-real-session-id")
+    gp.claim("h9", "stuck", pid=os.getpid())
+    _orig_sg = campaign_harness_stop_gate = __import__(
+        "showrunner.harness", fromlist=["harness"]).stop_gate
+    import showrunner.harness as _HH
+    _HH.stop_gate = lambda c, w, s: (True, "refused at turn-end by showrunner-stop-gate")
+    try:
+        f9 = next(f for f in campaign.reconcile(post, gp) if f["crawler"] == rec9["crawler"])
+        is_waiting, detail = campaign.waiting(post, gp)
+    finally:
+        _HH.stop_gate = _orig_sg
+    ok("reconcile ranks BLOCKED above LIVE — it IS live, and that is the whole problem",
+       f9["verdict"].startswith("BLOCKED"), f9["verdict"])
+    ok("...and `waiting` counts it as NEITHER waiting nor parked, so the orchestrator's own "
+       "watchdog is free to ring: sitting beside a session that can only be restarted from "
+       "outside is not waiting on work you cannot hurry",
+       is_waiting is False and not detail["live_crawlers"], (is_waiting, detail))
+    ok("...while still REPORTING it, because the Crawler is real and somebody has to go and "
+       "prompt it — dropping it would trade one silence for another",
+       "h9" in [c["leaf"] for c in detail["blocked_crawlers"]], detail["blocked_crawlers"])
+
     # RANKING, and it is showrunner's own bug rather than the harness's. A tree may carry more
     # than one harness directory, and the chain of pairwise comparisons that used to pick the
     # verdict let a notes-drifted second harness lose to a clean first one. The milder answer
