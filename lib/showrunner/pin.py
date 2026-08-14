@@ -31,6 +31,94 @@ PINNED_FILE = "PINNED"
 PAYLOAD = ("bin", "lib")
 
 
+def code_root():
+    """The directory the RUNNING code lives in. Never the cwd's repo.
+
+    That distinction is the whole point. Under a central install the code lives in
+    `~/.claude/showrunner-central` while the CWD is some consumer project, and resolving
+    provenance from the cwd would answer with that project's HEAD — a confident, precise,
+    completely wrong statement about which showrunner is executing. The question "what code is
+    this" is answered by where the code is, and nowhere else.
+    """
+    # <root>/lib/showrunner/pin.py -> <root>
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def running():
+    """What code is executing, and what names it. Returns a dict; never raises.
+
+    THE VERSION STRING ALONE IS A LIE BY OMISSION. `__version__` has read "0.1.0" since the
+    first commit and has never been bumped, so `--version` could not distinguish a checkout
+    from this morning from an install three weeks stale — establishing that seven consumers
+    were out of date needed a file-by-file diff, because the one field whose job is to answer
+    that question could not.
+
+    Three provenances, and only two of them can name a commit:
+
+      pinned    extracted by `self --pin` from a git ref. VERSION/PINNED sit beside the code
+                and name the exact commit. The strongest answer, and the reason central mode
+                can say what every project on the machine is running.
+      checkout  the code lives in a git repo — a clone, or this repo working on itself. HEAD
+                names it, and `dirty` says whether HEAD still describes what is actually here,
+                because uncommitted edits make the SHA an overstatement.
+      copy      `install.sh` without --central copies from a working tree. There is NO commit
+                that names this code and none can be invented — that is precisely the argument
+                for pinning, and it is reported as the absence it is rather than filled in
+                with the version literal and left to look like an answer.
+    """
+    root = code_root()
+    info = {"version": None, "source": "copy", "sha": None, "ref": None, "dirty": None,
+            "root": root}
+    from . import __version__
+    info["version"] = __version__
+
+    pinned = read_pin(root)
+    if pinned:
+        info.update(source="pinned", sha=pinned.get("sha"), ref=pinned.get("ref"))
+        # An edited pin is not the commit it claims, and read_pin already knows.
+        info["dirty"] = not pinned.get("consistent")
+        return info
+
+    # THE CODE ROOT MUST *BE* THE REPO, not merely sit inside one. A plain `install.sh` copy
+    # lands at `<consumer>/.showrunner/`, which is inside the CONSUMER's git repo — so asking
+    # git for HEAD there answers with the consumer's commit and reports it as showrunner's
+    # version. Confident, precise, and about the wrong repository entirely.
+    #
+    # Caught by running it: a fresh copy reported `checkout 943e2449`, which was the throwaway
+    # test project's own seed commit. The guard is exact rather than heuristic — a real
+    # checkout's root IS the toplevel; every installed layout is a subdirectory of one.
+    rc, top, _ = git(["rev-parse", "--show-toplevel"], cwd=root)
+    toplevel = (top or "").strip()
+    if rc != 0 or not toplevel or os.path.realpath(toplevel) != os.path.realpath(root):
+        return info
+
+    rc, out, _ = git(["rev-parse", "HEAD"], cwd=root)
+    sha = (out or "").strip()
+    if rc == 0 and sha:
+        info.update(source="checkout", sha=sha)
+        rc2, dirty, _ = git(["status", "--porcelain"], cwd=root)
+        info["dirty"] = bool((dirty or "").strip()) if rc2 == 0 else None
+    return info
+
+
+def describe():
+    """One line for `--version`. Says which of the three it is, and never invents a commit."""
+    d = running()
+    base = "showrunner %s" % d["version"]
+    if d["source"] == "pinned":
+        return "%s · pinned %s (%s)%s · %s" % (
+            base, (d["sha"] or "?")[:12], d["ref"] or "?",
+            "  ← EDITED SINCE IT WAS PINNED, so that sha no longer describes this code"
+            if d["dirty"] else "", d["root"])
+    if d["source"] == "checkout":
+        return "%s · checkout %s (%s) · %s" % (
+            base, (d["sha"] or "?")[:12],
+            "dirty — uncommitted changes, so this sha overstates what is here"
+            if d["dirty"] else "clean", d["root"])
+    return ("%s · copied from a working tree, so NO commit names this code. `self --pin` is "
+            "what makes this answerable. · %s" % (base, d["root"]))
+
+
 def read_pin(dest):
     """What is pinned at `dest`, or None. The READ SIDE, written with the write side.
 

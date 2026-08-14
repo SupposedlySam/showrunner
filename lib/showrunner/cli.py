@@ -156,7 +156,11 @@ def cmd_init(args):
 # ----------------------------------------------------------------- doctor
 def cmd_doctor(args):
     cfg = _cfg(args, required=False)
-    print("%sshowrunner %s%s  ·  repo %s" % (BOLD, __version__, OFF, cfg.root))
+    # THE CODE AND THE PROJECT ARE TWO DIFFERENT THINGS, and under a central install they are
+    # in two different places. Printing only the repo invited the reading that the tool came
+    # from it, which is exactly wrong for every centrally-wired consumer.
+    print("%s%s%s" % (BOLD, pin.describe(), OFF))
+    print("repo: %s" % cfg.root)
     print("config: %s%s" % (rel(cfg.path, cfg.root),
                             "" if os.path.exists(cfg.path) else "  (MISSING — run `showrunner init`)"))
     findings = cfg.validate()
@@ -576,6 +580,22 @@ def cmd_worktree_fork(args):
     for line in d.get("warnings") or []:
         print("  note    %s" % line)
     return 0
+
+
+class _LazyVersion(argparse.Action):
+    """`--version`, resolved only when ASKED.
+
+    argparse's built-in version action takes a finished string, which would mean resolving
+    provenance while BUILDING the parser — on every invocation. `worktree guard` runs from a
+    PreToolUse hook on every Write, Edit and Bash in the repo, so that would put a `git
+    rev-parse` subprocess in front of every tool call in every session, to answer a question
+    nobody asked. Lazy here is not a micro-optimisation; it is the difference between a version
+    string and a tax.
+    """
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        print(pin.describe())
+        parser.exit()
 
 
 def cmd_self(args):
@@ -1401,7 +1421,8 @@ def cmd_integration_commit(args):
 # ------------------------------------------------------------------ parser
 def build_parser():
     p = argparse.ArgumentParser(prog="showrunner", description=__doc__)
-    p.add_argument("--version", action="version", version="showrunner %s" % __version__)
+    p.add_argument("--version", action=_LazyVersion, nargs=0,
+                   help="show the version AND what commit names this code")
     sub = p.add_subparsers(dest="cmd")
 
     s = sub.add_parser("init", help="write .showrunner/config.json and the worktree root")

@@ -344,6 +344,26 @@ Everything else in showrunner talks to one interface and never learns which it g
 records no liveness on a claim, so `reap` cannot work against it and says so rather than reporting
 "nothing is stale".
 
+## Which code am I running?
+
+```
+showrunner --version
+```
+
+Answers with a **commit**, not just `0.1.0` — and resolves it from where the CODE lives, never
+from the cwd. Under a central install the cwd is some consumer project, so answering from it
+would report that project's HEAD as showrunner's version. Three provenances, and only two of
+them can name a commit:
+
+| | what names it |
+|---|---|
+| **pinned** | `self --pin` extracted it from a git ref; `VERSION`/`PINNED` sit beside the code. The strongest answer, and why central mode can say what every project on the machine runs. |
+| **checkout** | the code lives in a showrunner git repo — its root IS the repo root. Reports HEAD, and whether the tree is dirty, because uncommitted edits make that sha an overstatement. |
+| **copy** | `install.sh` without `--central` copies from a working tree. **No commit names this code**, and none is invented — that absence is the argument for pinning. |
+
+`__version__` alone was `0.1.0` for the project's whole life and never bumped, so it could not
+distinguish a checkout from this morning from an install three weeks stale.
+
 ## One copy of the code, every project's own config
 
 Per-project install is the **default** and stays the documented path. Central is opt-in, one
@@ -392,7 +412,7 @@ what is there now. Nothing hashes the contents.
 ## Verifying the tool itself
 
 ```
-python3 test/run.py        # 629 assertions; needs only Python 3 + git
+python3 test/run.py        # 639 assertions; needs only Python 3 + git
 bash prototype/demo.sh     # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 

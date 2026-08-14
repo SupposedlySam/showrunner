@@ -2247,6 +2247,68 @@ def test_self_pin():
            lambda: pin.pin(cfg, "no-such-ref-here", os.path.join(tmpdir("d2"), "c")),
            "cannot resolve")
 
+    # ---- WHAT CODE IS RUNNING, and what may name it ---------------------------------
+    # `__version__` has read "0.1.0" since the first commit and has never been bumped, so
+    # `--version` could not tell a checkout from this morning from an install three weeks
+    # stale. Establishing that seven real consumers were out of date needed a file-by-file
+    # diff, because the one field whose job is that question could not answer it.
+    eq("provenance is resolved from where the CODE lives, never from the cwd — under a central "
+       "install the cwd is some consumer project, and answering from it would report that "
+       "project's HEAD as showrunner's version", pin.code_root(), ROOT)
+    here = pin.running()
+    eq("...so this checkout reports itself as a checkout", here["source"], "checkout")
+    eq("...naming the commit that is actually checked out", here["sha"], head)
+    ok("...and saying whether that sha still describes the working tree, because uncommitted "
+       "edits make it an overstatement", here["dirty"] in (True, False), here)
+
+    # THE REGRESSION. A plain `install.sh` copy lands at <consumer>/.showrunner/, which is
+    # INSIDE the consumer's git repo — so asking git for HEAD there answers with the
+    # consumer's commit and reports it as showrunner's version. Confident, precise, and about
+    # the wrong repository. Observed: a fresh copy reported the test project's own seed commit.
+    consumer = tmpdir("version-consumer")
+    sh(["git", "init", "-q", "-b", "main"], consumer)
+    sh(["git", "config", "user.email", "t@t"], consumer)
+    sh(["git", "config", "user.name", "t"], consumer)
+    sh(["git", "commit", "-q", "--allow-empty", "-m", "seed"], consumer)
+    consumer_head = sh(["git", "rev-parse", "HEAD"], consumer).stdout.strip()
+    sh([os.path.join(ROOT, "install.sh"), consumer], ROOT)
+    said = subprocess.run([os.path.join(consumer, ".showrunner", "bin", "showrunner"),
+                           "--version"], cwd=consumer, capture_output=True, text=True).stdout
+    ok("a plain copied install does NOT claim the consumer's commit as its own version — the "
+       "code root must BE the repo, not merely sit inside one",
+       consumer_head[:12] not in said, said.strip()[:160])
+    ok("...it reports the absence instead, because a working-tree copy genuinely has no commit "
+       "that names it — which is the entire argument for pinning",
+       "no commit names this code" in said.lower() or "copied from a working tree" in said,
+       said.strip()[:160])
+
+    # THE PINNED BRANCH, against a REAL pin directory. Only `code_root` is redirected — the
+    # stamp, its reader and the consistency check are all the real ones. Redirecting where the
+    # code lives is the one thing that cannot vary inside a single process.
+    _orig_root = pin.code_root
+    pin.code_root = lambda _d=dest: _d
+    try:
+        pinned_info = pin.running()
+        line = pin.describe()
+    finally:
+        pin.code_root = _orig_root
+    eq("a pinned copy reports itself as pinned", pinned_info["source"], "pinned")
+    eq("...naming the commit it was extracted from", pinned_info["sha"], head)
+    ok("...and the one line says so", "pinned" in line and head[:12] in line, line[:120])
+
+    with open(os.path.join(dest, pin.VERSION_FILE), "w") as fh:
+        fh.write("0" * 40 + "\n")
+    pin.code_root = lambda _d=dest: _d
+    try:
+        tampered = pin.running()
+        tline = pin.describe()
+    finally:
+        pin.code_root = _orig_root
+    ok("a pin edited after the fact is reported as no longer described by its own sha, rather "
+       "than reporting the sha as though nothing happened",
+       tampered["dirty"] is True and "EDITED" in tline, tline[:160])
+    pin.pin(cfg, head, dest)
+
     # A HALF-WRITTEN PIN IS WORSE THAN NONE: it is a directory that exists, looks installed to
     # anything checking for a path, and cannot run. A fixture repo carries no bin/ or lib/, so
     # the extraction genuinely fails — this is not a simulated error.

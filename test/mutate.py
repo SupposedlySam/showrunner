@@ -161,6 +161,14 @@ TARGETS = [
      r"(def follow_up\(cfg\):\n)",
      "    return {'harness': None, 'last': None, 'waiting': None, 'scheduled': True, 'why': ''}\n"
      "def _neutered_follow_up(cfg):\n"),
+    # NOT auto-derived (it always returns a string), and swept because the mutant is the exact
+    # state this repo was in until today: `--version` printing a bare literal that has never
+    # been bumped. That answered every "which build is this?" with the same six characters, and
+    # proving seven consumers were stale took a file-by-file diff because of it. A regression
+    # here would be invisible — the output still looks like a version string.
+    ("what code is running", "pin.describe", "lib/showrunner/pin.py",
+     r"(def describe\(\):\n)",
+     "    return 'showrunner 0.1.0'\ndef _neutered_describe():\n"),
     ("lock guard", "locks.LockSet.guard", "lib/showrunner/locks.py",
      r"(    def guard\(self, command, session=None\):\n)",
      "        return True, ''\n    def _neutered_guard(self, command, session=None):\n"),
