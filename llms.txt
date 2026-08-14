@@ -68,6 +68,55 @@ showrunner reap                      # dry run; --apply to reclaim dead Crawlers
 showrunner reconcile                 # on resume: merged / abandoned / live / BLOCKED — ask FIRST
 ```
 
+## Watching a campaign live
+
+```
+showrunner watch                     # replay every event, then stop
+showrunner watch --follow            # ...and keep streaming. One JSON object per line.
+showrunner watch --since <cursor>    # resume: only what came after. The cursor is in `ready`.
+```
+
+`status` and `reconcile` answer **what is true now**. This answers **what just happened** — a
+leaf claimed, a Crawler spawned or blocked, a leaf closed. Ask this rather than reading
+`.showrunner/events.jsonl`: the file's name and layout are showrunner's business, and a consumer
+that reaches past the verb breaks the next time either changes.
+
+Frames carry their own type. `ready` marks the end of the replay, so attaching to a running
+campaign is never a blank screen. `heartbeat` proves the stream is alive — the journal is sparse
+by design and an orchestrator can integrate for twenty minutes without writing one event, so
+silence is normal and a stream that has DIED looks the same. `bye` marks a clean end; a stream
+that simply stops did not end, it broke.
+
+**The cursor names its instance, and `--since` refuses one from a different showrunner.** A seq
+counts within one journal. Several showrunners in several repos is the ordinary case, so a bare
+integer crossing that boundary is a confident answer about a different campaign — both sides
+integers, the comparison succeeding, nothing able to notice.
+
+**If you are relaying these somewhere, the cursor is the CONSUMER's.** `watch` keeps no durable
+position; you supply yours. Never record a cursor as proof of delivery before whatever you are
+feeding has actually taken the frames — that turns at-least-once into at-most-once, silently.
+
+## One session per worktree
+
+```
+showrunner lease status [<tree>]     # which trees are held, by whom, and on what evidence
+```
+
+**Read-only today — there is no `lease take` and no `lease release`.** The module can acquire and
+release; nothing has wired a verb to it yet, so a lease is taken by whatever integrates with it
+and this is how you see the result. Said plainly rather than left for you to discover by typing a
+command that does not exist.
+
+A worktree had an owner on paper (`campaign.json`) and no holder in fact — nothing consulted that
+record when a second session opened the directory and started editing. A lease's holder is a live
+process. `pid_basis` says how that pid was learned, because a hook is handed no PID and the
+answer comes from walking an ancestry, which can land on a weaker fact. Read it: a lease resting
+on `ppid-fallback` is worth less than one resting on `ancestor-claude`.
+
+It does **not** stop a human in an editor, a shell script or a `git checkout` — only Claude Code
+sessions consult it. And it protects the *tree*: two sessions in different trees still share the
+git common dir, the lock root, the graph and the campaign record.
+
 **A BLOCKED Crawler needs a message, not time.** It was refused at its turn-end, it is alive, and
 nothing here can prompt it — `reap` correctly proposes nothing and every other signal reads
 healthy. Send it something in its room. If chat is disabled you have no way to reach it, which is

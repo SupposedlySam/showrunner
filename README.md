@@ -315,6 +315,41 @@ Like `game_loop`, showrunner is generic; a project's specifics (which resources 
 which verbs are "serialized," the graph location, the owed checks) are **config, not code** — see
 [`.showrunner/config.json`](.showrunner/config.json) for this repo's own.
 
+## Watching a campaign while it runs
+
+`status` and `reconcile` answer *what is true now*. Neither answers *what just happened*, and a
+viewer that polls a snapshot and diffs it invents transitions it never saw and misses any pair
+that cancels out between polls. So every state change is appended to a journal, and one verb
+streams it:
+
+```bash
+showrunner watch --follow      # replay, then follow. One JSON object per line.
+```
+
+```jsonc
+{"kind":"leaf.claimed","seq":2,"leaf":"gh-15","actor":"crawler-a","instance":"/path/to/repo"}
+{"type":"ready","replayed":2,"seq":2,"cursor":"fd4620f33271@2","project":"showrunner"}
+{"type":"heartbeat","seq":2,"dropped":0,"unparseable":0}
+```
+
+Three properties, each with a reason:
+
+- **A viewer asks the verb; it never reads `.showrunner/`.** The journal's name and layout are
+  showrunner's business, and a consumer that reaches past the verb is the coupling this project
+  deleted a hardcoded rule list to end.
+- **Replay comes before follow.** Attaching to a running campaign is never a blank screen — and a
+  blank screen cannot be told apart from a broken pipe.
+- **A heartbeat, because the journal is sparse.** An orchestrator can integrate for twenty minutes
+  without writing one event. A view built on the journal alone freezes exactly when the work is
+  hardest, which is when someone is most likely watching it. The heartbeat also carries the count
+  of events that could **not** be written and lines that could not be parsed, so "nothing is
+  happening" and "I have not been able to see" stay different answers.
+
+The cursor names the instance that minted it, and `--since` refuses one from a different
+showrunner: a sequence number counts within one journal, and several showrunners in several repos
+is the ordinary case. Design notes, and what a server built on this must not do with that cursor,
+are in [`docs/plans/observability.md`](docs/plans/observability.md).
+
 ## Running more than one orchestrator
 
 A graph that survives sessions is a graph more than one agent will open — several Claude Code
