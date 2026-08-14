@@ -214,7 +214,23 @@ def concurrency_note():
 
 
 def atomic_write_json(path, data):
-    """Write-then-rename, so a reader never sees a half-written state file."""
+    """Write-then-rename, so a reader never sees a half-written state file.
+
+    ATOMIC AGAINST A READER, NOT DURABLE AGAINST A CRASH — stated because the word invites the
+    stronger reading. The contents are fsynced; the RENAME is not, because that would need an
+    fsync of the parent directory too. So a power loss between the two can leave the old file.
+
+    That is deliberate rather than unfinished, and the reason is which side the failure lands
+    on: a lost rename leaves the previous state intact, while a lost WRITE would leave a
+    truncated one. The hazard here is concurrent agents on one machine, and for that the
+    ordering above is what matters.
+
+    The temp name carries the PID so two processes never stage through one file. That is
+    per-process, not per-thread: two threads would collide on it exactly as two processes
+    would without it. showrunner is single-threaded and its shared state sits behind
+    `file_lock` regardless — but a threaded caller copying this line gets the original bug
+    back wearing a suffix that looks like it solved it.
+    """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = "%s.tmp.%d" % (path, os.getpid())
     with open(tmp, "w") as fh:
