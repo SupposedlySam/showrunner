@@ -130,6 +130,30 @@ indistinguishable from a clean finish. Their answer — every payload carries it
 and the client never infers completion from end-of-stream — is why `watch` emits `bye` and why the
 absence of it is the signal.
 
+### The cursor is the CONSUMER's, and the server must not adopt it
+
+llm_chat shipped and fixed exactly this defect in `do_read`: it advanced a durable cursor **before**
+printing, so a read that reached the server and then lost its output — a timeout, a killed child —
+left the cursor advanced and the text delivered to nobody. At-most-once, silently, with `pending: 0`
+beside an `owed` entry for a message no one ever saw.
+
+`showrunner watch` cannot have that failure, and the reason is structural rather than careful
+ordering: **it holds no durable cursor.** `seq` lives in the watch process's memory and dies with
+it. The consumer supplies its own position through `--since`, so a `watch` that dies mid-frame
+loses nothing — the next attach resumes from what the consumer actually processed.
+
+**That immunity is transferable, and the server is exactly where it gets thrown away.** A revali
+route that persists the `cursor` from a `ready` or `heartbeat` frame *before* pushing those events
+to the app has rebuilt llm_chat's bug one layer out: the socket drops, the frames are gone, the
+stored cursor says they were handled. So:
+
+- The server may cache a cursor as an optimisation, never as a record of delivery.
+- Whatever advances it must be downstream of the thing that consumed it — the app acknowledging,
+  or a zonai write committing — not the frame arriving.
+- If the server ever wants at-least-once across restarts, the cursor belongs in zonai next to the
+  events it indexes, advanced in the same transaction. Two stores means two cursors and one of them
+  is wrong.
+
 ---
 
 ## What waits on Morgan, and what does not
