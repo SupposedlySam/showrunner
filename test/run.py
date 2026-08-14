@@ -1945,6 +1945,21 @@ def test_cli():
                        text=True, env=env)
     eq("`stop-gate` exits 2 while a claimed leaf is open", p.returncode, 2)
 
+    # A REFUSAL MUST BE VISIBLE ON THE STREAM AGENTS FILTER. Every consumer of this CLI is an
+    # agent, the Crawler brief tells them to run `showrunner close ...`, and agents pipe stdout
+    # aggressively to protect context. A refusal that lives only on stderr is, to
+    # `... | grep -i closed`, indistinguishable from a command that did nothing and succeeded —
+    # a neighbouring project spent an afternoon reporting a working tool as broken for exactly
+    # that reason, three times in one day, each through a different filter.
+    p = subprocess.run([sys.executable, exe, "close", "no-such-leaf", "--proof", "README.md"],
+                       cwd=cfg.root, capture_output=True, text=True, env=env)
+    ok("a refusal exits non-zero", p.returncode != 0, p.returncode)
+    ok("...and puts a marker on STDOUT, so a filter cannot read a refusal as silence",
+       "REFUSED" in p.stdout, {"stdout": p.stdout, "stderr": p.stderr[:80]})
+    ok("...while the REASON stays on stderr rather than being duplicated onto both",
+       "no such leaf" in p.stderr and "no such leaf" not in p.stdout,
+       {"stdout": p.stdout, "stderr": p.stderr[:80]})
+
     # A REMEDY IS A CLAIM THAT A COMMAND EXISTS, and nothing here was checking it. The usual
     # docs check runs the other way — every verb the CLI defines must be documented — which
     # cannot notice a printed instruction naming a verb that was renamed or never existed.

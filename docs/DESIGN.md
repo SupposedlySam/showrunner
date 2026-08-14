@@ -115,7 +115,7 @@ build something.
 
 ## Validated primitives
 
-`test/run.py` — 309 assertions, Python 3 + git, no other setup. The `br`/`tmux` assertions skip
+`test/run.py` — 312 assertions, Python 3 + git, no other setup. The `br`/`tmux` assertions skip
 loudly. `prototype/` holds the original shell POC (7 assertions run anywhere, 5 skip).
 
 ## Still open

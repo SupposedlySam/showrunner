@@ -918,6 +918,16 @@ def main(argv=None):
     try:
         return args.func(args)
     except Refused as exc:
+        # A MARKER ON THE CHANNEL A FILTER READS. The refusal itself belongs on stderr and
+        # stays there — but every consumer of this CLI is an agent, this repo's own brief
+        # tells them to run `showrunner close ...`, and agents pipe stdout aggressively to
+        # protect context. A refusal that appears only on stderr is, to `... | grep -i done`,
+        # indistinguishable from a command that did nothing and succeeded.
+        #
+        # One line, so the filter cannot swallow the fact that something happened. Not the
+        # message: duplicating it would double every refusal for the humans reading both
+        # streams, and the point is to stop silence, not to repeat the explanation.
+        print("showrunner: REFUSED (exit %d) — reason on stderr" % exc.code)
         eprint("%s%s%s" % (RED, exc, OFF))
         if exc.hint:
             eprint("  %s" % exc.hint.replace("\n", "\n  "))
