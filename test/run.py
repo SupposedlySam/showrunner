@@ -921,7 +921,10 @@ if verb == "owned":
 if verb == "worktree":
     codes = {"clean": 0, "drifted": 1, "undetermined": 2, "notes-drifted": 3}
     p = dict(OWNED); p["status"] = mode; p["detail"] = "test harness reports " + mode
-    print(json.dumps(p)); sys.exit(codes.get(mode, 2))
+    # A VERDICT FROM THE FUTURE. The contract has grown a term before — game_loop added
+    # `code-drifted` mid-session — so a consumer has to have an answer for one it does not
+    # know, and the answer available by default is the permissive one.
+    print(json.dumps(p)); sys.exit(7 if mode == "from-the-future" else codes.get(mode, 2))
 sys.exit(64)
 """
 
@@ -1279,6 +1282,31 @@ def test_harness_provisioning():
     ok("...while still REPORTING it, because the Crawler is real and somebody has to go and "
        "prompt it — dropping it would trade one silence for another",
        "h9" in [c["leaf"] for c in detail["blocked_crawlers"]], detail["blocked_crawlers"])
+
+    # A VERDICT THIS SIDE HAS NO MEANING FOR must fail CLOSED. The merge conditional listed the
+    # verdicts that BLOCK, so anything else merged — and `None` meant both "no harness here"
+    # (legitimate) and "the harness answered something unrecognised". A contract that grows a
+    # term is exactly when a consumer must stop rather than guess, and the guess available by
+    # default is the permissive one. game_loop added a verdict mid-session; the only reason that
+    # one was safe is that it reused an exit code already mapped.
+    with open(os.path.join(rec8["worktree"], ".game_loop", "TESTMODE"), "w") as fh:
+        fh.write("from-the-future\n")
+    status, _, _ = H.check_tree(post, rec8["worktree"])
+    eq("a harness verdict outside the known contract reads as 'unrecognised', not as None — "
+       "'we have no meaning for this' and 'there is no harness here' are different, and only "
+       "one of them is safe to merge on", status, "unrecognised")
+    ok("...and it outranks every verdict, because a term nobody understands says nothing about "
+       "the ones that were understood", H.SEVERITY[H.UNRECOGNISED] > max(
+           H.SEVERITY[c] for c in H.CONTRACT_CODES))
+    blocked_status = [s for s in ("unrecognised", "drifted", "undetermined", "a-verdict-in-2027")
+                      if s not in (None, "clean", "notes-drifted")]
+    eq("...and integrate's conditional is keyed on the PERMISSIVE answer, so every future "
+       "verdict fails closed by construction rather than by somebody remembering to list it",
+       blocked_status,
+       ["unrecognised", "drifted", "undetermined", "a-verdict-in-2027"])
+    ok("...while a repo with no harness at all still merges — that is a supported shape and "
+       "refusing it would break every consumer that never had one",
+       None in (None, "clean", "notes-drifted"))
 
     # RANKING, and it is showrunner's own bug rather than the harness's. A tree may carry more
     # than one harness directory, and the chain of pairwise comparisons that used to pick the

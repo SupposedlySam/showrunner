@@ -79,7 +79,7 @@ CLEAN, DRIFTED, UNDETERMINED, NOTES_DRIFTED = 0, 1, 2, 3
 # outranks every determined finding, because a determined finding about the files that WERE
 # read says nothing about the one that was not — the harness ranks its own branches that way,
 # and a consumer that ranked them differently would report the milder half of a mixed tree.
-SEVERITY = {CLEAN: 0, NOTES_DRIFTED: 1, DRIFTED: 2, UNDETERMINED: 3}
+SEVERITY = {CLEAN: 0, NOTES_DRIFTED: 1, DRIFTED: 2, UNDETERMINED: 3, -1: 4}
 
 FALLBACK_RUNTIME = [
     "state.json", "sessions/", "edited.txt", "log.jsonl", "verified.json", "probe/",
@@ -195,6 +195,11 @@ def _install(cfg, sp, worktree_path):
 
 CONTRACT_CODES = (CLEAN, DRIFTED, UNDETERMINED, NOTES_DRIFTED)
 
+# The harness answered with a code this side has no meaning for. Its own state, outranking
+# every verdict — a contract that grew a term is exactly when a consumer must stop rather
+# than guess, and the guess available here is the permissive one.
+UNRECOGNISED = -1
+
 
 def _verify_with_harness(worktree_path, dirname):
     """Ask the harness whether this tree matches its parent. Authoritative when available.
@@ -207,8 +212,17 @@ def _verify_with_harness(worktree_path, dirname):
     """
     binary = bin_for(worktree_path, dirname)
     rc, payload = _porcelain(binary, "worktree")
-    if rc is None or not isinstance(payload, dict) or rc not in CONTRACT_CODES:
+    if rc is None or not isinstance(payload, dict):
         return None, None
+    if rc not in CONTRACT_CODES:
+        # ANSWERED, WITH SOMETHING THIS SIDE DOES NOT KNOW. Folded into the (None, None)
+        # above until now, which made it identical to "no harness here" — and `integrate`
+        # merges on that. So a harness shipping a NEW verdict would have put a Crawler's
+        # branch on trunk unexamined, silently.
+        #
+        # Not hypothetical: game_loop added `code-drifted` mid-session, and the only reason
+        # that one was safe is that it landed on an exit code already in this map.
+        return UNRECOGNISED, payload
     return rc, payload
 
 
@@ -234,8 +248,8 @@ def check_tree(cfg, worktree_path):
     live here let a notes-drifted second harness lose to a clean first one, so the milder
     verdict won and the finding it was added to surface never reached a caller.
     """
-    names = {CLEAN: "clean", DRIFTED: "drifted",
-             NOTES_DRIFTED: "notes-drifted", UNDETERMINED: "undetermined"}
+    names = {CLEAN: "clean", DRIFTED: "drifted", NOTES_DRIFTED: "notes-drifted",
+             UNDETERMINED: "undetermined", UNRECOGNISED: "unrecognised"}
     worst = None
     detail = ""
     mis_certified = False

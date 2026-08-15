@@ -598,7 +598,19 @@ def _integrate_locked(cfg, graph, base=None, only=None, dry_run=False):
         if wt and os.path.isdir(wt):
             from . import harness
             status, detail, mis_certified = harness.check_tree(cfg, wt)
-            if status in ("drifted", "undetermined"):
+            # COMPARED AGAINST THE PERMISSIVE ANSWER, NOT THE RESTRICTIVE ONE. This listed
+            # the verdicts that BLOCK, so anything else merged — including a verdict the
+            # harness adds later, and including None, which meant both "no harness here"
+            # (legitimate) and "the harness answered something we do not recognise" until
+            # those were split. game_loop shipped a new verdict mid-session; the only reason
+            # it was safe is that it reused an exit code already mapped.
+            #
+            # Inverted: merging requires an exact confident match, so every value added on
+            # either side of this boundary from now on fails CLOSED by construction. `None`
+            # is in the allow-set deliberately and narrowly — a repo with no harness
+            # configured is a supported shape, and refusing it would break every consumer
+            # that never had one.
+            if status not in (None, "clean", "notes-drifted"):
                 entry = dict(entry)
                 entry["_harness_block"] = status
                 entry["_harness_detail"] = detail
