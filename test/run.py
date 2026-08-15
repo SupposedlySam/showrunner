@@ -3986,6 +3986,93 @@ def test_hook_verbs_never_fail_open_in_silence():
            not re.search(r"\brun\b[^\n]*\)\s*exit 0", text), text[:400])
 
 
+def test_cross_branch_overlap_and_lingering():
+    group("What two branches already changed, and what is still running (#30, #29)")
+    if not have("git"):
+        skip("the overlap group", "git is not installed")
+        return
+    cfg = make_repo({}, files={"README.md": "seed\n", "src/a.py": "a\n", "src/b.py": "b\n"})
+
+    # #30 — `plan` estimates within ONE wave of ready leaves and has no notion of a branch, so
+    # it cannot see what earlier waves or another story's branch already changed. Two branches
+    # that were each internally collision-free shared six files and two ADD/ADDs, found at merge
+    # time when it was a one-line brief change at dispatch time.
+    def branch_with(name, edits, adds=()):
+        sh(["git", "checkout", "-q", "-b", name], cfg.root)
+        for path, text in edits:
+            with open(os.path.join(cfg.root, path), "w") as fh:
+                fh.write(text)
+        for path in adds:
+            full = os.path.join(cfg.root, path)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "w") as fh:
+                fh.write("created by %s\n" % name)
+        # NAMED PATHS, NOT `git add -A`. The blanket form staged .showrunner/config.json onto
+        # each branch, and checking main back out then DELETED it — so the subprocess assertions
+        # below ran against a repo with no config. That is CI-01, the hole this project already
+        # fixed for consumers, reproduced in its own fixture.
+        sh(["git", "add", "--"] + [p for p, _ in edits] + list(adds), cfg.root)
+        sh(["git", "commit", "-q", "-m", "work on " + name], cfg.root)
+        sh(["git", "checkout", "-q", "main"], cfg.root)
+
+    branch_with("story/one", [("src/a.py", "one\n")], adds=["test/shared_test.py"])
+    branch_with("story/two", [("src/a.py", "two\n"), ("src/b.py", "two\n")],
+                adds=["test/shared_test.py"])
+
+    res = collide.overlap(cfg, ["story/one", "story/two"], base="main")
+    ok("two in-flight branches that each passed their own wave check are compared at all — "
+       "`plan` estimates forward within a wave, this measures backward against what landed",
+       res["overlaps"], res)
+    # `or [{}]` so a neutered producer FAILS these rather than raising — a mutant killed by an
+    # exception is one the sweep cannot score, and this file's own crash detector caught me
+    # making that mistake here within an hour of building it.
+    ov = (res["overlaps"] or [{}])[0]
+    ok("...naming the file both actually edited, from the diff rather than an estimate",
+       "src/a.py" in (ov.get("files") or []), ov)
+    eq("...and ADD/ADD is called out on its own, because it is the one git cannot auto-resolve",
+       ov.get("add_add"), ["test/shared_test.py"])
+    ok("...while a file only ONE branch touched is not reported as shared — a check that flags "
+       "everything is one nobody reads", "src/b.py" not in (ov.get("files") or []), ov)
+
+    clean = collide.overlap(cfg, ["story/one"], base="main")
+    ok("a single branch has no overlap, and that is a measurement rather than a shrug",
+       not clean["overlaps"], clean)
+    ghost = collide.overlap(cfg, ["story/one", "no/such/branch"], base="main")
+    eq("a branch with no merge-base is reported UNRESOLVABLE, not folded into 'no overlap' — "
+       "the reassuring answer and the unanswerable one are otherwise the same empty list",
+       ghost["unresolvable"], ["no/such/branch"])
+
+    # #29 — the detection already existed and was reachable only through `reap`, a verb somebody
+    # has to decide to run. Two processes polled for four hours past their own closes and
+    # exhausted a shared rate limit, taking a turn-end gate down for every other agent.
+    g = new_graph(cfg)
+    g.add("finished work", leaf_id="LG1")
+    rec = worktree.spawn(cfg, g.show("LG1"), actor="ghost")
+    campaign.record_spawn(cfg, rec, pid=os.getpid())
+    campaign.set_state(cfg, rec["crawler"], "finished",
+                       finished_at=int(time.time()) - 9999, finished_why="leaf closed")
+    ling = campaign.lingering_crawlers(cfg)
+    ok("a process alive well after its leaf closed is reportable WITHOUT running reap — the "
+       "detection existed; nothing surfaced it, and it is invisible by construction",
+       any(x["crawler"] == rec["crawler"] for x in ling), ling)
+    exe = os.path.join(ROOT, "bin", "showrunner")
+    env = dict(os.environ, NO_COLOR="1")
+    out = subprocess.run([sys.executable, exe, "status"], cwd=cfg.root,
+                         capture_output=True, text=True, env=env)
+    ok("...and `status` says so, which is where an orchestrator is already looking",
+       "outlived their leaf" in (out.stdout + out.stderr), (out.stdout + out.stderr)[-300:])
+    snap = subprocess.run([sys.executable, exe, "snapshot"], cwd=cfg.root,
+                          capture_output=True, text=True, env=env)
+    ok("...and `snapshot` carries it machine-readably, so a viewer cannot draw a quiet campaign "
+       "over sessions that are still polling",
+       json.loads(snap.stdout).get("lingering"), snap.stdout[:200])
+
+    campaign.set_state(cfg, rec["crawler"], "finished", finished_at=int(time.time()))
+    ok("...while a Crawler that JUST closed is not reported — the grace window is what makes "
+       "this correct, since the moment of closing is the moment the process is busiest",
+       not campaign.lingering_crawlers(cfg), campaign.lingering_crawlers(cfg))
+
+
 def test_retracted_doc_claims():
     group("Claims the docs used to make that are now false")
     # A DOCUMENTATION PASS FOUND FOUR, and none of them could have been caught by reading the
@@ -4521,6 +4608,7 @@ def main():
                test_self_pin, test_central_install, test_installer_leaves_no_vendored_copy,
                test_publishable, test_dispatch, test_filed_issues_15_to_21,
                test_claims_about_the_layer_below, test_observability,
+               test_cross_branch_overlap_and_lingering,
                test_hook_verbs_never_fail_open_in_silence,
                test_retracted_doc_claims,
                test_cli, test_optional):

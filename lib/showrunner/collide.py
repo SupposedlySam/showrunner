@@ -62,6 +62,65 @@ _EXCLUSION_HEADING = re.compile(
     re.I | re.M)
 
 
+def overlap(cfg, branches, base=None):
+    """What in-flight branches have ACTUALLY changed in common. Measured, not estimated. (#30)
+
+    `plan_waves` estimates each ready leaf's blast radius and refuses to fan out two whose
+    estimates intersect. That is the right check and it is scoped to one wave of ready leaves,
+    using guesses, before dispatch — this module has no notion of a branch at all. So it cannot
+    see what leaves in EARLIER waves, or another story's branch, have already changed.
+
+    Two branches that were each internally collision-free shared six files and two ADD/ADDs —
+    found at merge time, when the repair is a hand-reconciliation, rather than at dispatch when
+    it was a one-line brief change ("extend that file, do not create it").
+
+    ESTIMATES CANNOT COVER THIS AND DIFFS CAN, and they are complementary rather than competing.
+    A blast radius is necessarily conservative guesswork about the future. Once work has landed
+    on a branch its file set is no longer a guess: `git diff --name-only <merge-base>..<branch>`
+    is exact, costs one call, and needs no heuristics. Estimate forward within a wave; measure
+    backward against what already exists.
+
+    ADD/ADD IS CALLED OUT SEPARATELY because it is the one git cannot auto-resolve at all. A
+    shared edit usually merges; two branches each CREATING the same path always stops, and it is
+    the case a reader most needs to see before dispatch rather than after.
+    """
+    base = base or cfg.get("integration_base") or "HEAD"
+    per_branch, missing = {}, []
+    for br in branches:
+        rc, mb, _ = run(["git", "merge-base", base, br], cwd=cfg.root)
+        if rc != 0 or not mb.strip():
+            missing.append(br)
+            continue
+        # --diff-filter=A separates "created here" from "edited here", which is the whole
+        # reason ADD/ADD can be reported rather than buried among ordinary shared edits.
+        rc, out, _ = run(["git", "diff", "--name-only", "%s..%s" % (mb.strip(), br)], cwd=cfg.root)
+        rc2, adds, _ = run(["git", "diff", "--name-only", "--diff-filter=A",
+                            "%s..%s" % (mb.strip(), br)], cwd=cfg.root)
+        per_branch[br] = {
+            "files": {l.strip() for l in out.splitlines() if l.strip()} if rc == 0 else set(),
+            "added": {l.strip() for l in adds.splitlines() if l.strip()} if rc2 == 0 else set(),
+        }
+
+    pairs = []
+    names = sorted(per_branch)
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            shared = per_branch[a]["files"] & per_branch[b]["files"]
+            if not shared:
+                continue
+            add_add = sorted(per_branch[a]["added"] & per_branch[b]["added"])
+            pairs.append({"a": a, "b": b, "files": sorted(shared), "add_add": add_add})
+    return {
+        "base": base,
+        "branches": {k: {"files": sorted(v["files"]), "added": sorted(v["added"])}
+                     for k, v in per_branch.items()},
+        "overlaps": pairs,
+        # A branch that could not be resolved is NOT a branch with no overlap. Reported, because
+        # the reassuring answer and the unanswerable one are the same empty list otherwise.
+        "unresolvable": sorted(missing),
+    }
+
+
 def _text_of(leaf):
     """Title plus body, with any explicitly out-of-scope SECTION removed.
 

@@ -347,6 +347,21 @@ def cmd_status(args):
         stale = []
     if stale:
         print("  %s%d stale claim(s)%s — run `showrunner reap`" % (RED, len(stale), OFF))
+    # #29 — SURFACED WHERE SOMEBODY IS ALREADY LOOKING. The detection existed and was reachable
+    # only through `reap`, a verb somebody has to decide to run — and a lingering process is
+    # invisible by construction, so nothing prompts that decision. Two of them polled for four
+    # hours past their own closes and exhausted a shared rate limit, taking down a turn-end gate
+    # for every other agent.
+    ling = campaign.lingering_crawlers(cfg)
+    if ling:
+        print("  %s%d crawler process(es) outlived their leaf%s — run `showrunner reap`"
+              % (RED, len(ling), OFF))
+        for item in ling[:5]:
+            print("        %s (leaf %s, pid %s) — %s"
+                  % (item["crawler"], item["leaf"], item["pid"], item["why"]))
+        eprint("  A finished session does not idle: it keeps polling whatever it was told to "
+               "poll, and that is a SHARED cost — the run that notices is usually not the run "
+               "that pays.")
     return 0
 
 
@@ -1191,6 +1206,47 @@ def cmd_amend(args):
     return 0
 
 
+def cmd_overlap(args):
+    """What in-flight branches have actually changed in common (#30)."""
+    cfg = _cfg(args)
+    branches = args.branches
+    if not branches:
+        # Default to every branch the campaign knows and has not integrated: the question is
+        # almost always "what is in flight right now", and making somebody type them is how a
+        # check gets skipped on the day it matters.
+        data = campaign.load(cfg)
+        branches = [c["branch"] for c in data.get("crawlers", [])
+                    if c.get("branch") and campaign.branch_exists(cfg, c["branch"])
+                    and not campaign.is_merged(cfg, c["branch"], args.base)]
+    if len(branches) < 2:
+        print("nothing to compare — %d in-flight branch(es). This is a real answer, not an "
+              "empty one: with fewer than two branches there is no cross-branch overlap to "
+              "have." % len(branches))
+        return 0
+    result = collide.overlap(cfg, branches, base=args.base)
+    if args.json:
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    if result["unresolvable"]:
+        eprint("%sCOULD NOT RESOLVE%s: %s — no merge-base against %s. These were NOT compared, "
+               "which is different from having no overlap."
+               % (RED, OFF, ", ".join(result["unresolvable"]), result["base"]))
+    if not result["overlaps"]:
+        print("no overlap across %d branch(es) against %s"
+              % (len(result["branches"]), result["base"]))
+        return 0
+    for ov in result["overlaps"]:
+        print("%sOVERLAP%s  %s  <->  %s" % (YEL, OFF, ov["a"], ov["b"]))
+        for f in ov["files"][:20]:
+            print("    both edit %s" % f)
+        for f in ov["add_add"]:
+            print("    %sADD/ADD%s  %s  — both CREATE it; git cannot merge this"
+                  % (RED, OFF, f))
+    eprint("\nFound before dispatch this is a one-line brief change (\"extend that file, do "
+           "not create it\"). Found at merge time it is a hand-reconciliation.")
+    return 2 if any(o["add_add"] for o in result["overlaps"]) else 0
+
+
 def cmd_snapshot(args):
     """The world as it is, in one call. JSON on stdout.
 
@@ -1244,6 +1300,9 @@ def cmd_snapshot(args):
                       "verdict": f["verdict"], "alive": f["alive"], "blocked": f["blocked"],
                       "harness": f["harness"]} for f in findings],
         "resources": resources,
+        # Same finding, machine-readable. A viewer showing a quiet campaign over two sessions
+        # still polling is the exact picture #29 describes.
+        "lingering": campaign.lingering_crawlers(cfg),
         "waiting": {"waiting": is_waiting,
                     "live": len(waiting_detail["live_crawlers"]),
                     "parked": len(waiting_detail["parked_crawlers"]),
@@ -1686,6 +1745,13 @@ def build_parser():
     s.add_argument("--evidence", required=True,
                    help="the real file behind the correction — a correction is an assertion too")
     s.set_defaults(func=cmd_amend)
+
+    s = sub.add_parser("overlap", help="what in-flight branches have ACTUALLY changed in common "
+                                       "— measured from diffs, where `plan` estimates")
+    s.add_argument("branches", nargs="*")
+    s.add_argument("--base", default="HEAD")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_overlap)
 
     s = sub.add_parser("snapshot", help="the whole campaign in ONE call and one instant — what "
                                         "a viewer needs before a stream of deltas means anything")

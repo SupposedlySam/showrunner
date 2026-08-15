@@ -271,6 +271,19 @@ TARGETS = [
     ("inject-vs-harness rule", "harness.owns_path", "lib/showrunner/harness.py",
      r"(def owns_path\(cfg, path\):\n)",
      "    return None\ndef _neutered_owns_path(cfg, path):\n"),
+    # An empty list is "nothing is stacking" — the reassuring answer, and the one a broken
+    # detector also gives. Neutered, status and snapshot both go quiet and the condition returns
+    # to being invisible by construction, which is the whole of #29.
+    # It returns a populated dict, so the candidate scan (which looks for producers that report
+    # NOTHING) never sees it — and an empty `overlaps` list is exactly the reassuring answer.
+    # Swept explicitly rather than left outside the denominator on a technicality.
+    ("cross-branch overlap", "collide.overlap", "lib/showrunner/collide.py",
+     r"(def overlap\(cfg, branches, base=None\):\n)",
+     "    return {'base': '', 'branches': {}, 'overlaps': [], 'unresolvable': []}\n"
+     "def _neutered_overlap(cfg, branches, base=None):\n"),
+    ("lingering processes, surfaced", "campaign.lingering_crawlers", "lib/showrunner/campaign.py",
+     r"(def lingering_crawlers\(cfg\):\n)",
+     "    return []\ndef _neutered_lingering_crawlers(cfg):\n"),
     ("the unarmed watchdog", "harness.waiting_probe", "lib/showrunner/harness.py",
      r"(def waiting_probe\(cfg, dirname\):\n)",
      "    return None, ''\ndef _neutered_waiting_probe(cfg, dirname):\n"),
@@ -526,6 +539,7 @@ NOT_SWEPT = {
                            "asserted by the reachable-rules group, so it is covered but not "
                            "by this tool.",
     "harness.inject_conflicts": "REPORTING over the rule, not the rule. It is a loop that\n                                 calls harness.owns_path, which IS swept — sweeping the\n                                 wrapper would count the same predicate twice and read as\n                                 more coverage than exists.",
+    "cli.cmd_overlap": "A COMMAND, not a producer — it formats what collide.overlap\n                       returns and chooses an exit code. collide.overlap carries the\n                       rule and is swept above; sweeping the printer too would count\n                       one finding twice.",
     "gates.load_baseline": "SHOULD BE SWEPT, IS NOT YET — returning None always would make "
                            "every comparison report 'no baseline', which the baseline group "
                            "asserts, but not through a stub.",

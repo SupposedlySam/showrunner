@@ -171,6 +171,32 @@ def is_empty(cfg, branch, base_sha):
     return commits_ahead(cfg, base_sha, branch) == 0
 
 
+def lingering_crawlers(cfg):
+    """Crawler processes still alive well after their leaf closed. Read-only. (#29)
+
+    The DETECTION already existed and was reachable only through `reap` — a verb somebody has
+    to decide to run. That is the whole defect: a lingering process is invisible by
+    construction. `status` says closed, the campaign reads quiet, and nothing prompts anyone to
+    look, so "remember to reap after every wave" is advice followed on the days you do not need
+    it.
+
+    What it cost, measured by the consumer who reported it: two sessions ran 3h47m and 4h56m
+    past their own closes. A finished session does not idle — it keeps polling whatever it was
+    told to poll — and that polling exhausted a shared rate limit. The resulting 429 landed on a
+    turn-end gate, so the orchestrator could neither confirm nobody was waiting nor withdraw
+    from the rooms to fix it. A finished agent nobody noticed took down the checking machinery
+    for everyone still working.
+    """
+    from . import dispatch as _dispatch
+    out = []
+    for entry in load(cfg).get("crawlers", []):
+        ling = _dispatch.lingering(entry)
+        if ling:
+            out.append({"crawler": entry.get("crawler"), "leaf": entry.get("leaf"),
+                        "pid": entry.get("pid"), "why": ling})
+    return out
+
+
 def live(entry):
     """A Crawler is live only if its PID responds AND it was recorded this boot."""
     if entry.get("boot") and entry["boot"] != boot_token():
