@@ -577,6 +577,28 @@ def failing(output):
     return {l[8:].strip() for l in output.splitlines() if l.startswith("  FAIL  ")}
 
 
+def crashed_groups(output):
+    """Groups that died mid-run. A kill count from such a run is NOT a coverage measure.
+
+    A neutered producer often returns None where callers subscript it, and an exception takes
+    the whole GROUP down: test/run.py catches it, records one "group crashed" entry, and the
+    group's remaining assertions never execute. So the mutant produces exactly ONE new FAIL
+    line, and every assertion that would have flipped is simply absent from the run.
+
+    The number that comes out is not high or low — it is meaningless, and it reads as THIN,
+    which is a verdict about the SUITE. It sent me strengthening a detector that was already
+    covered by three assertions, none of which had run.
+
+    This file's docstring has warned about mutants killed by crashing since it was written.
+    Prose did not stop it happening; a check does. Reported separately so nobody reads a
+    crash-shaped run as evidence of anything.
+    """
+    # index 1: the line is "  FAIL  <group> crashed: <exc>", and split() drops the
+    # leading spaces — [2] picked the literal word "crashed:" for every group.
+    return {l.split()[1] for l in output.splitlines()
+            if l.startswith("  FAIL  ") and " crashed:" in l}
+
+
 def accounting():
     """The denominator checks only — no mutation, no suite runs. Seconds, not minutes.
 
@@ -743,6 +765,16 @@ def main():
         # Only assertions that FLIPPED count. Anything already failing unmutated is noise.
         killed = failing(out) - baseline_failures
         f = len(killed)
+        # A group that crashed under the mutant took its remaining assertions with it, so this
+        # count is not comparable with any other. Said before the verdict rather than beside it.
+        crashed = crashed_groups(out) - crashed_groups(b_out)
+        if crashed:
+            print("%-34s %8d   CRASHED (%s) — this count is NOT a coverage measure: the group "
+                  "died and its remaining assertions never ran. Make them fail rather than "
+                  "raise (`or {}` on a possibly-None result), then re-sweep."
+                  % (name, f, ", ".join(sorted(crashed))))
+            weak.append((name, f))
+            continue
         # 3+ is comfortable; 1-2 is thin and worth naming rather than rounding up to "ok";
         # 0 is the real defect. Reporting thin as ok would be the same rounding-up this whole
         # exercise exists to refuse.
