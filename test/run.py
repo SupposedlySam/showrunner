@@ -2565,6 +2565,60 @@ def test_installer_leaves_no_vendored_copy():
        "it, and given the command that does",
        "ALREADY TRACKED" in out and "rm -r --cached" in out, out[-400:])
 
+    # THE ONLY THING THIS SCRIPT WRITES OUTSIDE THE TARGET REPO — the Claude Code skills, which
+    # live in the user's HOME rather than in anybody's project. Two ways to get it wrong and
+    # both are silent: prompting where nothing can answer (curl | bash, CI, this suite) hangs,
+    # and assuming yes writes into a HOME that was never offered. So: no TTY means no prompt AND
+    # no write, and the flag is the only way through.
+    def install_into(repo, home, *flags):
+        env = dict(os.environ, HOME=home)
+        env.pop("CLAUDE_CONFIG_DIR", None)  # HOME is the fixture; an ambient override is not
+        return subprocess.run([installer, *flags, repo], cwd=ROOT, capture_output=True,
+                              text=True, env=env, timeout=120)
+
+    quiet_home = tmpdir("fake-home")
+    quiet = install_into(fresh_repo(), quiet_home)
+    skills_dir = os.path.join(quiet_home, ".claude", "skills")
+    ok("a non-interactive install writes NOTHING into the user's skills dir — with no TTY it "
+       "neither prompts nor assumes a yes", not os.path.exists(skills_dir),
+       quiet.stdout[-300:])
+    ok("...and says so instead of staying silent, naming the flag that installs them — an "
+       "install that quietly skipped would be indistinguishable from one with nothing to offer",
+       "--skills" in quiet.stdout, quiet.stdout[-300:])
+
+    # THE CASE WHERE IT HAPPENS. Without this the assertion above passes just as well for an
+    # installer that cannot place a skill at all, which is the shape of a check that never was.
+    yes_home = tmpdir("fake-home")
+    loud = install_into(fresh_repo(), yes_home, "--skills")
+    placed = os.path.join(yes_home, ".claude", "skills")
+    names = sorted(os.listdir(placed)) if os.path.isdir(placed) else []
+    ok("--skills places the skills into HOME's Claude config, so the prompt has something real "
+       "behind it", "sr-status" in names and "showrunner" in names, (names, loud.stdout[-300:]))
+    ok("...as SYMLINKS into this checkout, not copies — a copy is a second source of truth that "
+       "goes stale exactly the way a vendored install does, and nothing would ever say it had",
+       all(os.path.islink(os.path.join(placed, n)) for n in names)
+       and os.path.realpath(os.path.join(placed, "sr-status")).startswith(ROOT), names)
+
+    # NEVER CLOBBER. Somebody else's skill of the same name, or an edited copy, is not ours to
+    # replace on the strength of a flag that says "install".
+    keep_home = tmpdir("fake-home")
+    mine = os.path.join(keep_home, ".claude", "skills", "sr-status")
+    os.makedirs(mine)
+    with open(os.path.join(mine, "SKILL.md"), "w") as fh:
+        fh.write("mine, not the installer's\n")
+    install_into(fresh_repo(), keep_home, "--skills")
+    with open(os.path.join(mine, "SKILL.md")) as fh:
+        survived = fh.read()
+    ok("--skills never replaces a skill that is already there, so an edited or unrelated one of "
+       "the same name survives an install that was told yes", "mine" in survived, survived)
+
+    # And the explicit refusal, which is what a script or a CI job passes.
+    no_home = tmpdir("fake-home")
+    install_into(fresh_repo(), no_home, "--no-skills")
+    ok("--no-skills writes nothing into HOME even though there is something to write — the "
+       "flag a CI job or another skill passes when it must not be asked",
+       not os.path.exists(os.path.join(no_home, ".claude", "skills")))
+
 
 def test_publishable():
     group("What a stranger gets when they clone this repo")

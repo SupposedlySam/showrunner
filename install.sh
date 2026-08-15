@@ -8,17 +8,24 @@ set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
 CENTRAL=0
+SKILLS=ask
 TARGET="."
 for arg in "$@"; do
   case "$arg" in
     --central) CENTRAL=1 ;;
+    --skills) SKILLS=yes ;;
+    --no-skills) SKILLS=no ;;
     -h|--help)
-      echo "usage: ./install.sh [--central] /path/to/your/project"
+      echo "usage: ./install.sh [--central] [--skills|--no-skills] /path/to/your/project"
       echo
       echo "  --central   do not copy the tool's code into the project at all. Write one tiny"
       echo "              dispatcher shim that execs a shared, machine-wide install instead."
       echo "              Populate that with \`showrunner self --pin <ref> --dest <path>\`."
       echo "              Opt-in and REVERSIBLE: re-run without --central to restore local copies."
+      echo "  --skills    also link the Claude Code skills (showrunner, sr-status, sr-doctor,"
+      echo "              sr-install) into ~/.claude/skills — the ONLY thing this script writes"
+      echo "              outside the target repo. Without a flag it asks, and only on a TTY."
+      echo "  --no-skills never touch ~/.claude, and do not ask."
       exit 0 ;;
     -*) echo "install.sh: unknown option $arg" >&2; exit 64 ;;
     *)  TARGET="$arg" ;;
@@ -194,6 +201,79 @@ fi
 if (cd "$TARGET" && "$SRC/bin/showrunner" worktree register 2>/dev/null | grep -q registered); then
   echo "  hooked  the worktree guard is registered in .claude/settings.json"
 fi
+
+# ------------------------------------------------------------------- skills
+# THE ONE THING THIS SCRIPT WRITES OUTSIDE THE TARGET REPO, so it is the one thing it asks about.
+# The skills are what makes showrunner reachable without remembering the CLI, and they are global
+# by nature: the question "what are my agents doing" gets asked from whichever project you are
+# standing in, not from the one that happens to have been installed last.
+#
+# ASKS ONLY ON A TTY, and defaults to doing nothing. `curl | bash`, CI and the test suite all run
+# with stdin closed or piped — an installer that blocks there for an answer nobody can type is an
+# installer that hangs, and one that assumes "yes" writes into a HOME nobody offered it.
+SKILLS_SRC="$SRC/.claude/skills"
+SKILLS_DEST="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/skills"
+SKILL_NAMES="showrunner sr-status sr-doctor sr-install"
+
+skills_missing() {
+  local name missing=""
+  for name in $SKILL_NAMES; do
+    [ -d "$SKILLS_SRC/$name" ] || continue
+    if [ ! -e "$SKILLS_DEST/$name" ] && [ ! -L "$SKILLS_DEST/$name" ]; then
+      missing="$missing $name"
+    fi
+  done
+  echo "${missing# }"
+}
+
+install_skills() {
+  local name linked=0 copied=0 kept=0
+  mkdir -p "$SKILLS_DEST"
+  for name in $SKILL_NAMES; do
+    [ -d "$SKILLS_SRC/$name" ] || continue
+    if [ -e "$SKILLS_DEST/$name" ] || [ -L "$SKILLS_DEST/$name" ]; then
+      kept=$((kept + 1))
+      continue
+    fi
+    # SYMLINK, NOT COPY, when it can: a copy is a second source of truth that goes stale in
+    # exactly the way `--central` exists to stop, and nothing would ever tell you it had.
+    if ln -s "$SKILLS_SRC/$name" "$SKILLS_DEST/$name" 2>/dev/null; then
+      linked=$((linked + 1))
+    else
+      cp -R "$SKILLS_SRC/$name" "$SKILLS_DEST/$name"
+      copied=$((copied + 1))
+    fi
+  done
+  [ "$linked" = 0 ] || echo "  linked  $linked skill(s) → $SKILLS_DEST (they follow this checkout)"
+  [ "$copied" = 0 ] || echo "  copied  $copied skill(s) → $SKILLS_DEST (a COPY — it will not follow this checkout)"
+  [ "$kept" = 0 ]   || echo "  kept    $kept skill(s) already in $SKILLS_DEST — not replaced"
+}
+
+MISSING="$(skills_missing)"
+case "$SKILLS" in
+  no) : ;;
+  yes) install_skills ;;
+  *)
+    if [ -z "$MISSING" ]; then
+      : # every skill is already there; nothing to ask about
+    elif [ -t 0 ] && [ -t 1 ]; then
+      echo
+      echo "Claude Code skills for showrunner are not installed for your user:"
+      echo "   $MISSING"
+      echo "  They are global on purpose — you ask 'what are my agents doing' from whatever"
+      echo "  project you are standing in. Linked, not copied, so they follow this checkout."
+      printf '  Install them into %s? [y/N] ' "$SKILLS_DEST"
+      read -r reply || reply=""
+      case "$reply" in
+        [yY]*) install_skills ;;
+        *) echo "  skipped — re-run with --skills, or link them yourself" ;;
+      esac
+    else
+      echo "  note    Claude Code skills are available but NOT installed ($MISSING)."
+      echo "          Non-interactive run, so nothing was written to $SKILLS_DEST."
+      echo "          Add them with:  $SRC/install.sh --skills $TARGET"
+    fi ;;
+esac
 
 echo
 echo "Done. Next:"
