@@ -409,6 +409,60 @@ class SqliteGraph:
         self.db.commit()
         return self.show(leaf_id)
 
+    def amend(self, leaf_id, premise, reason, evidence):
+        """Correct the VERDICT on a leaf that is already closed. Returns the leaf.
+
+        A Crawler closed a leaf `--refuted` with a well-cited report, then came back on its own:
+        a parallel trace it had dispatched found a real bug it had missed, and the verdict should
+        have been `partial`. It did exactly what this project asks — kept looking, refuted its own
+        conclusion, unprompted — and the tooling had nowhere to put it. No `reopen`, and `edit`
+        correctly refuses a closed leaf, so the permanent record said `refuted` for work that
+        needed doing.
+
+        That is not a cosmetic row. `refuted` means *nobody needs to build this*, so a wrong one
+        removes real work from the cycle for good, and the more disciplined the Crawler the more
+        likely it is to produce the correction that has nowhere to go.
+
+        SUPERSEDES, NEVER OVERWRITES. The original close and its proof stay in the record and the
+        correction is appended beneath them, because a verdict that quietly changed is a record
+        nobody can audit — and the first close was not a mistake to erase, it was the honest
+        conclusion from what was known then.
+
+        The inverse of `edit`, deliberately: `edit` refuses a CLOSED leaf because the brief is
+        already in somebody's hands, and this refuses an OPEN one because there is no verdict yet
+        to correct — that is what `close` is for.
+
+        WHAT THIS DOES NOT DO: queue the work the correction implies. A verdict moving from
+        `refuted` to `partial` means something real was missed, and the residue needs its own leaf
+        — `add` it. Making amend spawn work would hide a new piece of work inside a bookkeeping
+        verb, and the point of the premise field is that outcomes stay visible.
+        """
+        # Imported here rather than at module scope: the premise VOCABULARY belongs to the
+        # gate, not to storage, and graph.py must not grow an opinion about it that can drift
+        # from the one `close` enforces. gates.py imports nothing from here, so this is safe.
+        from .gates import PREMISE_VERDICTS
+        if premise not in PREMISE_VERDICTS:
+            die("--premise must be one of %s" % "/".join(PREMISE_VERDICTS), code=2)
+        leaf = self.show(leaf_id)
+        if leaf["status"] not in TERMINAL:
+            die("%s is %s, not closed — there is no verdict to correct yet. Close it through "
+                "the gate instead." % (leaf_id, leaf["status"]), code=2)
+        # A corrected verdict decides the same question the original did, so it moves `outcome`
+        # with it: `refuted` is the one that says nobody needs to build this, and leaving it in
+        # place under a `partial` premise would keep the exact claim being withdrawn.
+        outcome = REFUTED if premise == "refuted" else CLOSED
+        appended = ("%s\n  AMENDED: premise %s [was: %s] — %s [evidence: %s]"
+                    % (leaf.get("close_reason") or "", premise,
+                       leaf.get("close_reason", "").split("[premise: ")[-1].split("]")[0]
+                       or "unrecorded",
+                       reason, evidence))
+        self.db.execute("UPDATE leaves SET outcome=?, close_reason=? WHERE id=?",
+                        (outcome, appended.strip(), leaf_id))
+        self._event(leaf_id, "amended", "premise -> %s: %s [evidence: %s]"
+                    % (premise, reason, evidence))
+        self.db.commit()
+        return self.show(leaf_id)
+
     def events(self, limit=50):
         return [dict(r) for r in self.db.execute(
             "SELECT * FROM events ORDER BY ts DESC, rowid DESC LIMIT ?", (limit,)).fetchall()]

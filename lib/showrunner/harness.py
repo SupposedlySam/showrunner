@@ -503,6 +503,38 @@ def stop_gate(cfg, worktree_path, session):
     return None, ""
 
 
+def owns_path(cfg, path):
+    """The harness directory containing `path`, or None. THE rule, in one place.
+
+    Both callers need it — `worktree.inject` refuses an entry as it materialises, and `doctor`
+    reports the same conflict from the config with nothing running. Written twice it would be
+    two rules that agree today, and the failure mode of two rules that drift is that the
+    quieter one wins: doctor stays silent while spawn keeps aborting, or the reverse.
+    """
+    if not path:
+        return None
+    for d in spec(cfg)["dirs"]:
+        if path == d or path.startswith(d.rstrip("/") + os.sep):
+            return d
+    return None
+
+
+def inject_conflicts(cfg):
+    """Configured inject paths that fall inside a harness directory (#22). Doctor asks.
+
+    `spawn` refuses these where they happen, which is correct and late: it fires one Crawler at
+    a time in the middle of a fan-out. The conflict is knowable from the config alone, with
+    nothing running, so this is the same rule at the moment it costs nothing.
+    """
+    out = []
+    for entry in (cfg.get("inject") or []):
+        path = entry.get("path") if isinstance(entry, dict) else entry
+        owner = owns_path(cfg, path)
+        if owner:
+            out.append((path, owner))
+    return out
+
+
 def report(cfg):
     """Doctor-facing summary of what a Crawler would get."""
     sp = spec(cfg)

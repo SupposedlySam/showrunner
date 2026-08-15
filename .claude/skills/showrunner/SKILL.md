@@ -19,9 +19,10 @@ the work goes through `./.showrunner/bin/showrunner`, and the transcript shows i
   session from the trace. One line, not a paragraph.
 - **If showrunner is not installed here, stop and say so.** Do not improvise an orchestration with
   subagents instead. Offer `/sr-install`. That is the *whole* response.
-- **Never arm the watchdog** (`.game_loop` → `watchdog.waiting_probe`). A human does that once per
-  install, deliberately: a probe an agent can write is a watchdog the watched sessions can switch
-  off, and a probe of `true` exits 0 forever.
+- **Never arm the harness's idle watchdog.** A human does that once per install, deliberately: a
+  probe an agent can write is a watchdog the watched sessions can switch off, and a probe of
+  `true` exits 0 forever. `showrunner doctor` prints the exact file and line to paste — it asks
+  the harness rather than naming its config key, so the instruction survives a rename there.
 - **Never bypass a gate.** Not `--no-verify`, not editing `verify.yaml` to widen it, not closing a
   leaf without a real artifact. A gate refusing you is usually the gate being right.
 - **Brief.** One line per command, one line per result. No narration of what you are about to do.

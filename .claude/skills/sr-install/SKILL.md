@@ -76,7 +76,7 @@ cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/showrunner-install.json" 2>/dev/null
 ```
 
 ```json
-{"mode": "central", "central": "/Users/morgan/.claude/showrunner-central",
+{"mode": "central", "central": "~/.claude/showrunner-central",
  "set_at": "2026-08-14", "set_by": "sr-install", "why": "..."}
 ```
 

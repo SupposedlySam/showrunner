@@ -3213,6 +3213,26 @@ def test_filed_issues_15_to_21():
     real = brief.sr_bin(config.load(ROOT))
     ok("the binary this repo's OWN briefs name actually exists and runs — not merely that it "
        "was written absolutely", os.access(real, os.X_OK), real)
+
+    # #28 — EVERY PATH THE BRIEF HANDS OVER IS RESOLVED FROM THE WORKTREE, not from here. The
+    # binary was made absolute by #15 and the scratch dir was left relative, so a Crawler
+    # created `<worktree>/.showrunner/scratch/<crawler>/` and `git worktree remove` destroyed
+    # its report, its evidence and the artifact it cited as --proof. A true claim read as false.
+    #
+    # Asserted as a RULE over the whole table rather than as a fact about scratch, because the
+    # next path added to that block is the next instance. The table is where a Crawler looks for
+    # "where do I work", so a relative entry there is a promise that resolves somewhere else.
+    table = [ln for ln in text.splitlines() if ln.startswith("| ") and "`" in ln]
+    relative = []
+    for ln in table:
+        for cell in re.findall(r"`([^`]+)`", ln):
+            if "/" in cell and not os.path.isabs(cell) and not cell.startswith("showrunner/"):
+                relative.append(ln.strip())
+    ok("no path in the brief's own location table is relative — the Crawler reads it standing "
+       "in its worktree, so a relative path names a different place than the one meant",
+       not relative, relative)
+    ok("...and the scratch dir it is told to write to is the one in the MAIN checkout, which "
+       "outlives the tree", os.path.join(cfg.root, ".showrunner", "scratch") in text, None)
     ok("...and it is resolved against the filesystem rather than assumed, so an installed copy "
        "and a development checkout both name something real",
        os.path.isabs(real) and os.path.basename(real) == "showrunner", real)
@@ -3248,6 +3268,65 @@ def test_filed_issues_15_to_21():
     g.claim("L17", "someone", pid=os.getpid())
     raises("...but not once it is claimed — that would rewrite the instructions under a Crawler "
            "already working from them", lambda: g.edit("L17", body="x"), "not open")
+
+    # #22 — an inject path inside the harness directory creates that directory as a side effect
+    # (os.makedirs of the parent), and provisioning runs AFTER inject, sees it exists, and leaves
+    # it alone. The harness then cannot answer its contract and the spawn aborts blaming the
+    # harness's embedding contract — every word true, pointing at the wrong party, and the
+    # natural next move is harness.require=false: accepting a Crawler with unverified rules to
+    # work around a self-inflicted config error.
+    inj = make_repo({"inject": [{"path": ".game_loop/bin/check-thing", "mode": "symlink"}]})
+    _seed_harness(inj.root)
+    os.makedirs(os.path.join(inj.root, ".game_loop", "bin"), exist_ok=True)
+    with open(os.path.join(inj.root, ".game_loop", "bin", "check-thing"), "w") as fh:
+        fh.write("#!/bin/sh\n")
+    _res, _probs = worktree.inject(inj, tmpdir("injwt"))
+    ok("an inject path inside the harness directory is REFUSED, rather than silently defeating "
+       "provisioning and letting the harness take the blame downstream",
+       any("INSIDE the harness directory" in p for p in _probs), _probs)
+    ok("...and the refusal names the real remedy instead of the one that disables the guard — "
+       "harness.installer or tracking it, never harness.require=false",
+       any("harness.installer" in p and "require=false" in p for p in _probs), _probs)
+    from showrunner import harness as _HI
+    conflicts = _HI.inject_conflicts(inj)
+    eq("...and `doctor` can see it from the config alone, with nothing running, rather than one "
+       "Crawler at a time mid-fan-out", [p for p, _ in conflicts], [".game_loop/bin/check-thing"])
+    clean = make_repo({"inject": [{"path": ".env", "optional": True}]})
+    _seed_harness(clean.root)
+    ok("...and an ordinary inject path is not flagged, so the check separates the two rather "
+       "than refusing injection", not _HI.inject_conflicts(clean), _HI.inject_conflicts(clean))
+
+    # #26 — a Crawler that self-corrects AFTER closing had nowhere to put it. No `reopen`, and
+    # `edit` correctly refuses a closed leaf, so a leaf whose verdict should be `partial` stayed
+    # `refuted` forever. That is not a cosmetic row: `refuted` means nobody needs to build this,
+    # so a wrong one removes real work from the cycle — and it happened to a Crawler doing
+    # exactly what this project asks, refuting its own conclusion unprompted.
+    g.add("self-corrects", leaf_id="L26")
+    g.claim("L26", "corrector", pid=os.getpid(), tree=cfg.root)
+    proof26 = os.path.join(cfg.root, "proof-26.txt")
+    with open(proof26, "w") as fh:
+        fh.write("report\n")
+    gates.close_gate(cfg, g, "L26", None, "premise does not hold", refuted=True,
+                     evidence="proof-26.txt", premise="refuted", premise_read="README.md")
+    eq("a leaf closes refuted", g.show("L26")["outcome"], "refuted")
+    raises("...and `edit` still refuses it, because the brief is in somebody's hands",
+           lambda: g.edit("L26", body="x"), "not open")
+    amended = g.amend("L26", "partial", "a parallel trace found a real bug I missed",
+                      "proof-26.txt")
+    eq("...but the VERDICT can be corrected", amended["outcome"], "closed")
+    reason = amended.get("close_reason") or ""
+    ok("...and the correction SUPERSEDES rather than overwrites — the original close and its "
+       "proof stay in the record, because a verdict that quietly changed is one nobody can "
+       "audit, and the first close was the honest conclusion from what was known then",
+       "premise does not hold" in reason and "AMENDED" in reason, reason)
+    ok("...naming what it was, so the change itself is legible rather than implied",
+       "was: refuted" in reason, reason)
+    raises("amend refuses an OPEN leaf — the exact inverse of edit, because there is no verdict "
+           "to correct yet and `close` is the verb for that",
+           lambda: g.amend("L15", "partial", "x", "proof-26.txt"), "not closed")
+    raises("...and refuses a verdict outside the vocabulary the close gate enforces, so the two "
+           "cannot drift apart", lambda: g.amend("L26", "maybe", "x", "proof-26.txt"),
+           "must be one of")
 
     # #20 — the claim's liveness named the shell that ran spawn, gone seconds later, while the
     # session it launched ran for fifteen minutes. reap --apply would release a live leaf.

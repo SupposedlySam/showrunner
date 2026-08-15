@@ -261,6 +261,16 @@ TARGETS = [
     ("blocked-vs-working (a refused turn-end)", "harness.stop_gate", "lib/showrunner/harness.py",
      r"(def stop_gate\(cfg, worktree_path, session\):\n)",
      "    return None, ''\ndef _neutered_stop_gate(cfg, worktree_path, session):\n"),
+    # An empty list is "no inject path conflicts with the harness" — the reassuring answer, and
+    # the one a broken detector also gives. Neutered, doctor goes quiet and every spawn goes back
+    # to aborting with a message blaming the harness for a config conflict (#22).
+    # THE rule, shared by both callers — `worktree.inject` refuses an entry as it materialises
+    # and `doctor` reports it from the config. Written twice it would be two rules that agree
+    # today, and the quieter one wins when they drift. Sweeping the predicate covers both;
+    # `inject_conflicts` above it is now a loop and is excluded as reporting.
+    ("inject-vs-harness rule", "harness.owns_path", "lib/showrunner/harness.py",
+     r"(def owns_path\(cfg, path\):\n)",
+     "    return None\ndef _neutered_owns_path(cfg, path):\n"),
     ("the unarmed watchdog", "harness.waiting_probe", "lib/showrunner/harness.py",
      r"(def waiting_probe\(cfg, dirname\):\n)",
      "    return None, ''\ndef _neutered_waiting_probe(cfg, dirname):\n"),
@@ -515,6 +525,7 @@ NOT_SWEPT = {
                            "the exact defect that produced this file. Its reachability is "
                            "asserted by the reachable-rules group, so it is covered but not "
                            "by this tool.",
+    "harness.inject_conflicts": "REPORTING over the rule, not the rule. It is a loop that\n                                 calls harness.owns_path, which IS swept — sweeping the\n                                 wrapper would count the same predicate twice and read as\n                                 more coverage than exists.",
     "gates.load_baseline": "SHOULD BE SWEPT, IS NOT YET — returning None always would make "
                            "every comparison report 'no baseline', which the baseline group "
                            "asserts, but not through a stub.",

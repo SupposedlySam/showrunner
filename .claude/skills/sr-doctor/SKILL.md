@@ -77,8 +77,8 @@ blocked. Say that out loud — it is the state that looks like nothing is wrong.
 ## 3. Read the header — it names the code, not the project
 
 ```
-showrunner 0.1.0 · pinned 94959a067001 (HEAD) · /Users/morgan/.claude/showrunner-central
-repo: /Users/morgan/Development/dart_projects/revali
+showrunner 0.1.0 · pinned 94959a067001 (HEAD) · ~/.claude/showrunner-central
+repo: ~/dev/<your-project>
 ```
 
 Two different places, on purpose. Under a central install the code lives once and the repo is a

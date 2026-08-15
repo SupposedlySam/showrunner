@@ -221,6 +221,35 @@ def inject(cfg, worktree):
         src = os.path.join(cfg.root, src_rel)
         dst = os.path.join(worktree, src_rel)
 
+        # AN INJECT PATH INSIDE THE HARNESS DIRECTORY SILENTLY DEFEATS PROVISIONING (#22).
+        # `os.makedirs(os.path.dirname(dst))` below creates the parent, so injecting
+        # `<harness>/bin/anything` creates `<harness>/` as a side effect — and `harness.provision`
+        # runs AFTER this, sees a directory that already exists, and takes its "already present,
+        # left alone" branch. The harness is never provisioned, so it cannot answer the contract,
+        # and the spawn aborts with a refusal that is entirely about the harness's embedding
+        # contract. Every word of it is true and it points at the wrong party.
+        #
+        # Refused HERE rather than left to that downstream abort, because the reader's next move
+        # matters: the honest response to that message is to go read the harness's docs and
+        # consider `harness.require=false` — accepting a Crawler with unverified rules to work
+        # around a self-inflicted config error. The minimal workaround for a gap in the layer
+        # below quietly disabling the guard that checks the layer below is the exact shape this
+        # project exists to catch.
+        from . import harness as _harness
+        owned_by = _harness.owns_path(cfg, src_rel)
+        if owned_by:
+            problems.append(
+                "inject %s is INSIDE the harness directory %s, and injecting it would create "
+                "that directory before the harness is provisioned into this worktree — after "
+                "which provisioning leaves it alone and the harness cannot answer "
+                "`worktree --porcelain`. The spawn would then abort blaming the harness's "
+                "embedding contract for a config conflict.\n"
+                "  The harness owns what crosses into a worktree: set harness.installer, or "
+                "track %s in git. Do not inject into it, and do not reach for "
+                "harness.require=false — that accepts a Crawler whose rules are unverified."
+                % (src_rel, owned_by, owned_by))
+            continue
+
         if not os.path.exists(src):
             msg = "declared inject path is missing from the source repo: %s" % src_rel
             (results if optional else problems).append(

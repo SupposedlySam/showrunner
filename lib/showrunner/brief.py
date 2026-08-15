@@ -113,8 +113,11 @@ correctly denied and a variable-built path sailed through with no output disting
 default, so that silence was the normal shape under fan-out, not an edge case. It is fixed
 upstream, and a tree carrying an older harness still has the quiet version.
 
-**Put every non-repo file in your own scratch dir above** — commit messages, captured
-output, before/after artifacts, fixtures. Not in a shared temp dir. Two Crawlers in a real
+**Put every non-repo file in your own scratch dir above, by the ABSOLUTE path given** — commit
+messages, captured output, before/after artifacts, fixtures. Never at a path relative to this
+worktree: your tree is deleted once your work is integrated and everything inside it goes too,
+including the artifact you cite as `--proof`. The scratch dir named above is in the main
+checkout and survives. Not a shared temp dir either. Two Crawlers in a real
 run both reached for `commitmsg.txt` in one shared directory; the second noticed the first
 one's file only because it happened to list the directory first. Had it not, one Crawler
 would have committed the other's commit message onto its own changes: a real commit, a
@@ -272,10 +275,26 @@ def build(cfg, leaf, spawn_record, decision=None, orchestrator_findings=None,
         lock_block=lock_block,
         orchestrator_block=orchestrator_block,
         shared_block=shared_block,
-        worktree=rel(spawn_record["worktree"], cfg.root),
+        # Absolute for the same reason as scratch, and caught by the same rule the moment it
+        # was written: this row is the reader's answer to "where am I", and a relative path
+        # there resolves against the tree they are already standing in — naming a directory
+        # inside their own worktree that does not exist. It was only ever informational, which
+        # is exactly why nobody noticed; the actionable copy below was always absolute.
+        worktree=spawn_record["worktree"],
         worktree_abs=spawn_record["worktree"],
         branch=spawn_record["branch"],
-        scratch=rel(spawn_record["scratch"], cfg.root),
+        # ABSOLUTE, for exactly the reason `sr_bin` is (#15) — the brief is READ inside a
+        # worktree, so a relative path resolves against the Crawler's cwd and not the main
+        # checkout. It produced a real scratch directory inside the worktree, and
+        # `git worktree remove` destroyed everything in it: the report, the captured evidence,
+        # and the artifact cited as `--proof`. A true claim then reads as false, because the
+        # file the close gate recorded is gone from the only place anyone looks for it.
+        #
+        # WORSE, IT ONLY APPEARS AFTER #15 IS ADOPTED. Consumers used to symlink the state dir
+        # into the worktree to reach the binary, which incidentally made this relative path
+        # resolve to the shared directory. #15 replaced that workaround with an absolute path —
+        # correctly — and this stayed relative, so the fix removed what had been masking it.
+        scratch=cfg.abspath(spawn_record["scratch"]),
     )
 
 

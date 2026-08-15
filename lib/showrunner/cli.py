@@ -259,6 +259,18 @@ def cmd_doctor(args):
             else:
                 print("  %s chat %s resolves: %s" % (GRN + "ok   " + OFF, key, path))
 
+    # #22 — knowable from the config with nothing running, so it is worth saying here rather
+    # than one Crawler at a time in the middle of a fan-out.
+    for path, dirname in harness.inject_conflicts(cfg):
+        print("  %s inject %r is INSIDE the harness directory %s. Injecting it creates that "
+              "directory before the harness is provisioned, after which provisioning leaves it "
+              "alone and the harness cannot answer `worktree --porcelain` — so every spawn "
+              "aborts blaming the harness's embedding contract for a config conflict.\n"
+              "        The harness owns what crosses into a worktree: set harness.installer, or "
+              "track %s in git."
+              % (RED + "ERROR" + OFF, path, dirname, dirname))
+        bad += 1
+
     # THE WATCHDOG THAT CANNOT SEE A SUBAGENT (issue #23). `showrunner waiting` was built for
     # exactly one consumer and nothing connects them, so the default state of a two-layer
     # install is: the guard exists, the answer exists, and they are not talking. The failure is
@@ -1149,6 +1161,36 @@ def cmd_reconcile(args):
     return 0
 
 
+def cmd_amend(args):
+    """Correct the verdict on a leaf that is already closed.
+
+    A correction is an assertion, so it owes evidence exactly as the close did — an amended
+    verdict with nothing behind it is the same wish as an unsourced 'done', and this verb exists
+    precisely because the FIRST verdict was confident and wrong.
+    """
+    cfg = _cfg(args)
+    g = _graph(cfg)
+    path = args.evidence if os.path.isabs(args.evidence) else os.path.join(cfg.root, args.evidence)
+    if not os.path.exists(path):
+        die("--evidence names a path that does not exist: %s" % args.evidence, code=2)
+    if os.path.isfile(path) and os.path.getsize(path) == 0:
+        die("--evidence names an empty file: %s" % args.evidence, code=2)
+    before = g.show(args.id)
+    leaf = g.amend(args.id, args.premise, args.reason, rel(path, cfg.root))
+    events.emit(cfg, "leaf.amended", {"leaf": args.id, "premise": args.premise,
+                                      "was_outcome": before.get("outcome"),
+                                      "outcome": leaf.get("outcome"),
+                                      "evidence": rel(path, cfg.root)})
+    print("amended %s — premise is now %r (outcome %s)"
+          % (args.id, args.premise, leaf.get("outcome")))
+    print("  the original close and its proof are kept; the correction is appended beneath them")
+    if args.premise in ("holds", "partial"):
+        eprint("\nNOTE: this corrected the RECORD and queued nothing. A verdict moving off "
+               "`refuted` means real work was missed — give it its own leaf with `showrunner "
+               "add`, or it exists only in this reason string.")
+    return 0
+
+
 def cmd_snapshot(args):
     """The world as it is, in one call. JSON on stdout.
 
@@ -1634,6 +1676,16 @@ def build_parser():
     s.add_argument("--base", default="HEAD")
     s.add_argument("--json", action="store_true")
     s.set_defaults(func=cmd_reconcile)
+
+    s = sub.add_parser("amend", help="correct the VERDICT on a leaf that is already closed — "
+                                     "the inverse of `edit`, which refuses a closed leaf")
+    s.add_argument("id")
+    s.add_argument("--premise", required=True,
+                   help="the corrected verdict: holds|partial|refuted|unverifiable")
+    s.add_argument("--reason", required=True, help="what changed your conclusion")
+    s.add_argument("--evidence", required=True,
+                   help="the real file behind the correction — a correction is an assertion too")
+    s.set_defaults(func=cmd_amend)
 
     s = sub.add_parser("snapshot", help="the whole campaign in ONE call and one instant — what "
                                         "a viewer needs before a stream of deltas means anything")
