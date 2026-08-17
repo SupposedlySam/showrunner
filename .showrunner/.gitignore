@@ -10,4 +10,5 @@ integration-commit.json
 config.local.json
 campaign.json.lock
 events.jsonl
+waiting.jsonl
 *.lock
