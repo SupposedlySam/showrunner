@@ -225,6 +225,7 @@ DEFAULT_CONFIG = {
     # cannot fire on its own: it counts an OPTIONAL verb, and in this repo's whole history `trans`
     # ran once against twelve hardens and zero retros. This one counts work that logs itself.
     "work_nudge_every": 8,
+    "retro_overdue_factor": 2,   # the nudge becomes a GATE at factor x threshold; 0 disables
     "watchdog": {"idle_sec": 30, "settle_sec": 5, "ring_cap": 3},
     # Usage-limit survival (statusline tap + limitgate + watchdog park). threshold_pct is where the
     # handoff gate closes; exhausted_pct is where the watchdog treats the session as rate-limited
@@ -311,6 +312,9 @@ def now():
 CONFIG_LOCAL_F = os.path.join(ROOT, "config.local.json")
 
 
+_CONFIG_UNREADABLE = set()
+
+
 def config():
     """config.json, then config.local.json on top — the second one GITIGNORED.
 
@@ -335,9 +339,24 @@ def config():
                 d = json.load(f)
             if isinstance(d, dict):
                 cfg.update(d)
-        except (OSError, ValueError):
+        except OSError:
+            continue            # absent is a FACT: this project set no config here
+        except ValueError:
+            # PRESENT AND UNPARSEABLE IS NOT THAT FACT, and storing it as one is permissive. A git
+            # conflict in this tracked file (two branches that both edited it — ordinary) made every
+            # configured key read as unset, which for a DENYLIST rail means allow: `deploy_verbs`
+            # stopped blocking and nothing said so. Found by running a consumer's own test against
+            # this repo — break the file the way git would, then ask your query and your destructive
+            # verb. A failed read is not a fact.
+            _CONFIG_UNREADABLE.add(f_)
             continue
     return cfg
+
+
+def config_unreadable():
+    """Config files that EXIST and do not parse — never the ones that are simply absent."""
+    config()                    # populate; cheap and already cached by callers' usage patterns
+    return sorted(_CONFIG_UNREADABLE)
 
 
 def config_local_keys():
@@ -482,6 +501,33 @@ def render_banner(s, frm=None):
         f"{TIER_NAMES.get(tier, tier).split(' (')[0]} · claims {s.get('claim_count', 0)} · "
         f"hardened {s.get('hardened_count', 0)}",
     ])
+
+
+def retro_overdue(s):
+    """PAST the nudge by a wide margin — the point where advice has demonstrably not worked.
+
+    Reported by a human watching several machines: agents ignore the nudge, never re-check it, and
+    when asked will happily say the retro is past due. That is the nudge working exactly as designed
+    and the design being wrong — `status` prints a sentence, and a sentence is a thing to remember.
+    INV1 has one test: if the agent ignored every instruction, would this still hold? It did not.
+
+    A WIDE MARGIN on purpose. The nudge stays a nudge for a whole threshold's worth of work, so an
+    agent mid-chapter is never yanked out of it; the gate closes only once the count says the nudge
+    has been passed over for as long again. Config-tunable, and a project that wants no gate sets
+    the factor to 0.
+    """
+    cfg = config()
+    factor = cfg.get("retro_overdue_factor", 2)
+    if not factor:
+        return None
+    t, w = s.get("trans_since_stepback", 0), s.get("work_since_stepback", 0)
+    t_every = cfg.get("trans_nudge_every", 12) * factor
+    w_every = cfg.get("work_nudge_every", 8) * factor
+    if w >= w_every:
+        return (f"{w} pieces of evidence work since the last retro (the gate closes at {w_every})")
+    if t >= t_every:
+        return (f"{t} transitions since the last retro (the gate closes at {t_every})")
+    return None
 
 
 def retro_nudge(s):
@@ -1820,6 +1866,35 @@ def cmd_mandate(s, a):
     flair_out(s, "mandate_set")
 
 
+def ritual_checkpoints():
+    """Checkpoints since the last piece of EVIDENCE WORK, from the shared log (#75).
+
+    NOT a gate, deliberately. `checkpoint` is cheap so a stop is always DELIBERATE, and pricing it
+    would push the next agent toward `--park`, which claims a human called a break when none did —
+    a worse failure than the one being fixed. What changes is the RECORD: repetition becomes
+    visible, which is what makes "this mandate is being ritualised" arguable with evidence instead
+    of something a human has to notice and say twice.
+    """
+    WORK = {"claim", "harden", "fix_prove", "effector_prove", "mutate_prove", "trans", "stepback",
+            "measure", "instrument", "confidence", "authorize"}
+    n = 0
+    try:
+        with open(LOG_F) as f:
+            recs = [l for l in f if '"kind"' in l]
+    except OSError:
+        return 0
+    for line in reversed(recs):
+        try:
+            k = json.loads(line).get("kind")
+        except ValueError:
+            continue
+        if k == "checkpoint":
+            n += 1
+        elif k in WORK:
+            break
+    return n
+
+
 def cmd_checkpoint(s, a):
     """Declare that this turn-end REPORTS rather than ASKS. Buys exactly one turn-end.
 
@@ -1836,8 +1911,15 @@ def cmd_checkpoint(s, a):
     save(s)
     if notify:
         notify.send("checkpoint", f"📍 checkpoint — {a.notes}")  # default-off event; opt in to page
+    _rit = ritual_checkpoints()
     out("✓ CHECKPOINT — one turn-end allowed (reporting, not asking).",
         f"  {a.notes}",
+        *([f"⚠ {_rit + 1} CHECKPOINTS SINCE ANY EVIDENCE WORK — no claim, harden, proof, phase or",
+           "  retro has been logged in between. That is not progress reported N times; it is the",
+           "  same turn-end bought N times, and it is the shape a mandate gets ritualised into.",
+           "  Nothing is blocked: this is cheap so a stop stays deliberate, and pricing it would",
+           "  push the next agent toward `--park`, which lies about a human calling a break."]
+          if _rit >= 2 else []),
         "→ if your closing message asks the human anything, the gate still blocks it. Report, don't ask.")
     # The handback is where the human forms their picture of what exists; "14 commits that only exist
     # here" belongs in that picture — and so does "the fix in those commits was never exercised".
@@ -1893,6 +1975,96 @@ def cmd_arm(s, a):
         "→ the next turn-end passes the gate exactly once, then consumes the arm.",
         "  If your prediction is confident, reconsider: a predicted answer is not worth a T3.")
     flair_out(s, "arm")
+
+
+def cmd_mutate(s, a):
+    """Prove a test PINS something, by breaking the code and watching it go red (#71).
+
+    The tool runs both halves. A self-report cannot satisfy it, which is the whole point: a reviewer
+    mutation-tested eight leaves that had each reported a revert-proof in prose, and three stayed
+    green with the bug reintroduced. The sentence reads identically either way.
+    """
+    if not (a.prove and a.test and a.file and a.replace is not None and a.with_ is not None):
+        die("mutate needs --prove \"<what the test pins>\" --test \"<command>\" --file <path> "
+            "--replace \"<text>\" --with \"<text>\".\n"
+            "The tool runs the test twice and compares. You supply the mutation; it supplies the "
+            "verdict — a revert-proof you report yourself reads the same whether or not it happened.")
+    path = os.path.realpath(os.path.expanduser(a.file))
+    if not os.path.isfile(path):
+        die(f"--file is not a real file: {path}")
+    orig = open(path).read()
+    n = orig.count(a.replace)
+    if n != 1:
+        die(f"--replace must appear EXACTLY once in {a.file}; it appears {n} times.\n"
+            "Ambiguity here would mutate a line you did not mean and prove something about it.")
+
+    def run_test():
+        r = subprocess.run(["bash", "-c", a.test], cwd=REPO_ROOT, capture_output=True, text=True,
+                           timeout=int(a.timeout or 900))
+        return r.returncode
+
+    try:
+        before = run_test()
+    except subprocess.TimeoutExpired:
+        die("the test timed out on the UNMUTATED tree — nothing can be concluded. --timeout to raise.")
+    if before != 0:
+        die(f"the test already FAILS on the unmutated tree (exit {before}).\n"
+            "A red test proves nothing about what it pins: it is red either way. Get it green first.")
+    restored, after = False, None
+    try:
+        with open(path, "w") as f:
+            f.write(orig.replace(a.replace, a.with_, 1))
+        # BUMP THE MTIME, or a same-size mutation is invisible to every cache keyed on (mtime, size).
+        # Found by this verb returning NOT PROVED for a test that demonstrably DOES go red: `a + b`
+        # -> `a - b` is byte-for-byte the same length, both writes landed inside one filesystem mtime
+        # tick, and Python reused its .pyc. The verb built to catch a test that cannot fail was
+        # itself reporting a confident wrong verdict for the same reason.
+        _future = time.time() + 5
+        try:
+            os.utime(path, (_future, _future))
+        except OSError:
+            pass                    # best effort: a filesystem that refuses this is not a reason to
+                                    # abandon the proof, but the caller may see a stale-cache pass
+        try:
+            after = run_test()
+        except subprocess.TimeoutExpired:
+            after = None
+    finally:
+        try:
+            with open(path, "w") as f:
+                f.write(orig)
+            restored = True
+        except OSError as exc:
+            print(f"\n!! COULD NOT RESTORE {path}: {exc}\n"
+                  f"!! The file is MUTATED on disk. Restore it before anything else.",
+                  file=sys.stderr)
+    if not restored:
+        die("refusing to record a proof while the tree is left mutated.")
+    if after is None:
+        die("the test timed out on the MUTATED tree. That is not a failure — it is a run that could "
+            "not answer, and treating it as red would be the exact substitution this verb exists to "
+            "stop.")
+    if after == 0:
+        die(f"NOT PROVED — the test still PASSED with the mutation applied (exit 0).\n\n"
+            f"  {a.file}: {a.replace!r} -> {a.with_!r}\n"
+            f"  {a.test}\n\n"
+            "This test does not pin what you said it pins. That is the finding, and it is the one "
+            "worth having: a reviewer found three of eight leaves in this state, each having "
+            "reported a revert-proof in prose. Either the test is not covering this line, or the "
+            "mutation is not the behaviour it covers.")
+    logline({"kind": "mutate_prove", "prove": a.prove, "file": path, "test": a.test,
+             "replace": a.replace[:120], "with": a.with_[:120], "before": before, "after": after})
+    s["mutate_proofs"] = s.get("mutate_proofs", 0) + 1
+    save(s)
+    out("✓ PROVED — the test goes RED when that line changes.",
+        f"  pins   : {a.prove}",
+        f"  file   : {a.file}",
+        f"  test   : {a.test}",
+        f"  before : exit {before} (green, unmutated)   after: exit {after} (red, mutated)",
+        "  tree restored.",
+        "",
+        "WHAT THIS DOES NOT SAY: that the test is good, that this mutation is the bug the fix was",
+        "for, or that anything else is covered. It says this one line is pinned by that one test.")
 
 
 def cmd_authorize(s, a):
@@ -3986,6 +4158,43 @@ def cmd_stopgate(s, a, payload):
             s["stop_gate_blocks_total"] = s.get("stop_gate_blocks_total", 0) + 1
             save(s)
             print(tblock, file=sys.stderr)
+            sys.exit(2)
+        # THE RETRO OWES ITS ENCODING (and a PARKED mandate is exempt — a human called that break
+        # and must not be trapped by a bookkeeping debt). Checked after the trigger block so an
+        # attachment's verdict still comes first, and before the consume block so it does not spend
+        # a checkpoint the agent will still need.
+        # OVERDUE BEATS UNPAID: being told to run a retro you have skipped twice over is more use
+        # than being told to encode a retro you have not had. Same park exemption.
+        _over = retro_overdue(s)
+        if _over and not ((s.get("mandate") or {}).get("parked")):
+            s["stop_gate_blocks_total"] = s.get("stop_gate_blocks_total", 0) + 1
+            save(s)
+            print("STOP GATE CLOSED — the retro is overdue and the nudge did not work.\n\n"
+                  f"  {_over}\n\n"
+                  "`status` has been saying this is due. A printed nudge is a thing to remember, and\n"
+                  "this project's first invariant is that a rule the agent has to remember is followed\n"
+                  "only some of the time. So it is a gate now, one full threshold past the nudge.\n\n"
+                  "  game_loop stepback --notes \"what worked, where I deviated, what to encode\"\n\n"
+                  "It will then hold again until you ENCODE something from it, or say on the record\n"
+                  "that there was nothing to encode. The reflection was never the point.",
+                  file=sys.stderr)
+            sys.exit(2)
+        _debt = retro_debt_open(s)
+        if _debt and not ((s.get("mandate") or {}).get("parked")):
+            s["stop_gate_blocks_total"] = s.get("stop_gate_blocks_total", 0) + 1
+            save(s)
+            print("STOP GATE CLOSED — you ran a retro and encoded nothing from it.\n\n"
+                  f"  the retro landed at {_debt}, and no `harden` has been logged since.\n\n"
+                  "A retro that lists learnings and encodes none is indistinguishable, a week later,\n"
+                  "from one that never happened — both leave a session where nothing got enforced.\n"
+                  "The reflection was never the point; the encoding is.\n\n"
+                  "  game_loop harden --learning \"..\" --artifact <real path> --mechanism \"..\" --rung <1..6>\n\n"
+                  "If this chapter genuinely taught nothing, that is a legitimate outcome and costs\n"
+                  "one sentence on the record:\n\n"
+                  "  game_loop stepback --nothing-to-harden --reason \"<why>\"\n\n"
+                  "This gate exists because the printed instruction was not enough: a consumer ran\n"
+                  "the retro, produced a full reflection, and hardened nothing.",
+                  file=sys.stderr)
             sys.exit(2)
         if (rec or {}).get("kind") == "mandate_park_stop":
             # CONSUME: one park == one turn-end (the break itself). The mandate stays parked — it is
@@ -6610,6 +6819,20 @@ def cmd_status(s, a):
     out(*fixes_report(s))   # which fixes were exercised through their OWN output — not their repro
     out(*coverage_report(s))   # what the rails are NOT looking at — silence from a rail is not safety
     out(*worktree_report(s))   # …and whether the rails in THIS tree are the project's at all (#30)
+    # A CONFIG THAT DID NOT PARSE IS NOT A CONFIG WITH NOTHING IN IT. Reported before anything that
+    # reads config, because every line below is computed from defaults when this fires — and for a
+    # DENYLIST rail (deploy_verbs) defaults mean ALLOW. A tracked file two branches both edited
+    # conflicts as a matter of course, so this is an ordinary merge away, not an exotic state.
+    _unread = config_unreadable()
+    if _unread:
+        out("⚠ CONFIG DID NOT PARSE — every setting below is a DEFAULT, not this project's policy:",
+            *[f"    {p}" for p in _unread],
+            "  This is what a git conflict in a tracked config looks like. While it lasts,",
+            "  `deploy_verbs` blocks NOTHING (a denylist read as empty allows everything), and any",
+            "  mcp_* or allow_write_roots grant this project set is not in force either.",
+            "  Fix the file; nothing here can tell an unparseable config from an absent one on your",
+            "  behalf, which is exactly why it says so rather than carrying on quietly.",
+            "")
     out(*config_paths_report())   # a TRACKED config handing every cloner a write root on ONE machine
     if (ro := ruled_out()):
         # The single most useful question at the start of a resumed investigation is "what has
@@ -6703,6 +6926,7 @@ def cmd_harden(s, a):
             "Hardening means the artifact EXISTS (code / assert / check / tool), not a plan to write "
             "one. Write it first, then record it here.")
     general = (getattr(a, "general", None) or "").strip()
+    s["retro_owes_harden"] = None          # CONSUME: the retro's obligation is paid by the act
     logline({"kind": "harden", "learning": a.learning, "artifact": list(resolved.values()),
              "mechanism": a.mechanism, "rung": a.rung, "general": general or None})
     s["hardened_count"] = s.get("hardened_count", 0) + 1
@@ -6767,6 +6991,18 @@ def retro_outcome():
 
 
 def cmd_stepback(s, a):
+    if getattr(a, "nothing_to_harden", False):
+        if not a.reason:
+            die("--nothing-to-harden needs --reason: an empty retro is a DECISION, and a decision "
+                "with no reason is indistinguishable from the silence this gate exists to stop.")
+        s["retro_owes_harden"] = None
+        save(s)
+        logline({"kind": "retro_no_harden", "reason": a.reason})
+        out("✓ RECORDED — this retro encoded nothing, and why.",
+            f"  {a.reason}",
+            "→ turn-end is open. It is in the log, so an empty chapter reads as a call somebody",
+            "  made rather than a retro that quietly produced nothing.")
+        return
     if not a.notes:
         die("stepback needs --notes — a REAL retro: what WORKED (repeat it)? where did I DEVIATE? "
             "did I assert before reading? AND which recurring learning gets ENCODED (harden), not "
@@ -6781,6 +7017,11 @@ def cmd_stepback(s, a):
     logline({"kind": "stepback", "notes": a.notes})
     s["trans_since_stepback"] = 0
     s["work_since_stepback"] = 0
+    # THE RETRO NOW OWES ITS OWN ENCODING. Everything printed below is an instruction, and a
+    # consumer ran this verb, produced a full reflection and hardened nothing — the failure this
+    # verb exists to prevent, committed by the verb that teaches it. The Stop gate holds turn-end
+    # until a harden lands or the agent declines on the record.
+    s["retro_owes_harden"] = now()
     save(s)
     if incoming:
         out(*incoming)
@@ -6799,7 +7040,37 @@ def cmd_stepback(s, a):
         *["  " + r for r in HARDEN_LADDER],
         "Then record each with a REAL artifact path (the ungameable bit, same as `claim --read`):",
         '  game_loop harden --learning ".." --artifact <real path> --mechanism ".." --rung <1..6>',
-        "Rung 6 (doc/memory) is the LAST resort — if you pick it, say why 1-5 don't apply.")
+        "Rung 6 (doc/memory) is the LAST resort — if you pick it, say why 1-5 don't apply.",
+        "",
+        "THIS TURN CANNOT END UNTIL ONE OF THOSE LANDS. Not a nag — the gate holds, because every",
+        "line above is an instruction and instructions are what this project refuses to enforce with.",
+        "If the chapter genuinely taught nothing, say so and it is a decision on the record:",
+        '  game_loop stepback --nothing-to-harden --reason "<why there is nothing to encode>"')
+
+
+def retro_debt_open(s):
+    """Does this session owe a harden for a retro it already ran? (the obligation, not a judgement)
+
+    Satisfied by a harden logged AFTER the stepback — read from the log rather than a flag the
+    verb sets, so it cannot be cleared by anything except the act itself.
+    """
+    owed = s.get("retro_owes_harden")
+    if not owed:
+        return None
+    try:
+        with open(LOG_F) as f:
+            for ln in f:
+                if '"harden"' not in ln:
+                    continue
+                try:
+                    r = json.loads(ln)
+                except ValueError:
+                    continue
+                if r.get("kind") == "harden" and str(r.get("t") or "") > str(owed):
+                    return None                     # encoded: the debt is paid
+    except OSError:
+        return None                                 # cannot read the log: never invent a debt
+    return owed
 
 
 # ── prose arrives unmangled, or it does not arrive (#58) ─────────────────────────────────────────
@@ -6926,6 +7197,13 @@ def main():
     n.add_argument("--text")
 
     hd = sub.add_parser("harden")
+    mu = sub.add_parser("mutate")   # a revert-proof the TOOL performs, not one you report (#71)
+    mu.add_argument("--prove", help="what this test is claimed to pin")
+    mu.add_argument("--test", help="the test command; must be GREEN before, RED after")
+    mu.add_argument("--file", help="the production file to break")
+    mu.add_argument("--replace", help="text to replace — must appear exactly once")
+    mu.add_argument("--with", dest="with_", help="what to replace it with")
+    mu.add_argument("--timeout", help="seconds per test run (default 900)")
     hd.add_argument("--learning", help="the one-line rule you'd otherwise have to REMEMBER")
     hd.add_argument("--artifact", help="real path[,path] to the code/assert/check/tool that enforces it")
     hd.add_argument("--mechanism", help="how it now fails loudly / becomes impossible")
@@ -6934,6 +7212,10 @@ def main():
                                       "knowing this codebase (fed to any `harden` trigger)")
 
     sb = sub.add_parser("stepback")
+    sb.add_argument("--nothing-to-harden", action="store_true",
+                    help="this retro encoded nothing, deliberately. Needs --reason; recorded in the "
+                         "log so an empty chapter is a decision rather than a silence.")
+    sb.add_argument("--reason", help="why there is nothing to encode (with --nothing-to-harden)")
     sb.add_argument("--notes")
 
     tr = sub.add_parser("trans")
@@ -7116,7 +7398,7 @@ def main():
      "pin": cmd_pin, "effector": cmd_effector, "fix": cmd_fix,
      "checkpoint": cmd_checkpoint, "authorize": cmd_authorize, "notify": cmd_notify,
      "pin": cmd_pin, "effector": cmd_effector, "fix": cmd_fix, "owned": cmd_owned,
-     "worktree": cmd_worktree, "watchdog": cmd_watchdog, "self": cmd_self,
+     "mutate": cmd_mutate, "worktree": cmd_worktree, "watchdog": cmd_watchdog, "self": cmd_self,
      "confidence": cmd_confidence,
      "instrument": cmd_instrument, "measure": cmd_measure,
      "limitprobe": cmd_limitprobe, "model": cmd_model}[a.cmd](s, a)

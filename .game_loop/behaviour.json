@@ -146,6 +146,15 @@
       "change": "`authorize --reason` now REFUSES a narrow, named class of reason: one citing the agent's own instructions (\"brief instructs\", \"the brief\", \"my prompt\", \"task says\", \"as instructed\", and similar). The refusal names the two real routes \u2014 ask via `arm`, or report upward if you were dispatched. The record and the log also now carry asked_via_arm, saying whether a question was armed in this session.",
       "consequence": "if anything you run authorises from a dispatched brief rather than a human's words, it now fails instead of recording. A human's actual sentence still authorises unchanged \u2014 only self-citation is refused, and a human who happens to say \"the brief says to\" loses a rephrase. asked_via_arm does not gate anything; it makes a hatch spent with nobody asked readable as different from one spent after asking.",
       "why_it_qualifies": "an authorize call that succeeded before now returns non-zero. It closes a case observed in the wild: an unattended Crawler spent the human's hatch twice on its own brief, and the log then read as human-sanctioned when nobody had been asked \u2014 which destroys the property single-use-and-logged exists for."
+    },
+    {
+      "seq": 13,
+      "sha": "a63005e",
+      "notice": true,
+      "verb": "the commit gate, on a tree with no harness",
+      "change": "the refusal now prints a PASTEABLE install command for the exact unharnessed tree, and records itself in the PARENT's log as kind commit_gate_unharnessed_tree. The refusal itself is unchanged in what it refuses.",
+      "consequence": "if you grep your log for how often this gate fires, you will now find entries where before there were none \u2014 the commit tree has no .game_loop/ and therefore no log of its own, so every one of these was previously invisible in the only place a reviewer would look. Nothing is refused that was permitted before.",
+      "why_it_qualifies": "a consumer who changed nothing sees different refusal text and new log lines. Reported after four --no-verify commits in one day: the honest remedies were a manual step and an impossibility, so the escape hatch won every time and left no trace of the gate that prompted it. The behaviour gate did NOT fire \u2014 no refusal line matched its regex \u2014 so this entry is a judgement."
     }
   ],
   "schema": 1

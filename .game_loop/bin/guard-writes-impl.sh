@@ -760,17 +760,43 @@ Commit from the tree you are already in, or name the path literally. Either is o
 leave a gate that actually ran."
           ;;
         undetermined:*)
+          # LOG IT TO THE PARENT, which is the only tree here that HAS a log (#74). The commit tree
+          # has no .game_loop/, so it has no log.jsonl, so every one of these refusals was invisible
+          # in the one place a reviewer would grep. Four --no-verify commits in a day left no trace
+          # of the gate that prompted them. A guard that cannot report how often it is bypassed
+          # cannot be argued about with evidence.
+          _gl_unharnessed="${commit_root#undetermined:}"
+          if [ -d "$GAMELOOP_DIR" ]; then
+            python3 - "$GAMELOOP_DIR/log.jsonl" "$_gl_unharnessed" "$REPO_REAL" <<'PYLOG' 2>/dev/null || true
+import datetime, json, sys
+try:
+    with open(sys.argv[1], "a") as f:
+        f.write(json.dumps({"t": datetime.datetime.now().isoformat(timespec="seconds"),
+                            "kind": "commit_gate_unharnessed_tree",
+                            "commit_tree": sys.argv[2], "checks_describe": sys.argv[3]}) + "\n")
+except OSError:
+    pass
+PYLOG
+          fi
           deny "BLOCKED: this commit lands in a tree that carries no game_loop, so its owed checks cannot be read.
 
-    the commit's tree:  ${commit_root#undetermined:}
+    the commit's tree:  ${_gl_unharnessed}
     the tree these checks describe:  $REPO_REAL
 
 .game_loop/verify.yaml and the record of when each check last ran belong to ONE tree. Checking a
 DIFFERENT tree's record would answer a question about files this commit does not contain — and report
 confidence either way. That is the false green this gate exists to prevent, so it refuses instead (INV6).
 
-Install game_loop in that tree so it carries its own record, commit from the tree the checks describe,
-or commit with --no-verify to skip the gate out loud and on the record."
+THE FIX, ready to paste — it provisions that tree with THIS tree's rules, once:
+
+    ${REPO_REAL}/.game_loop/bin/../../install.sh ${_gl_unharnessed}
+
+(If game_loop was installed here from elsewhere, use that clone's install.sh. A worktree provisioned
+this way adopts the parent's verify.yaml rather than a blank one, which would be a gate that owes
+nothing and reports success.)
+
+Or commit from the tree the checks describe, or use --no-verify to skip the gate out loud. This
+refusal is now recorded in the PARENT's log either way, so how often it fires is answerable."
           ;;
       esac
       GAMELOOP_TARGET="${commit_root#root:}"
