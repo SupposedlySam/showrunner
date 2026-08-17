@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -299,6 +300,31 @@ def test_locks():
         fh.write("some-host:1\n")
     state, _ = device.state()
     eq("a claim from a different boot is STALE even when the pid is alive", state, locks.STALE)
+
+    # A BOOT TOKEN NOBODY COULD READ IS NOT A DIFFERENT BOOT. `boot_token` degrades to
+    # `<host>:unknown` when the boot time is undiscoverable, and comparing THAT against a real
+    # recorded one made every holder on the machine read as "recorded on a previous boot" — i.e.
+    # PROVED DEAD, reclaimable, taken out from under a live session. A transient `sysctl`
+    # failure was enough. Both directions, because a stored unknown is the same problem from
+    # the other side: neither value can settle the question, so neither may answer it.
+    _orig_bt = locks.boot_token
+    locks.boot_token = lambda: "%s:unknown" % os.uname().nodename
+    try:
+        with open(os.path.join(device.dir, "boot"), "w") as fh:
+            fh.write("some-host:1\n")
+        unknown_now, _ = device.state()
+        with open(os.path.join(device.dir, "boot"), "w") as fh:
+            fh.write("%s:unknown\n" % os.uname().nodename)
+        unknown_stored, _ = device.state()
+    finally:
+        locks.boot_token = _orig_bt
+    eq("when THIS boot's token could not be read, a live holder is still HELD — 'could not "
+       "tell' must never become 'proved dead', which is this module's whole posture and the "
+       "one verdict that lets a lock be taken from somebody", unknown_now, locks.HELD)
+    eq("...and the same when the RECORDED token is the unknown one, since neither value can "
+       "settle the question", unknown_stored, locks.HELD)
+    ok("...while the real comparison still fires, so this widened nothing: the STALE assertion "
+       "above ran against the same lock with both tokens readable", state == locks.STALE)
     device.release(force=True)
 
     marker = os.path.join(tmpdir("lockrun"), "ran.txt")
@@ -1182,9 +1208,19 @@ def test_harness_provisioning():
         else:
             ok("...while a '%s' one says WHY nothing is scheduled, rather than reporting no "
                "follow-up as though that were normal" % label, bool(fu["why"]), fu)
+    # AGAINST `follow_up`, not against the table this test declared. This read
+    # `not follow_states["failing"][1]`, which subscripts the literal `False` written twenty
+    # lines above — `not False`, in a sentence about the watchdog. The loop's own
+    # `eq(fu["scheduled"], want_sched)` already covers the case; this states the consequence,
+    # so it asks the producer.
+    H._porcelain = lambda b, v: (0, dict(follow_states["failing"][0]))
+    try:
+        failing = H.follow_up(post)
+    finally:
+        H._porcelain = _orig_porc
     ok("a FAILING probe is not counted as scheduled — it rings and reports failing, so it is a "
        "broken watchdog rather than a re-check that will happen",
-       not follow_states["failing"][1])
+       failing["scheduled"] is False and bool(failing.get("why")), failing)
 
     # THE INTERVAL IS ABSENT, AND THAT IS ASSERTED RATHER THAN ASSUMED. The harness's payload
     # carries no period, so "next follow-up at HH:MM" cannot be computed from anything this
@@ -1298,15 +1334,11 @@ def test_harness_provisioning():
     ok("...and it outranks every verdict, because a term nobody understands says nothing about "
        "the ones that were understood", H.SEVERITY[H.UNRECOGNISED] > max(
            H.SEVERITY[c] for c in H.CONTRACT_CODES))
-    blocked_status = [s for s in ("unrecognised", "drifted", "undetermined", "a-verdict-in-2027")
-                      if s not in (None, "clean", "notes-drifted")]
-    eq("...and integrate's conditional is keyed on the PERMISSIVE answer, so every future "
-       "verdict fails closed by construction rather than by somebody remembering to list it",
-       blocked_status,
-       ["unrecognised", "drifted", "undetermined", "a-verdict-in-2027"])
-    ok("...while a repo with no harness at all still merges — that is a supported shape and "
-       "refusing it would break every consumer that never had one",
-       None in (None, "clean", "notes-drifted"))
+    # WHAT INTEGRATE DOES WITH THAT VERDICT is asserted against `campaign.integrate` in the
+    # integration group, not here. Two assertions used to sit at this spot claiming to cover it
+    # and computing both sides from string literals written three lines above them: they passed
+    # with the conditional reverted, and would have passed with campaign.py deleted from disk.
+    # A test is falsifiable only by something that did not share the belief, and those shared it.
 
     # RANKING, and it is showrunner's own bug rather than the harness's. A tree may carry more
     # than one harness directory, and the chain of pairwise comparisons that used to pick the
@@ -1563,7 +1595,6 @@ def test_integration():
         fh.write("done\n")
     gates.close_gate(cfg, g, "m5", "proof-m5.txt", "done", premise="holds",
                      premise_read="README.md")
-    real_check = campaign.harness.check_tree if hasattr(campaign, "harness") else None
     from showrunner import harness as _H
     _orig = _H.check_tree
     _H.check_tree = lambda c, w: ("drifted", "test: this tree enforces different things", False)
@@ -1575,6 +1606,35 @@ def test_integration():
        "was answering a different question", ok_d is False, res_d)
     ok("...and says so by name rather than failing obscurely",
        any(r["status"].startswith("harness-") for r in res_d), res_d)
+
+    # THE INVERSION ITSELF, which is the claim the conditional was rewritten to make and which
+    # had no behavioural coverage anywhere. What stood in for it (in the harness group) was a
+    # list comprehension over four string literals asserted against those same four literals —
+    # `campaign` was never called, imported or read, and the second assertion was
+    # `None in (None, ...)`. Reverting campaign.py's conditional to its old permissive form
+    # left the whole suite green, which is how an `unrecognised` verdict would have merged.
+    #
+    # dry_run on purpose: the block is decided BEFORE the dry-run branch, so both sides are
+    # provable without moving the trunk out from under the assertions that follow.
+    def integrate_with(verdict):
+        _H.check_tree = lambda c, w, _v=verdict: (_v, "test: canned %r" % (_v,), False)
+        try:
+            return campaign.integrate(cfg, g, base="main", only=["m5"], dry_run=True)
+        finally:
+            _H.check_tree = _orig
+
+    res_f, ok_f = integrate_with("a-verdict-from-2027")
+    ok("a verdict this side has no meaning for BLOCKS the merge, without anyone having listed "
+       "it — the conditional is keyed on the PERMISSIVE answer, so a contract that grows a term "
+       "stops the consumer rather than being guessed at in the permissive direction",
+       ok_f is False and any(r["status"] == "harness-a-verdict-from-2027" for r in res_f), res_f)
+
+    for allowed in (None, "clean", "notes-drifted"):
+        res_p, ok_p = integrate_with(allowed)
+        ok("...while %r stays on the MERGING side, which is the half that makes this a boundary "
+           "and not a blanket refusal: a repo with no harness at all is a supported shape, and "
+           "blocking it would break every consumer that never had one" % (allowed,),
+           ok_p is not False and any(r["status"] == "would-merge" for r in res_p), res_p)
 
     # Provenance of an integration commit (#14).
     merged_branch = results[0]["branch"]
@@ -1613,6 +1673,28 @@ def test_integration():
 
 
 # ======================================================== CORE: the CLI
+def _fork_output(cli_mod, cfg, name, session):
+    """`worktree fork` through the CLI, in-process, returning what it printed.
+
+    In-process rather than through a subprocess because the state under test — an acquire that
+    cannot resolve a session pid — is produced by a monkeypatch, and a child process would
+    resolve a real pid and never enter the branch. The cwd is the config's only input, so it is
+    moved and restored rather than passed.
+    """
+    import io
+    args = cli_mod.build_parser().parse_args(
+        ["worktree", "fork", "--from", "recorded-probe", "--name", name, "--session", session])
+    buf, saved, cwd = io.StringIO(), sys.stdout, os.getcwd()
+    sys.stdout = buf
+    os.chdir(cfg.root)
+    try:
+        cli_mod.cmd_worktree_fork(args)
+    finally:
+        os.chdir(cwd)
+        sys.stdout = saved
+    return buf.getvalue()
+
+
 def test_worktree_lease():
     group("The worktree lease: one session per tree (WL-02)")
     cfg = make_repo()
@@ -1807,11 +1889,15 @@ def test_worktree_lease():
     eq("...and the hijack is LOGGED, because WL-05 may not build a gate without an observed "
        "failure, and a line printed to a terminal nobody kept is not an observation",
        len(events_of("lease.hijack")), before + 1)
-    ev = events_of("lease.hijack")[-1]
+    # `or [{}]`, so a run where NO hijack was journalled fails the two assertions below rather
+    # than raising out of the group and taking the twenty after them with it. A mutant that
+    # crashes a group is unscoreable — the sweep reports a number from a truncated run — and
+    # this subscript is what made `worktree enter` read as CRASHED rather than as covered.
+    ev = (events_of("lease.hijack") or [{}])[-1]
     eq("...naming the intruder", ev.get("intruder_session"), "sess-2")
     eq("...and the holder it collided with", ev.get("holder_session"), "sess-1")
     eq("entering does NOT take the tree from the holder — the prompt is not the enforcement",
-       lease.Lease(cfg, "enter-probe").holder().get("session"), "sess-1")
+       (lease.Lease(cfg, "enter-probe").holder() or {}).get("session"), "sess-1")
 
     # A dead holder is reclaimed, loudly. Paired with the hijack above so neither reads as
     # "enter always does the same thing".
@@ -1822,7 +1908,7 @@ def test_worktree_lease():
     eq("a tree whose holder is provably dead is RECLAIMED, so a crashed session cannot wedge it "
        "forever", v, "reclaimed")
     eq("...and the new holder is the entering session",
-       lease.Lease(cfg, "enter-probe").holder().get("session"), "sess-3")
+       (lease.Lease(cfg, "enter-probe").holder() or {}).get("session"), "sess-3")
 
     # UNREADABLE must survive entry untouched. The one state where being helpful is the bug: a
     # partial write by a LIVE holder is indistinguishable from a dead one.
@@ -1858,7 +1944,7 @@ def test_worktree_lease():
     eq("the fork's base is recorded RESOLVED, not as the symbolic ref it was asked for — git "
        "cannot recover what 'HEAD' meant at this instant afterwards", d["base"], first)
     eq("...and the forking session holds the new tree",
-       lease.Lease(cfg, "fork-probe").holder().get("session"), "sess-9")
+       (lease.Lease(cfg, "fork-probe").holder() or {}).get("session"), "sess-9")
     eq("...while the tree it forked FROM is untouched", lease.tree_for(cfg, ent), "enter-probe")
 
     _, d2 = lease.fork(cfg, "enter-probe", "sess-9", base="HEAD", name="fork-symbolic")
@@ -1882,6 +1968,148 @@ def test_worktree_lease():
        d3["base"], first)
     ok("...which is not the tip, so that assertion can tell the two apart", first != head)
 
+    # THE LEASE THE FORK CLAIMS TO HAVE TAKEN. `fork` called `acquire` and threw the result
+    # away; the CLI printed "lease held by you" unconditionally. So in the state where `enter`
+    # itself refuses — no resolvable session pid — the reader was moved to a fresh tree, told
+    # it was leased, and it was FREE. That is the FIRST remedy the hijack refusal offers, so
+    # the lie was reserved for somebody already being told their tree had been taken.
+    ok("a fork that took its lease says so", d3.get("leased") is True, d3)
+    _orig_spid = lease.session_pid
+    lease.session_pid = lambda: (None, "test: nothing to resolve")
+    try:
+        _, d4 = lease.fork(cfg, "recorded-probe", "sess-11", name="fork-hollow")
+    finally:
+        lease.session_pid = _orig_spid
+    ok("...and a fork whose lease could NOT be taken reports leased=False rather than "
+       "reporting the acquire it discarded", d4.get("leased") is False, d4)
+    eq("...and the tree really is unheld, which is what makes the flag a measurement rather "
+       "than a second opinion", lease.Lease(cfg, "fork-hollow").state()[0], locks.FREE)
+    # THROUGH THE CLI, because a `leased` flag computed correctly and printed as success is
+    # exactly the shape of a check nobody notices. In-process so the same monkeypatch reaches
+    # it — a subprocess resolves a real pid and never enters this branch.
+    from showrunner import cli as _CLI
+    lease.session_pid = lambda: (None, "test: nothing to resolve")
+    try:
+        said = _fork_output(_CLI, cfg, "fork-hollow-cli", "sess-12")
+    finally:
+        lease.session_pid = _orig_spid
+    ok("...and the CLI says UNGUARDED rather than 'held by you', because the reader acts on "
+       "that line and the tree it names is one anybody can walk into",
+       "UNGUARDED" in said and "held by you" not in said, said[-300:])
+    ok("...while a fork that DID take its lease still says held by you, so this is a report of "
+       "the acquire and not a line that got pessimistic",
+       "held by you" in _fork_output(_CLI, cfg, "fork-held-cli", "sess-13"))
+
+    # A LOST RACE IS NOT A MISSING PID. `acquire` returns False for two unrelated reasons and
+    # `enter` mapped both onto "no session process could be resolved… this tree is unprotected"
+    # — which, when another session simply got there first, is the opposite of the truth: the
+    # holder is real, live, and was reported as absent. Only the READER's timing is simulated
+    # here; the lock, the holder and the acquire are all real, and the acquire really loses.
+    racer = "race-probe"
+    os.makedirs(os.path.join(cfg.worktree_root, racer), exist_ok=True)
+    winner = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        lease.Lease(cfg, racer).acquire("sess-WINNER", who="first", pid=winner.pid,
+                                        basis="dispatch-recorded")
+        # ONLY THE FIRST LOOK IS STALE, which is what the race actually is: `enter` reads FREE,
+        # somebody else wins the mkdir in the gap, and every read after that sees the truth. A
+        # patch that answered FREE forever would also blind the re-derivation and prove nothing.
+        # Patched at the read `enter` ACTUALLY MAKES — `Lock.settled_state`, the one it uses to
+        # adjudicate — while `Lock.state`, which `held_by_other` re-reads through, stays real.
+        # So the first look is stale and every look after it sees the truth, which is what the
+        # race is. A patch that answered FREE forever would blind the re-derivation too and
+        # prove nothing.
+        _orig_settled = locks.Lock.settled_state
+        looks = []
+
+        def stale_once(self, *a, **kw):
+            looks.append(1)
+            return (locks.FREE, None) if len(looks) == 1 else _orig_settled(self, *a, **kw)
+
+        locks.Lock.settled_state = stale_once
+        try:
+            verdict, detail = lease.enter(cfg, "sess-LOSER",
+                                          path=os.path.join(cfg.worktree_root, racer))
+        finally:
+            locks.Lock.settled_state = _orig_settled
+        ok("...and the loser really did look again after losing, rather than reporting a "
+           "verdict inferred from the boolean the failed acquire returned",
+           (detail.get("holder") or {}).get("pid"), detail)
+        eq("a session that reads FREE and then LOSES the atomic mkdir is told it was HIJACKED, "
+           "not that no process could be resolved — the verdict is re-derived from the lock "
+           "after the failed acquire instead of being inferred from a boolean",
+           verdict, "hijack")
+        eq("...naming the session that actually holds it",
+           (detail.get("holder") or {}).get("session"), "sess-WINNER")
+        from showrunner import events as _EV
+        ev, _, _ = _EV.read(cfg)
+        raced = [e for e in ev if e.get("kind") == "lease.hijack" and e.get("raced")]
+        ok("...and the hijack is JOURNALLED like any other, so the race is visible to `watch` "
+           "rather than being the one hijack nobody records", raced, ev[-2:])
+    finally:
+        winner.terminate()
+        winner.wait()
+
+    # AN INCOMPLETE LOCK IS NOT A CORRUPT ONE. `acquire` mkdirs the directory and writes `pid`
+    # as a separate file, so for a moment a concurrent reader sees a lock with no pid — which
+    # `state()` calls UNREADABLE and every adjudicating caller treats as "a human must clear
+    # this". Two sessions starting in the same tree could therefore hard-fail, exit 2, over a
+    # lock that was valid a millisecond later, with a printed remedy that did not work.
+    half = locks.Lock(cfg.lock_root, "half-written")
+    os.makedirs(half.dir, exist_ok=True)
+    eq("a lock directory with no pid in it yet reads UNREADABLE — the transient and the torn "
+       "write are genuinely indistinguishable in one look", half.state()[0], locks.UNREADABLE)
+    filler = threading.Thread(target=lambda: (time.sleep(0.15),
+                                              half._write_owner(os.getpid(), "late", "s-late")))
+    filler.start()
+    try:
+        eq("...but LOOKING AGAIN settles it: a writer still finishing resolves to HELD, because "
+           "'cannot tell' is answered by looking rather than by promoting the transient case",
+           half.settled_state(grace=3.0)[0], locks.HELD)
+    finally:
+        filler.join()
+    torn = locks.Lock(cfg.lock_root, "torn-write")
+    os.makedirs(torn.dir, exist_ok=True)
+    eq("...while a torn write STAYS unreadable past the grace and keeps the hard refusal, "
+       "because it does not repair itself and only a human can find out whether that holder "
+       "is running", torn.settled_state(grace=0.2)[0], locks.UNREADABLE)
+
+    # THE REMEDY THAT REFUSAL PRINTS. `lock release <name> --force` resolved CONFIGURED
+    # resources only, and a lease is named `worktree:<tree>`, which is not one and never will
+    # be — so the single escape hatch offered to a human staring at a wedged lease answered
+    # "no resource named 'worktree:...' in config" and exited 2.
+    stuck = lease.lease_name(racer)
+    ok("a lease's lock is not a configured resource, which is why this was reachable at all",
+       cfg.resource(stuck) is None, stuck)
+    ok("...and it is really on disk under that name",
+       os.path.isdir(os.path.join(cfg.lock_root, "%s.lock" % stuck)))
+    rel_out = subprocess.run(
+        [sys.executable, os.path.join(ROOT, "bin", "showrunner"), "lock", "release", stuck,
+         "--force"], cwd=cfg.root, capture_output=True, text=True)
+    eq("`lock release <lease> --force` — the exact string the UNREADABLE refusal prints — "
+       "actually releases it (%s)" % (rel_out.stdout + rel_out.stderr).strip()[-120:],
+       rel_out.returncode, 0)
+    eq("...and the lease is gone afterwards, so the remedy repaired the state rather than "
+       "exiting 0 about it", lease.Lease(cfg, racer).state()[0], locks.FREE)
+    typo = subprocess.run(
+        [sys.executable, os.path.join(ROOT, "bin", "showrunner"), "lock", "release",
+         "worktree:no-such-tree", "--force"], cwd=cfg.root, capture_output=True, text=True)
+    eq("...while a name that is neither configured NOR on disk is still refused, so this "
+       "widened one door rather than removing the check", typo.returncode, 2)
+    # The refusal has to NAME what is really there, or a human clearing a wedged lease is told
+    # only about the configured resources — the set that provably does not contain the thing
+    # they are looking at. A second consumer of the same on-disk listing, so an always-empty
+    # answer is noticed here as well as by `reap`.
+    lease.Lease(cfg, racer).acquire("sess-KNOWN", who="probe", pid=os.getpid(),
+                                    basis="dispatch-recorded")
+    named = subprocess.run(
+        [sys.executable, os.path.join(ROOT, "bin", "showrunner"), "lock", "release",
+         "worktree:still-not-a-tree", "--force"], cwd=cfg.root, capture_output=True, text=True)
+    ok("...and the refusal lists the locks that ARE held, leases included, so the reader is "
+       "shown the name they actually need rather than only the configured resources",
+       stuck in (named.stdout + named.stderr), (named.stdout + named.stderr)[-300:])
+    lease.Lease(cfg, racer).release(force=True)
+
     # ---- worktree guard (WL-05): the teeth -------------------------------------------
     # EVERY ALLOW IS PAIRED WITH THE CASE WHERE IT DENIES. An allow-only suite passes
     # identically against a guard that does nothing, and a permission — unlike a refusal — can
@@ -1902,12 +2130,22 @@ def test_worktree_lease():
         eq("...naming the tree it is protecting", det.get("tree"), gt)
         ok("...and naming the HOLDER, because a refusal a reader cannot act on is one they "
            "work around", "crawler-g" in msg, msg[:200])
+        # THE NEGATIVE HALF WAS DATED. `17\d{8}` covers epoch seconds from 2023 to 2026 and
+        # nothing after, so from 2027 it could no longer fail — a guard that retires quietly on
+        # a date nobody wrote down. Keyed on "a long run of digits where the date goes" instead,
+        # which is the actual defect and does not expire.
         ok("...with a readable timestamp rather than the raw epoch second it printed on its "
            "first real run — a number the reader has to go and convert, in the line telling "
            "them how long somebody has held this",
-           "since    2" in msg and not re.search(r"since\s+17\d{8}", msg), msg[:300])
+           "since    2" in msg and not re.search(r"since\s+\d{9,}", msg), msg[:300])
+        # NOT `x or "…" in msg`. The second clause made the first dead weight: any ellipsis
+        # anywhere in DENIED or REMEDIES would have carried it, and the specific claim — that
+        # THIS id is shown abbreviated — would have stopped being checked without failing.
         ok("...and the session id marked as ABBREVIATED, so two ids that differ past the cut "
-           "are never shown as the same id", "sess-HOLDER-…" in msg or "…" in msg, msg[:300])
+           "are never shown as the same id", "sess-HOLDER-…" in msg, msg[:300])
+        ok("...which is a real abbreviation and not the whole id with a decoration, so two "
+           "sessions sharing that prefix are visibly indistinguishable rather than silently so",
+           "sess-HOLDER-long" not in msg, msg[:300])
 
         # THE PAIR. Same tree, same lease, same call — only the session differs.
         allow, msg, _ = lease.guard(cfg, "sess-HOLDER-long", tool="Write",
@@ -1956,6 +2194,27 @@ def test_worktree_lease():
         ok("...and the chained one is actually DENIED, which is what makes the three "
            "assertions above more than a statement about a regex", not allow)
 
+        # REDIRECTIONS AND PROCESS SUBSTITUTIONS, which the first version of the rule did not
+        # disqualify while its comment claimed it disqualified "anything that could introduce a
+        # second command". Both of these were allowed unconditionally, before any tree was
+        # resolved, inside a tree another live session holds:
+        #   `... worktree list <(cmd)`   bash runs cmd regardless of the outer command
+        #   `... worktree status > f`    truncates f, and a write is the thing being guarded
+        # Asserted through `guard`, not only through the regex, and paired with the plain verb
+        # above so a rule that started refusing EVERYTHING could not pass this block.
+        for suffix, what in ((" <(touch /tmp/sr-proof)", "a process substitution"),
+                             (" > %s/src/main.py" % gpath, "a redirection into the held tree"),
+                             (" >> %s/notes.md" % gpath, "an appending redirection"),
+                             (" 2> %s/err.log" % gpath, "a stderr redirection"),
+                             (" < /etc/passwd", "an input redirection")):
+            ok("the carve-out refuses %s — it is not spellable in a real showrunner "
+               "invocation, and it is a second command or a write" % what,
+               not lease.own_command(fork_cmd + suffix))
+            allow, _, det = lease.guard(cfg, "sess-INTRUDER", tool="Bash",
+                                        tool_input={"command": fork_cmd + suffix}, cwd=gpath)
+            ok("...and `guard` DENIES it rather than falling through the carve-out",
+               not allow, det)
+
         # AN UNIDENTIFIABLE SESSION ALLOWS, LOUDLY. Denying would refuse the holder's own
         # writes — the guard blocking the work it was taken out for. Allowing in SILENCE would
         # be indistinguishable from a guard that ran and was content.
@@ -1998,10 +2257,67 @@ def test_worktree_lease():
     shim_dst = os.path.join(cfg.root, shim_rel)
     os.remove(os.path.join(claude_dir, "settings.json"))
     errs = [m for l, m in lease.guard_health(cfg) if l == "error"]
-    ok("a repo with no hook registration reports the guard as an ERROR, not a warning — an "
-       "unregistered guard is indistinguishable from one that ran and was content",
-       any("registers no worktree-guard" in m or "nothing registers" in m for m in errs),
+    ok("a repo with NO .claude/settings.json at all reports the guard as an ERROR, not a "
+       "warning — an unregistered guard is indistinguishable from one that ran and was content",
+       any("nothing registers" in m or "no .claude/settings.json" in m.lower() for m in errs),
        errs[:2])
+
+    # THE OTHER BRANCH, and it is the one with a population: settings.json EXISTS, carries
+    # somebody else's hooks, and has no worktree-guard entry — i.e. every consumer installed
+    # before the guard shipped. Deleting the file only ever reached `registered is None`, and
+    # the assertion above used to say `A or B` so it could not tell which. Downgrading this
+    # branch from error to ok left the suite green.
+    with open(os.path.join(claude_dir, "settings.json"), "w") as fh:
+        json.dump({"hooks": {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command",
+                                           "command": "somebody-elses.sh"}]}]}}, fh)
+    theirs = lease.guard_health(cfg)
+    errs2 = [m for l, m in theirs if l == "error"]
+    ok("a settings.json that exists, has other people's hooks, and registers NO worktree-guard "
+       "is an ERROR too — that is the state of every repo installed before the guard shipped, "
+       "and it is the only one of the two an upgrade actually produces",
+       any("registers no worktree-guard" in m for m in errs2), errs2[:2])
+    ok("...distinguished from the missing-file case by its own wording, so the two are not one "
+       "assertion joined by `or`",
+       not any("nothing registers" in m for m in errs2), errs2[:2])
+
+    # THE SHIM'S OWN THREE CHECKS, none of which had an assertion. Deleting all three left the
+    # suite green — and the crossing check is the one whose comment cites the observed failure
+    # ("the first probe worktree came up with no shim in it at all"), i.e. the check that tells
+    # a consumer the guard will NOT reach the place it exists for.
+    mode = os.stat(shim_dst).st_mode
+    os.chmod(shim_dst, 0o644)
+    try:
+        noexec = [m for l, m in lease.guard_health(cfg) if l == "error"]
+        ok("a shim that exists but is NOT EXECUTABLE is an error — the hook cannot run it, so "
+           "the guard is inert while every path-based check says it is installed",
+           any("not executable" in m for m in noexec), noexec[:2])
+    finally:
+        os.chmod(shim_dst, mode)
+    ok("...and restoring the mode clears it, so that assertion is about the bit and not about "
+       "the check always firing",
+       not any("not executable" in m for l, m in lease.guard_health(cfg)))
+
+    # THE CROSSING. `git worktree add` copies tracked files only, so an untracked or uncommitted
+    # shim is present here and absent in every worktree made from now on.
+    untracked = [m for l, m in lease.guard_health(cfg) if l == "warn"]
+    ok("an UNTRACKED shim is reported — it is present here and absent in every worktree, which "
+       "is the one place the guard exists to run",
+       any("not tracked" in m for m in untracked), untracked[:2])
+    sh(["git", "add", shim_rel], cfg.root)
+    sh(["git", "commit", "-q", "-m", "track the guard shim"], cfg.root)
+    ok("...and committing it clears that warning, which is what makes the line above a check "
+       "and not a constant",
+       not any("not tracked" in m for l, m in lease.guard_health(cfg)))
+    with open(shim_dst, "a") as fh:
+        fh.write("# edited after the commit\n")
+    differs = [m for l, m in lease.guard_health(cfg) if l == "warn"]
+    ok("...and a tracked shim whose WORKING copy differs from HEAD's is reported too, because "
+       "a new worktree gets HEAD's version — the guard that crosses is not the one you are "
+       "reading", any("DIFFERS" in m for m in differs), differs[:2])
+    sh(["git", "checkout", "--", shim_rel], cfg.root)
+    ok("...and it clears once the two agree again",
+       not any("DIFFERS" in m for l, m in lease.guard_health(cfg)))
 
     with open(os.path.join(claude_dir, "settings.json"), "w") as fh:
         json.dump({"hooks": {"PreToolUse": [
@@ -2191,11 +2507,10 @@ def test_self_pin():
     # AGAINST THE REAL REPO, because `git archive` needs a repo that actually carries bin/ and
     # lib/ — and a fixture that faked them would be asserting against the fake. Nothing here
     # writes to ROOT: `git archive` reads, and every destination is a temp dir.
-    cfg = config.load(start=ROOT)
     head = sh(["git", "rev-parse", "HEAD"], ROOT).stdout.strip()
 
     dest = os.path.join(tmpdir("central"), "central")
-    d = pin.pin(cfg, "HEAD", dest)
+    d = pin.pin("HEAD", dest)
     eq("a symbolic ref is RESOLVED to a sha before anything is stamped — git cannot recover "
        "what 'HEAD' meant at this instant afterwards", d["sha"], head)
     with open(os.path.join(dest, pin.VERSION_FILE)) as fh:
@@ -2223,6 +2538,32 @@ def test_self_pin():
     ok("...and a directory that was never pinned reads as nothing, rather than as an empty pin",
        pin.read_pin(tmpdir("notapin")) is None)
 
+    # UNREADABLE IS NOT MISSING, and this returned None for both — so a genuinely pinned
+    # directory with a truncated stamp fell through to `source="copy"` and `--version` claimed
+    # "copied from a working tree, so NO commit names this code" while VERSION sat beside it
+    # naming the commit. A positive claim about provenance, derived from a caught exception.
+    corrupt = tmpdir("corrupt-pin")
+    os.makedirs(os.path.join(corrupt, "lib", "showrunner"), exist_ok=True)
+    with open(os.path.join(corrupt, pin.PINNED_FILE), "w") as fh:
+        fh.write("{not json")
+    torn_pin = pin.read_pin(corrupt)
+    ok("a pin whose stamp is CORRUPT reads as unreadable, not as absent — 'which commit' is "
+       "unknown here, and 'no commit names this code' is a different and stronger claim",
+       (torn_pin or {}).get("unreadable"), torn_pin)
+    _cr2 = pin.code_root
+    pin.code_root = lambda _d=corrupt: _d
+    try:
+        torn_info, torn_line = pin.running(), pin.describe()
+    finally:
+        pin.code_root = _cr2
+    eq("...so the running code still reports itself as PINNED", torn_info["source"], "pinned")
+    ok("...and the line says the stamp cannot be read rather than that no commit names this "
+       "code", "STAMP UNREADABLE" in torn_line and "NO commit names" not in torn_line,
+       torn_line[:160])
+    ok("...and it does NOT claim the directory was edited since it was pinned, which is a "
+       "finding and would here be derived from a failed read", torn_info["dirty"] is None,
+       torn_info)
+
     # The consumer's own state must not ride along. A central copy carrying one project's
     # config is the misread that makes a shared install report on the wrong repo.
     ok("the pinned payload carries the TOOL and not the project — no .showrunner/ comes with "
@@ -2237,7 +2578,7 @@ def test_self_pin():
        "preferring one of the two files", edited and not edited.get("consistent"), edited)
 
     # Re-pinning over our OWN pin is allowed — that is the upgrade path.
-    d2 = pin.pin(cfg, head, dest)
+    d2 = pin.pin(head, dest)
     eq("re-pinning over an existing pin works, which is the whole upgrade path", d2["sha"], head)
     ok("...and it repaired the edited stamp, so an upgrade is also the remedy for a modified "
        "central directory", (pin.read_pin(dest) or {}).get("consistent"))
@@ -2256,7 +2597,7 @@ def test_self_pin():
        "inconsistency is a refusal and not a line in a report", bad.returncode, 2)
     ok("...naming both values, because 'they disagree' without them is a fact the reader "
        "cannot act on", "DISAGREE" in bad.stdout, bad.stdout[-200:])
-    pin.pin(cfg, head, dest)
+    pin.pin(head, dest)
 
     # THE DELETION SAFETY. `pin` removes its destination wholesale, so the question "is this
     # mine?" is deciding a deletion. A mistyped --dest must not eat a directory.
@@ -2266,13 +2607,13 @@ def test_self_pin():
         fh.write("the only copy\n")
     raises("a destination that is not a pin is REFUSED rather than deleted — a pin overwrites "
            "wholesale, so it only ever overwrites something it recognises as its own",
-           lambda: pin.pin(cfg, "HEAD", stranger), "refusing to delete")
+           lambda: pin.pin("HEAD", stranger), "refusing to delete")
     ok("...and the file that was there is still there", os.path.exists(keep))
     ok("...and an empty directory is not mistaken for a pin either, since 'exists' is the test "
        "that would make a typo destructive", not pin.looks_pinned(tmpdir("empty")))
 
     raises("an unresolvable ref is refused before anything is created",
-           lambda: pin.pin(cfg, "no-such-ref-here", os.path.join(tmpdir("d2"), "c")),
+           lambda: pin.pin("no-such-ref-here", os.path.join(tmpdir("d2"), "c")),
            "cannot resolve")
 
     # ---- WHAT CODE IS RUNNING, and what may name it ---------------------------------
@@ -2286,8 +2627,13 @@ def test_self_pin():
     here = pin.running()
     eq("...so this checkout reports itself as a checkout", here["source"], "checkout")
     eq("...naming the commit that is actually checked out", here["sha"], head)
-    ok("...and saying whether that sha still describes the working tree, because uncommitted "
-       "edits make it an overstatement", here["dirty"] in (True, False), here)
+    # NOT `here["dirty"] in (True, False)`, which was what this asserted and which is
+    # `isinstance(x, bool)` wearing a sentence about the working tree. Hard-coding `dirty=False`
+    # in pin.py left the suite green. Compared against git instead, so it fails whichever state
+    # ROOT happens to be in.
+    eq("...and saying whether that sha still describes the working tree, because uncommitted "
+       "edits make it an overstatement", here["dirty"],
+       bool(sh(["git", "status", "--porcelain"], ROOT).stdout.strip()))
 
     # THE REGRESSION. A plain `install.sh` copy lands at <consumer>/.showrunner/, which is
     # INSIDE the consumer's git repo — so asking git for HEAD there answers with the
@@ -2335,17 +2681,65 @@ def test_self_pin():
     ok("a pin edited after the fact is reported as no longer described by its own sha, rather "
        "than reporting the sha as though nothing happened",
        tampered["dirty"] is True and "EDITED" in tline, tline[:160])
-    pin.pin(cfg, head, dest)
+    pin.pin(head, dest)
 
     # A HALF-WRITTEN PIN IS WORSE THAN NONE: it is a directory that exists, looks installed to
     # anything checking for a path, and cannot run. A fixture repo carries no bin/ or lib/, so
     # the extraction genuinely fails — this is not a simulated error.
+    #
+    # THE MATCHER IS THE FINDING HERE. It used to be "self --pin", which is the prefix of ALL
+    # FOUR refusals this module raises, so it could not tell which one fired — and the guard the
+    # description named was never entered, because `git archive` dies at the pathspec stage
+    # first. Deleting the guard outright left the suite green. Both stages are separated below.
     empty_repo = make_repo()
     doomed = os.path.join(tmpdir("doomed"), "central")
-    raises("a commit that carries no bin/ and lib/ is refused",
-           lambda: pin.pin(empty_repo, "HEAD", doomed), "self --pin")
+    raises("a commit with no bin/ or lib/ at all fails in `git archive`, at the pathspec",
+           lambda: pin.pin("HEAD", doomed, source=empty_repo.root), "could not extract")
     ok("...and leaves NOTHING behind — a half-extracted central directory would read as "
        "installed to anything that checks for a path", not os.path.exists(doomed))
+
+    # THE GUARD ITSELF, which needs a commit that archives CLEANLY and still carries no tool:
+    # `bin/` and `lib/` exist, and neither holds showrunner. That is the ref-predates-the-rename
+    # case the guard was written for, and until now nothing constructed it.
+    wrong = make_repo(files={"README.md": "seed\n", "bin/other": "#!/bin/sh\n",
+                             "lib/other/x.py": "pass\n"})
+    dud = os.path.join(tmpdir("dud"), "central")
+    raises("a commit that DOES archive bin/ and lib/ but carries no showrunner in either is "
+           "refused by the payload check — extracting cleanly is not the same as extracting the "
+           "tool, and the difference is a central directory that looks installed and cannot run",
+           lambda: pin.pin("HEAD", dud, source=wrong.root), "predates this layout")
+    ok("...leaving nothing behind either", not os.path.exists(dud))
+
+    # THE SOURCE REPO IS NEVER THE CWD'S. `pin` resolved its source from the consumer's config,
+    # so the remedy printed to a consumer — `self --pin <ref> --dest <central>` — archived from
+    # THEIR repo: it either failed after deleting the machine's central install, or succeeded and
+    # published their code as showrunner with a real sha and exit 0. Both were reproduced.
+    survivor = os.path.join(tmpdir("survivor"), "central")
+    pin.pin(head, survivor)
+    raises("pinning from a repo that carries no tool is refused",
+           lambda: pin.pin("HEAD", survivor, source=empty_repo.root), "could not extract")
+    ok("...and the pin that was ALREADY THERE is untouched — the destination used to be deleted "
+       "before anything validated the source, so the failure path removed the central install "
+       "every project on the machine dispatches to, then printed the command that did it",
+       (pin.read_pin(survivor) or {}).get("sha") == head, pin.read_pin(survivor))
+    still = subprocess.run([os.path.join(survivor, "bin", "showrunner"), "--version"],
+                           cwd=survivor, capture_output=True, text=True)
+    eq("...and it still RUNS, which is the claim 'untouched' is actually making",
+       still.returncode, 0)
+    ok("...and no staging directory is left beside it", not any(
+        n.startswith("central.pinning.") for n in os.listdir(os.path.dirname(survivor))),
+        os.listdir(os.path.dirname(survivor)))
+
+    # And the refusal when the running code is not a checkout at all — the state a pinned
+    # central install is in, i.e. the exact place the shim's old remedy was typed.
+    _cr = pin.code_root
+    pin.code_root = lambda _d=tmpdir("not-a-repo"): _d
+    try:
+        raises("`self --pin` from code that is not itself a git checkout is REFUSED rather than "
+               "resolved from the cwd, and says a clone of showrunner is what it needs",
+               lambda: pin.pin("HEAD", os.path.join(tmpdir("d3"), "c")), "not itself a git")
+    finally:
+        pin.code_root = _cr
 
 
 def test_central_install():
@@ -2378,8 +2772,13 @@ def test_central_install():
     repo = consumer_repo()
     nowhere = os.path.join(tmpdir("nowhere"), "absent")
     env = dict(os.environ, SHOWRUNNER_CENTRAL=nowhere)
-    subprocess.run([installer, "--central", repo], cwd=ROOT, capture_output=True, text=True,
-                   env=env)
+    installed = subprocess.run([installer, "--central", repo], cwd=ROOT, capture_output=True,
+                               text=True, env=env)
+    # CHECKED, because every assertion below opens a file this run was supposed to write. An
+    # installer that died here would crash the group instead of failing one line, and a mutant
+    # that is unscoreable is one the sweep cannot count.
+    eq("`install.sh --central` exits 0 — %s"
+       % (installed.stderr or installed.stdout).strip()[-120:], installed.returncode, 0)
 
     placed = os.path.join(repo, ".showrunner", "bin", "showrunner")
     with open(template) as fh:
@@ -2400,14 +2799,40 @@ def test_central_install():
 
     # ---- CENTRAL ABSENT: both directions, because an absence-only suite passes against a
     # build that does nothing at all.
-    for verb in (["lock", "guard"], ["worktree", "guard"], ["stop-gate"], ["worktree", "enter"]):
+    # THE CHANNEL IS THE ASSERTION, and asserting the wrong one is what let this ship: every
+    # verb here used to be checked with `in res.stderr`, which proves the STRING WAS PRODUCED
+    # and nothing about whether anything receives it. A PreToolUse hook that exits 0 surfaces
+    # stderr to nobody, so the shim was announcing its own absence into a void — while its
+    # header explained at length that never doing that was the point.
+    for verb in (["lock", "guard"], ["worktree", "guard"]):
         res = run_sr(repo, verb, nowhere)
-        eq("with no central install, the HOOK verb `%s` exits 0 — a PreToolUse that hard-fails "
+        eq("with no central install, the PreToolUse verb `%s` exits 0 — a hook that hard-fails "
            "on missing plumbing blocks the write that would repair it" % " ".join(verb),
            res.returncode, 0)
-        ok("...and SAYS it was not checked, which is the one thing game_loop's own shim does "
-           "not do and the only change the retracted fail-posture objection left behind",
+        try:
+            payload = json.loads(res.stdout)
+        except ValueError:
+            payload = None
+        ctx = ((payload or {}).get("hookSpecificOutput") or {}).get("additionalContext") or ""
+        ok("...and says so on the channel that REACHES THE AGENT — additionalContext on stdout, "
+           "the same shape .showrunner/hooks/worktree-guard.sh emits, rather than stderr, which "
+           "on an exit-0 hook is indistinguishable from silence",
+           "ALLOWED WITHOUT BEING CHECKED" in ctx, (res.stdout or res.stderr)[:160])
+        eq("...in output the host can actually parse, since a notice that arrives as broken "
+           "JSON is the same silence one layer down",
+           ((payload or {}).get("hookSpecificOutput") or {}).get("hookEventName"), "PreToolUse")
+
+    # The two that are NOT PreToolUse. `worktree enter` is typed at a terminal and a Stop hook
+    # permitting a stop has no channel to the model at all, so stderr is the best there is —
+    # asserted separately so the weaker guarantee is visible rather than averaged in.
+    for verb in (["stop-gate"], ["worktree", "enter"]):
+        res = run_sr(repo, verb, nowhere)
+        eq("with no central install, `%s` exits 0" % " ".join(verb), res.returncode, 0)
+        ok("...and says it was not checked on stderr, which is where its reader is",
            "ALLOWED WITHOUT BEING CHECKED" in res.stderr, res.stderr[:120])
+        ok("...and does NOT emit hook JSON, because it is not answering a PreToolUse and a "
+           "payload the host never asked for is noise it may try to parse",
+           "hookSpecificOutput" not in res.stdout, res.stdout[:120])
 
     for verb in (["status"], ["doctor"], ["integrate"], ["lock", "run", "device"]):
         res = run_sr(repo, verb, nowhere)
@@ -2426,12 +2851,44 @@ def test_central_install():
 
     # ---- CENTRAL PRESENT ----------------------------------------------------------
     central = os.path.join(tmpdir("central-code"), "code")
-    pin.pin(config.load(start=ROOT), "HEAD", central)
+    pinned_at = pin.pin("HEAD", central)
     res = run_sr(repo, ["--version"], central)
     eq("with a central install present the shim dispatches to it and the tool runs",
        res.returncode, 0)
-    ok("...and it is genuinely the CENTRAL copy answering, not a local one — there is no local "
-       "copy left to answer", "showrunner" in res.stdout.lower(), res.stdout[:60])
+    # NOT `"showrunner" in stdout.lower()`, which was the old form: `describe()` opens with
+    # "showrunner 0.1.0" for all three provenances, so any copy answering from anywhere passed
+    # a line whose description claimed it proved WHICH copy. The evidence was sitting in the
+    # same string unused — a pinned directory names its sha and its own path.
+    ok("...and it is genuinely the CENTRAL copy answering, identified by the sha it was pinned "
+       "at and the directory it lives in, not by the word 'showrunner' appearing in a line "
+       "every copy prints",
+       pinned_at["sha"][:12] in res.stdout and "pinned" in res.stdout, res.stdout[:160])
+
+    # A DIRECTORY THAT RUNS IS NOT A PIN. The shim dispatched to anything executable at the
+    # central path, so a half-extracted directory, a stale hand-copy, or something left at a
+    # path the shim resolves to would be exec'd by every centrally-wired project on the machine.
+    # `self --pin` writes PINNED and nothing else does, so it is the cheapest thing that
+    # separates "showrunner put this here" from "this is executable". NOT an integrity check —
+    # PINNED names a commit and does not attest that the code beside it is that commit — and the
+    # shim says so rather than implying more than it checked.
+    squat = os.path.join(tmpdir("squatted"), "central")
+    os.makedirs(os.path.join(squat, "bin"))
+    with open(os.path.join(squat, "bin", "showrunner"), "w") as fh:
+        fh.write("#!/bin/sh\necho SQUATTED\n")
+    os.chmod(os.path.join(squat, "bin", "showrunner"), 0o755)
+    res = run_sr(repo, ["--version"], squat)
+    eq("an executable at the central path with NO PINNED stamp is REFUSED rather than exec'd",
+       res.returncode, 1)
+    ok("...and its output never reaches the caller, which is the half that matters — the check "
+       "has to happen before the exec, not be reported after it",
+       "SQUATTED" not in (res.stdout + res.stderr), (res.stdout + res.stderr)[:200])
+    ok("...naming what is missing, so the reader can tell this from 'no central install'",
+       "PINNED" in res.stderr, res.stderr[:200])
+    with open(os.path.join(squat, "PINNED"), "w") as fh:
+        json.dump({"ref": "x", "sha": "0" * 40}, fh)
+    res = run_sr(repo, ["--version"], squat)
+    ok("...and a stamped directory IS dispatched to, so the check is about the stamp and not "
+       "about refusing everything", "SQUATTED" in res.stdout, res.stdout[:120])
 
     res = run_sr(repo, ["doctor"], central)
     ok("the central binary resolves THIS repo's config, not central's — only the CODE is "
@@ -2614,6 +3071,19 @@ def test_installer_leaves_no_vendored_copy():
        "install that quietly skipped would be indistinguishable from one with nothing to offer",
        "--skills" in quiet.stdout, quiet.stdout[-300:])
 
+    # IT REGISTERS THE GUARD, AND THEREFORE MUST NOT ASK THE READER TO. Both were true in one
+    # run: `worktree register` ran, printed "the worktree guard is registered", and then step 3
+    # of the closing instructions told the reader to add a PreToolUse entry to
+    # .claude/settings.json by hand and pasted the JSON to use. Following it produced a SECOND
+    # entry — the guard running twice per tool call, which `_guard_registration` cannot notice
+    # because it returns on the first match — and the pasted copy was a third spelling of what
+    # `register_guard` writes, with different quoting and no timeout.
+    ok("the installer registers the worktree guard itself", "guard is registered" in quiet.stdout,
+       quiet.stdout[-400:])
+    ok("...and therefore does NOT also print a hook entry for the reader to paste, which would "
+       "register it a second time — the entry has exactly one author, `lease.register_guard`",
+       "PreToolUse" not in quiet.stdout, quiet.stdout[-500:])
+
     # THE CASE WHERE IT HAPPENS. Without this the assertion above passes just as well for an
     # installer that cannot place a skill at all, which is the shape of a check that never was.
     yes_home = tmpdir("fake-home")
@@ -2642,10 +3112,20 @@ def test_installer_leaves_no_vendored_copy():
 
     # And the explicit refusal, which is what a script or a CI job passes.
     no_home = tmpdir("fake-home")
-    install_into(fresh_repo(), no_home, "--no-skills")
+    refused = install_into(fresh_repo(), no_home, "--no-skills")
+    # THE DENOMINATOR. "Nothing was written" is also what a failed install produces, and this
+    # HOME is a different fixture from the --skills one above, so nothing here established that
+    # the run reached the point of deciding.
+    eq("`install.sh --no-skills` exits 0 (%s)"
+       % ((getattr(refused, "stderr", "") or "").strip()[-100:]),
+       getattr(refused, "returncode", 0), 0)
     ok("--no-skills writes nothing into HOME even though there is something to write — the "
        "flag a CI job or another skill passes when it must not be asked",
        not os.path.exists(os.path.join(no_home, ".claude", "skills")))
+    ok("...and it SAYS it skipped them, so the absence is a decision the reader was told about "
+       "rather than an install that quietly did less",
+       "skill" in (getattr(refused, "stdout", "") or "").lower(),
+       (getattr(refused, "stdout", "") or "")[-200:])
 
 
 def test_publishable():
@@ -3251,6 +3731,15 @@ def test_filed_issues_15_to_21():
     # next path added to that block is the next instance. The table is where a Crawler looks for
     # "where do I work", so a relative entry there is a promise that resolves somewhere else.
     table = [ln for ln in text.splitlines() if ln.startswith("| ") and "`" in ln]
+    # THE DENOMINATOR, which this one scan was missing while the rest of this file establishes
+    # it everywhere and says so out loud. If the brief's table is ever rendered differently —
+    # no leading space, a bullet list, another renderer — `table` goes empty and the rule below
+    # passes over nothing, which looks exactly like a brief with no relative paths in it.
+    ok("the brief's location table has rows to check at all, so the rule below is applied to "
+       "something rather than matching nothing", len(table) >= 3, len(table))
+    ok("...and the rule CATCHES a relative path when one is there, so it can fail",
+       any("/" in c and not os.path.isabs(c)
+           for c in re.findall(r"`([^`]+)`", "| where | `.showrunner/scratch/x` |")))
     relative = []
     for ln in table:
         for cell in re.findall(r"`([^`]+)`", ln):
@@ -3790,13 +4279,45 @@ def test_observability():
 
     # RECLAIM IS NOT RELEASE. Only one of them says something went wrong, and collapsing them
     # hands a viewer a resource that looks tidily handed back by an agent that never came home.
-    src = open(os.path.join(ROOT, "lib", "showrunner", "campaign.py")).read()
-    ok("reap journals a reclaimed lock under its own kind", "lock.reclaimed" in src, None)
+    #
+    # ASSERTED BY REAPING, not by grepping campaign.py for the string "lock.reclaimed" — which
+    # is what stood here, in the one group that otherwise emits real events and reads them back,
+    # and which passes on the word appearing in a comment.
+    dead = DeadPid()
+    locks.Lock(locks.LockSet(lk).root, "device").acquire(dead.pid, "ghost", session="s-dead")
+    eq("a lock whose holder is dead reads STALE, which is the state reap acts on",
+       locks.LockSet(lk).lock("device").state()[0], locks.STALE)
+    # Counted BEFORE, so the assertions below are about what the reap emitted rather than about
+    # whatever this group has journalled up to now — `lock run` legitimately released earlier.
+    before_rel = len([e for e in EV.read(lk)[0] if e["kind"] == "lock.released"])
+    campaign.reap(lk, G.open_graph(lk), apply=True)
+    reclaimed = [e for e in EV.read(lk)[0] if e["kind"] == "lock.reclaimed"]
+    ok("...and reaping it journals `lock.reclaimed`, a kind of its own — not `lock.released`, "
+       "which would show a viewer a resource handed back by an agent that never came home",
+       any(e.get("resource") == "device" for e in reclaimed), reclaimed[-2:])
+    ok("...and it names the pid it took the lock from, so the reclaim is traceable to a corpse "
+       "rather than being an unattributed state change",
+       any(str(e.get("dead_pid")) == str(dead.pid) for e in reclaimed), reclaimed[-2:])
+    ok("...while the reap journalled NO plain release, which is the distinction the two kinds "
+       "exist to make — a reclaim reports something that went wrong",
+       len([e for e in EV.read(lk)[0] if e["kind"] == "lock.released"]) == before_rel,
+       kinds(lk))
+
+    # AND THE LEASES, which this loop could not see at all: it iterated CONFIGURED resources,
+    # and a lease is named `worktree:<tree>`. A dead Crawler holds one for its whole life, so
+    # the reaper was blind to the abandonment it is most likely to be looking at.
+    os.makedirs(os.path.join(lk.worktree_root, "reap-probe"), exist_ok=True)
+    lease.Lease(lk, "reap-probe").acquire("s-dead-2", who="ghost-2", pid=DeadPid().pid,
+                                          basis="dispatch-recorded")
+    acts, _warn = campaign.reap(lk, G.open_graph(lk), apply=False)
+    ok("`reap` reports an abandoned worktree LEASE, not only the configured resources — the "
+       "lock a dead Crawler is most likely to leave behind was the one kind it never looked at",
+       any(a.get("resource") == lease.lease_name("reap-probe") for a in acts), acts[-3:])
 
     # EVERY WAY INTEGRATE CAN FINISH goes through one path. It has five, each previously its own
     # `results.append`, so a sixth would have arrived with no event and a viewer would silently
     # stop seeing the riskiest verb finish.
-    tree = ast.parse(src)
+    tree = ast.parse(open(os.path.join(ROOT, "lib", "showrunner", "campaign.py")).read())
     integ = next(n for n in ast.walk(tree)
                  if isinstance(n, ast.FunctionDef) and n.name == "integrate")
     appends = [n for n in ast.walk(integ)
@@ -3871,7 +4392,10 @@ def test_observability():
     snap_p = subprocess.run([sys.executable, exe, "snapshot"], cwd=cfg.root,
                             capture_output=True, text=True, env=env)
     eq("`snapshot` succeeds (%s)" % (snap_p.stderr or "").strip()[:60], snap_p.returncode, 0)
-    snap = json.loads(snap_p.stdout)
+    # Guarded: `eq` above records a failure and keeps going, so an unparseable stdout would
+    # take the rest of this group down with it — and a mutant that CRASHES a group is one the
+    # sweep cannot score, which is the whole point of mutate.py's crashed-group detector.
+    snap = json.loads(snap_p.stdout) if snap_p.returncode == 0 else {}
     for key in ("project", "instance", "cursor", "ready", "in_progress", "crawlers",
                 "resources", "waiting", "journal_unreadable"):
         ok("...and carries %s, so a viewer needs no second call to draw the picture" % key,
@@ -4098,9 +4622,11 @@ def test_cross_branch_overlap_and_lingering():
        "outlived their leaf" in (out.stdout + out.stderr), (out.stdout + out.stderr)[-300:])
     snap = subprocess.run([sys.executable, exe, "snapshot"], cwd=cfg.root,
                           capture_output=True, text=True, env=env)
+    eq("`snapshot` exits 0 (%s)" % (snap.stderr or "").strip()[:60], snap.returncode, 0)
     ok("...and `snapshot` carries it machine-readably, so a viewer cannot draw a quiet campaign "
        "over sessions that are still polling",
-       json.loads(snap.stdout).get("lingering"), snap.stdout[:200])
+       (json.loads(snap.stdout) if snap.returncode == 0 else {}).get("lingering"),
+       snap.stdout[:200])
 
     campaign.set_state(cfg, rec["crawler"], "finished", finished_at=int(time.time()))
     ok("...while a Crawler that JUST closed is not reported — the grace window is what makes "
@@ -4304,9 +4830,23 @@ def test_cli():
     # exactly this, and the reason is worth naming: the scan keyed on the SPELLING of the binary
     # rather than on the shape of a command. `sr_bin` exists precisely because that spelling is
     # resolved rather than fixed, so the two were always going to diverge.
-    BINARY = r"(?:showrunner|\{[a-z_][a-z_0-9]*\})"
+    # AND A THIRD SPELLING, found the same way as the second: by a remedy that did not exist
+    # surviving this scan. `cli.py` printed "`%s worktree takeover %s --reason ...`" — a verb
+    # this repo has never had, in the branch reserved for the state only a human can resolve —
+    # and `%s` is not `showrunner` and not `{sr}`, so it was invisible. That is now three
+    # spellings of the same idea, and the check keys on all three rather than on the two
+    # somebody happened to think of.
+    BINARY = r"(?:showrunner|\{[a-z_][a-z_0-9]*\}|%s)"
+
+    def joined(text):
+        """Python implicit string concatenation, undone. A remedy split across source lines is
+        still one remedy at run time — and the takeover ghost was split exactly there, with the
+        opening backtick on one line and the closing one on the next, so every span-based
+        pattern below stopped at the newline that the interpreter does not see."""
+        return re.sub(r"(['\"])\s*\n\s*(['\"])", "", text)
 
     def commands_in(text):
+        text = joined(text)
         spans = re.findall(r"`([^`\n]+)`", text)
         for block in re.findall(r"```[a-z]*\n(.*?)```", text, re.S):
             spans.extend(block.splitlines())
@@ -4379,6 +4919,26 @@ def test_cli():
        "only thing separating it from a regex that quietly matches nothing",
        ("worktree", "teleport") in ghost
        and "teleport" not in subverbs_of("worktree"), sorted(ghost))
+
+    # THE %s SPELLING AND THE SPLIT LINE, each with both controls. The real ghost had both at
+    # once: `%s` for the binary, and the backticked span broken across two source lines by
+    # implicit concatenation. Either one alone hid it, so a control for either one alone would
+    # have passed while the check stayed blind.
+    pct = set(commands_in('print("run `%s worktree fork --from x` now")'))
+    ok("a remedy interpolated with %s is extracted — that is how cli.py spells the binary, and "
+       "it was the one spelling this scan did not know",
+       ("worktree", "fork") in pct, sorted(pct))
+    pct_ghost = set(commands_in('print("then `%s worktree takeover %s --reason x`")'))
+    ok("...and a ghost spelled that way is CAUGHT, which is the actual regression: this exact "
+       "line shipped and this exact check was green",
+       ("worktree", "takeover") in pct_ghost
+       and "takeover" not in subverbs_of("worktree"), sorted(pct_ghost))
+    split = set(commands_in('    "then `%s worktree takeover "\n    "%s --reason x`"'))
+    ok("...including when the string is SPLIT across source lines, because Python joins them "
+       "and the reader gets one command — the span patterns all stopped at a newline the "
+       "interpreter never sees", ("worktree", "takeover") in split, sorted(split))
+    ok("...and joining does not invent commands out of ordinary adjacent strings",
+       not list(commands_in('    "nothing here"\n    "or here"')))
     # Pure observation passes by finding nothing, which is also what a broken regex returns.
     ok("...and it found commands to check at all, so a PASS means they were verified rather "
        "than that the scan matched nothing", seen > 5, seen)

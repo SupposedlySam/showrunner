@@ -75,8 +75,29 @@ def boot_token():
     DESIGN.md flags PID reuse as an open question; this is the tightening.
 
     Falls back to the hostname when no boot time is discoverable, which degrades to
-    plain PID semantics rather than to a crash.
+    plain PID semantics rather than to a crash — see `Lock._live`, which is where that
+    degradation has to be honoured, because a token this function could not read must not be
+    compared against one it could.
+
+    CACHED FOR THE LIFE OF THE PROCESS, which is not an optimisation: the answer cannot change
+    while this process runs (a reboot ends it), and re-deriving it means shelling out to
+    `sysctl` on EVERY liveness check — every lock read, every lease check, every guard call.
+    Each of those was a chance for a transient failure to answer `unknown` and flip a live
+    holder to "proved dead", which is the one verdict this module is most careful about
+    everywhere else.
     """
+    global _BOOT_TOKEN
+    if _BOOT_TOKEN is not None:
+        return _BOOT_TOKEN
+    _BOOT_TOKEN = _read_boot_token()
+    return _BOOT_TOKEN
+
+
+UNKNOWN_BOOT = ":unknown"
+_BOOT_TOKEN = None
+
+
+def _read_boot_token():
     host = os.uname().nodename
     try:
         if sys.platform == "darwin":
@@ -195,10 +216,24 @@ def run(cmd, cwd=None, check=False, timeout=None, env=None):
     """
     if cwd is not None and not os.path.isdir(cwd):
         return 127, "", "working directory does not exist: %s" % cwd
-    proc = subprocess.run(
-        cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout,
-        env=env, shell=isinstance(cmd, str),
-    )
+    # THE SAME ARGUMENT, TWO MORE WAYS THE PROCESS NEVER STARTS. A binary that is not on PATH
+    # raises FileNotFoundError and a `timeout=` that expires raises TimeoutExpired — neither is
+    # an exit code either, and the callers that catch nothing include `pin.running()`, whose
+    # docstring promises "never raises" and which backs `--version` and the statusline. On a box
+    # without git that was a traceback from `showrunner --version`. Fixed at the single spawn
+    # point rather than at each call site, for the reason above.
+    try:
+        proc = subprocess.run(
+            cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout,
+            env=env, shell=isinstance(cmd, str),
+        )
+    except FileNotFoundError as exc:
+        return 127, "", "command not found: %s" % (exc.filename or cmd)
+    except subprocess.TimeoutExpired:
+        # 124, which is what `timeout(1)` returns, so a caller reading the code gets the same
+        # answer it would from the shell. Distinct from 127 on purpose: "it never started" and
+        # "it started and would not finish" are different problems.
+        return 124, "", "timed out after %ss: %s" % (timeout, cmd)
     if check and proc.returncode != 0:
         die("command failed (%s): %s\n%s" % (proc.returncode, cmd, proc.stderr.strip()))
     return proc.returncode, proc.stdout, proc.stderr

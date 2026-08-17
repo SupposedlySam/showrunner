@@ -44,6 +44,37 @@ def code_root():
     return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
+def source_root():
+    """The checkout a pin extracts FROM. The running code's root, or a refusal.
+
+    THE MIRROR OF `code_root`, and it is here because the write side never had one. `pin`
+    resolved its source from `cfg.root` — the git root of the CWD — while `running()` argues
+    at length that provenance may never be resolved that way. One module, two opposite rules,
+    and the printed remedy walked straight into the wrong one: `self --pin <ref> --dest
+    $central` is what the shim and the installer tell a reader standing in their OWN project,
+    so the source repo was theirs. Two outcomes, both observed:
+
+      it fails    their repo has no `bin`+`lib` to archive — after `pin` has already deleted
+                  the machine-wide central install every project on the box dispatches to.
+      it SUCCEEDS their repo happens to have those paths, so central is now serving that
+                  project's code as showrunner, stamped with a real SHA and exit 0.
+
+    So the source is where this code lives, and it must BE a checkout — the same toplevel
+    identity check `running()` makes, for the same reason: an installed copy sits INSIDE the
+    consumer's repo, and asking git for a ref there answers about the wrong repository.
+    """
+    root = code_root()
+    rc, top, _ = git(["rev-parse", "--show-toplevel"], cwd=root)
+    toplevel = (top or "").strip()
+    if rc != 0 or not toplevel or os.path.realpath(toplevel) != os.path.realpath(root):
+        raise Refused(
+            "self --pin: the running code at %s is not itself a git checkout, so there is no "
+            "ref here to pin. A pin extracts from the repository showrunner's own code lives "
+            "in — never from the project you are standing in, whose HEAD would be published "
+            "as showrunner. Run this from a clone of showrunner." % root)
+    return root
+
+
 def running():
     """What code is executing, and what names it. Returns a dict; never raises.
 
@@ -74,9 +105,12 @@ def running():
 
     pinned = read_pin(root)
     if pinned:
-        info.update(source="pinned", sha=pinned.get("sha"), ref=pinned.get("ref"))
-        # An edited pin is not the commit it claims, and read_pin already knows.
-        info["dirty"] = not pinned.get("consistent")
+        info.update(source="pinned", sha=pinned.get("sha"), ref=pinned.get("ref"),
+                    unreadable=pinned.get("unreadable"))
+        # An edited pin is not the commit it claims, and read_pin already knows. `dirty` is left
+        # None when the stamp could not be read: "edited since it was pinned" is a finding, and
+        # deriving it from a failed READ would state it on no evidence.
+        info["dirty"] = None if pinned.get("unreadable") else not pinned.get("consistent")
         return info
 
     # THE CODE ROOT MUST *BE* THE REPO, not merely sit inside one. A plain `install.sh` copy
@@ -106,6 +140,12 @@ def describe():
     d = running()
     base = "showrunner %s" % d["version"]
     if d["source"] == "pinned":
+        if d.get("unreadable"):
+            # Neither "pinned at X" nor "no commit names this" — both would be inventions. The
+            # directory IS a pin; what cannot be read is which commit, and that is the answer.
+            return ("%s · pinned, STAMP UNREADABLE (%s) — this directory was pinned and the "
+                    "file naming the commit cannot be read, so which commit is unknown rather "
+                    "than absent. Re-pin it. · %s" % (base, d["unreadable"], d["root"]))
         return "%s · pinned %s (%s)%s · %s" % (
             base, (d["sha"] or "?")[:12], d["ref"] or "?",
             "  ← EDITED SINCE IT WAS PINNED, so that sha no longer describes this code"
@@ -128,13 +168,24 @@ def read_pin(dest):
     record are the callers that will need this (CI-04, CI-05); it is written now, beside the
     thing it reads, rather than later by somebody inferring the format.
     """
+    # MISSING AND UNREADABLE ARE DIFFERENT ANSWERS, and collapsing them here produced a
+    # positive claim about provenance out of a caught exception: a genuinely pinned directory
+    # whose stamp was truncated fell through to `source="copy"` and `--version` said "copied
+    # from a working tree, so NO commit names this code" — with VERSION sitting beside it
+    # naming the commit. That is this module's own stated anti-pattern (report an absence as
+    # the absence it is, rather than filling it in and leaving it to look like an answer)
+    # applied to the wrong absence.
+    if not os.path.exists(os.path.join(dest, PINNED_FILE)):
+        return None
     try:
         with open(os.path.join(dest, PINNED_FILE)) as fh:
             data = json.load(fh)
-    except (OSError, ValueError):
-        return None
+    except (OSError, ValueError) as exc:
+        return {"unreadable": str(exc), "sha": None, "ref": None,
+                "version": None, "consistent": False}
     if not isinstance(data, dict) or not data.get("sha"):
-        return None
+        return {"unreadable": "%s carries no sha" % PINNED_FILE, "sha": None, "ref": None,
+                "version": None, "consistent": False}
     try:
         with open(os.path.join(dest, VERSION_FILE)) as fh:
             data["version"] = fh.read().strip()
@@ -159,12 +210,17 @@ def looks_pinned(dest):
         os.path.isdir(os.path.join(dest, "lib", "showrunner"))
 
 
-def extract(cfg, sha, dest):
-    """`git archive <sha> bin lib` into dest, through stdlib tarfile — no `tar` dependency."""
+def extract(source, sha, dest):
+    """`git archive <sha> bin lib` from `source` into dest, through stdlib tarfile.
+
+    `source` is a showrunner checkout — see `source_root`. It is a parameter rather than a
+    config field because the config describes the CONSUMER's project, and the consumer's
+    project has no say in what code gets published as showrunner.
+    """
     import subprocess
     import tarfile
 
-    proc = subprocess.Popen(["git", "-C", cfg.root, "archive", "--format=tar", sha] +
+    proc = subprocess.Popen(["git", "-C", source, "archive", "--format=tar", sha] +
                             list(PAYLOAD), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         with tarfile.open(fileobj=proc.stdout, mode="r|") as tf:
@@ -188,53 +244,76 @@ def extract(cfg, sha, dest):
                            "predates this layout, or names the wrong repo")
 
 
-def pin(cfg, ref, dest):
+def pin(ref, dest, source=None):
     """Extract the tool at `ref` into `dest` and stamp it. Returns detail. Raises Refused.
 
     Pinned to a REF, never to a working tree. A working-tree copy cannot answer "what is
     central running" with anything checkable, and under a central install that question is
     asked about every consumer on the machine at once.
+
+    NO CONFIG. It took one deliberately: the consumer's `Config`, whose `root` then chose the
+    repository to publish as showrunner. `source` defaults to `source_root()` — where this
+    code lives — and is a parameter only so a test can point it somewhere synthetic.
+
+    THE DESTINATION IS NOT TOUCHED UNTIL A REPLACEMENT EXISTS. Everything lands in a staging
+    directory beside it and is renamed into place at the end. The previous order deleted
+    `dest` first and validated after, so the failure path — a ref that carries no payload —
+    left the machine with no central install at all and a recovery message naming the command
+    that had just removed it. A failed pin now leaves whatever was already there running.
     """
     dest = os.path.abspath(os.path.expanduser(dest))
+    source = source or source_root()
 
-    rc, out, _ = git(["rev-parse", "%s^{commit}" % ref], cwd=cfg.root)
+    rc, out, _ = git(["rev-parse", "%s^{commit}" % ref], cwd=source)
     sha = (out or "").strip()
     if rc != 0 or not sha:
         raise Refused("self --pin: git cannot resolve %r in %s — name a commit, tag or branch "
-                      "that exists here." % (ref, cfg.root))
+                      "that exists in the showrunner checkout." % (ref, source))
 
-    if os.path.exists(dest):
-        if not looks_pinned(dest):
-            raise Refused(
-                "self --pin: %s exists and is not a pinned checkout — refusing to delete it. "
-                "A pin overwrites its destination wholesale, so it will only ever overwrite "
-                "something it recognises as its own. Move it aside yourself." % dest)
-        shutil.rmtree(dest)
-    os.makedirs(dest)
+    if os.path.exists(dest) and not looks_pinned(dest):
+        raise Refused(
+            "self --pin: %s exists and is not a pinned checkout — refusing to delete it. "
+            "A pin overwrites its destination wholesale, so it will only ever overwrite "
+            "something it recognises as its own. Move it aside yourself." % dest)
+
+    staging = "%s.pinning.%d" % (dest, os.getpid())
+    shutil.rmtree(staging, ignore_errors=True)
+    os.makedirs(staging)
 
     try:
-        extract(cfg, sha, dest)
+        extract(source, sha, staging)
+
+        bindir = os.path.join(staging, "bin")
+        for name in sorted(os.listdir(bindir)):
+            path = os.path.join(bindir, name)
+            if os.path.isfile(path):
+                os.chmod(path, 0o755)
+
+        stamp = {"ref": ref, "sha": sha, "at": now()}
+        with open(os.path.join(staging, VERSION_FILE), "w") as fh:
+            fh.write(sha + "\n")
+        with open(os.path.join(staging, PINNED_FILE), "w") as fh:
+            # NO "home" AND NO SOURCE REPO, following game_loop's reasoning rather than
+            # inventing a second one: a --dest checkout is meant to serve many consumers, so
+            # naming whichever repo happened to run the command is a fact that reads as
+            # ownership and is not one.
+            json.dump(stamp, fh, indent=2)
+            fh.write("\n")
     except Exception as exc:                        # noqa: BLE001 — see below
         # A HALF-WRITTEN PIN IS WORSE THAN NONE: it is a central directory that exists, looks
-        # installed to anything checking for a path, and cannot run. Clean up and say why.
-        shutil.rmtree(dest, ignore_errors=True)
-        raise Refused("self --pin: could not extract the tool at %s — %s" % (sha[:8], exc))
+        # installed to anything checking for a path, and cannot run. Clean up and say why —
+        # and `dest` has not been touched, so what was there is still what is running.
+        shutil.rmtree(staging, ignore_errors=True)
+        if isinstance(exc, Refused):
+            raise
+        raise Refused("self --pin: could not extract the tool at %s — %s. %s is UNCHANGED."
+                      % (sha[:8], exc, dest))
 
-    bindir = os.path.join(dest, "bin")
-    for name in sorted(os.listdir(bindir)):
-        path = os.path.join(bindir, name)
-        if os.path.isfile(path):
-            os.chmod(path, 0o755)
+    # The one unavoidable window, and it is between two local renames rather than around a
+    # network fetch and a validation. `dest` is known to be one of ours by the check above.
+    if os.path.exists(dest):
+        shutil.rmtree(dest)
+    os.rename(staging, dest)
 
-    stamp = {"ref": ref, "sha": sha, "at": now()}
-    with open(os.path.join(dest, VERSION_FILE), "w") as fh:
-        fh.write(sha + "\n")
-    with open(os.path.join(dest, PINNED_FILE), "w") as fh:
-        # NO "home" AND NO SOURCE REPO, following game_loop's reasoning rather than inventing a
-        # second one: a --dest checkout is meant to serve many consumers, so naming whichever
-        # repo happened to run the command is a fact that reads as ownership and is not one.
-        json.dump(stamp, fh, indent=2)
-        fh.write("\n")
-
-    return {"ref": ref, "sha": sha, "dest": dest, "at": stamp["at"],
+    return {"ref": ref, "sha": sha, "dest": dest, "at": stamp["at"], "source": source,
             "binary": os.path.join(dest, "bin", "showrunner")}

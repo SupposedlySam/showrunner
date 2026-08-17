@@ -132,13 +132,19 @@ class Lease:
         be a different child of the same session than the one that acquired. Keying release on
         the pid would refuse the true owner and hand `--force` to routine use — and an escape
         hatch reached routinely stops being an escape hatch.
+
+        A MISSING SESSION IS NOT A MATCHING ONE. The check used to read `if not force and
+        session and ...`, so calling `release()` with no session at all skipped ownership
+        entirely and took anybody's lease — the caller who knows least got the most authority,
+        which is the wrong way round for the one mutation on a mutex. `force` is now the only
+        way past the check, and it has to be said out loud.
         """
         h = self.lock.holder()
         if not h:
             return False, "not held"
-        if not force and session and h.get("session") != session:
-            return False, ("held by session %s, not you — pass force only if you know that "
-                           "session is gone" % (h.get("session") or "?"))
+        if not force and h.get("session") != session:
+            return False, ("held by session %s, not you (%s) — pass force only if you know that "
+                           "session is gone" % (h.get("session") or "?", session or "no session"))
         self.lock.release(force=True)
         return True, "released"
 
@@ -205,7 +211,12 @@ def enter(cfg, session, path=None, who=None):
         return "not-a-worktree", {}
 
     lease = Lease(cfg, tree)
-    state, h = lease.state()
+    # SETTLED, for the same reason `Lock.acquire` uses it: this ACTS on the answer. An
+    # UNREADABLE verdict here is a dead end that only a human can clear, and the commonest way
+    # to see one is to read a lock another session is halfway through writing — which two
+    # Crawlers starting in the same tree produce every time. A transient must not be handed to
+    # somebody as a state requiring manual repair.
+    state, h = lease.lock.settled_state()
 
     if state == locks.UNREADABLE:
         # Not adjudicable from here, and deliberately not "reclaim it and carry on". A partial
@@ -229,15 +240,35 @@ def enter(cfg, session, path=None, who=None):
         })
         return "hijack", {"tree": tree, "holder": h or {}}
 
-    if state == locks.STALE:
+    got, holder = lease.acquire(session, who=who or INTERACTIVE)
+    if got and state == locks.STALE:
+        # EMITTED AFTER THE ACQUIRE, not before it. This fired first, so an acquire that then
+        # failed left the journal recording a reclaim that never happened — a viewer would show
+        # a tree handed from a dead session to a live one while it was in fact still held.
         events.emit(cfg, "lease.reclaimed", {
             "tree": tree, "session": session,
             "dead_session": h.get("session") if h else None,
             "dead_pid": h.get("pid") if h else None,
         })
-
-    got, holder = lease.acquire(session, who=who or INTERACTIVE)
     if not got:
+        # WHY IT FAILED IS RE-DERIVED, NOT INFERRED FROM THE BOOLEAN. `acquire` returns False
+        # for two unrelated reasons — no resolvable pid, and losing the atomic mkdir to a
+        # session that got there first — and this reported both as "no session process could be
+        # resolved… this tree is unprotected". In the race that is the exact opposite of the
+        # truth: somebody else holds it, they are live, and the reader was told nothing does.
+        # The window is real and narrow — between `state()` reading FREE above and the mkdir
+        # here — which is the same fan-out shape two Crawlers starting in one tree produce.
+        hijack, other = lease.held_by_other(session)
+        if hijack:
+            events.emit(cfg, "lease.hijack", {
+                "tree": tree,
+                "intruder_session": session,
+                "holder_session": (other or {}).get("session"),
+                "holder_pid": (other or {}).get("pid"),
+                "holder": (other or {}).get("who"),
+                "raced": True,
+            })
+            return "hijack", {"tree": tree, "holder": other or {}}
         return "no-liveness", {"tree": tree, "holder": holder or {}}
     verdict = "reclaimed" if state == locks.STALE else "acquired"
     events.emit(cfg, "lease.acquired", {"tree": tree, "session": session,
@@ -255,9 +286,22 @@ def enter(cfg, session, path=None, who=None):
 # substitution, a newline — disqualifies the whole string, and the operator runs the verb on
 # its own. Being refused once and retyping it plainly is the cost; the alternative is a
 # bypass anybody can find by appending `&&`.
+#
+# THE FIRST VERSION OF THIS SAID ALL OF THAT AND LISTED ONLY THE SEPARATORS. `;`, `&`, `|`, a
+# newline and `$(` were disqualifying; `>` and `<` were not, and both of these were allowed:
+#
+#     showrunner worktree list <(rm -rf ...)        the substitution runs whatever the outer
+#                                                   command does, and bash runs it FIRST
+#     showrunner worktree status > <somebody's tree>/src/main.py    truncates it
+#
+# The carve-out is an UNCONDITIONAL allow checked before any tree is resolved, so either one
+# was a write into a tree a live session holds, through the one door the guard leaves open.
+# A redirection IS a write — which is the thing being guarded — and a process substitution IS
+# a second command, so both belong in a rule whose stated test is "could this introduce a
+# second command or a write". Neither is spellable in a real showrunner invocation.
 _OWN_VERB = re.compile(r"^\s*(?:[A-Za-z_][A-Za-z_0-9]*=\S*\s+)*"    # leading FOO=bar
                        r"(?:[^\s;|&]*/)?showrunner\s+(?:worktree|lease)\b")
-_CHAINED = re.compile(r"[;&|\n]|\$\(|`")
+_CHAINED = re.compile(r"[;&|<>\n]|\$\(|`")
 
 
 def own_command(command):
@@ -449,6 +493,7 @@ def register_guard(cfg):
     as it is: silently rewriting a file we could not read is how somebody's hooks disappear.
     """
     import json
+    from .util import atomic_write_json, file_lock
 
     path = os.path.join(cfg.root, ".claude", "settings.json")
     entry = {"matcher": "|".join(GUARD_TOOLS),
@@ -457,6 +502,15 @@ def register_guard(cfg):
                         "timeout": 10,
                         "statusMessage": "showrunner: is this tree held by another session?"}]}
 
+    # ONE LOCK AROUND THE WHOLE READ-MODIFY-WRITE, not just the write. Two installs racing —
+    # and `install.sh` runs this on every invocation — could otherwise both read a file with no
+    # entry and both append one, or the second could overwrite whatever the first added.
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with file_lock(path + ".sr-lock"):
+        return _register_guard_locked(cfg, path, entry, json, atomic_write_json)
+
+
+def _register_guard_locked(cfg, path, entry, json, atomic_write_json):
     data = {}
     if os.path.exists(path):
         try:
@@ -484,10 +538,14 @@ def register_guard(cfg):
                        % rel_or(path, cfg.root))
     pre.append(entry)
 
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as fh:
-        json.dump(data, fh, indent=2)
-        fh.write("\n")
+    # WRITE-THEN-RENAME, through the helper that already exists for this. A plain `open(w)` +
+    # `json.dump` truncates the file first, so a crash, a full disk, or a second writer between
+    # the truncate and the flush loses somebody's entire hook configuration — the exact outcome
+    # this function's own docstring argues against when it refuses to rewrite a file it could
+    # not read. `install.sh` calls this on EVERY run and `init` calls it too, so the window is
+    # not rare. `.claude/settings.json` belongs to Claude Code and to whoever else registered a
+    # hook in it; it is not ours to lose.
+    atomic_write_json(path, data)
     return True, ("registered the worktree guard in %s (PreToolUse on %s)"
                   % (rel_or(path, cfg.root), "|".join(GUARD_TOOLS)))
 
@@ -580,7 +638,19 @@ def fork(cfg, tree, session, base=None, name=None):
         raise Refused("git cannot resolve base %r in %s" % (base, cfg.root))
     base = resolved.strip()
 
+    # THE NAME IS DERIVED FROM A PREFIX, so two sessions whose ids share their first 8
+    # characters derive the same one — and the second then failed with "worktree path already
+    # exists", which blames the path and sends the reader looking at the filesystem instead of
+    # at the collision. Real session UUIDs make this rare, not impossible, and `--name` is the
+    # answer either way; the refusal now says so.
+    derived = name is None
     name = name or slug("%s-fork-%s" % (tree, (session or "x")[:8]), 60)
+    if derived and os.path.exists(os.path.join(cfg.worktree_root, name)):
+        raise Refused(
+            "fork: %r already exists. The name is derived from the tree and the first 8 "
+            "characters of your session id, so another session whose id starts the same way "
+            "already forked this tree — this is a name collision, not a leftover directory. "
+            "Pass --name <something> to choose your own." % name)
     from . import worktree as W
     path = W.create(cfg, name, "showrunner/%s" % name, base)
     injected, problems = W.inject(cfg, path)
@@ -591,13 +661,20 @@ def fork(cfg, tree, session, base=None, name=None):
         raise Refused("fork aborted — the new tree's harness is not the project's:\n  - %s"
                       % "\n  - ".join(hp))
 
+    # THE RESULT OF THE ACQUIRE IS THE ANSWER, not a side effect. This discarded it and the CLI
+    # printed "lease held by you" unconditionally — so in the state where `enter` itself refuses
+    # ("no session process could be resolved, this tree is unprotected"), `fork` moved the user
+    # to a fresh tree, told them it was leased, and left it FREE. That lands on the recovery
+    # path: fork is the FIRST remedy the hijack refusal offers, so the failure is reserved for
+    # someone already being told their tree was taken.
     lease = Lease(cfg, name)
-    lease.acquire(session, who=INTERACTIVE)
+    got, holder = lease.acquire(session, who=INTERACTIVE)
     from . import events
     events.emit(cfg, "lease.forked", {"from": tree, "tree": name, "session": session,
-                                      "base": base})
+                                      "base": base, "leased": bool(got)})
     return path, {"tree": name, "base": base, "from": tree, "injected": injected,
-                  "provisioned": provisioned, "warnings": hw,
+                  "provisioned": provisioned, "warnings": hw, "leased": bool(got),
+                  "lease_holder": holder or {},
                   "problems": [] if not hp else hp}
 
 

@@ -137,6 +137,13 @@ TARGETS = [
     ("guard registration", "lease.register_guard", "lib/showrunner/lease.py",
      r"(def register_guard\(cfg\):\n)",
      "    return False, ''\ndef _neutered_register_guard(cfg):\n"),
+    # Every lock directory that EXISTS, which is not the same set as the configured resources —
+    # a worktree lease is named `worktree:<tree>` and never appears in config. An always-empty
+    # answer makes `reap` blind to abandoned leases again (the state it exists to surface) and
+    # makes `lock release <lease>` refuse the one name a human needs to clear.
+    ("locks present on disk", "locks.LockSet.on_disk", "lib/showrunner/locks.py",
+     r"(    def on_disk\(self\):\n)",
+     "        return []\n    def _neutered_on_disk(self):\n"),
     # NOT auto-derived as a candidate — it has one return and no "nothing" branch — and swept
     # anyway, because it is the most dangerous predicate in this repo: it decides whether `pin`
     # may DELETE its destination wholesale. Always-True turns a mistyped --dest into rm -rf on
@@ -520,6 +527,9 @@ NOT_SWEPT = {
                     "0 on a clean pin, 2 on a directory edited since it was pinned. WHAT THAT "
                     "DOES NOT COVER: the two argument refusals (--pin without --dest, --dest "
                     "without either), which are asserted nowhere.",
+    "lease._register_guard_locked": "the body of register_guard, split out only so the whole "
+                                    "read-modify-write sits under one file lock. Stubbing "
+                                    "register_guard (which IS swept) neuters this with it.",
     "cli.cmd_worktree_register": "CLI wrapper over lease.register_guard, which IS swept. Its "
                                  "effect is asserted end to end through install.sh, on the "
                                  "UPGRADE path that had the bug: a repo with an existing config "
@@ -571,9 +581,26 @@ def all_functions():
     return names
 
 
+# A MUTANT THAT HANGS MEASURES NOTHING, AND WAITING FOR IT MEASURES NOTHING EITHER. A stub that
+# returns the wrong shape can put a caller into a poll that never ends — `settled_state` and
+# `lock run` both wait on something — and without a deadline the sweep stops at that producer
+# forever, which reads to whoever started it as "still running" rather than as a result.
+# Generous on purpose: the whole suite runs in well under a minute here, so this only fires on
+# a genuine hang and never on a slow machine.
+SUITE_DEADLINE = 600
+
+
 def run_suite(cwd):
-    proc = subprocess.run([sys.executable, os.path.join("test", "run.py")],
-                          cwd=cwd, capture_output=True, text=True)
+    try:
+        proc = subprocess.run([sys.executable, os.path.join("test", "run.py")],
+                              cwd=cwd, capture_output=True, text=True, timeout=SUITE_DEADLINE)
+    except subprocess.TimeoutExpired:
+        # Reported as its own outcome rather than as zero kills. "Nothing noticed" and "nothing
+        # finished" are the same number and opposite findings — the second is unscoreable.
+        return None, None, ("HUNG — the suite did not finish within %ss under this mutant, so "
+                            "no assertion was measured. A stub that makes a caller poll forever "
+                            "produces this; fix the stub or give the producer a bounded one."
+                            % SUITE_DEADLINE)
     m = re.search(r"RESULT: (\d+) passed, (\d+) failed", proc.stdout)
     if not m:
         return None, None, proc.stdout[-800:]
@@ -734,7 +761,11 @@ def main():
     print("%-34s %8s   %s" % ("producer neutered", "killed", "verdict"))
     print("-" * 78)
 
-    weak = []
+    # UNSCOREABLE IS NOT THIN, and they were printed under one heading. A producer whose
+    # mutant CRASHED a group has no measurement at all — its remaining assertions never ran —
+    # while a THIN one was measured and came back low. Filing the first under "thinly covered"
+    # mislabels the exact category the crashed-group detector was built to separate out.
+    weak, unscoreable = [], []
     # A --target that matches nothing swept NOTHING and then printed "every producer above is
     # noticed", which is a clean bill of health for a run that did no work. Found by typing a
     # KEY where the filter only ever read the label. Both are matched now, and matching zero
@@ -773,8 +804,12 @@ def main():
         p, f, out = run_suite(tree)
         shutil.rmtree(work, ignore_errors=True)
         if p is None:
-            print("%-34s %8s   SUITE CRASHED (stub may not parse)" % (name, "-"))
-            weak.append((name, 0))
+            hung = isinstance(out, str) and out.startswith("HUNG")
+            print("%-34s %8s   %s" % (name, "-",
+                                      "SUITE HUNG (no measurement taken)" if hung
+                                      else "SUITE CRASHED (stub may not parse)"))
+            unscoreable.append((name, 0, "the suite hung" if hung
+                                else "the suite did not run — the stub may not parse"))
             continue
         # Only assertions that FLIPPED count. Anything already failing unmutated is noise.
         killed = failing(out) - baseline_failures
@@ -787,7 +822,7 @@ def main():
                   "died and its remaining assertions never ran. Make them fail rather than "
                   "raise (`or {}` on a possibly-None result), then re-sweep."
                   % (name, f, ", ".join(sorted(crashed))))
-            weak.append((name, f))
+            unscoreable.append((name, f, "group(s) crashed: %s" % ", ".join(sorted(crashed))))
             continue
         # 3+ is comfortable; 1-2 is thin and worth naming rather than rounding up to "ok";
         # 0 is the real defect. Reporting thin as ok would be the same rounding-up this whole
@@ -803,6 +838,13 @@ def main():
         print("%-34s %8d   %s" % (name, f, verdict))
 
     print()
+    if unscoreable:
+        print("UNSCOREABLE producers (no measurement was taken — not a coverage result):")
+        for name, f, why in unscoreable:
+            print("  %-32s %d killed before it died   (%s)" % (name, f, why))
+        print("  Fix these FIRST: until the group survives its mutant, the number beside it")
+        print("  is a floor from a truncated run and says nothing about what is covered.")
+        print()
     unprotected = [w for w in weak if w[1] == 0]
     if weak:
         print("Thinly covered producers (2 or fewer assertions notice):")
@@ -816,7 +858,9 @@ def main():
         print("only unsupported, and rewriting it loses the restraint claim it encodes.")
         # Thin is information; only UNPROTECTED is a failure. A sweep that nags on thin
         # coverage is one that gets run with its output ignored.
-        return 1 if unprotected else 0
+        return 1 if (unprotected or unscoreable) else 0
+    if unscoreable:
+        return 1
     print("Every producer above is noticed by at least two assertions.")
     return 0
 

@@ -541,12 +541,17 @@ def cmd_worktree_enter(args):
               "session %s) — reclaimed.\n  Its work may still be in the tree. Nothing here "
               "deleted anything." % (tree, prev.get("pid"), (prev.get("session") or "?")[:8]))
     elif verdict == "unreadable":
+        # THE REMEDIES COME FROM `lease.REMEDIES`, and this line is why that constant exists.
+        # It used to hand-roll its own and print `worktree takeover`, which is a command this
+        # repo has never had — in the one branch reserved for the state only a human can
+        # resolve. REMEDIES says so in as many words ("NOT BUILT YET (WL-06)… a remedy naming a
+        # command that does not exist is worse than no remedy, and this project has shipped
+        # that twice"), and then a second copy of the rule shipped it a third time.
         print("showrunner: worktree %s holds an UNREADABLE pid (%r). It cannot be proved dead, "
               "so it will not be reclaimed — a partial write by a LIVE holder looks exactly "
-              "like this.\n  Find out whether %s is still running, then `%s worktree takeover "
-              "%s --reason \"<why>\"`."
-              % (tree, (h.get("pid") or "")[:40], h.get("who") or "the holder",
-                 brief.sr_bin(cfg), tree))
+              "like this.\n  Find out whether %s is still running. Meanwhile:\n"
+              % (tree, (h.get("pid") or "")[:40], h.get("who") or "the holder"))
+        print(lease.REMEDIES.format(sr=brief.sr_bin(cfg), tree=tree))
         return 0
     elif verdict == "no-liveness":
         print("showrunner: no session process could be resolved, so a lease here would have no "
@@ -601,7 +606,20 @@ def cmd_worktree_fork(args):
         d["base"][:12],
         "explicit --base" if args.base else "the commit %s started at" % d["from"]))
     print("  path    %s" % rel(path, cfg.root))
-    print("  lease   held by you")
+    # REPORTED FROM THE ACQUIRE, not asserted. This printed "held by you" whatever happened,
+    # including when the acquire had failed — the fresh tree the reader was just moved to was
+    # UNGUARDED and they had been told the opposite, on the recovery path, by the remedy the
+    # refusal recommends first.
+    if d.get("leased"):
+        print("  lease   held by you")
+    else:
+        print("  %slease   NOT TAKEN — this tree is UNGUARDED%s" % (YEL, OFF))
+        print("          The fork itself worked and the tree is yours to use; what failed is "
+              "the lease,\n          so nothing will refuse a second session that walks into "
+              "it. Same cause as\n          `worktree enter` reporting no liveness: no session "
+              "process could be resolved\n          (session %r). Said out loud rather than "
+              "left to look like the line above."
+              % (session or ""))
     for line in d.get("injected") or []:
         print("  inject  %s" % line)
     for line in d.get("warnings") or []:
@@ -632,7 +650,10 @@ def cmd_self(args):
     from the absence of callers: `install.sh --central` and the dispatcher shim are CI-03, and
     a pin with no consumer is a populated directory, not a working central install.
     """
-    cfg = _cfg(args)
+    # NO CONFIG IS LOADED HERE, and its absence is the fix rather than an oversight. Both halves
+    # of this verb are about a DIRECTORY and a checkout of showrunner's own code; neither is
+    # about the consumer project you happen to be standing in. Passing that project's config to
+    # `pin` is what made `self --pin` archive from the wrong repository.
     if not args.pin:
         # THE READ SIDE, reachable on its own. A stamp that can only be written by the command
         # that writes it is one nobody checks between upgrades.
@@ -641,8 +662,16 @@ def cmd_self(args):
                 "--dest <path> to create one.", code=64)
         found = pin.read_pin(os.path.abspath(os.path.expanduser(args.dest)))
         if not found:
-            print("no pinned checkout at %s (no readable %s)" % (args.dest, pin.PINNED_FILE))
+            print("no pinned checkout at %s (no %s)" % (args.dest, pin.PINNED_FILE))
             return 1
+        if found.get("unreadable"):
+            # A PIN THAT IS THERE AND CANNOT BE READ, reported as that. It used to reach the
+            # branch above and print "no pinned checkout", which is a different fact and the
+            # one that sends a reader looking for a directory that is sitting right there.
+            print("%s%s exists at %s and CANNOT BE READ (%s) — this is a pin whose commit is "
+                  "unknown, not the absence of one. Re-pin it.%s"
+                  % (RED, pin.PINNED_FILE, args.dest, found["unreadable"], OFF))
+            return 2
         print("pinned  %s (%s)" % (found["sha"][:12], found.get("ref")))
         print("  at    %s" % _stamp_or(found.get("at")))
         if not found.get("consistent"):
@@ -658,8 +687,10 @@ def cmd_self(args):
         die("self --pin: --dest is required. The only consumer of a pin today is a machine-wide "
             "central install, which is somewhere you name; there is no default that would be "
             "right for it.", code=64)
-    d = pin.pin(cfg, args.pin, args.dest)
+    d = pin.pin(args.pin, args.dest)
     print("pinned %s (%s) → %s" % (d["ref"], d["sha"][:12], d["dest"]))
+    print("  from  %s — the checkout this code is running out of, never the project you are "
+          "standing in" % d["source"])
     print("  stamped %s and %s, so 'what is central running' answers with a commit rather than "
           "with whoever last copied a working tree" % (pin.VERSION_FILE, pin.PINNED_FILE))
     print("  NOTHING POINTS AT IT YET — wiring consumer repos to a central copy is CI-03 "
@@ -855,7 +886,9 @@ def cmd_lock_acquire(args):
 
 def cmd_lock_release(args):
     cfg = _cfg(args)
-    lock = locks.LockSet(cfg).lock(args.resource)
+    # `existing`, not `lock`: this is the remedy the UNREADABLE refusal prints, and the locks a
+    # human most needs to clear — `worktree:<tree>` leases — are not configured resources.
+    lock = locks.LockSet(cfg).existing(args.resource)
     if lock.release(pid=args.pid or os.getpid(), force=args.force):
         events.emit(cfg, "lock.released", {"resource": args.resource, "forced": bool(args.force),
                                            "path": "release"})
@@ -1162,7 +1195,10 @@ def cmd_reconcile(args):
         print("%s%-28s%s %s" % (colour, f["crawler"], OFF, f["verdict"]))
         print("    leaf %s (%s) · branch %s%s" % (
             f["leaf"], f["leaf_status"], f["branch"], "" if f["branch_exists"] else " [gone]"))
-        if f["uncommitted"]:
+        if f.get("uncommitted_unknown"):
+            print("    %sCOULD NOT READ %s — git failed there, so whether it holds uncommitted "
+                  "work is UNKNOWN%s" % (YEL, f["worktree"], OFF))
+        elif f["uncommitted"]:
             print("    %d uncommitted change(s) in %s — inspect before deleting anything"
                   % (len(f["uncommitted"]), f["worktree"]))
         if f["scratch_files"]:

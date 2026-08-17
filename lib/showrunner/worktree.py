@@ -91,6 +91,16 @@ def create(cfg, name, branch, base="HEAD"):
 def remove(cfg, name, force=False):
     path = worktree_path(cfg, name)
     rc, _, err = git(["worktree", "remove"] + (["--force"] if force else []) + [path], cwd=cfg.root)
+    if rc == 0:
+        # THE LEASE GOES WITH THE TREE. `Lease.release` had a write side and no caller at all —
+        # the same asymmetry `Lock.holder`'s docstring names as THE defect in `acquire(extra=)`,
+        # re-introduced one layer up. The practical effect was that a lease was never handed
+        # back deliberately, only reclaimed from a corpse on somebody else's next `enter`, and
+        # a lease naming a tree that no longer exists is stale state that outlives the thing it
+        # described. Forced, because the tree is gone: there is nothing left to protect and no
+        # session left that could be asked.
+        from .lease import Lease
+        Lease(cfg, name).release(force=True)
     return rc == 0, err.strip()
 
 

@@ -240,7 +240,14 @@ def reconcile(cfg, graph, base="HEAD"):
         # healthy. Observed doing exactly that.
         f["session_health"] = _dispatch.session_health(cfg, entry)
         if f["worktree_exists"]:
-            f["uncommitted"] = worktree.dirty(wt) or []
+            # `dirty` returns None when git itself failed, and `or []` turned that into "no
+            # uncommitted work" — a positive claim about somebody's tree derived from a read
+            # that did not happen, and the one that decides whether a dead Crawler's tree is
+            # garbage. Guarded by `worktree_exists` today, which makes it unlikely rather than
+            # unreachable: a tree can exist and still be unreadable by git.
+            found = worktree.dirty(wt)
+            f["uncommitted"] = [] if found is None else found
+            f["uncommitted_unknown"] = found is None
         if scratch and os.path.isdir(scratch):
             f["scratch_files"] = [x for x in sorted(os.listdir(scratch)) if x != "README.txt"]
 
@@ -373,8 +380,15 @@ def reap(cfg, graph, base="HEAD", apply=False):
 
     # 2. Locks whose holder is dead. The lock already reclaims lazily on the next
     #    acquire; reaping makes the abandonment *visible* instead of silently absorbed.
+    # CONFIGURED RESOURCES **AND** WORKTREE LEASES. This iterated `ls.names()`, which is the
+    # configured resources only — and a lease is named `worktree:<tree>`, which is not one and
+    # never will be. So the reaper, whose stated job two lines up is to make abandonment
+    # VISIBLE rather than silently absorbed, could not see the locks a dead Crawler is most
+    # likely to leave behind: it holds a lease for its whole life. A lease outliving its session
+    # self-heals on the next `worktree enter` (it goes STALE and is reclaimed), which is exactly
+    # the "silently absorbed" this loop exists to end, one lock namespace over.
     ls = locks.LockSet(cfg)
-    for name in ls.names():
+    for name in sorted(set(ls.names()) | set(ls.on_disk())):
         state, holder = locks.Lock(ls.root, name).state()
         if state == locks.STALE:
             actions.append({
@@ -478,7 +492,14 @@ def reap(cfg, graph, base="HEAD", apply=False):
     for f in reconcile(cfg, graph, base):
         if f["verdict"].startswith("ABANDONED"):
             detail = []
-            if f["uncommitted"]:
+            if f.get("uncommitted_unknown"):
+                # READ BACK WHERE IT MATTERS, not written and forgotten: this line is the one
+                # that tells a human whether a tree about to be cleaned up holds the only copy
+                # of real work, and "(no uncommitted work found)" over a failed git read is the
+                # confident-and-wrong version of that sentence.
+                detail.append("COULD NOT READ %s — git failed, so whether it holds uncommitted "
+                              "work is UNKNOWN, not none" % f["worktree"])
+            elif f["uncommitted"]:
                 detail.append("%d uncommitted change(s) in %s" % (len(f["uncommitted"]), f["worktree"]))
             if f["scratch_files"]:
                 detail.append("%d file(s) in scratch %s" % (len(f["scratch_files"]), f["scratch"]))

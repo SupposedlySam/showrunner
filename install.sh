@@ -74,6 +74,17 @@ if [ "$CENTRAL" = 1 ]; then
   echo "  wrote   .showrunner/bin/showrunner — ONE dispatcher shim, no local copy of the tool"
   if [ -x "$SRC_CENTRAL/bin/showrunner" ]; then
     echo "  central install found at $SRC_CENTRAL — reachable right now"
+    # AND WHETHER THE SHIM WILL RESOLVE THE SAME PATH, which is a different question. Nothing
+    # here persists SHOWRUNNER_CENTRAL: the shim re-reads it at run time, and a Claude Code hook
+    # process does not carry this shell's environment. So an install done with a custom path
+    # reported success and then resolved $HOME/.claude/showrunner-central at every hook.
+    if [ -n "${SHOWRUNNER_CENTRAL:-}" ] && \
+       [ "$SRC_CENTRAL" != "$HOME/.claude/showrunner-central" ]; then
+      echo "  ⚠ that path came from SHOWRUNNER_CENTRAL in THIS shell, and nothing records it."
+      echo "    The shim re-reads that variable at run time and a hook process will not have it,"
+      echo "    so hooks will look in $HOME/.claude/showrunner-central instead. Export it from"
+      echo "    your shell profile, or pin to the default path."
+    fi
   else
     echo "  ⚠ NO central install at $SRC_CENTRAL yet. Until one exists, every non-hook verb in"
     echo "    this repo exits 1, and the hook verbs allow AND SAY they did not run."
@@ -251,7 +262,14 @@ install_skills() {
 
 MISSING="$(skills_missing)"
 case "$SKILLS" in
-  no) : ;;
+  no)
+    # SAID, not silent. "Nothing was written" is also what a failed install looks like, and a
+    # flag whose whole effect is an absence should leave a line the reader can point at.
+    if [ -n "$MISSING" ]; then
+      echo "  note    --no-skills: Claude Code skills NOT installed ($MISSING)."
+      echo "          Nothing was written to $SKILLS_DEST. Add them later with:"
+      echo "            $SRC/install.sh --skills $TARGET"
+    fi ;;
   yes) install_skills ;;
   *)
     if [ -z "$MISSING" ]; then
@@ -285,12 +303,16 @@ echo "       checks     — the commands integration re-runs after EACH merge"
 echo "  2. ./.showrunner/bin/showrunner doctor"
 echo "       It REFUSES a config that would degrade silently — a worktree-relative lock root,"
 echo "       or worktrees outside the repo. A mutex that is quietly a no-op is worse than none."
-echo "  3. Register the worktree guard in .claude/settings.json, or it never runs:"
-echo "       PreToolUse → {\"matcher\": \"Write|Edit|NotebookEdit|Bash\","
-echo "                     \"hooks\": [{\"type\": \"command\","
-echo "                       \"command\": \"\\\$CLAUDE_PROJECT_DIR/.showrunner/hooks/worktree-guard.sh\"}]}"
-echo "       Then commit .showrunner/hooks/. doctor reports both as errors until you do —"
-echo "       an unregistered guard is indistinguishable from one that ran and was content."
+# STEP 3 USED TO PASTE THE HOOK ENTRY, and this script had already written it — every install
+# runs `worktree register` above. So a reader who followed the instruction got a SECOND
+# PreToolUse entry and the guard ran twice per tool call, which `_guard_registration` does not
+# notice because it returns on the first match. The literal JSON also lived in two places with
+# different quoting and no timeout; `lease.register_guard` is the only copy now.
+echo "  3. git add .showrunner/hooks/ && commit — the guard is registered already, but"
+echo "       \`git worktree add\` copies TRACKED files only, so until it is committed the guard"
+echo "       is present here and ABSENT in every worktree, which is the one place it runs."
+echo "       (Re-register any time with: ./.showrunner/bin/showrunner worktree register —"
+echo "        it is idempotent. doctor reports both states as errors until they are fixed.)"
 echo "  4. ./.showrunner/bin/showrunner baseline    # on a known-good tree"
 echo "       The gate is 'no NEW failures', never 'all green' — a repo with pre-existing"
 echo "       failures cannot satisfy 'all green', so that version gets switched off on contact."

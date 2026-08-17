@@ -25,31 +25,75 @@
 # OPTIMISATION (routing), and `lock run` is the guarantee, which is not a hook and still fails
 # loud below. So the notice is actionable, not just honest: it tells the reader to take the lock
 # themselves.
+#
+# AND "NOT IN SILENCE" MEANS THE CHANNEL THE READER IS ON, which this file got wrong: it wrote
+# the notice to stderr and exited 0, and a PreToolUse hook that exits 0 surfaces stderr to
+# nobody. The rule was stated correctly here and implemented into a void, which is the exact
+# shape of the drift the whole feature exists to stop. `additionalContext` on STDOUT is what
+# reaches the agent — the same shape .showrunner/hooks/worktree-guard.sh already emits for the
+# identical situation, and it is spelled the same way here on purpose.
 set -u
 
 central="${SHOWRUNNER_CENTRAL:-$HOME/.claude/showrunner-central}"
 
-if [ -x "$central/bin/showrunner" ]; then
+# IT MUST LOOK LIKE A PIN, not merely be executable. `self --pin` writes PINNED beside the code
+# and nothing else does, so requiring it is the cheapest available check that this directory was
+# put here by the tool rather than left there by something else — a half-finished extraction, a
+# stale hand-copy, or a directory somebody created at a path the shim resolves to.
+#
+# WHAT THIS IS NOT: an integrity check. PINNED names a commit; it does not attest that the code
+# beside it is that commit, and this file cannot verify a signature it has no key for. Anyone who
+# can write inside $HOME can write PINNED too — and at that point they already run as you. Said
+# here rather than left implied, because a check that looks like verification and is not is worse
+# than none: it is the difference between "this is showrunner's own layout" and "this is safe".
+if [ -x "$central/bin/showrunner" ] && [ -f "$central/PINNED" ]; then
   exec "$central/bin/showrunner" "$@"
 fi
 
-unchecked() {
-  echo "showrunner: ALLOWED WITHOUT BEING CHECKED — no central install at $central, so \`$*\`" >&2
-  echo "  did not run. This is not a guard reporting that it was content; it is the guard" >&2
-  echo "  being absent. Routing and guarding are optimisations here; the guarantee is" >&2
-  echo "  \`showrunner lock run <resource> --holder <who> -- <cmd>\`, which is not a hook and" >&2
-  echo "  still fails loud. Take the lock yourself, or repair central:" >&2
-  echo "    showrunner self --pin <ref> --dest $central" >&2
+if [ -x "$central/bin/showrunner" ]; then
+  echo "showrunner: $central holds an executable but no PINNED stamp, so it was not put there" >&2
+  echo "  by \`self --pin\` — a half-extracted or hand-copied directory runs and cannot say what" >&2
+  echo "  code it is. Refusing to dispatch to it. Re-pin it, or point SHOWRUNNER_CENTRAL" >&2
+  echo "  somewhere that was." >&2
+  exit 1
+fi
+
+# HOW TO GET ONE. Deliberately not `showrunner self --pin ...`: the only `showrunner` on a
+# centrally-wired consumer's PATH is THIS FILE, which has just refused, and `self --pin`
+# extracts from the checkout its own code is running out of — so the command has to be typed
+# from a clone of showrunner, and saying so is the whole content of the remedy.
+repair="from a clone of showrunner:  ./bin/showrunner self --pin <ref> --dest $central"
+
+# JSON string escaping for the one interpolated value. $central comes from the environment and
+# a quote or backslash in it would produce output the host cannot parse — which would turn the
+# notice into silence again, one layer down.
+json_escape() {
+  local s=$1
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  printf '%s' "$s"
 }
 
 # The verb pair, so `lock guard` is matched without also matching `lock run`.
 case "${1:-}:${2:-}" in
-  lock:guard|worktree:guard|worktree:enter|stop-gate:*)
-    unchecked "${1:-}" "${2:-}"; exit 0 ;;
+  lock:guard|worktree:guard)
+    # A PreToolUse hook. There IS a channel to the agent on an allow, so use it.
+    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"%s"}}\n' \
+      "$(json_escape "⚠ showrunner: ALLOWED WITHOUT BEING CHECKED — no central install at $central, so \`${1:-} ${2:-}\` did not run. This is not a guard reporting that it was content; it is the guard being absent. A worktree or resource held by another live session is NOT protected right now. Routing and guarding are optimisations here; the guarantee is \`showrunner lock run <resource> --holder <who> -- <cmd>\`, which is not a hook and still fails loud. Take the lock yourself, or repair central — $repair")"
+    exit 0 ;;
+  worktree:enter|stop-gate:*)
+    # NOT PreToolUse, and the difference is stated rather than smoothed over: `worktree enter`
+    # is typed, so its reader is at a terminal; a Stop hook that permits the stop has no
+    # documented channel that reaches the model at all. stderr is the best available here, and
+    # that it is weaker than the branch above is a LIMIT of the host, not a choice made here.
+    echo "showrunner: ALLOWED WITHOUT BEING CHECKED — no central install at $central, so" >&2
+    echo "  \`${1:-} ${2:-}\` did not run. This is not a guard reporting that it was content;" >&2
+    echo "  it is the guard being absent. Repair central — $repair" >&2
+    exit 0 ;;
   *)
     echo "showrunner: no central install at $central" >&2
     echo "  This repo dispatches to a shared copy of the tool and there is not one there." >&2
-    echo "  Populate it:  showrunner self --pin <ref> --dest $central" >&2
+    echo "  Populate it — $repair" >&2
     echo "  Or point elsewhere with SHOWRUNNER_CENTRAL, or re-run install.sh WITHOUT" >&2
     echo "  --central to go back to a local copy of the code in this repo." >&2
     exit 1 ;;

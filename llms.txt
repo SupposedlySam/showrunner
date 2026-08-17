@@ -372,6 +372,10 @@ flag, and reversible in both directions:
 ```
 ./install.sh --central /path/to/project      # write ONE dispatcher shim, no local copy of the code
 showrunner self --pin <ref> --dest <path>    # populate central: extract bin/ and lib/ at a git ref
+                                             # RUN FROM A SHOWRUNNER CHECKOUT: the ref is resolved
+                                             # in the repo the RUNNING CODE lives in, never in the
+                                             # project you are standing in. From a consumer repo it
+                                             # refuses rather than publishing their HEAD as the tool.
 showrunner self --dest <path>                # what is pinned there; exit 2 if it was edited since
 ./install.sh /path/to/project                # revert: restore the local copy, drop the dependency
 ```
@@ -412,7 +416,7 @@ what is there now. Nothing hashes the contents.
 ## Verifying the tool itself
 
 ```
-python3 test/run.py        # 677 assertions; needs only Python 3 + git
+python3 test/run.py        # 754 assertions; needs only Python 3 + git
 bash prototype/demo.sh     # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 

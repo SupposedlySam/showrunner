@@ -32,7 +32,7 @@ import re
 import shutil
 import time
 
-from .util import boot_token, die, eprint, now, pid_alive, pid_readable
+from .util import UNKNOWN_BOOT, boot_token, die, eprint, now, pid_alive, pid_readable
 
 FREE, HELD, STALE = "FREE", "HELD", "STALE"
 # A fourth state, and the reason it exists is the whole point of this module. STALE means
@@ -108,10 +108,58 @@ class Lock:
             return UNREADABLE, h
         return (HELD if self._live(h) else STALE), h
 
+    def settled_state(self, grace=1.0, poll=0.05):
+        """`state()`, but UNREADABLE has to still be true a moment later to count.
+
+        THE WRITE IS NOT ATOMIC AND NEVER WAS: `acquire` creates the lock directory and then
+        writes `pid` as a separate file, so for a few hundred microseconds a concurrent reader
+        sees a directory with no pid in it — which `state()` correctly calls UNREADABLE, and
+        which every adjudicating caller correctly treats as "a human has to clear this". Two
+        sessions starting in the same tree is the ordinary fan-out shape, and it could produce a
+        hard refusal, exit 2, over a lock that was valid a millisecond later.
+
+        UNREADABLE means "cannot tell", and the honest way to answer a question you cannot tell
+        yet is to look again — not to promote the transient case (someone is mid-acquire) or to
+        demote the real one (a torn write by a process that died). A torn write does not repair
+        itself, so anything still unreadable after the grace is the state the refusal was
+        written for and gets it, unchanged.
+
+        Only for callers that ACT on the answer. Reporting readers keep `state()`: a report that
+        blocks for a second per lock is a report nobody runs.
+        """
+        state, h = self.state()
+        if state != UNREADABLE:
+            return state, h
+        deadline = time.time() + max(0, grace)
+        while time.time() < deadline:
+            time.sleep(poll)
+            state, h = self.state()
+            if state != UNREADABLE:
+                return state, h
+        return UNREADABLE, h
+
     @staticmethod
     def _live(h):
-        """Alive means: the PID responds AND it was recorded during this boot."""
-        if h.get("boot") and h["boot"] != boot_token():
+        """Alive means: the PID responds AND it was recorded during this boot.
+
+        A BOOT TOKEN NOBODY COULD READ IS NOT A DIFFERENT BOOT. `boot_token` degrades to
+        `<host>:unknown` when the boot time is not discoverable — a `sysctl` that failed, a
+        container with no `/proc/stat` — and comparing that against a real recorded token makes
+        every holder on the machine read as "recorded during a previous boot", i.e. PROVED DEAD.
+        A live session's lease would then be reclaimed out from under it by the next `acquire`,
+        which is the single worst outcome this module has, produced by a transient failure to
+        read an unrelated number.
+
+        So an unknown token on either side drops back to plain PID semantics — exactly what
+        `boot_token`'s docstring says the fallback degrades to, honoured here rather than only
+        promised there. That is weaker (a PID reused across a reboot could read as alive) and it
+        is the right direction: this module's whole posture is that 'could not tell' must never
+        become 'proved dead'.
+        """
+        theirs, ours = h.get("boot"), boot_token()
+        comparable = (theirs and not theirs.endswith(UNKNOWN_BOOT)
+                      and not ours.endswith(UNKNOWN_BOOT))
+        if comparable and theirs != ours:
             return False
         return pid_alive(h.get("pid"))
 
@@ -148,7 +196,10 @@ class Lock:
                 self._write_owner(pid, who, session, extra)
                 return True
 
-            state, h = self.state()
+            # SETTLED, because this caller ACTS on the answer — it reclaims, or it refuses a
+            # human out to a manual repair. The unsettled read makes another session's own
+            # acquire, mid-write, look like corruption.
+            state, h = self.settled_state()
             if state == STALE:
                 eprint("note: reclaiming stale lock %r (holder pid %s, boot %s — not alive)"
                        % (self.name, h.get("pid"), h.get("boot")))
@@ -197,6 +248,36 @@ class LockSet:
             die("no resource named %r in config (known: %s)"
                 % (name, ", ".join(self.names()) or "<none>"), code=2)
         return Lock(self.root, name)
+
+    def on_disk(self):
+        """Every lock directory under the root, configured or not."""
+        try:
+            return sorted(d[:-len(".lock")] for d in os.listdir(self.root)
+                          if d.endswith(".lock"))
+        except OSError:
+            return []
+
+    def existing(self, name):
+        """A lock to RELEASE. Configured, or merely present — releasing is the remedial path.
+
+        `lock()` resolves configured resources only, which is right for taking a lock: a typo
+        must not mint a new one. It is wrong for giving one back, and the gap was reachable
+        through a printed remedy. The UNREADABLE refusal says
+
+            showrunner lock release <name> --force
+
+        and the worktree lease names its locks `worktree:<tree>`, which is not a configured
+        resource and never will be — so the one escape hatch offered to a human staring at a
+        wedged lock answered "no resource named 'worktree:victim' in config" and exited 2.
+
+        A lock that physically exists can be released by name. Refusing to name something that
+        is really there is refusing to repair a real state.
+        """
+        if self.cfg.resource(name) or os.path.isdir(os.path.join(self.root, "%s.lock" % name)):
+            return Lock(self.root, name)
+        known = sorted(set(self.names()) | set(self.on_disk()))
+        die("no lock named %r — nothing configured under that name and nothing held under it "
+            "on disk (known: %s)" % (name, ", ".join(known) or "<none>"), code=2)
 
     def matching(self, command):
         """Every configured resource whose match patterns fire on this command line."""
