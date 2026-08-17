@@ -3324,6 +3324,38 @@ def test_filed_issues_15_to_21():
     ok("...and an ordinary inject path is not flagged, so the check separates the two rather "
        "than refusing injection", not _HI.inject_conflicts(clean), _HI.inject_conflicts(clean))
 
+    # THE CAVEAT PRINTS EVERY TIME, INCLUDING ON THE QUIET RUN. The scope statement used to ride
+    # on the "open but NOT yours" line, which appears only when a sibling happens to hold
+    # something — so on a quiet campaign the pass said "stop OK" and stated no reach at all. The
+    # reach IS the point since #27: this answers about ONE caller, and a reader who takes it for
+    # "the campaign is finished" was told that by its silence rather than its words.
+    # A MISSING WORKING DIRECTORY IS NOT A NON-ZERO EXIT. `stop_gate` resolves a claim's RECORDED
+    # tree, and a recorded tree outlives the directory — a worktree removed after its claim leaves
+    # a path that was true when written. subprocess raises rather than returning, every caller
+    # here is written against exit codes, and stop-gate is a HOOK: it crashed with a traceback
+    # instead of answering, and the harness's fail-open kept the session moving while the gate
+    # said nothing. Found by a test whose fixture named a tree it never created.
+    from showrunner.util import run as _run
+    rc_missing, _, err_missing = _run(["git", "status"], cwd=os.path.join(cfg.root, "no-such-dir"))
+    ok("a missing cwd comes back as a non-zero result rather than an exception, so a caller "
+       "written against exit codes behaves correctly without knowing the case exists",
+       rc_missing != 0, (rc_missing, err_missing))
+    ok("...and says which directory, because 'command failed' about a path nobody named is a "
+       "second investigation", "no-such-dir" in err_missing, err_missing)
+
+    quiet = make_repo()
+    gq = new_graph(quiet)
+    ok_q, msg_q = gates.stop_gate(quiet, gq, tree=quiet.root)
+    ok("a campaign with nothing open passes", ok_q, msg_q)
+    ok("...and STILL says what the pass does not mean — an assembled caveat can assemble to "
+       "nothing, and an empty caveat reads as a gate with nothing to add on the run where it "
+       "had the most", "SCOPED TO YOU" in msg_q, msg_q)
+    gq.add("someone else's", leaf_id="Q1")
+    gq.claim("Q1", "sibling", pid=os.getpid(), tree=os.path.join(quiet.root, ".worktrees", "s"))
+    ok_b, msg_b = gates.stop_gate(quiet, gq, tree=quiet.root)
+    ok("...and the same caveat is there when a sibling DOES hold work, so its presence carries "
+       "no information the reader has to decode", ok_b and "SCOPED TO YOU" in msg_b, msg_b)
+
     # #26 — a Crawler that self-corrects AFTER closing had nowhere to put it. No `reopen`, and
     # `edit` correctly refuses a closed leaf, so a leaf whose verdict should be `partial` stayed
     # `refuted` forever. That is not a cosmetic row: `refuted` means nobody needs to build this,
@@ -3446,6 +3478,9 @@ def test_claims_about_the_layer_below():
         "lib/showrunner/brief.py": "what every Crawler is told about the commit gate",
         "lib/showrunner/harness.py": "why a tree carrying no harness must be refused",
         "lib/showrunner/worktree.py": "the per-tree gate the shared-state audit rests on",
+        "lib/showrunner/util.py": "why a missing cwd must not raise — it cites the harness's "
+                                  "hook fail-open as what made the crash survivable and therefore "
+                                  "quiet",
         "lib/showrunner/campaign.py": "what a drifted tree's gate is said to owe",
         "lib/showrunner/dispatch.py": "why a Crawler must be a session — hooks, park, transcript",
         "lib/showrunner/cli.py": "doctor's account of what a worktree inherits and when spawn refuses",

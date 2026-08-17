@@ -178,7 +178,23 @@ def session_pid(start=None):
 
 
 def run(cmd, cwd=None, check=False, timeout=None, env=None):
-    """Run a command, returning (rc, stdout, stderr). Never raises on non-zero unless asked."""
+    """Run a command, returning (rc, stdout, stderr). Never raises on non-zero unless asked.
+
+    A MISSING `cwd` IS NOT A NON-ZERO EXIT, and it used to escape as an exception. Python raises
+    from `subprocess.run` when it cannot enter the working directory — the process never starts,
+    so there is no exit code to return — and every caller here is written against exit codes and
+    catches nothing. One of them is `stop_gate`, which resolves a claim's RECORDED tree, and a
+    recorded tree outlives the directory: a worktree removed after its claim leaves a path that
+    was true when written. So a Claude Code hook crashed with a traceback instead of answering,
+    and the harness's fail-open kept the session moving while the gate said nothing.
+
+    Converted here rather than at each call site because this is the single point processes are
+    spawned, which is the only place that fixes it once. Reported as rc 127 — "command not
+    executable" is the closest true thing, and it is non-zero, so a caller checking `rc != 0`
+    behaves correctly without knowing this case exists.
+    """
+    if cwd is not None and not os.path.isdir(cwd):
+        return 127, "", "working directory does not exist: %s" % cwd
     proc = subprocess.run(
         cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout,
         env=env, shell=isinstance(cmd, str),

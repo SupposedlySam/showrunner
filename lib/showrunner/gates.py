@@ -244,9 +244,21 @@ def stop_gate(cfg, graph, leaf_id=None, tree=None):
         if lines:
             msg += "\n  " + "\n  ".join(lines)
         return False, msg
+    # THE CAVEAT IS A FIXED STRING AND IT PRINTS EVERY TIME. Everything above it interpolates —
+    # scope, counts, ids — and the sentence saying what the pass does NOT mean does not, because
+    # an assembled caveat can assemble to nothing and an empty caveat reads as a gate with
+    # nothing to add, on the run where it had the most.
+    #
+    # It was previously carried only by the "open but NOT yours" line, which appears only when a
+    # sibling happens to hold something. So on a quiet campaign the pass said "stop OK" with no
+    # statement of its reach at all — and the reach IS the point, since #27: this answers about
+    # ONE caller, and a reader who takes it for "the campaign is finished" has been told that by
+    # its silence rather than its words.
     msg = "stop OK: no claimed-open leaf work of YOURS (%s)" % basis
     if lines:
         msg += "\n  " + "\n  ".join(lines)
+    msg += ("\n  SCOPED TO YOU. This says nothing about whether the campaign is finished, or "
+            "whether a sibling still holds work — `showrunner status` answers that.")
     return True, msg
 
 
