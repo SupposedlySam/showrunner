@@ -75,6 +75,27 @@ def raises(label, fn, contains=None):
     return ok(label, False, "did not refuse")
 
 
+def attempt(fn, default=None):
+    """Call `fn`, returning `default` if it REFUSES. Asserts nothing itself.
+
+    THE COMPANION TO `raises`, for the calls a test makes on its way to the assertion it cares
+    about. A producer stubbed to answer "nothing" makes the callers below it refuse — correctly,
+    that is the fail-closed behaviour — and an unhandled `Refused` in the middle of a group
+    takes every assertion after it down with it. The mutant that should have been MEASURED
+    becomes UNSCOREABLE instead, and `mutate.py` reports a floor from a truncated run.
+
+    Deliberately silent and deliberately not an assertion of its own: emitting one here would
+    make the suite's assertion count depend on whether a mutation is in effect. The refusal
+    surfaces as `default` flowing into the assertions that follow, which then FAIL — which is
+    the whole point, and the difference between a producer scored at 22 and one scored at 0
+    with a crash beside it.
+    """
+    try:
+        return fn()
+    except Refused:
+        return default
+
+
 def skip(label, why):
     SKIP.append((label, why))
     print("  SKIP  %s — %s" % (label, why))
@@ -1015,24 +1036,33 @@ def test_harness_provisioning():
     info = H.owned(cfg, ".game_loop")
     ok("showrunner asks the harness for its owned set", bool(info), info)
     eq("...and takes the rule/notes split from it, rather than assuming",
-       (info["rule_files"], info["notes_files"]),
+       ((info or {}).get("rule_files"), (info or {}).get("notes_files")),
        (["config.json", "INVARIANTS.md", "verify.yaml"], ["LEDGER.md"]))
 
     g = new_graph(cfg)
     g.add("work", leaf_id="h1", labels=["backend"])
-    rec = worktree.spawn(cfg, g.show("h1"), actor="crawler-h")
-    wt = rec["worktree"]
+    # `spawn` REFUSES when the harness it must provision cannot answer, which is correct and
+    # is also every assertion below it dying at once. Caught so the refusal becomes a failed
+    # line rather than an unscoreable producer.
+    rec = attempt(lambda: worktree.spawn(cfg, g.show("h1"), actor="crawler-h"), {})
+    # A PATH THAT CANNOT EXIST when the spawn refused, rather than None. Every assertion below
+    # joins onto `wt`, and None turns each of them into a TypeError that ends the group — so the
+    # sentinel keeps them EVALUATING: the "it was provisioned" lines fail, which is the truth,
+    # and the group survives to be measured.
+    wt = rec.get("worktree") or os.path.join(cfg.root, ".spawn-refused-no-worktree")
+    os.makedirs(wt, exist_ok=True)
     ok("an UNTRACKED harness is provisioned into the worktree",
-       os.path.exists(os.path.join(wt, ".game_loop", "bin", "game_loop")))
+       bool(wt) and os.path.exists(os.path.join(wt, ".game_loop", "bin", "game_loop")))
     ok("...with the executable bit preserved",
-       os.access(os.path.join(wt, ".game_loop", "bin", "game_loop"), os.X_OK))
+       bool(wt) and os.access(os.path.join(wt, ".game_loop", "bin", "game_loop"), os.X_OK))
     ok("the harness's OWN verdict is what showrunner records, not showrunner's comparison",
-       any("verified by the harness" in a for a in rec["provisioned"]), rec["provisioned"])
+       any("verified by the harness" in a for a in rec.get("provisioned") or []),
+       rec.get("provisioned"))
     ok("...and the report names the limit that is REAL — the hook-registration file is outside "
        "the harness directory, so the harness cannot compare it and showrunner checks it "
        "separately",
-       any("NOT checked by it" in a and "hook-registration" in a for a in rec["provisioned"]),
-       rec["provisioned"])
+       any("NOT checked by it" in a and "hook-registration" in a for a in (rec.get("provisioned") or [])),
+       (rec.get("provisioned") or []))
     ok("another session's state is NOT copied into the Crawler",
        not os.path.exists(os.path.join(wt, ".game_loop", "sessions", "abc123", "state.json")))
     ok("...nor its edited-file set", not os.path.exists(os.path.join(wt, ".game_loop", "edited.txt")))
@@ -1064,16 +1094,16 @@ def test_harness_provisioning():
            lambda: worktree.spawn(c, gg.show("h3")), "environment is incomplete")
 
     c, gg = spawn_with("notes-drifted", "h4")
-    rec4 = worktree.spawn(c, gg.show("h4"))
+    rec4 = attempt(lambda: worktree.spawn(c, gg.show("h4")), {})
     ok("exit 3 (NOTES drifted) warns and carries on — per-tree notes are ordinary",
-       any("NOTE:" in a for a in rec4["provisioned"]), rec4["provisioned"])
+       any("NOTE:" in a for a in (rec4.get("provisioned") or [])), (rec4.get("provisioned") or []))
 
     # --- the hook-registration file -----------------------------------------
     ok("showrunner does NOT copy the hook-registration file (the installer MERGES it, "
        "preserving the project's own settings and its stray-hook warning)",
        not os.path.exists(os.path.join(wt, ".claude", "settings.json")) or
-       "settings.json" not in " ".join(rec["provisioned"]),
-       rec["provisioned"])
+       "settings.json" not in " ".join((rec.get("provisioned") or [])),
+       (rec.get("provisioned") or []))
     nohooks = make_repo()
     _seed_harness(nohooks.root, track_settings=False)
     gnh = new_graph(nohooks)
@@ -1095,11 +1125,11 @@ def test_harness_provisioning():
     config.write(inst)
     gi = new_graph(inst)
     gi.add("work", leaf_id="h5", labels=["backend"])
-    rec5 = worktree.spawn(inst, gi.show("h5"))
+    rec5 = attempt(lambda: worktree.spawn(inst, gi.show("h5")), {})
     ok("a configured installer is used instead of copying, and is told which tree to match",
-       any("installer" in a and "MERGES" in a for a in rec5["provisioned"]), rec5["provisioned"])
+       any("installer" in a and "MERGES" in a for a in (rec5.get("provisioned") or [])), (rec5.get("provisioned") or []))
     ok("...and the hook registration lands through it",
-       os.path.exists(os.path.join(rec5["worktree"], ".claude", "settings.json")))
+       os.path.exists(os.path.join((rec5.get("worktree") or ""), ".claude", "settings.json")))
 
     # --- a harness with no verbs --------------------------------------------
     noverb = make_repo()
@@ -1113,9 +1143,9 @@ def test_harness_provisioning():
     _seed_harness(lax.root, verbs=False)
     gl = new_graph(lax)
     gl.add("work", leaf_id="h7", labels=["backend"])
-    rec7 = worktree.spawn(lax, gl.show("h7"))
+    rec7 = attempt(lambda: worktree.spawn(lax, gl.show("h7")), {})
     ok("...with require=false as the escape hatch, and the unverified state stated on the record",
-       any("NOT ENFORCED" in a for a in rec7["provisioned"]), rec7["provisioned"])
+       any("NOT ENFORCED" in a for a in (rec7.get("provisioned") or [])), (rec7.get("provisioned") or []))
 
     # A Crawler can weaken its OWN rules after it starts. Verifying only at spawn verifies
     # that for exactly one instant.
@@ -1123,23 +1153,31 @@ def test_harness_provisioning():
     _seed_harness(post.root)
     gp = new_graph(post)
     gp.add("tamper", leaf_id="h8", labels=["backend"])
-    rec8 = worktree.spawn(post, gp.show("h8"), actor="tamperer")
-    campaign.record_spawn(post, rec8, pid=os.getpid())
-    status, _, mis = H.check_tree(post, rec8["worktree"])
+    rec8 = attempt(lambda: worktree.spawn(post, gp.show("h8"), actor="tamperer"), {})
+    # `record_spawn` reads the fields a refused spawn never produced. Guarded so a stubbed
+    # producer upstream fails the assertions below instead of ending the group at the record.
+    # Only when there IS a record. `record_spawn` reads fields a refused spawn never produced,
+    # and a KeyError here ends the group — so a producer stubbed upstream became unscoreable
+    # at the bookkeeping line rather than failing the assertions that are about it. Skipping
+    # is truthful: nothing was spawned, so there is nothing to record, and the campaign stays
+    # empty in exactly the way the assertions below will report.
+    if rec8:
+        campaign.record_spawn(post, rec8, pid=os.getpid())
+    status, _, mis = H.check_tree(post, (rec8.get("worktree") or ""))
     eq("a freshly spawned tree checks clean", status, "clean")
     ok("...and is not retroactively flagged as mis-certified when nothing was unreadable",
        mis is False, mis)
 
-    with open(os.path.join(rec8["worktree"], ".game_loop", "TESTMODE"), "w") as fh:
+    with open(os.path.join((rec8.get("worktree") or ""), ".game_loop", "TESTMODE"), "w") as fh:
         fh.write("drifted\n")
-    status, _, _ = H.check_tree(post, rec8["worktree"])
+    status, _, _ = H.check_tree(post, (rec8.get("worktree") or ""))
     eq("post-spawn rule drift is caught by RE-asking the harness, not assumed away",
        status, "drifted")
-    finding = next(f for f in campaign.reconcile(post, gp)
-                   if f["crawler"] == rec8["crawler"])
+    finding = next((f for f in campaign.reconcile(post, gp)
+                    if f["crawler"] == (rec8.get("crawler") or "")), {})
     ok("...and reconcile reports it above every other verdict — a gate answering a different "
        "question makes everything it certified mean less",
-       finding["verdict"].startswith("HARNESS DRIFTED"), finding["verdict"])
+       (finding.get("verdict") or "").startswith("HARNESS DRIFTED"), finding.get("verdict"))
 
     # THE UNARMED WATCHDOG (issue #23). `showrunner waiting` was built for one consumer and
     # nothing connected them, so a two-layer install defaults to the guard and the answer not
@@ -1267,7 +1305,7 @@ def test_harness_provisioning():
         "blocked": True, "blocks_total": 1, "limit": 3,
         "attachments": {"showrunner-stop-gate": {"verdict": "blocked", "consecutive": 1}}}}))
     try:
-        blocked, why = H.stop_gate(post, rec8["worktree"], "some-session-id")
+        blocked, why = H.stop_gate(post, (rec8.get("worktree") or ""), "some-session-id")
     finally:
         H.run = _orig_run
     ok("a Crawler refused at a turn-end is reported BLOCKED", blocked is True, (blocked, why))
@@ -1277,47 +1315,50 @@ def test_harness_provisioning():
 
     H.run = _canned_run(json.dumps({"stop_gate": {"blocked": False, "attachments": {}}}))
     try:
-        blocked, _ = H.stop_gate(post, rec8["worktree"], "some-session-id")
+        blocked, _ = H.stop_gate(post, (rec8.get("worktree") or ""), "some-session-id")
     finally:
         H.run = _orig_run
     ok("a working Crawler is not", blocked is False, blocked)
 
     H.run = _canned_run("not json at all")
     try:
-        blocked, _ = H.stop_gate(post, rec8["worktree"], "some-session-id")
+        blocked, _ = H.stop_gate(post, (rec8.get("worktree") or ""), "some-session-id")
     finally:
         H.run = _orig_run
     ok("a harness with no such seam answers None, NOT False — an older harness's silence is "
        "not evidence that its Crawler is fine, and reading it as such is the same mistake one "
        "layer up", blocked is None, blocked)
     ok("...and so is a Crawler whose session was never recorded, rather than being assumed "
-       "healthy", H.stop_gate(post, rec8["worktree"], None)[0] is None)
+       "healthy", H.stop_gate(post, (rec8.get("worktree") or ""), None)[0] is None)
 
     # THE WIRING, not just the reader. Everything above proves stop_gate answers correctly and
     # says nothing about whether the two verbs that decide anything ever ask it. A verified
     # diagnosis is not a verified fix.
     gp.add("blocked work", leaf_id="h9", labels=["backend"])
-    rec9 = worktree.spawn(post, gp.show("h9"), actor="stuck")
-    campaign.record_spawn(post, rec9, pid=os.getpid(), session="a-real-session-id")
+    rec9 = attempt(lambda: worktree.spawn(post, gp.show("h9"), actor="stuck"), {})
+    if rec9:
+        campaign.record_spawn(post, rec9, pid=os.getpid(), session="a-real-session-id")
     gp.claim("h9", "stuck", pid=os.getpid())
     _orig_sg = campaign_harness_stop_gate = __import__(
         "showrunner.harness", fromlist=["harness"]).stop_gate
     import showrunner.harness as _HH
     _HH.stop_gate = lambda c, w, s: (True, "refused at turn-end by showrunner-stop-gate")
     try:
-        f9 = next(f for f in campaign.reconcile(post, gp) if f["crawler"] == rec9["crawler"])
+        f9 = next((f for f in campaign.reconcile(post, gp)
+                   if f["crawler"] == (rec9.get("crawler") or "")), {})
         is_waiting, detail = campaign.waiting(post, gp)
     finally:
         _HH.stop_gate = _orig_sg
     ok("reconcile ranks BLOCKED above LIVE — it IS live, and that is the whole problem",
-       f9["verdict"].startswith("BLOCKED"), f9["verdict"])
+       (f9.get("verdict") or "").startswith("BLOCKED"), f9.get("verdict"))
     ok("...and `waiting` counts it as NEITHER waiting nor parked, so the orchestrator's own "
        "watchdog is free to ring: sitting beside a session that can only be restarted from "
        "outside is not waiting on work you cannot hurry",
-       is_waiting is False and not detail["live_crawlers"], (is_waiting, detail))
+       is_waiting is False and not (detail or {}).get("live_crawlers"), (is_waiting, detail))
     ok("...while still REPORTING it, because the Crawler is real and somebody has to go and "
        "prompt it — dropping it would trade one silence for another",
-       "h9" in [c["leaf"] for c in detail["blocked_crawlers"]], detail["blocked_crawlers"])
+       "h9" in [c["leaf"] for c in (detail or {}).get("blocked_crawlers") or []],
+       (detail or {}).get("blocked_crawlers"))
 
     # A VERDICT THIS SIDE HAS NO MEANING FOR must fail CLOSED. The merge conditional listed the
     # verdicts that BLOCK, so anything else merged — and `None` meant both "no harness here"
@@ -1325,9 +1366,9 @@ def test_harness_provisioning():
     # term is exactly when a consumer must stop rather than guess, and the guess available by
     # default is the permissive one. game_loop added a verdict mid-session; the only reason that
     # one was safe is that it reused an exit code already mapped.
-    with open(os.path.join(rec8["worktree"], ".game_loop", "TESTMODE"), "w") as fh:
+    with open(os.path.join((rec8.get("worktree") or ""), ".game_loop", "TESTMODE"), "w") as fh:
         fh.write("from-the-future\n")
-    status, _, _ = H.check_tree(post, rec8["worktree"])
+    status, _, _ = H.check_tree(post, (rec8.get("worktree") or ""))
     eq("a harness verdict outside the known contract reads as 'unrecognised', not as None — "
        "'we have no meaning for this' and 'there is no harness here' are different, and only "
        "one of them is safe to merge on", status, "unrecognised")
@@ -1662,9 +1703,11 @@ def test_integration():
         fh.write("the only copy of real work\n")
     g.claim("m4", "ghost", pid=dead.pid)
     findings = campaign.reconcile(cfg, g, base="main")
-    ghost = next(f for f in findings if f["crawler"] == rec_d["crawler"])
-    ok("reconcile identifies an ABANDONED Crawler", ghost["verdict"].startswith("ABANDONED"), ghost)
-    ok("...and surfaces its uncommitted work rather than deleting it", bool(ghost["uncommitted"]),
+    ghost = next((f for f in findings if f["crawler"] == rec_d["crawler"]), {})
+    ok("reconcile identifies an ABANDONED Crawler",
+       (ghost.get("verdict") or "").startswith("ABANDONED"), ghost)
+    ok("...and surfaces its uncommitted work rather than deleting it",
+       bool(ghost.get("uncommitted")),
        ghost)
     actions, _ = campaign.reap(cfg, g, base="main", apply=False)
     ok("reap says where the abandoned work is, and does not remove it",
@@ -1689,6 +1732,12 @@ def _fork_output(cli_mod, cfg, name, session):
     os.chdir(cfg.root)
     try:
         cli_mod.cmd_worktree_fork(args)
+    except Refused:
+        # `die` RAISES; only `main()` turns that into an exit code, and this calls the command
+        # function directly. Caught so a refusal is an EMPTY transcript the assertions below can
+        # fail on, rather than an exception that ends the group and makes the producer that
+        # caused it unscoreable.
+        pass
     finally:
         os.chdir(cwd)
         sys.stdout = saved
@@ -1935,21 +1984,25 @@ def test_worktree_lease():
     sh(["git", "commit", "-q", "--allow-empty", "-m", "second"], cfg.root)
     head = sh(["git", "rev-parse", "HEAD"], cfg.root).stdout.strip()
     first = sh(["git", "rev-parse", "HEAD~1"], cfg.root).stdout.strip()
-    path, d = lease.fork(cfg, "enter-probe", "sess-9", base=first, name="fork-probe")
-    ok("...and forks from the base it was given when it has one", os.path.isdir(path), path)
+    path, d = attempt(lambda: lease.fork(cfg, "enter-probe", "sess-9", base=first,
+                                         name="fork-probe"), (None, {}))
+    ok("...and forks from the base it was given when it has one",
+       bool(path) and os.path.isdir(path), path)
     eq("the new tree starts at THAT commit, asserted against the SHA rather than 'it has "
        "commits' — which is true of the wrong base too",
        sh(["git", "rev-parse", "HEAD"], path).stdout.strip(), first)
     ok("...which is NOT the tip, so the assertion above can distinguish them", first != head)
     eq("the fork's base is recorded RESOLVED, not as the symbolic ref it was asked for — git "
-       "cannot recover what 'HEAD' meant at this instant afterwards", d["base"], first)
+       "cannot recover what 'HEAD' meant at this instant afterwards", (d or {}).get("base"),
+       first)
     eq("...and the forking session holds the new tree",
        (lease.Lease(cfg, "fork-probe").holder() or {}).get("session"), "sess-9")
     eq("...while the tree it forked FROM is untouched", lease.tree_for(cfg, ent), "enter-probe")
 
-    _, d2 = lease.fork(cfg, "enter-probe", "sess-9", base="HEAD", name="fork-symbolic")
+    _, d2 = attempt(lambda: lease.fork(cfg, "enter-probe", "sess-9", base="HEAD",
+                                       name="fork-symbolic"), (None, {}))
     eq("a symbolic base is resolved to a sha before anything is created",
-       d2["base"], head)
+       (d2 or {}).get("base"), head)
 
     # THE RECORDED PATH, which every assertion above bypasses by passing base= explicitly.
     # Without this, base_sha_of could return None forever: fork would still refuse, the refusal
@@ -1963,9 +2016,10 @@ def test_worktree_lease():
     os.makedirs(os.path.join(cfg.worktree_root, "recorded-probe"), exist_ok=True)
     eq("the base is read back from the campaign record, which is the only place it survives",
        lease.base_sha_of(cfg, "recorded-probe"), first)
-    _, d3 = lease.fork(cfg, "recorded-probe", "sess-10", name="fork-recorded")
+    _, d3 = attempt(lambda: lease.fork(cfg, "recorded-probe", "sess-10",
+                                       name="fork-recorded"), (None, {}))
     eq("...and fork uses it with no --base, landing on the commit the held tree started at",
-       d3["base"], first)
+       (d3 or {}).get("base"), first)
     ok("...which is not the tip, so that assertion can tell the two apart", first != head)
 
     # THE LEASE THE FORK CLAIMS TO HAVE TAKEN. `fork` called `acquire` and threw the result
@@ -1977,7 +2031,8 @@ def test_worktree_lease():
     _orig_spid = lease.session_pid
     lease.session_pid = lambda: (None, "test: nothing to resolve")
     try:
-        _, d4 = lease.fork(cfg, "recorded-probe", "sess-11", name="fork-hollow")
+        _, d4 = attempt(lambda: lease.fork(cfg, "recorded-probe", "sess-11",
+                                           name="fork-hollow"), (None, {}))
     finally:
         lease.session_pid = _orig_spid
     ok("...and a fork whose lease could NOT be taken reports leased=False rather than "
@@ -3548,18 +3603,18 @@ def test_dispatch():
     hlog = os.path.join(hdir, "session.log")
     open(hlog, "w").close()
     eq("an empty log is QUIET — started, said nothing yet",
-       dispatch.session_health(hcfg, hentry)["verdict"], "quiet")
+       (dispatch.session_health(hcfg, hentry) or {}).get("verdict"), "quiet")
     with open(hlog, "w") as fh:
         fh.write("working on it\nwrote a file\n")
     eq("output that is not an error is PRODUCING",
-       dispatch.session_health(hcfg, hentry)["verdict"], "producing")
+       (dispatch.session_health(hcfg, hentry) or {}).get("verdict"), "producing")
     with open(hlog, "w") as fh:
         fh.write("Execution error")
-    h = dispatch.session_health(hcfg, hentry)
+    h = dispatch.session_health(hcfg, hentry) or {}
     eq("...and an errored session is ERRORED even though its process is still alive",
-       h["verdict"], "errored")
+       h.get("verdict"), "errored")
     ok("...and it names what it matched, so the verdict can be argued with",
-       h["errors"] == ["Execution error"], h)
+       h.get("errors") == ["Execution error"], h)
 
     # SPIN-DOWN. The dangerous half is knowing when NOT to stop something. A Crawler closes
     # its own leaf from inside its own session, so at that instant it is mid-call — writing
@@ -3624,9 +3679,10 @@ def test_dispatch():
     dg.close(dl, "refuted", "README.md", "proved by spin-down")
     campaign.record_spawn(dcfg2, {"crawler": "c-done", "leaf": dl, "branch": "nope",
                                   "worktree": ".", "scratch": "."}, pid=999999, session="s")
-    v = [f for f in campaign.reconcile(dcfg2, dg) if f["crawler"] == "c-done"][0]["verdict"]
+    v = ([f for f in campaign.reconcile(dcfg2, dg)
+          if f["crawler"] == "c-done"] or [{}])[0].get("verdict")
     ok("a Crawler whose leaf CLOSED is retired, never abandoned — abandonment has to keep "
-       "meaning work that may be lost", v.startswith("RETIRED"), v)
+       "meaning work that may be lost", (v or "").startswith("RETIRED"), v)
 
     # Through the consumer, not just the predicate: a finished Crawler whose process outlived
     # the grace window has to be REPORTED by reap, or the detector is correct and unused. Dry
@@ -4182,18 +4238,24 @@ def test_observability():
     evs, _, _ = EV.read(cfg)
     seqs = [e["seq"] for e in evs]
     eq("...and the sequence is strictly increasing ACROSS processes", seqs, sorted(set(seqs)))
+    # THE DENOMINATOR, and the guard on it. A journal that emitted nothing has no seqs[1], and
+    # subscripting it raised out of the group — so `events.emit` stubbed to write nothing scored
+    # as CRASHED rather than as caught. Stated as its own assertion so an empty journal fails
+    # HERE, on the sentence that is actually about it, rather than downstream.
+    ok("...with at least two events to compare, so the resume assertion below is applied to "
+       "something rather than to an empty journal", len(seqs) >= 2, seqs)
     ok("...which is what makes --since a resume rather than a guess",
-       len(EV.read(cfg, since_seq=seqs[1])[0]) == len(seqs) - 2, seqs)
+       len(seqs) >= 2 and len(EV.read(cfg, since_seq=seqs[1])[0]) == len(seqs) - 2, seqs)
 
     # A caller cannot forge the frame's own identity: `add` records a leaf's kind, and `kind` is
     # the event type. The first version took **kwargs and raised TypeError from inside
     # `showrunner add` — a journal breaking the work it observes, which is the one thing it must
     # never do. Renamed at the call site AND defended here, because only one of those travels.
     EV.emit(cfg, "test.reserved", {"ts": "not a time", "seq": 9999, "kind": "lies"})
-    forged = [e for e in EV.read(cfg)[0] if e["kind"] == "test.reserved"][0]
+    forged = ([e for e in EV.read(cfg)[0] if e["kind"] == "test.reserved"] or [{}])[0]
     ok("a caller cannot overwrite ts, seq or kind — a frame claiming a sequence it does not "
        "have is worse than a missing field, because nothing downstream can doubt it",
-       forged["seq"] != 9999 and forged["ts"] != "not a time", forged)
+       forged.get("seq") != 9999 and forged.get("ts") != "not a time", forged)
     eq("...and the smuggled values are kept under a prefix rather than dropped",
        forged.get("field_kind"), "lies")
 
@@ -4416,7 +4478,13 @@ def test_observability():
     blocked = make_repo()
     EV.emit(blocked, "test.before", {"leaf": "x"})
     jp = EV.path_for(blocked)
-    os.chmod(jp, 0o000)
+    # THE FILE HAS TO EXIST TO BE BROKEN. `emit` stubbed to write nothing leaves no journal,
+    # and chmod on a missing path raised out of the group — so the producer whose absence
+    # this test exists to catch was the one it could not score.
+    ok("...and there IS a journal to make unreadable, so the unreadable case below is\n       constructed rather than inherited from a journal that was never written",
+       os.path.exists(jp), jp)
+    if os.path.exists(jp):
+        os.chmod(jp, 0o000)
     try:
         unreadable_ok = os.access(jp, os.R_OK) is False
         evs, bad, unreadable = EV.read(blocked)
@@ -4434,7 +4502,11 @@ def test_observability():
             ok("...naming the journal, so the remedy is obvious rather than a mystery",
                "could not be read" in (p.stdout + p.stderr), (p.stdout + p.stderr)[:200])
     finally:
-        os.chmod(jp, 0o644)
+        # Matched to the guard on the chmod that broke it: there is nothing to restore if the
+        # journal was never written, and raising here would end the group in a `finally`, which
+        # is the one place a crash also loses the reason for it.
+        if os.path.exists(jp):
+            os.chmod(jp, 0o644)
     evs, _, unreadable = EV.read(blocked)
     ok("...and a journal that is readable again is not still reported unreadable — the flag is "
        "a measurement, not a latch", unreadable is False and len(evs) == 1, (evs, unreadable))
