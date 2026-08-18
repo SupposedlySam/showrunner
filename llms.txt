@@ -48,7 +48,9 @@ you are running unattended, say that it is unarmed rather than proceeding quietl
 showrunner ready                     # unblocked AND unclaimed leaves — the only discovery entrypoint
 showrunner plan                      # group them into waves whose estimated file sets do not overlap
 showrunner route                     # which lane each leaf takes, and the rule that decided
-showrunner spawn <leaf> --actor <name> [--finding "<something you already checked>"]
+showrunner spawn <leaf> --actor <name> [--base <ref>] [--finding "<already checked>"]
+                                     # prints the base it cuts from, and REFUSES to be quiet when
+                                     # a graph dependency's branch is not in it
                                      # prepares the room: worktree, branch, scratch, brief, lock, claim
 showrunner spawn <leaf> --launch     # ...and STARTS a real Claude Code session in it, with its own
                                      # hooks, on the model its lane declares. --dry-run to see the
@@ -139,6 +141,7 @@ showrunner lease status [<tree>]     # which trees are held, by whom, and on wha
 showrunner worktree enter            # SessionStart: take this tree's lease, or report who holds it
 showrunner worktree fork --from <t>  # your own tree, off the same base commit as a held one
 showrunner worktree guard            # PreToolUse: DENY a write into a tree another live session holds
+showrunner worktree register         # put BOTH hooks in .claude/settings.json (idempotent)
 ```
 
 `enter` never blocks — a SessionStart hook cannot — so it is where the *prompt* lives. `guard` is
@@ -148,18 +151,41 @@ oversight — a stale holder is proved dead, and an unreadable one cannot be adj
 refusing on it would wedge a tree on somebody's partial write.
 
 **The guard is exactly as present as its registration.** It runs from a tracked shim,
-`.showrunner/hooks/worktree-guard.sh`, registered as a PreToolUse hook — tracked because
-`git worktree add` copies tracked files only, and a hook that does not cross into a worktree
-cannot guard one. `init` places it and registers it; **commit it**, or it is absent in every
-worktree made from then on. `showrunner doctor` reports the shim, its tracking and its
-registration separately, because a guard nobody registered has never once run.
+`.showrunner/hooks/worktree-guard.sh`, registered as a PreToolUse hook. `git worktree add`
+copies tracked files only, and a hook that does not cross into a worktree cannot guard one — so
+the shim needs one of two arrangements, and `doctor` names which one you are in:
+
+* **tracked** — commit it and git carries it. The simplest thing when a repo allows it.
+* **ignored** — `spawn` provisions it into each worktree instead. This is the arrangement for a
+  shared repo that keeps `.showrunner/` out of its history (`.git/info/exclude`), where "commit
+  it" is the one action you cannot take.
+
+**Neither is the only state with no answer**, and it warns: git will not carry the file, and
+provisioning refuses to, because copying it would hand the Crawler something its own `git add -A`
+commits onto its branch — which then collides with the same untracked path in the main checkout.
+
+`showrunner doctor` reports the shim, its arrangement and its registration separately, because a
+guard nobody registered has never once run.
 
 **It fails OPEN and says so.** No binary, no payload, an exception — all allow, and all print
 that the call was allowed without being checked. A PreToolUse that hard-fails on its own plumbing
 blocks every write including the one that would repair it.
 
-There is still no `lease take` and no `lease release` verb: a lease is acquired by `enter` and
-`fork`, and `lease status` is how you read the result.
+There is still no `lease take` verb: a lease is acquired by `enter` and `fork`, and
+`lease status` is how you read the result. A lease is released when its tree is removed, and a
+wedged one is cleared by name — `showrunner lock release worktree:<tree> --force`, which is the
+remedy the UNREADABLE refusal prints.
+
+**A second hook, on Stop.** `.showrunner/hooks/inert-crawler-gate.sh` refuses the ORCHESTRATOR's
+turn-end while `waiting` reports a Crawler that is alive and inert — refused at its own turn-end,
+needing a message rather than time. `waiting` already knew; nothing consulted it at the one moment
+that decides anything, and a run stalled until a human noticed. It fails open on every unknown, it
+offers `reap` beside messaging (a block can mean gone rather than waiting), and it does not fire
+inside a Crawler's own worktree — a Crawler cannot message or reap its siblings.
+
+Read `waiting --porcelain`, not the prose, if you build anything on this: the BLOCKED lines go to
+**stderr**, and `waiting` exits non-zero for "not waiting", which is the state a blocked Crawler
+produces. A gate written against the human output allows in exactly the case it exists for.
 
 A worktree had an owner on paper (`campaign.json`) and no holder in fact — nothing consulted that
 record when a second session opened the directory and started editing. A lease's holder is a live
