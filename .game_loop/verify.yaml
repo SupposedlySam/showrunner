@@ -55,6 +55,14 @@
   - "python3 test/run.py"
 "install.sh":
   - "python3 test/run.py"
+# THE TEMPLATES ARE OUTPUTS, which is the exact case this file's own header describes: nothing
+# runs them where they sit — install.sh COPIES them into a consumer, and only there do they
+# decide anything. Both were rewritten or created without owing a check, and `verify --coverage`
+# is what said so. The suite installs a real consumer and drives the shim's present and absent
+# central paths through the placed copy, and pins the stop trigger byte-identical to its shipped
+# twin — so the check exists; it just was not owed.
+"templates/**":
+  - "python3 test/run.py"
 # The shell prototype is kept for the record but is still a claim in the README.
 "prototype/**":
   - "bash prototype/demo.sh"
