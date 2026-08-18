@@ -113,6 +113,45 @@ def route(cfg, leaf):
     })
 
 
+def unmatched(cfg, tail=200):
+    """How many of the last `tail` routing decisions matched no rule. Returns (unmatched, total).
+
+    THE READER `routing.jsonl` NEVER HAD. Every decision has been appended since this module was
+    written and nothing has ever opened the file — so the one line that matters, "NO RULE MATCHED
+    — an unmatched leaf is a missing rule, not a neutral outcome", printed once to stderr at
+    spawn and then accumulated somewhere nobody looks. A detector whose output nobody reads is
+    the silence it was built to break, with a receipt.
+
+    Bounded to a tail because this is a report, not an audit: the question a reader has is
+    "is my routing configured", and the last few hundred decisions answer it. Says how many it
+    LOOKED at, so a small number of misses out of three decisions cannot read like a small
+    number out of three hundred.
+
+    Never raises. An unreadable or absent log answers (None, None) — "could not tell" — because
+    zero misses and no file are the same reassuring number otherwise.
+    """
+    path = os.path.join(cfg.state_dir, "routing.jsonl")
+    if not os.path.exists(path):
+        return None, None
+    rows = []
+    try:
+        with open(path, errors="ignore") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    continue          # a torn final line is ordinary; it is not a verdict
+    except OSError:
+        return None, None
+    rows = rows[-tail:]
+    if not rows:
+        return None, None
+    return sum(1 for r in rows if not r.get("matched")), len(rows)
+
+
 def log(cfg, decisions):
     path = os.path.join(cfg.state_dir, "routing.jsonl")
     os.makedirs(os.path.dirname(path), exist_ok=True)

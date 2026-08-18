@@ -751,6 +751,34 @@ def test_routing():
     ok("every routing decision is logged with its rule, so a wrong route is diagnosable",
        len(logged) == 3 and logged[0]["rule"] == "device-work", logged)
 
+    # THE READER routing.jsonl NEVER HAD. Every decision has been appended since this module was
+    # written and NOTHING opened the file — so "NO RULE MATCHED: an unmatched leaf is a missing
+    # rule, not a neutral outcome" printed once at spawn and then accumulated where nobody looks.
+    # A repo whose leaves keep defaulting is slow rather than broken, and slow has no error
+    # message, so the file was the only place that gap was visible.
+    #
+    # ITS OWN REPO, because the assertion above counts entries in the shared one: a new test that
+    # changes what an existing test measures makes the old one fail for a reason its sentence
+    # does not mention.
+    rcfg = make_repo()
+    rg = new_graph(rcfg)
+    rg.add("deploy to the TV", leaf_id="q1", labels=["device"])
+    rg.add("nobody wrote a rule for this", leaf_id="q2")
+    eq("with no routing log yet, the reader answers COULD NOT TELL rather than zero misses — "
+       "an absent file and a clean record are the same reassuring number otherwise",
+       lanes.unmatched(rcfg), (None, None))
+    lanes.log(rcfg, [lanes.route(rcfg, rg.show("q1"))])
+    eq("...and once a decision is recorded it reports none missed, out of a stated denominator",
+       lanes.unmatched(rcfg), (0, 1))
+    lanes.log(rcfg, [lanes.route(rcfg, rg.show("q2"))])
+    eq("...and an UNMATCHED decision is COUNTED, which is the whole reason the file exists",
+       lanes.unmatched(rcfg), (1, 2))
+    with open(os.path.join(rcfg.state_dir, "routing.jsonl"), "a") as fh:
+        fh.write("{not json\n")
+    eq("...and a torn final line is skipped rather than becoming a verdict — a viewer may attach "
+       "mid-append, and one bad line must not turn a real answer into 'could not tell'",
+       lanes.unmatched(rcfg), (1, 2))
+
 
 # ======================================================= CORE: collision
 def test_collision():
@@ -2135,6 +2163,17 @@ def test_worktree_lease():
     ok("...and the CLI says UNGUARDED rather than 'held by you', because the reader acts on "
        "that line and the tree it names is one anybody can walk into",
        "UNGUARDED" in said and "held by you" not in said, said[-300:])
+    # THE REASON IS READ BACK FROM THE RECORD, not restated beside it. `fork` records the failed
+    # acquire's holder in `lease_holder`, and that field was written and read by NOTHING — the
+    # asymmetry `Lock.acquire(extra=)` was fixed for, re-introduced by me. The line used to
+    # hardcode one of the several reasons acquire can fail, so the day it failed for another the
+    # record would be right and the line wrong.
+    eq("...and the REASON it prints is the one the acquire recorded, so the message cannot "
+       "disagree with the record it sits beside",
+       (d4.get("lease_holder") or {}).get("why") in said, True)
+    ok("...which is a real reason rather than an empty string, or reading it back would be a "
+       "check that cannot fail", ((d4.get("lease_holder") or {}).get("why") or "").strip(),
+       d4.get("lease_holder"))
     ok("...while a fork that DID take its lease still says held by you, so this is a report of "
        "the acquire and not a line that got pessimistic",
        "held by you" in _fork_output(_CLI, cfg, "fork-held-cli", "sess-13"))

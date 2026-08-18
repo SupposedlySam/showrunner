@@ -157,6 +157,12 @@ TARGETS = [
     ("showrunner's own hooks, crossing", "lease.provision_hooks", "lib/showrunner/lease.py",
      r"(def provision_hooks\(cfg, worktree_path\):\n)",
      "    return []\ndef _neutered_provision_hooks(cfg, worktree_path):\n"),
+    # The reader that turns an accumulating log into a signal. An always-(None, None) answer is
+    # the SILENT half of not having it: doctor prints "nothing recorded yet", which is exactly
+    # what a repo with no routing gap looks like, and the missing lane rules stay invisible.
+    ("routing gaps, read back", "lanes.unmatched", "lib/showrunner/lanes.py",
+     r"(def unmatched\(cfg, tail=200\):\n)",
+     "    return None, None\ndef _neutered_unmatched(cfg, tail=200):\n"),
     ("locks present on disk", "locks.LockSet.on_disk", "lib/showrunner/locks.py",
      r"(    def on_disk\(self\):\n)",
      "        return []\n    def _neutered_on_disk(self):\n"),

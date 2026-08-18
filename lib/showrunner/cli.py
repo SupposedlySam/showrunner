@@ -197,6 +197,26 @@ def cmd_doctor(args):
               "unrecognised shape rather than reporting an empty graph. If br changes its "
               "output you will get a loud error, not a silent no-op." % (YEL + "note " + OFF))
 
+    # ROUTING, READ BACK. Every lane decision has been appended to routing.jsonl since that
+    # module was written, and nothing ever opened it — so "NO RULE MATCHED: an unmatched leaf is
+    # a missing rule, not a neutral outcome" printed once at spawn and then accumulated where
+    # nobody looks. A repo whose leaves keep defaulting has a configuration gap that is invisible
+    # exactly because the default is safe: unclassified work SERIALIZES, so it is slow rather
+    # than broken, and slow has no error message.
+    missed, seen = lanes.unmatched(cfg)
+    if seen is None:
+        print("  %s no routing decisions recorded yet — nothing has been routed here, so this "
+              "says nothing about whether your lane rules are right"
+              % (YEL + "note " + OFF))
+    elif missed:
+        print("  %s %d of the last %d routing decision(s) MATCHED NO RULE and defaulted. An "
+              "unmatched leaf is a missing lane rule, not a neutral outcome — the default "
+              "serializes, so the cost is a campaign that is quietly slower than it should be."
+              % (YEL + "warn " + OFF, missed, seen))
+    else:
+        print("  %s all %d recorded routing decision(s) matched a lane rule"
+              % (GRN + "ok   " + OFF, seen))
+
     ls = locks.LockSet(cfg)
     if ls.names():
         print("  %s resources: %s" % (GRN + "ok   " + OFF, ", ".join(ls.names())))
@@ -613,13 +633,17 @@ def cmd_worktree_fork(args):
     if d.get("leased"):
         print("  lease   held by you")
     else:
+        # THE REASON IS READ BACK, not restated. `fork` records the failed acquire's holder in
+        # `lease_holder`, whose `why` already says what went wrong — and this branch used to
+        # hardcode "no session process could be resolved", which is only ONE of the reasons
+        # `acquire` can fail. A field written and never read is a detector reporting to nobody,
+        # and a duplicate of its content beside it is how the two start disagreeing: the day
+        # acquire fails for a different reason, the record is right and the line is wrong.
+        why = (d.get("lease_holder") or {}).get("why") or "the acquire returned no reason"
         print("  %slease   NOT TAKEN — this tree is UNGUARDED%s" % (YEL, OFF))
         print("          The fork itself worked and the tree is yours to use; what failed is "
               "the lease,\n          so nothing will refuse a second session that walks into "
-              "it. Same cause as\n          `worktree enter` reporting no liveness: no session "
-              "process could be resolved\n          (session %r). Said out loud rather than "
-              "left to look like the line above."
-              % (session or ""))
+              "it.\n          Reason: %s (session %r)." % (why, session or ""))
     for line in d.get("injected") or []:
         print("  inject  %s" % line)
     for line in d.get("warnings") or []:
