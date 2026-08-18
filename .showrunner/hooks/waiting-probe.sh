@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# game_loop's waiting probe, answered from showrunner's campaign record.
+#
+# THE QUESTION THE WATCHDOG IS ASKING: is this session legitimately waiting on work it dispatched,
+# or has it gone quiet with nothing outstanding? An orchestrator that fanned Crawlers into
+# worktrees is idle for long stretches BY DESIGN, and a watchdog that rings through that is one
+# somebody turns off. showrunner already knows the answer — a live Crawler PID or an explicit
+# park — so this is a translation, not a judgement.
+#
+# THE TRANSCRIPT IS THE WRONG SIGNAL and this deliberately does not look at it. The orchestrator's
+# transcript is quiet precisely WHILE it waits; that is the state being recognised, not something
+# that distinguishes it from a stall. What is live is the children's artifacts, which is what the
+# campaign record holds.
+#
+# TWO EXIT CONTRACTS MEET HERE, and they do not line up. game_loop's is:
+#     0  waiting          stay quiet
+#     1  not waiting      ring
+#     *  COULD NOT TELL   ring, AND report this probe as FAILING
+# showrunner's `waiting` grew a third code of its own (#35):
+#     0  waiting     1  not waiting     3  a Crawler is BLOCKED (alive and inert)
+# Passing showrunner's 3 through unmapped would be read as "could not tell" and would mark this
+# probe FAILING for as long as a Crawler stays blocked — which is a working probe reporting a
+# true state, described as broken. 3 maps to 1: there IS work outstanding, ring, and it is an
+# ANSWER rather than a failure to answer.
+set -u
+
+# A CRAWLER IS NOT AN ORCHESTRATOR. .game_loop/config.local.json is copied into every worktree by
+# harness.provision, so this probe runs inside each Crawler too — and a Crawler answering
+# "waiting" because its SIBLINGS are alive would silence its own watchdog with somebody else's
+# liveness, which is the disarm-by-proxy this whole seam exists to avoid. A Crawler dispatches
+# nothing, so the honest answer for one is always "not waiting".
+common="$(git rev-parse --git-common-dir 2>/dev/null)" || exit 2
+case "$common" in /*) ;; *) common="$PWD/$common" ;; esac
+root="$(cd "$(dirname "$common")" 2>/dev/null && pwd)" || exit 2
+top="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 2
+[ "$(cd "$top" && pwd)" = "$root" ] || exit 1
+
+# Resolved explicitly: a hook's PATH is not a shell's, and a probe that bails because a binary was
+# not on PATH exits non-zero with nothing to say — which reads as "there is work" and is the
+# failure game_loop reported spending five rounds on.
+SR=""
+for candidate in "$root/.showrunner/bin/showrunner" "$root/bin/showrunner"; do
+  [ -x "$candidate" ] && { SR="$candidate"; break; }
+done
+[ -n "$SR" ] || { echo "no showrunner binary under $root — cannot tell" >&2; exit 2; }
+
+"$SR" waiting >/dev/null 2>&1
+case "$?" in
+  0) exit 0 ;;                                   # waiting on live dispatched work
+  1) exit 1 ;;                                   # nothing outstanding — ring
+  3) echo "a Crawler is BLOCKED — alive and inert, needs a message not time" >&2; exit 1 ;;
+  *) echo "showrunner waiting returned an unmapped code — cannot tell" >&2; exit 2 ;;
+esac

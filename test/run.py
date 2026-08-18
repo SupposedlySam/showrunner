@@ -2425,6 +2425,71 @@ def test_worktree_lease():
     ok("...and still on stderr, where a human reading a terminal already looked for it",
        "BLOCKED" in err_b, err_b[:160])
 
+    # ---- THE WAITING PROBE: two exit contracts that do not line up --------------------
+    # game_loop's watchdog asks "is this session legitimately waiting on work it dispatched" and
+    # reads 0 waiting / 1 not waiting / ANYTHING ELSE as "could not tell", which rings AND marks
+    # the probe FAILING. showrunner's own `waiting` grew a third code (#35): 3 for a BLOCKED
+    # Crawler. Passed through unmapped, a working probe reporting a true state would be described
+    # as broken for as long as the Crawler stayed blocked.
+    probe = os.path.join(ROOT, ".showrunner", "hooks", "waiting-probe.sh")
+    ok("the waiting probe ships and is executable", os.path.isfile(probe) and
+       os.access(probe, os.X_OK), probe)
+
+    prepo = make_repo()
+    # THE PATH THE PROBE ACTUALLY RESOLVES FIRST — .showrunner/bin/ before bin/, which is
+    # `sr_bin`'s order and not a second resolver. Writing the fake to the other one made every
+    # assertion below measure the REAL binary instead of the chosen code.
+    fake_sr = os.path.join(prepo.root, ".showrunner", "bin", "showrunner")
+    os.makedirs(os.path.dirname(fake_sr), exist_ok=True)
+
+    def with_rc(rc, cwd=None):
+        """A repo whose showrunner answers a chosen code, so the MAPPING is what is under test."""
+        with open(fake_sr, "w") as fh:
+            fh.write("#!/bin/sh\nexit %d\n" % rc)
+        os.chmod(fake_sr, 0o755)
+        return subprocess.run(["bash", probe], cwd=cwd or prepo.root, capture_output=True,
+                              text=True)
+
+    eq("waiting (0) passes through as waiting, so the watchdog stays quiet on a legitimate wait",
+       with_rc(0).returncode, 0)
+    eq("...not waiting (1) passes through, so an orchestrator with nothing outstanding rings",
+       with_rc(1).returncode, 1)
+    blocked_probe = with_rc(3)
+    eq("...and a BLOCKED Crawler (3) maps to 1 rather than falling through to 'could not tell' — "
+       "it IS an answer, and an unmapped code would mark a working probe FAILING for as long as "
+       "the Crawler stayed blocked", blocked_probe.returncode, 1)
+    ok("...saying why on stderr, so the ring is actionable rather than a bare code",
+       "BLOCKED" in blocked_probe.stderr, blocked_probe.stderr[:120])
+    eq("...while a code the mapping does not know is COULD NOT TELL (2), never folded into an "
+       "answer", with_rc(9).returncode, 2)
+
+    # A CRAWLER IS NOT AN ORCHESTRATOR. config.local.json is copied into every worktree by
+    # harness.provision, so this runs inside each Crawler too — and one answering "waiting"
+    # because its SIBLINGS are alive would silence its own watchdog with somebody else's
+    # liveness. A Crawler dispatches nothing, so the honest answer for one is never 0.
+    pwt = os.path.join(prepo.worktree_root, "probe-wt")
+    os.makedirs(prepo.worktree_root, exist_ok=True)
+    sh(["git", "worktree", "add", "-q", pwt, "-b", "showrunner/probe-wt"], prepo.root)
+    in_wt = with_rc(0, cwd=pwt)                  # the orchestrator WOULD say "waiting"
+    eq("...and inside a linked worktree it NEVER answers waiting, even when the orchestrator "
+       "would — a Crawler silencing its own watchdog with a sibling's liveness is the "
+       "disarm-by-proxy this seam exists to prevent", in_wt.returncode, 1)
+    eq("...while the same binary answers 0 from the main checkout, so that is about the tree and "
+       "not about the code it found",
+       with_rc(0).returncode, 0)
+
+    # THE BINARY MUST BE RESOLVED, NOT ASSUMED. A hook's PATH is not a shell's, and a probe that
+    # bails on a missing binary with a bare non-zero reads as "there is work" forever.
+    bare = make_repo()
+    for stray in (os.path.join(bare.root, ".showrunner", "bin", "showrunner"),
+                  os.path.join(bare.root, "bin", "showrunner")):
+        if os.path.exists(stray):
+            os.remove(stray)
+    no_bin = subprocess.run(["bash", probe], cwd=bare.root, capture_output=True, text=True)
+    eq("a probe that cannot find the binary answers COULD NOT TELL, not 'there is work' — the "
+       "second is a lie that rings forever and reports nothing wrong", no_bin.returncode, 2)
+    ok("...and names what it could not find", "showrunner" in no_bin.stderr, no_bin.stderr[:120])
+
     # ---- THE INERT-CRAWLER STOP TRIGGER (#32) -----------------------------------------
     # `waiting` already knew a Crawler was alive and doing nothing. Nothing spent that at the
     # orchestrator's turn-end, so a "Next: ..." list was written and the session walked away

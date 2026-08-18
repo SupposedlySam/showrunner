@@ -114,6 +114,10 @@ echo "  copied  .showrunner/hooks/worktree-guard.sh (COMMIT THIS — it must cro
 cp "$SRC/.showrunner/hooks/inert-crawler-gate.sh" "$TARGET/.showrunner/hooks/inert-crawler-gate.sh"
 chmod +x "$TARGET/.showrunner/hooks/inert-crawler-gate.sh"
 echo "  copied  .showrunner/hooks/inert-crawler-gate.sh (Stop: refuses a turn-end while a Crawler is inert)"
+cp "$SRC/.showrunner/hooks/waiting-probe.sh" "$TARGET/.showrunner/hooks/waiting-probe.sh"
+chmod +x "$TARGET/.showrunner/hooks/waiting-probe.sh"
+echo "  copied  .showrunner/hooks/waiting-probe.sh (answers a harness watchdog; NOT wired by this"
+echo "          script — arming a wait is a human decision, see the note at the end)"
 
 if [ ! -f "$TARGET/.showrunner/.gitignore" ]; then
   cat >"$TARGET/.showrunner/.gitignore" <<'EOF'
@@ -319,7 +323,14 @@ echo "       \`git worktree add\` copies TRACKED files only, so until it is comm
 echo "       is present here and ABSENT in every worktree, which is the one place it runs."
 echo "       (Re-register any time with: ./.showrunner/bin/showrunner worktree register —"
 echo "        it is idempotent. doctor reports both states as errors until they are fixed.)"
-echo "  4. ./.showrunner/bin/showrunner baseline    # on a known-good tree"
+echo "  4. OPTIONAL — arm your harness's idle watchdog against this orchestrator:"
+echo "       .showrunner/hooks/waiting-probe.sh answers \"is this session legitimately waiting"
+echo "       on work it dispatched\" from the campaign record. An orchestrator that fanned work"
+echo "       out is idle BY DESIGN, and a watchdog that rings through that gets switched off."
+echo "       Point your harness at it — for game_loop that is watchdog.waiting_probe in"
+echo "       .game_loop/config.local.json. NOT done for you: a wait an agent can declare for"
+echo "       itself is an off switch for the watchdog watching it, so this is a human's call."
+echo "  5. ./.showrunner/bin/showrunner baseline    # on a known-good tree"
 echo "       The gate is 'no NEW failures', never 'all green' — a repo with pre-existing"
 echo "       failures cannot satisfy 'all green', so that version gets switched off on contact."
 echo
