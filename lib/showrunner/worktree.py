@@ -482,8 +482,16 @@ def spawn(cfg, leaf, actor="crawler", base="HEAD", branch=None):
     # The harness is provisioned before anything else can go wrong, and its rule files are
     # compared byte-for-byte against the parent's. A Crawler whose rails are quietly weaker
     # than the orchestrator's is worse than one with no rails, because the run looks guarded.
+    # SHOWRUNNER'S OWN HOOKS, before the harness and for the same reason (#31). They are the
+    # one thing a deliberately-untracked install could not get into a worktree, and the only
+    # remedy offered was "commit it" — unavailable in a shared repo that excludes `.showrunner`
+    # on purpose. One mechanism, one answer, whoever's files they are.
+    from . import lease as _lease
+    provisioned = _lease.provision_hooks(cfg, path)
+
     from . import harness
-    provisioned, harness_problems, harness_warnings = harness.provision(cfg, path)
+    hp2, harness_problems, harness_warnings = harness.provision(cfg, path)
+    provisioned += hp2
     provisioned += ["NOTE: %s" % w for w in harness_warnings]
     if harness_problems and harness.spec(cfg)["require"]:
         problems += harness_problems

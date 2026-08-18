@@ -32,6 +32,7 @@ print it rather than re-derive it.
 
 import os
 import re
+import shutil
 
 from . import locks
 from .util import now, session_pid, short_session, stamp
@@ -392,7 +393,77 @@ def guard(cfg, session, tool=None, tool_input=None, cwd=None, sr=None):
 
 
 GUARD_SHIM = os.path.join(".showrunner", "hooks", "worktree-guard.sh")
+GUARD_HOOKS_DIR = os.path.join(".showrunner", "hooks")
 GUARD_TOOLS = ("Write", "Edit", "NotebookEdit", "Bash")
+
+
+def provision_hooks(cfg, worktree_path):
+    """Copy showrunner's own hook shims into a fresh worktree. Returns [] or [action].
+
+    THE ONLY REMEDY THIS OFFERED WAS ONE SOME INSTALLS CANNOT TAKE (#31). `git worktree add`
+    carries TRACKED files only, so an untracked shim is present in the main checkout and absent
+    in every worktree — the one place the guard exists to run — and `doctor` said so and told
+    the reader to commit it. In a shared team repo where `.showrunner/` is in
+    `.git/info/exclude` on purpose, committing it is exactly the thing that must not happen.
+    The diagnosis was right and the remedy was unavailable.
+
+    SHOWRUNNER HAD ALREADY SOLVED THIS SHAPE — for the other harness. `harness.provision` copies
+    game_loop into each worktree for precisely this reason, and it is the arrangement
+    showrunner's own docs tell a consumer to configure. Its own hooks were not covered by it,
+    which is one mechanism with two answers depending on whose files it is.
+
+    So the shims are provisioned, not tracked. Tracking still works and is still the simpler
+    thing when a repo allows it: a worktree that already carries the file is left alone, and
+    this reports nothing.
+    """
+    from . import worktree as W
+
+    src = os.path.join(cfg.root, GUARD_HOOKS_DIR)
+    if not os.path.isdir(src):
+        return []
+    dst = os.path.join(worktree_path, GUARD_HOOKS_DIR)
+    copied = []
+    for name in sorted(os.listdir(src)):
+        s = os.path.join(src, name)
+        d = os.path.join(dst, name)
+        if not os.path.isfile(s) or os.path.exists(d):
+            # Already there means git carried it — the file is TRACKED, which is the other
+            # supported arrangement and needs nothing from here. Overwriting it with the working
+            # copy would also make a spawned tree differ from a hand-made one for no stated
+            # reason.
+            continue
+        os.makedirs(dst, exist_ok=True)
+        shutil.copy2(s, d)
+        os.chmod(d, 0o755)   # the mode is the difference between a guard and an inert file
+        copied.append(name)
+    if not copied:
+        return []
+
+    # AND THEN VERIFY WHAT WE JUST CREATED, which is this repo's own rule arriving on its own
+    # code: a file that is neither tracked nor ignored is the one combination with no visible
+    # state, and the next `git add -A` commits it. Caught by the suite immediately — the copied
+    # shim landed on a Crawler's branch and then blocked the merge into a main checkout holding
+    # the same path untracked. Provisioning a guard must not hand the Crawler a file that
+    # wedges its own integration.
+    rel_paths = [os.path.join(GUARD_HOOKS_DIR, n) for n in copied]
+    check = W.unignored(worktree_path, rel_paths)
+    if not check.stageable:
+        return ["%s provisioned into the worktree (%s) — `git worktree add` carries tracked "
+                "files only, so an install that is deliberately untracked would otherwise leave "
+                "the guard absent in the one place it runs"
+                % (GUARD_HOOKS_DIR, ", ".join(copied))]
+
+    for rel_path in rel_paths:
+        p = os.path.join(worktree_path, rel_path)
+        if os.path.exists(p):
+            os.remove(p)
+    return ["NOT PROVISIONED: %s is neither tracked by git nor ignored, so copying it into the "
+            "worktree would hand the Crawler a file its own `git add -A` commits onto its "
+            "branch — which then collides with the same untracked path in the main checkout and "
+            "wedges the merge. The copy was removed. Fix it at the source: TRACK the hooks (they "
+            "then cross by themselves and this does nothing), or IGNORE them (and this "
+            "provisions them). Neither-nor is the only state with no answer."
+            % ", ".join(sorted(check.stageable))]
 
 
 def guard_health(cfg):

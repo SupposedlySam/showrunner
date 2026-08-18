@@ -75,6 +75,25 @@ as evidence the hazard exists.
 Your worktree is **inside** the repo on purpose: your own write guard treats everything
 outside the project as read-only, so a sibling directory would deny your first edit.
 
+**And that is exactly why a parent-walking resolver finds the WRONG tree.** `npx`, a bare
+binary on `PATH`, `python -m` against a parent venv, `bundle exec` — each walks UP until it
+finds a `node_modules`, a venv, a Gemfile. Your worktree sits inside the repo root, so the
+first one they find belongs to the PRIMARY checkout, not to you.
+
+**Invoke project binaries by explicit path from this tree.** `./node_modules/.bin/mocha`,
+never `npx mocha`.
+
+This is here rather than in a doc because the failure is shaped to waste your time. Observed:
+`npx mocha` inside a worktree failed with `Cannot find package 'ts-node'`, naming a path under
+the primary checkout — in a project that uses `tsx` and has never depended on `ts-node`. The
+error names a package the repo does not use, so it reads as a broken install, and the natural
+next move (reinstalling dependencies inside the worktree) is slow and can "fix" it in a way
+that hides the cause.
+
+**So: if a tool reports a dependency this project does not use, suspect the resolver picked up
+the parent checkout before you suspect the install.** Read the paths in the error — they name
+which tree actually answered, and that is the fastest thing in the message.
+
 **If a commit is refused because checks are stale, run them IN THIS TREE:**
 
     cd {worktree_abs} && ./.game_loop/bin/verify

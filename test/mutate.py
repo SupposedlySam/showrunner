@@ -151,6 +151,12 @@ TARGETS = [
      "    return {'base': base, 'sha': None, 'branch': base, 'explicit': False,\n"
      "            'missing': [], 'present': [], 'unknown': []}\n"
      "def _neutered_base_report(cfg, graph, leaf, base='HEAD'):\n"),
+    # An always-empty answer is the SILENT half of not provisioning: the spawn succeeds, the
+    # record says nothing, and the guard is absent in the one place it runs — which is the exact
+    # state #31 was filed about, restored without a word.
+    ("showrunner's own hooks, crossing", "lease.provision_hooks", "lib/showrunner/lease.py",
+     r"(def provision_hooks\(cfg, worktree_path\):\n)",
+     "    return []\ndef _neutered_provision_hooks(cfg, worktree_path):\n"),
     ("locks present on disk", "locks.LockSet.on_disk", "lib/showrunner/locks.py",
      r"(    def on_disk\(self\):\n)",
      "        return []\n    def _neutered_on_disk(self):\n"),

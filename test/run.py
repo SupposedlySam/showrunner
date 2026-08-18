@@ -970,6 +970,23 @@ def test_spawn():
     ok("the brief warns about the shared-state refusal without offering a bypass",
        "--no-verify" in text and "never bypass" in text.lower(), )
 
+    # PARENT-WALKING RESOLVERS, which every Crawler hits independently because a worktree is a
+    # directory INSIDE the repo root by default (#34). `npx` walks up, finds the PRIMARY
+    # checkout's node_modules, and fails naming a package the project does not depend on — so
+    # the error reads as a broken install and the natural next move is reinstalling into the
+    # worktree, which is slow and can hide the cause. Nothing to build; the fix is knowing,
+    # which is why it belongs in the text every Crawler is handed rather than in a doc.
+    ok("the brief tells the Crawler that a parent-walking resolver will find the PRIMARY "
+       "checkout — the failure is invisible from inside the worktree and costs a wrong "
+       "conclusion before it costs time",
+       "walks UP" in text and "PRIMARY checkout" in text, text[:200])
+    ok("...and gives the concrete form rather than only the principle, because 'use an explicit "
+       "path' is not actionable at the moment somebody is typing `npx`",
+       "./node_modules/.bin/" in text and "never `npx" in text, text[:200])
+    ok("...and names the tell — a dependency the project does not use — so the reader can "
+       "recognise it from the error rather than having to remember this paragraph",
+       "does not use" in text and "suspect the resolver" in text, text[:200])
+
     # A declared inject path that is missing must fail the SPAWN, loudly.
     bad = make_repo(files={"README.md": "seed\n", ".gitignore": "service-account.json\n"},
                     extra_config={"inject": [{"path": "service-account.json"}]})
@@ -2348,6 +2365,69 @@ def test_worktree_lease():
        "tree on a partial write, which is exactly what locks.py refuses to do one layer down",
        allow, msg)
     shutil.rmtree(lease.Lease(cfg, gt).lock.dir, ignore_errors=True)
+
+    # ---- DOES IT CROSS, when the install is deliberately untracked? (#31) ------------
+    # `git worktree add` carries TRACKED files only, so an untracked shim is present in the
+    # main checkout and absent in every worktree — the one place the guard runs. The only
+    # remedy offered was "commit it", which a shared team repo excluding `.showrunner` via
+    # .git/info/exclude cannot take. showrunner had already solved this shape for the OTHER
+    # harness (`harness.provision` copies game_loop in for exactly this reason) and its own
+    # hooks were not covered by it: one mechanism, two answers depending on whose files.
+    prov = make_repo(files={"README.md": "seed\n",
+                            ".gitignore": ".worktrees/\n.showrunner/hooks/\n"})
+    hooks_src = os.path.join(prov.root, lease.GUARD_HOOKS_DIR)
+    os.makedirs(hooks_src, exist_ok=True)
+    with open(os.path.join(hooks_src, "worktree-guard.sh"), "w") as fh:
+        fh.write("#!/usr/bin/env bash\nexit 0\n")
+    gprov = new_graph(prov)
+    gprov.add("untracked-install work", leaf_id="p1", labels=["backend"])
+    prec = worktree.spawn(prov, gprov.show("p1"), actor="crawler-p")
+    crossed = os.path.join(prec["worktree"], lease.GUARD_SHIM)
+    ok("an IGNORED (deliberately untracked) guard shim is PROVISIONED into the worktree — git "
+       "could not carry it, and 'commit it' is not a remedy a repo that excludes .showrunner "
+       "on purpose can take", os.path.exists(crossed), prec.get("provisioned"))
+    ok("...and it is EXECUTABLE there, which is the difference between a guard and a file",
+       os.path.exists(crossed) and os.access(crossed, os.X_OK))
+    ok("...and the spawn record SAYS it provisioned them, so the copy is visible rather than "
+       "being a silent side effect of spawning",
+       any(lease.GUARD_HOOKS_DIR in a for a in prec.get("provisioned") or []),
+       prec.get("provisioned"))
+
+    # THE OTHER SUPPORTED ARRANGEMENT, so the assertion above is about the untracked case and
+    # not about provisioning happening unconditionally.
+    tracked = make_repo(files={"README.md": "seed\n", ".gitignore": ".worktrees/\n",
+                               os.path.join(".showrunner", "hooks", "worktree-guard.sh"):
+                                   "#!/usr/bin/env bash\nexit 0\n"})
+    gtr = new_graph(tracked)
+    gtr.add("tracked-install work", leaf_id="p2", labels=["backend"])
+    trec = worktree.spawn(tracked, gtr.show("p2"), actor="crawler-t")
+    ok("a TRACKED shim crosses by itself and is left alone — provisioning reports nothing, "
+       "because git already did the work",
+       not any(lease.GUARD_HOOKS_DIR in a for a in trec.get("provisioned") or []),
+       trec.get("provisioned"))
+    ok("...and it is still there, so 'reports nothing' means 'nothing to do' rather than "
+       "'nothing happened'", os.path.exists(os.path.join(trec["worktree"], lease.GUARD_SHIM)))
+
+    # THE STATE WITH NO ANSWER, which the copy created before anything checked it: neither
+    # tracked nor ignored. A Crawler's `git add -A` commits showrunner's plumbing onto its
+    # branch, and integrating it collides with the same untracked path in the main checkout —
+    # found by the suite the moment provisioning was wired in, on the merge assertion.
+    neither = make_repo(files={"README.md": "seed\n", ".gitignore": ".worktrees/\n"})
+    nh = os.path.join(neither.root, lease.GUARD_HOOKS_DIR)
+    os.makedirs(nh, exist_ok=True)
+    with open(os.path.join(nh, "worktree-guard.sh"), "w") as fh:
+        fh.write("#!/usr/bin/env bash\nexit 0\n")
+    gn2 = new_graph(neither)
+    gn2.add("neither-nor", leaf_id="p3", labels=["backend"])
+    nrec = worktree.spawn(neither, gn2.show("p3"), actor="crawler-n")
+    ok("a shim that is NEITHER tracked NOR ignored is NOT provisioned — copying it would hand "
+       "the Crawler a file its own `git add -A` commits, which then wedges the merge",
+       not os.path.exists(os.path.join(nrec["worktree"], lease.GUARD_SHIM)),
+       nrec.get("provisioned"))
+    ok("...and the refusal names BOTH fixes, because either one works and the reader cannot be "
+       "expected to derive which suits their repo",
+       any("TRACK the hooks" in a and "IGNORE them" in a
+           for a in nrec.get("provisioned") or []), nrec.get("provisioned"))
 
     # ---- is the guard WIRED? (the check one level out from 'does it work') -----------
     # A guard verb nobody registers has never once run. That was true of `lock guard` for this
