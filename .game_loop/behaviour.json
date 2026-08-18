@@ -155,6 +155,42 @@
       "change": "the refusal now prints a PASTEABLE install command for the exact unharnessed tree, and records itself in the PARENT's log as kind commit_gate_unharnessed_tree. The refusal itself is unchanged in what it refuses.",
       "consequence": "if you grep your log for how often this gate fires, you will now find entries where before there were none \u2014 the commit tree has no .game_loop/ and therefore no log of its own, so every one of these was previously invisible in the only place a reviewer would look. Nothing is refused that was permitted before.",
       "why_it_qualifies": "a consumer who changed nothing sees different refusal text and new log lines. Reported after four --no-verify commits in one day: the honest remedies were a manual step and an impossibility, so the escape hatch won every time and left no trace of the gate that prompted it. The behaviour gate did NOT fire \u2014 no refusal line matched its regex \u2014 so this entry is a judgement."
+    },
+    {
+      "seq": 14,
+      "sha": "d24b430",
+      "notice": true,
+      "verb": "the write guard, on Bash `rm` with recursive+force, WHILE A MANDATE IS LIVE",
+      "change": "a new refusal. `rm -rf` (and -fr, -r -f, --recursive --force, /bin/rm, behind sudo) is DENIED while an unparked mandate is set. Command position is required, and both flags: `rm -r`, `rm -f`, `rmdir`, a single-file `rm`, and prose mentioning the command are all untouched. With NO mandate, or a PARKED one, nothing changes at all.",
+      "consequence": "if you run cleanup with `rm -rf` inside a mandated run, it now stops with a refusal naming non-prompting alternatives (mktemp -d and leave it, `git worktree remove`, `rmdir`, a plain `rm`) and the `authorize` hatch. Nothing outside a live mandate is affected, so a session that never sets one sees no change.",
+      "why_it_qualifies": "a consumer who changed nothing is refused a command that previously ran. Reported from a real unattended run: the permission layer escalated `rm -rf` to an interactive approval, and their owner happened to be at his desk. Unattended it would have blocked forever \u2014 no timeout, no log line, and the watchdog cannot help because a run waiting on a prompt is not idle. That is the one hazard here that fails SILENT, and it is a property of the PAIR (a mandate says nobody is watching; the permission model assumes somebody is), which only game_loop can see. Refusing converts an unbounded wait into an instant, self-serviceable error."
+    },
+    {
+      "seq": 15,
+      "sha": "7c54835",
+      "notice": true,
+      "verb": "the Stop gate, on a checkpoint whose notes name the next action",
+      "change": "a NEW refusal. Under a live mandate, with nothing armed and nothing reporting as waiting, a checkpoint whose notes name a successor ('Next: X', 'moving on to X', \"I'll start X\") is REFUSED, and the refusal quotes the phrase. A named blocker in the same notes ('blocked on <fact>', 'needs a decision') clears it, as does an armed T3 or a probe reporting waiting.",
+      "consequence": "if you end turns with checkpoints that say what you will do next, those turn-ends now stop instead of handing back. Ordinary progress checkpoints are unaffected, and with no mandate the gate is inert as before. The cheapest way to clear it is to delete the word \u2014 the refusal says outright that this is not the fix, because doing so teaches worse checkpoints while changing nothing about the run.",
+      "why_it_qualifies": "a consumer who changed nothing is refused a turn-end that previously succeeded. Reported with a verbatim case and a table showing that EVERY existing gate passed it, each for a correct reason: the Stop gate saw a declared checkpoint (its contract), the ritual counter saw a real commit, the watchdog saw no idle because the session had stopped rather than gone quiet. The hole was between the gates. The behaviour gate did NOT fire here \u2014 the refusal is a return, not a deny line, so no regex matched \u2014 which makes this entry a judgement rather than a prompted one."
+    },
+    {
+      "seq": 16,
+      "sha": "65ba47d",
+      "notice": true,
+      "verb": "the write guard, on Bash commands that MENTION a recursive-force delete",
+      "change": "a REFUSAL WITHDRAWN. Commands that only write about or search for the verb are no longer blocked \u2014 a grep whose search pattern contains it, prose in an echo, a commit message. The matcher now tokenises before splitting on shell operators, so a quoted string is one token instead of being torn apart by the alternation bars inside it. Every real spelling still denies, including -r -f split across tokens.",
+      "consequence": "if seq 14 was blocking your greps or your commit messages, it stops. Nothing that was allowed becomes refused.",
+      "why_it_qualifies": "a consumer who changed nothing is no longer refused commands that seq 14 blocked yesterday. Reported the day after shipping it, hit while grepping the binary to find where the guard lived \u2014 which is the likeliest first encounter anyone adopting it has. guard-sdb.sh already carried this exact lesson in its header, and it reproduced on me while I was fixing it: the patch command carrying the explanatory comment was itself refused."
+    },
+    {
+      "seq": 17,
+      "sha": "65ba47d",
+      "notice": true,
+      "verb": "the Stop gate, on a checkpoint that ENUMERATES remaining work, and on a reworded second turn-end",
+      "change": "two widenings of seq 15. A checkpoint that lists what is LEFT ('mandate has 4108, 4109, 4111 left') is now a deferral even when it never says 'next' \u2014 both a remaining-word AND a work-item token are required, so an ordinary finding like 'the remaining 19 failures are pre-existing' still passes. And `stop_hook_active` no longer allows a turn-end when NOTHING is on the record since the gate's last refusal.",
+      "consequence": "turn-ends that summarise outstanding work now stop, and answering a block by rewriting the closing message no longer succeeds on the second attempt \u2014 one tool call clears it. The two-block circuit breaker still stands the gate down, and the refusal now says so explicitly. An unreadable log allows, unchanged.",
+      "why_it_qualifies": "a consumer who changed nothing is refused turn-ends that succeeded before. Both measured across two overnight strandings on the reporter's side, where every gate fired correctly, `consecutive` never reached the stand-down bound, and the run still ended: the enforcement budget for a turn-end was exactly one refusal, and the cheapest way to spend it was on prose."
     }
   ],
   "schema": 1

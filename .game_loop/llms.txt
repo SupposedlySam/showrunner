@@ -92,11 +92,18 @@ turn-end). If you can predict the human's answer, don't ask; make the call and c
 
 ## Usage limits: the handoff gate and the park
 
-If a tool call is refused with **LIMIT GATE CLOSED**, a Claude Code usage window is nearly exhausted
-and the session will soon die mid-action. Do not argue with it and do not route around it — write the
-handoff file at the exact path the gate names (YOUR session's own, under `.game_loop/sessions/<id>/`):
-the mandate, where you are, what is DONE and VERIFIED (with proving paths), what you were mid-flight
-on, exact next actions, how to resume. The gate opens the moment that file exists, and you keep
+If a tool call is refused with **LIMIT GATE CLOSED**, either a Claude Code usage window is nearly
+exhausted and the session will soon die mid-action, or this session's context has grown past the
+configured cap and every remaining call is re-sending the whole of it. The refusal says which. Do not
+argue with it and do not route around it — write the handoff file at the exact path the gate names
+(YOUR session's own, under `.game_loop/sessions/<id>/`): the mandate, where you are, what is DONE and
+VERIFIED (with proving paths), what you were mid-flight on, exact next actions, how to resume. The
+gate opens the moment that file exists.
+
+If the refusal named the **context cap**, the handoff is only half of it: writing it opens the gate
+but does not shrink the context, so carrying on here keeps paying for it. Run
+`./.game_loop/bin/game_loop successor` — it mints the next session's id, points it at your handoff and
+prints (or opens) the command that starts it — and then stop. If it named a **usage window**, you keep
 working until the window actually runs dry.
 
 If you are woken with **"the exhausted usage window has reset"**, you are the resumed run: run
@@ -304,7 +311,32 @@ measure --instrument <name> --before <n> --after <n> --events <per-event values>
 fix --prove <name> --promises ".." --produces <the fix's own output> \
     --diagnosis <the repro> --before <verdict> --observed <verdict>
 #   a verified diagnosis is NOT a verified fix — exercise what the fix PRODUCES
+mutate --prove ".." --test <command> --file <path> --replace ".." --with ".."
+#   prove a TEST pins something: the tool runs it green, applies your mutation, runs it
+#   again, restores the file, and compares. "I reverted the fix and watched it fail" is
+#   one sentence whether or not it happened — a reviewer mutation-tested eight leaves that
+#   each reported exactly that, and three stayed GREEN with the bug reintroduced.
+#   --replace must appear EXACTLY once. --timeout <sec> per run (default 900).
+#   A green mutated run is decisive; a red one is one specific claim, not a good test.
+contribute --reviewed --filed "<urls, or none>" --note ".."
+#   record that you asked, of each learning hardened since the last review: does this name a
+#   TOOL's behaviour, or THIS REPO's? `stepback` nudges once enough have accumulated and LISTS
+#   them, because the judgement is unmakeable from a count. A learning phrased as a fact about
+#   a tool usually IS one — encoded locally it is fixed for one agent, in one repo, and every
+#   other agent using that tool rediscovers it. "All project-specific" is a COMPLETE answer;
+#   recording the review is what clears it, so the gate cannot manufacture noise issues.
+stepback [--notes ".."] | stepback --nothing-to-harden --reason ".."
+#   the retro. The second form is the honest escape when a chapter truly yielded no rule —
+#   it takes a reason, because "nothing to learn" is a claim like any other.
+successor [--handoff <path>] [--task ".."] [--title ".."] [--cwd <dir>] [--dry-run]
+#   mint the next session and hand over: it points the successor at your handoff rather
+#   than hoping it finds one. --dry-run prints what it would do without doing it.
 ```
+
+**The `proved` moment.** `fix --prove`, `effector --prove` and `mutate --prove` each fire a
+`proved` trigger — the instant a change is demonstrated to behave differently, which is when
+documentation goes stale and is still cheap to fix. Attach your documentation checks THERE, not
+to `confidence`: at publish you are asked about a dozen changes at once, each decided days ago.
 
 **`confidence` — how much this project stands behind a commit.** Three levels, each meaning only
 what was *checked*, never that the code is correct: **alpha** (the absence of a mark), **beta**

@@ -275,8 +275,8 @@ re-reading everything: the assumptions above cite `guard-writes-impl.sh`, `verif
 cannot have moved. That is the difference between a check being satisfied and a check being
 skipped, and it is worth writing down because the skip is the tempting one.
 
-<!-- game_loop-verified: b9722cd8 — payload digest. THIS is the gated value.
-     First carried by release 648f4c81. That release name changes ONLY when the digest above
+<!-- game_loop-verified: 4104291e — payload digest. THIS is the gated value.
+     First carried by release fc0c301e. That release name changes ONLY when the digest above
      changes: the two describe the same event, and a release where the digest did not move did
      not re-verify anything. Overwriting it on every upgrade was done twice here by updating
      both fields together out of habit — an ungated number drifting beside a gated one, inside
@@ -286,10 +286,25 @@ skipped, and it is worth writing down because the skip is the tempting one.
 
 - The commit gate resolves **per target tree** — the resolution lands in `commit_root`, and the
   no-harness branch then carries it in `_gl_unharnessed` — and denies in two cases: when that
-  tree carries no harness (`guard-writes-impl.sh:781`), and
+  tree carries no harness (`guard-writes-impl.sh:871`, where the `undetermined:` resolution
+  becomes `_gl_unharnessed`), and
   when the target is built from a **shell variable** so the gate cannot resolve it without
-  executing it (line 749). The second is newer than the first — it used to pass silently,
+  executing it (line 852). The second is newer than the first — it used to pass silently,
   which is the default shape under fan-out.
+- A **FOURTH** denial, newest of all and the only one keyed on a *mandate* rather than on a
+  path: a Bash `rm` carrying BOTH recursive and force, while an unparked mandate is live
+  (`guard-writes-impl.sh:689`). The reasoning is not about the delete — it is that an
+  interactive approval is the one hazard in an unattended run that fails SILENT: no timeout, no
+  log line, and the watchdog cannot answer it because a run blocked on a prompt is not idle.
+  Both flags are required, in any spelling (`-rf`, `-r -f`, `--recursive --force`), and the
+  argv is lexed rather than pattern-matched — unbalanced quotes make it say nothing rather than
+  guess at a command.
+
+  **This bullet exists because the enumeration above was wrong the moment the harness moved.**
+  It read "denies in two cases" plus "a third" against a payload that had grown a fourth, and
+  the payload stamp is what caught it — not a reader noticing. An enumeration is complete on the
+  day it is written.
+
 - A **third** denial, newer than both and not on the commit path at all: a Write or Edit to
   `config.json`, `INVARIANTS.md` or `verify.yaml` **when the file already exists** (line 432).
   The discriminator is existence, so seeding an absent one is provisioning and passes —
@@ -308,8 +323,9 @@ skipped, and it is worth writing down because the skip is the tempting one.
 - The edited-file set is scoped to the **session**, not the tree — one session is one session
   however many trees it touches. (`EDITED_F` at line 263.)
 - The blast-radius check is a **warning, never a denial** — `blast_note` reaches `commit_note`
-  and nothing else (lines 866, 1361) — and is silent when the session's `edited` set is empty,
-  which is no evidence rather than a clean bill (line 881).
+  and nothing else (`blast_note` assigned at 969, consumed at 1464) — and is silent when the
+  session's `edited` set is empty, which is no evidence rather than a clean bill (line 984,
+  stated as design at 966).
 **The two below cite `install.sh` by ANCHOR, not by line, and that is a correction.** It is
 the one file here that is not vendored — it lives in game_loop's own checkout — so the payload
 digest does not move when it changes and the cited-line check cannot read it. They carried line
