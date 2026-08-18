@@ -1473,6 +1473,8 @@ def cmd_waiting(args):
     cfg = _cfg(args)
     is_waiting, detail = campaign.waiting(cfg, _graph(cfg), base=args.base)
     if args.porcelain:
+        # The porcelain branch returns through the same three-code path below, so a structured
+        # consumer and a prose one cannot disagree about the verdict.
         print(json.dumps(detail, indent=2, sort_keys=True))
     else:
         if is_waiting:
@@ -1488,8 +1490,26 @@ def cmd_waiting(args):
         # waiting while Crawlers are alive, and a verdict whose cause is invisible is one the
         # reader argues with. These are the sessions somebody has to go and prompt.
         for c in detail.get("blocked_crawlers") or []:
+            # ON STDOUT AS WELL AS STDERR, because this line is the FINDING and the finding must
+            # not depend on which stream a caller happened to capture. It stays on stderr too:
+            # a human reading a terminal sees it in the same place as before, and the colour is
+            # only worth carrying there.
+            print("BLOCKED %s (%s) — %s. Alive and doing nothing; it needs a message, not time."
+                  % (c["crawler"], c["leaf"], c["why"]))
             eprint("  %sBLOCKED%s %s (%s) — %s. Alive and doing nothing; it needs a message, "
                    "not time." % (YEL, OFF, c["crawler"], c["leaf"], c["why"]))
+
+    # THREE STATES, NOT TWO (#35). This returned 0 for waiting and 1 for everything else, so a
+    # blocked Crawler — counted as neither waiting nor parked — produced the SAME code as an
+    # ordinary quiet campaign. A consumer writing `waiting || exit 0`, which is the natural way
+    # to mean "if it cannot tell, do not act", then allowed in exactly the case it was built for.
+    # That happened: a real stop gate, written against this verb, never fired once.
+    #
+    # 3 is chosen so the wrong reading becomes LOUD rather than staying quiet: a caller that
+    # treats non-zero as "no" now gets a different number for the case it must not miss, and one
+    # that only knew 0/1 sees an unexpected code instead of a false negative.
+    if detail.get("blocked_crawlers"):
+        return 3
     return 0 if is_waiting else 1
 
 
@@ -1850,11 +1870,14 @@ def build_parser():
     s.set_defaults(func=cmd_watch)
 
     s = sub.add_parser("waiting",
-                       help="exit 0 when this orchestrator is legitimately waiting on dispatched "
-                            "work (a live Crawler PID or an explicit park), exit 1 otherwise — a "
-                            "recomputable fact for an idle watchdog that cannot see subagents")
+                       help="is this orchestrator legitimately waiting? exit 0 waiting, 1 not "
+                            "waiting, 3 a Crawler is BLOCKED (alive and inert — needs a message, "
+                            "not time). Build against --porcelain: three exit codes and two "
+                            "streams are easy to combine wrongly, and every wrong way is quiet")
     s.add_argument("--base", default="HEAD")
-    s.add_argument("--porcelain", action="store_true")
+    s.add_argument("--porcelain", action="store_true",
+                   help="JSON on stdout — THE CONTRACT. The prose form splits its verdict across "
+                        "stdout and its BLOCKED finding across both streams; build on this one")
     s.set_defaults(func=cmd_waiting)
 
     s = sub.add_parser("baseline", help="record the current check results as the comparison point")

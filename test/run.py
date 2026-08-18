@@ -2385,6 +2385,46 @@ def test_worktree_lease():
        allow, msg)
     shutil.rmtree(lease.Lease(cfg, gt).lock.dir, ignore_errors=True)
 
+    # THREE EXIT CODES, NOT TWO (#35). `waiting` returned 1 for "not waiting" AND for "a
+    # Crawler is blocked", so the natural consumer spelling — `waiting || exit 0`, meaning "if
+    # it cannot tell, do not act" — allowed in exactly the case it was built for. A real stop
+    # gate written against this verb never fired once. 3 makes the wrong reading LOUD.
+    import io as _io
+    import showrunner.cli as _C
+
+    def waiting_exit(blocked, waiting_now=False):
+        _ow = campaign.waiting
+        campaign.waiting = lambda c, g, base=None: (waiting_now, {
+            "live_crawlers": [], "parked_crawlers": [], "waiting": waiting_now,
+            "blocked_crawlers": ([{"crawler": "c-x", "leaf": "X1", "why": "refused at turn-end"}]
+                                 if blocked else []), "basis": "t"})
+        buf, errb = _io.StringIO(), _io.StringIO()
+        saved, saved_err, cwd = sys.stdout, sys.stderr, os.getcwd()
+        sys.stdout, sys.stderr = buf, errb
+        os.chdir(cfg.root)
+
+        class A:
+            porcelain = False
+            base = None
+        try:
+            rc = _C.cmd_waiting(A())
+        finally:
+            os.chdir(cwd); sys.stdout, sys.stderr = saved, saved_err
+            campaign.waiting = _ow
+        return rc, buf.getvalue(), errb.getvalue()
+
+    rc_b, out_b, err_b = waiting_exit(blocked=True)
+    eq("a BLOCKED Crawler exits 3, not 1 — the code that says 'not waiting' must not also be the "
+       "code that says 'somebody is stuck', or a consumer treating non-zero as no misses the one "
+       "case it exists for", rc_b, 3)
+    eq("...while an ordinary quiet campaign still exits 1", waiting_exit(blocked=False)[0], 1)
+    eq("...and a genuinely waiting one still exits 0",
+       waiting_exit(blocked=False, waiting_now=True)[0], 0)
+    ok("...and the BLOCKED finding is on STDOUT as well as stderr, so it does not depend on "
+       "which stream a caller captured", "BLOCKED" in out_b, out_b[:160])
+    ok("...and still on stderr, where a human reading a terminal already looked for it",
+       "BLOCKED" in err_b, err_b[:160])
+
     # ---- THE INERT-CRAWLER STOP TRIGGER (#32) -----------------------------------------
     # `waiting` already knew a Crawler was alive and doing nothing. Nothing spent that at the
     # orchestrator's turn-end, so a "Next: ..." list was written and the session walked away
