@@ -2562,15 +2562,39 @@ def test_worktree_lease():
 
     # THE CROSSING. `git worktree add` copies tracked files only, so an untracked or uncommitted
     # shim is present here and absent in every worktree made from now on.
+    # NEITHER TRACKED NOR IGNORED is the state with no answer, and it is the one this warns
+    # about now. An IGNORED shim is fine since `spawn` provisions it (#31) — warning there
+    # would name the one action a repo that excludes `.showrunner` on purpose has already
+    # ruled out, which is a remedy that reads as "you are holding it wrong".
     untracked = [m for l, m in lease.guard_health(cfg) if l == "warn"]
-    ok("an UNTRACKED shim is reported — it is present here and absent in every worktree, which "
-       "is the one place the guard exists to run",
-       any("not tracked" in m for m in untracked), untracked[:2])
+    ok("a shim that is NEITHER tracked NOR ignored is reported — git will not carry it and "
+       "provisioning refuses to, so it is absent in every worktree",
+       any("NEITHER tracked NOR ignored" in m for m in untracked), untracked[:2])
+    ok("...and the warning names BOTH ways out, because a repo that keeps showrunner out of its "
+       "history cannot take the one that says `git add`",
+       any("git add" in m and "info/exclude" in m for m in untracked), untracked[:2])
     sh(["git", "add", shim_rel], cfg.root)
     sh(["git", "commit", "-q", "-m", "track the guard shim"], cfg.root)
     ok("...and committing it clears that warning, which is what makes the line above a check "
        "and not a constant",
-       not any("not tracked" in m for l, m in lease.guard_health(cfg)))
+       not any("NEITHER tracked" in m for l, m in lease.guard_health(cfg)))
+
+    # THE OTHER WAY OUT, asserted rather than asserted-about: ignoring it is not a warning at
+    # all, because provisioning carries it. Without this the assertion above passes just as
+    # well against a check that warns on everything untracked.
+    ign = make_repo(files={"README.md": "seed\n",
+                           ".gitignore": ".worktrees/\n.showrunner/hooks/\n"})
+    os.makedirs(os.path.join(ign.root, lease.GUARD_HOOKS_DIR), exist_ok=True)
+    with open(os.path.join(ign.root, lease.GUARD_SHIM), "w") as fh:
+        fh.write("#!/usr/bin/env bash\nexit 0\n")
+    os.chmod(os.path.join(ign.root, lease.GUARD_SHIM), 0o755)
+    ign_health = lease.guard_health(ign)
+    ok("an IGNORED shim is NOT warned about — `spawn` provisions it, so this is the supported "
+       "arrangement for a repo that keeps showrunner out of its history, not a defect",
+       not any("NEITHER tracked" in m for l, m in ign_health), ign_health[:3])
+    ok("...and it SAYS which arrangement is in force, because silence here would read as the "
+       "check not having run",
+       any(l == "ok" and "provisions it" in m for l, m in ign_health), ign_health[:3])
     with open(shim_dst, "a") as fh:
         fh.write("# edited after the commit\n")
     differs = [m for l, m in lease.guard_health(cfg) if l == "warn"]

@@ -509,10 +509,28 @@ def guard_health(cfg):
             # It is also the state EVERY fresh install passes through: install.sh places this
             # file and tells the consumer to commit it, so erroring here would make a correct
             # install's first `doctor` red for something it had just been told to do.
-            out.append(("warn", "%s is not tracked by git yet. `git worktree add` copies "
-                                "tracked files only, so until it is committed the guard is "
-                                "present here and ABSENT in every worktree — the one place it "
-                                "exists to run. `git add %s`" % (GUARD_SHIM, GUARD_SHIM)))
+            # AND NOW THERE ARE TWO ANSWERS, so this must not print only one. `spawn`
+            # provisions the hooks into each worktree (#31), which makes an IGNORED shim
+            # perfectly fine — a shared repo that excludes `.showrunner/` on purpose cannot
+            # take "commit it", and telling it so was a remedy that named the one action the
+            # reader had already ruled out. What is NOT fine is neither-nor: git will not carry
+            # it and provisioning refuses to, because copying it would hand the Crawler a file
+            # its own `git add -A` commits onto its branch.
+            rc_i, _, _ = git(["check-ignore", "-q", GUARD_SHIM], cwd=cfg.root)
+            if rc_i == 0:
+                out.append(("ok", "%s is ignored rather than tracked, so `spawn` provisions it "
+                                  "into each worktree — the arrangement for a repo that keeps "
+                                  "showrunner out of its history" % GUARD_SHIM))
+            else:
+                out.append(("warn", "%s is NEITHER tracked NOR ignored, which is the one state "
+                                    "with no answer: `git worktree add` carries tracked files "
+                                    "only, and `spawn` will not provision a file the Crawler's "
+                                    "own `git add -A` would then commit onto its branch. So the "
+                                    "guard is ABSENT in every worktree — the one place it runs. "
+                                    "Either `git add %s` (it then crosses by itself), or ignore "
+                                    "it (`.gitignore`, or `.git/info/exclude` to keep it out of "
+                                    "a shared repo) and spawn will carry it."
+                                    % (GUARD_SHIM, GUARD_SHIM)))
         else:
             rc, pending, _ = git(["diff", "HEAD", "--name-only", "--", GUARD_SHIM], cwd=cfg.root)
             if rc == 0 and (pending or "").strip():
