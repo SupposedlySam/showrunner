@@ -141,6 +141,16 @@ TARGETS = [
     # a worktree lease is named `worktree:<tree>` and never appears in config. An always-empty
     # answer makes `reap` blind to abandoned leases again (the state it exists to surface) and
     # makes `lock release <lease>` refuse the one name a human needs to clear.
+    # NOT auto-derived either — it always returns a dict, so it can never answer "nothing" in
+    # the shape the derivation looks for. Swept anyway, for the same reason `looks_pinned` is:
+    # its WRONG answer is the reassuring one. An always-empty `missing` restores exactly the
+    # silence #33 was filed about, where a chained leaf starts without its dependency and ships
+    # half the item with every gate green.
+    ("the base a spawn will actually use", "worktree.base_report", "lib/showrunner/worktree.py",
+     r'(def base_report\(cfg, graph, leaf, base="HEAD"\):\n)',
+     "    return {'base': base, 'sha': None, 'branch': base, 'explicit': False,\n"
+     "            'missing': [], 'present': [], 'unknown': []}\n"
+     "def _neutered_base_report(cfg, graph, leaf, base='HEAD'):\n"),
     ("locks present on disk", "locks.LockSet.on_disk", "lib/showrunner/locks.py",
      r"(    def on_disk\(self\):\n)",
      "        return []\n    def _neutered_on_disk(self):\n"),
@@ -794,9 +804,15 @@ def main():
             # A named producer that no longer exists is UNPROTECTED, not a skip. A sweep that
             # shrugs at a rename is a check that cannot fail — which is precisely the defect
             # the sweep exists to find, arriving inside the sweep itself.
-            print("%-34s %8s   UNPROTECTED — producer not found (renamed? removed?)"
-                  % (name, "-"))
-            weak.append((name, 0))
+            print("%-34s %8s   NOT FOUND — the anchor matched nothing (renamed? removed? "
+                  "over-escaped?)" % (name, "-"))
+            # UNSCOREABLE, not thin. This line USED to say UNPROTECTED and file the producer
+            # among the thinly-covered, which reads as "nothing notices this" — a hole, stated
+            # about code the sweep never mutated. It is the same conflation the CRASHED case
+            # had: no measurement was taken. Caught by hitting it — an anchor that arrived
+            # double-escaped reported a real, well-tested producer as UNPROTECTED, and the
+            # summary heading was where I believed it.
+            unscoreable.append((name, 0, "the anchor matched nothing, so nothing was mutated"))
             shutil.rmtree(work, ignore_errors=True)
             continue
         with open(target, "w") as fh:

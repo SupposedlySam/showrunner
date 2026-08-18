@@ -998,6 +998,35 @@ def cmd_plan(args):
 
 
 # ------------------------------------------------------------------ spawn
+def _print_base(report):
+    """The one input that silently decides whether a spawn is correct (#33).
+
+    `spawn` cuts from the PRIMARY checkout's HEAD, and that default is invisible and
+    context-dependent: the identical command is right or wrong depending on where an unrelated
+    checkout happens to be pointing. Everything else about a dispatch was printed — lane, model,
+    the full argv — except this. One line would have caught the reported failure, because `main`
+    was obviously wrong to the operator the moment they saw it.
+    """
+    origin = "explicit --base" if report.get("explicit") else "primary checkout HEAD"
+    print("  base     %s @ %s (%s)" % (report.get("branch") or "?",
+                                       (report.get("sha") or "?")[:12], origin))
+    for dep, dep_branch in report.get("missing") or []:
+        eprint("  %sBASE IS MISSING A DEPENDENCY: %s (%s) is NOT an ancestor of this base.%s"
+               % (RED, dep, dep_branch, OFF))
+        eprint("    The Crawler will come up without that work in its history. A brief that "
+               "branches on\n    whether a prerequisite landed will then take the smaller path, "
+               "correctly, and report a\n    complete honest outcome that is half the item — "
+               "with every gate green.")
+        eprint("    Pass --base %s (or a ref that contains it) if this leaf builds on it."
+               % dep_branch)
+    for why in report.get("unknown") or []:
+        eprint("  %sBASE NOT CHECKED against one dependency: %s%s" % (YEL, why, OFF))
+        eprint("    Not 'nothing is missing' — this could not look. Confirm the base yourself.")
+    if report.get("present") and not (report.get("missing") or report.get("unknown")):
+        print("  base dep %s in history" % ", ".join(
+            d for d, _ in report["present"]))
+
+
 def cmd_spawn(args):
     cfg = _cfg(args)
     g = _graph(cfg)
@@ -1024,10 +1053,17 @@ def cmd_spawn(args):
         print("%sDispatch (dry run — NOTHING created: no worktree, branch, scratch, brief or "
               "claim)%s" % (BOLD, OFF))
         print("  lane     %s" % decision["lane"])
+        # IN THE REHEARSAL TOO, and this is the half that matters: the dry run existed to show
+        # the operator what a launch would do, and it showed everything except the input that
+        # decides correctness.
+        _print_base(worktree.base_report(cfg, g, leaf, args.base))
         print("  model    %s" % (model or "(inherited)"))
         print("  command  %s" % " ".join(cmd))
         return 0
 
+    # Computed BEFORE the spawn, so a base that is missing a dependency is reported even when
+    # the spawn goes on to fail for an unrelated reason.
+    base_seen = worktree.base_report(cfg, g, leaf, args.base)
     record = worktree.spawn(cfg, leaf, actor=args.actor, base=args.base, branch=args.branch)
     # The channel is named before the brief is written, so the brief can TELL the Crawler
     # where to reach the orchestrator. A room the agent is never told about is a room it
@@ -1056,6 +1092,7 @@ def cmd_spawn(args):
                                " (resource %s)" % decision["resource"] if decision.get("resource") else ""))
     print("  worktree %s" % rel(record["worktree"], cfg.root))
     print("  branch   %s" % record["branch"])
+    _print_base(base_seen)
     print("  scratch  %s" % rel(record["scratch"], cfg.root))
     for line in record["injected"]:
         print("  inject   %s" % line)

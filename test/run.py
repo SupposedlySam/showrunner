@@ -816,6 +816,54 @@ def test_spawn():
     g.add("do the work", leaf_id="w1", labels=["backend"])
     rec = worktree.spawn(cfg, g.show("w1"), actor="crawler-a")
 
+    # ---- THE BASE, WHICH DECIDES CORRECTNESS AND WAS NEVER PRINTED (#33) -------------
+    # `spawn` cuts from the PRIMARY checkout's HEAD. That default is invisible AND
+    # context-dependent: the identical command is right or wrong depending on where an
+    # unrelated checkout happens to be pointing. Reported from a real campaign — five chained
+    # leaves, the checkout moved back to `main` between spawns, and the last Crawler came up
+    # with none of its prerequisite in history. It then took the documented smaller path and
+    # reported a complete honest outcome that was half the item, with every gate green.
+    g.add("the dependency", leaf_id="w-dep", labels=["backend"])
+    g.add("builds on it", leaf_id="w-next", labels=["backend"])
+    g.dep("w-next", "w-dep")
+    dep_rec = worktree.spawn(cfg, g.show("w-dep"), actor="crawler-dep")
+    with open(os.path.join(dep_rec["worktree"], "dependency.txt"), "w") as fh:
+        fh.write("the prerequisite\n")
+    sh(["git", "add", "-A"], dep_rec["worktree"])
+    sh(["git", "commit", "-q", "-m", "the dependency's work"], dep_rec["worktree"])
+
+    # The main checkout is sitting where it was — which does NOT contain the dependency.
+    report = worktree.base_report(cfg, g, g.show("w-next"), "HEAD")
+    eq("the base a spawn WOULD use is resolved and reported, rather than being an invisible "
+       "default nobody sees at the moment of dispatch",
+       report["sha"], sh(["git", "rev-parse", "HEAD"], cfg.root).stdout.strip())
+    ok("...and says where it came from, because 'HEAD' names a different commit depending on "
+       "where an unrelated checkout is pointing", report["explicit"] is False, report)
+    eq("...and a dependency whose branch is NOT in that base is named as MISSING — showrunner "
+       "owns the graph and the branch, so this is the check the Crawler had to run by hand",
+       [d for d, _ in report["missing"]], ["w-dep"])
+    eq("...and nothing is claimed present", report["present"], [])
+
+    # THE PAIR. Same graph, same dependency, a base that DOES contain it — without this the
+    # assertion above passes just as well against a check that calls everything missing.
+    report_ok = worktree.base_report(cfg, g, g.show("w-next"), dep_rec["branch"])
+    eq("...while a base that DOES contain the dependency reports it present",
+       [d for d, _ in report_ok["present"]], ["w-dep"])
+    eq("...and finds nothing missing", report_ok["missing"], [])
+    ok("...and records that the base was named rather than defaulted, since an explicit base "
+       "is the operator having decided", report_ok["explicit"] is True, report_ok)
+
+    # THE THIRD ANSWER. A dependency that was never spawned has no branch to compare against,
+    # and 'nothing is missing' there would be a claim about a graph this could not read.
+    g.add("never spawned", leaf_id="w-ghost", labels=["backend"])
+    g.dep("w-next", "w-ghost")
+    report_unknown = worktree.base_report(cfg, g, g.show("w-next"), dep_rec["branch"])
+    ok("a dependency with no branch is UNKNOWN, not absent — it was never spawned, and "
+       "reporting it as satisfied or as missing would both be inventions",
+       any("w-ghost" in u for u in report_unknown["unknown"]), report_unknown)
+    eq("...while the one that CAN be checked is still checked, so an unknown does not swallow "
+       "the answer for its siblings", [d for d, _ in report_unknown["present"]], ["w-dep"])
+
     wt = os.path.realpath(rec["worktree"])
     ok("the worktree is created INSIDE the repo (or the Crawler's own guard denies its first edit)",
        wt.startswith(os.path.realpath(cfg.root) + os.sep), wt)

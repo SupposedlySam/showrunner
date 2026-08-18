@@ -402,11 +402,73 @@ def harness_gap(cfg, worktree_path=None):
 
 
 # -------------------------------------------------------------- the spawn
+def branch_for(leaf_id):
+    """The branch `spawn` gives a leaf. One rule, so callers stop re-deriving it."""
+    return "showrunner/%s" % slug(leaf_id, 60)
+
+
+def base_report(cfg, graph, leaf, base="HEAD"):
+    """What `base` actually resolves to, and whether the leaf's dependencies are in it.
+
+    THE DEFAULT IS INVISIBLE AND CONTEXT-DEPENDENT, which is the whole issue (#33). `spawn`
+    cuts from the PRIMARY checkout's HEAD, so the identical command produces a correct base or
+    a wrong one depending on where an unrelated checkout happens to be pointing. The reported
+    case: five chained leaves, the checkout moved back to `main` between spawns, and the last
+    Crawler came up with none of its prerequisite in history.
+
+    THE COST IS NOT A WASTED WORKTREE. A brief that says "if L4 has landed do both halves,
+    otherwise ship the smaller one and say so" is a GOOD brief — and with a silently wrong base
+    it becomes a trap: the Crawler correctly observes the prerequisite is absent, correctly
+    takes the smaller path, and correctly reports a complete honest outcome, for a reason that
+    is purely the orchestrator's dispatch error. Half the item ships and every gate is green.
+    It was caught only because that Crawler refuted the orchestrator's `--finding`, which is
+    `--finding` working as designed and too thin a thread to hang this on.
+
+    Returns a dict; never raises. `missing` is the finding — a dependency whose branch is not
+    an ancestor of the base. `unknown` is the honest third answer: a backend that cannot list
+    dependencies (br) or a dependency that was never spawned answers neither yes nor no, and
+    saying "nothing is missing" there would be a claim about a graph this could not read.
+    """
+    rc, sha, _ = git(["rev-parse", "%s^{commit}" % base], cwd=cfg.root)
+    sha = (sha or "").strip() if rc == 0 else None
+    rc2, named, _ = git(["rev-parse", "--abbrev-ref", base], cwd=cfg.root)
+    named = (named or "").strip() if rc2 == 0 else base
+    if named == "HEAD":
+        rc3, head_branch, _ = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=cfg.root)
+        named = (head_branch or "").strip() or "HEAD"
+
+    out = {"base": base, "sha": sha, "branch": named, "explicit": base != "HEAD",
+           "missing": [], "present": [], "unknown": []}
+    if not sha:
+        out["unknown"].append("git cannot resolve %r in %s" % (base, cfg.root))
+        return out
+
+    try:
+        deps = graph.deps_of(leaf["id"])
+    except Exception as exc:                        # noqa: BLE001
+        # Refused from the br adapter, which declines to answer rather than returning [].
+        out["unknown"].append("dependencies could not be listed: %s" % str(exc).split("\n")[0])
+        return out
+
+    for dep in deps:
+        dep_branch = branch_for(dep)
+        rc, _, _ = git(["rev-parse", "--verify", "--quiet", "refs/heads/%s" % dep_branch],
+                       cwd=cfg.root)
+        if rc != 0:
+            out["unknown"].append(
+                "%s has no branch %s — it was never spawned, or its work landed under a name "
+                "this cannot derive" % (dep, dep_branch))
+            continue
+        rc, _, _ = git(["merge-base", "--is-ancestor", dep_branch, sha], cwd=cfg.root)
+        (out["present"] if rc == 0 else out["missing"]).append((dep, dep_branch))
+    return out
+
+
 def spawn(cfg, leaf, actor="crawler", base="HEAD", branch=None):
     """Create everything a Crawler gets. Returns a record; raises on anything unsafe."""
     cfg.require_valid()
     name = crawler_name(leaf["id"], actor)
-    branch = branch or "showrunner/%s" % slug(leaf["id"], 60)
+    branch = branch or branch_for(leaf["id"])
     # Resolve the base to a SHA *before* creating the branch. Afterwards git cannot tell
     # a fully-merged branch from one that never received a commit — both have the base as
     # their merge-base — and that distinction decides whether a worktree is garbage or the
