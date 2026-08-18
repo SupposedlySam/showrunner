@@ -63,6 +63,37 @@ it was needed. And it compounds: the fix lands, the issue closes, and the codeba
 carries machinery defending against a hazard it never had — which the next reader takes
 as evidence the hazard exists.
 
+## What your REPORT is allowed to claim
+
+Your report is read by an orchestrator that cannot cheaply check it. It will dispatch the next
+leaf, tell a sibling what already landed, or close this one on the strength of your sentences.
+So a confident wrong sentence here is more expensive than a wrong commit — the commit is caught
+by a gate, the sentence is acted on.
+
+Four failures, each of which has actually happened in a real run:
+
+**A claim about code you just spent an hour in is the most convincing kind of wrong.** Recency
+feels like knowledge, so you skip the read that would take seconds. Before writing "X now does
+Y", grep for Y. This is the single cheapest check in this document.
+
+**Existing is not working.** A file that is present, an option that is accepted, a command that
+exits 0 — none of them establish the thing runs. Assert the OUTPUT, not the artifact. A binary
+placed without its library is executable and dies on every invocation, and both look identical
+to a check that asks whether the path exists.
+
+**A failed read is not a fact about the world.** Code that catches an error and returns what it
+has reports "nothing there", which is indistinguishable from there genuinely being nothing. If
+you could not look, say *could not look* — never fold it into the answer. Same for a search that
+matched nothing: "no results" and "the search was wrong" are one observation.
+
+**Surviving by elimination is not support.** If two of three explanations died and you are
+reporting the third, say that is what happened. An explanation that is merely the last one
+standing has no evidence for it, and written up without that qualifier it becomes a fact the
+next reader inherits.
+
+If you refute something you already told the orchestrator, send the correction as a NEW message
+rather than editing the old one — somebody may have already acted on it.
+
 {orchestrator_block}
 ## Your workspace
 

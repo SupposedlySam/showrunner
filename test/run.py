@@ -970,6 +970,25 @@ def test_spawn():
     ok("the brief warns about the shared-state refusal without offering a bypass",
        "--no-verify" in text and "never bypass" in text.lower(), )
 
+    # WHAT A REPORT MAY CLAIM. A Crawler's sentences are read by an orchestrator that cannot
+    # cheaply check them and then dispatches the next leaf on them — so a confident wrong
+    # sentence costs more than a wrong commit, which a gate catches. All four of these happened
+    # in real runs, three of them to this repo's own agent.
+    for phrase, what in (
+            ("spent an hour in", "recency reads as knowledge, so the read that would take "
+                                 "seconds gets skipped"),
+            ("Existing is not working", "a path that exists and a thing that runs are different "
+                                        "claims"),
+            ("failed read is not a fact", "'could not look' folded into the answer is "
+                                          "indistinguishable from 'nothing was there'"),
+            ("elimination is not support", "the last explanation standing has no evidence FOR "
+                                           "it, and loses that qualifier when written up")):
+        ok("the brief tells the Crawler what its REPORT may claim — %s" % what,
+           phrase in text, text[:200])
+    ok("...and to correct a refuted claim in a NEW message rather than editing the old one, "
+       "because somebody may already have acted on it",
+       "NEW message" in text and "already acted" in text, text[:200])
+
     # PARENT-WALKING RESOLVERS, which every Crawler hits independently because a worktree is a
     # directory INSIDE the repo root by default (#34). `npx` walks up, finds the PRIMARY
     # checkout's node_modules, and fails naming a package the project does not depend on — so
