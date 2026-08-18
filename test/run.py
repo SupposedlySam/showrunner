@@ -2366,6 +2366,85 @@ def test_worktree_lease():
        allow, msg)
     shutil.rmtree(lease.Lease(cfg, gt).lock.dir, ignore_errors=True)
 
+    # ---- THE INERT-CRAWLER STOP TRIGGER (#32) -----------------------------------------
+    # `waiting` already knew a Crawler was alive and doing nothing. Nothing spent that at the
+    # orchestrator's turn-end, so a "Next: ..." list was written and the session walked away
+    # from a run one message would have restarted — and the HUMAN noticed the stall. Every fact
+    # needed was already computed and printed.
+    trig = os.path.join(ROOT, lease.STOP_TRIGGER)
+    ok("the stop trigger ships in the repo and is executable — a gate that is not executable is "
+       "a gate that never runs", os.path.isfile(trig) and os.access(trig, os.X_OK), trig)
+    # TWO COPIES, ONE FILE. `install.sh` copies from `.showrunner/hooks/` and the template under
+    # `templates/stop-triggers/` is what a fresh install is built from; every assertion below
+    # runs the SHIPPED copy, so a template that drifted from it would be tested by nothing and
+    # installed by everybody. Same rule the central shim already carries.
+    tmpl_trig = os.path.join(ROOT, "templates", "stop-triggers", "inert-crawler-gate.sh")
+    ok("...and the template it is installed from is BYTE-IDENTICAL to it, so the copy under "
+       "test and the copy a consumer receives cannot drift apart",
+       os.path.isfile(tmpl_trig) and filecmp.cmp(trig, tmpl_trig, shallow=False),
+       tmpl_trig)
+
+    def run_trigger(payload, cwd=ROOT):
+        fx = os.path.join(tmpdir("trigger-fixture"), "waiting.json")
+        with open(fx, "w") as fh:
+            fh.write(payload)
+        return subprocess.run(["bash", trig], cwd=cwd, capture_output=True, text=True,
+                              env=dict(os.environ, INERT_CRAWLER_GATE_FIXTURE=fx))
+
+    blocked_payload = json.dumps({
+        "waiting": False, "live_crawlers": [], "parked_crawlers": [],
+        "blocked_crawlers": [{"crawler": "crawler-ml-l2a", "leaf": "ML-L2a",
+                              "why": "refused at turn-end by showrunner-stop-gate"}]})
+    clean_payload = json.dumps({"waiting": False, "live_crawlers": [], "parked_crawlers": [],
+                                "blocked_crawlers": []})
+
+    refused = run_trigger(blocked_payload)
+    eq("a BLOCKED Crawler REFUSES the orchestrator's turn-end — exit 2, which is the code that "
+       "blocks a Stop", refused.returncode, 2)
+    ok("...naming the Crawler and the leaf, because 'somebody is blocked' is not something the "
+       "reader can act on", "crawler-ml-l2a" in refused.stderr and "ML-L2a" in refused.stderr,
+       refused.stderr[:200])
+    ok("...and offering REAP in the same breath as messaging it, because a block can mean GONE "
+       "rather than waiting and an agent that cannot tell will sit re-messaging a corpse",
+       "reap" in refused.stderr and "message" in refused.stderr.lower(), refused.stderr[:400])
+
+    # THE PAIR, and every unknown, because a gate that refuses on everything is not a gate.
+    eq("...while a campaign with NO blocked Crawler allows the turn-end",
+       run_trigger(clean_payload).returncode, 0)
+    eq("...and an UNPARSEABLE answer allows — a gate that blocks when it cannot see blocks "
+       "forever the day it breaks, and this one sits on the human's own turn-end",
+       run_trigger("not json at all").returncode, 0)
+    eq("...and an EMPTY answer allows, for the same reason", run_trigger("").returncode, 0)
+    missing_fx = subprocess.run(
+        ["bash", trig], cwd=ROOT, capture_output=True, text=True,
+        env=dict(os.environ, INERT_CRAWLER_GATE_FIXTURE=os.path.join(tmpdir("gone"), "nope.json")))
+    eq("...and a fixture that is not there allows rather than erroring", missing_fx.returncode, 0)
+
+    # REGISTERED, because a gate nobody registers has never once run — which is the state
+    # `lock guard` was in for this repo's whole life and the row that shaped all of this.
+    reg = make_repo()
+    reg_settings = os.path.join(reg.root, ".claude", "settings.json")
+    os.makedirs(os.path.dirname(reg_settings), exist_ok=True)
+    # Seeded with SOMEBODY ELSE'S hook and no showrunner entry at all, so the two assertions
+    # below are about which event this lands on rather than about whatever the fixture happened
+    # to have registered already.
+    with open(reg_settings, "w") as fh:
+        json.dump({"hooks": {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command", "command": "theirs.sh"}]}]}}, fh)
+    changed, note = lease.register_stop_trigger(reg)
+    ok("registering the stop trigger reports that it changed something", changed, note)
+    ok("...and it lands on the Stop event, not on PreToolUse — the two gates answer different "
+       "questions at different moments", lease._stop_registration(reg_settings)[0], note)
+    ok("...and the PreToolUse detector does NOT see it, so a detector keyed only on the command "
+       "would report the worktree guard as registered because the Stop entry exists",
+       not lease._guard_registration(reg_settings)[0], open(reg_settings).read()[:200])
+    ok("...while somebody else's PreToolUse hook is untouched, because this file belongs to "
+       "Claude Code and to whoever else registered in it",
+       "theirs.sh" in open(reg_settings).read())
+    changed2, _ = lease.register_stop_trigger(reg)
+    ok("...and registering twice is a no-op, so an installer that runs on every upgrade does "
+       "not accumulate duplicates", not changed2)
+
     # ---- DOES IT CROSS, when the install is deliberately untracked? (#31) ------------
     # `git worktree add` carries TRACKED files only, so an untracked shim is present in the
     # main checkout and absent in every worktree — the one place the guard runs. The only
@@ -3263,9 +3342,14 @@ def test_installer_leaves_no_vendored_copy():
     # `register_guard` writes, with different quoting and no timeout.
     ok("the installer registers the worktree guard itself", "guard is registered" in quiet.stdout,
        quiet.stdout[-400:])
-    ok("...and therefore does NOT also print a hook entry for the reader to paste, which would "
+    # KEYED ON THE ENTRY, NOT ON THE EVENT NAME. This first read `"PreToolUse" not in stdout`,
+    # which is a proxy that cannot tell "names the event it registered on" from "hands you JSON
+    # to paste" — and it failed the moment the installer's report started naming both events
+    # correctly. The thing that must not appear is a pasteable hook entry.
+    ok("...and therefore does NOT also print a hook ENTRY for the reader to paste, which would "
        "register it a second time — the entry has exactly one author, `lease.register_guard`",
-       "PreToolUse" not in quiet.stdout, quiet.stdout[-500:])
+       '"matcher"' not in quiet.stdout and '"type": "command"' not in quiet.stdout
+       and '\\"matcher\\"' not in quiet.stdout, quiet.stdout[-500:])
 
     # THE CASE WHERE IT HAPPENS. Without this the assertion above passes just as well for an
     # installer that cannot place a skill at all, which is the shape of a check that never was.

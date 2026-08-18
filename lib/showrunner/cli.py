@@ -716,16 +716,22 @@ def cmd_worktree_register(args):
     exists instead of printing JSON to paste by hand.
     """
     cfg = _cfg(args)
-    changed, note = lease.register_guard(cfg)
-    if changed:
-        print(note)
-        return 0
-    if note:
-        eprint(note)
-        return 2
-    print("the worktree guard is already registered in %s"
-          % rel(os.path.join(cfg.root, ".claude", "settings.json"), cfg.root))
-    return 0
+    settings = rel(os.path.join(cfg.root, ".claude", "settings.json"), cfg.root)
+    # BOTH OF SHOWRUNNER'S HOOKS, from one verb. They are registered together because they are
+    # installed together and a reader has no way to know there are two — and the second one
+    # existing but unregistered is precisely the state this verb was built to end.
+    rc = 0
+    for register, what in ((lease.register_guard, "worktree guard"),
+                           (lease.register_stop_trigger, "inert-Crawler stop trigger")):
+        changed, note = register(cfg)
+        if changed:
+            print(note)
+        elif note:
+            eprint(note)
+            rc = 2
+        else:
+            print("the %s is already registered in %s" % (what, settings))
+    return rc
 
 
 def _hook_payload():

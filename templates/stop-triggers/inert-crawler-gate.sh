@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# STOP HOOK: refuse the orchestrator's turn-end while a Crawler is alive and inert.
+#
+# `showrunner waiting` already knows this. Nothing spent it at the one moment it decides
+# anything, so an orchestrator would write a "Next: ..." list and walk away from a run that one
+# message would restart — and the HUMAN was the one who noticed the stall. Every fact needed to
+# prevent that was already computed and printed (#32).
+#
+# WHY THE EXISTING GATES DO NOT COVER IT, since three of them are adjacent:
+#   the harness watchdog  fires on IDLE, which is after the orchestrator already stopped. It
+#                         rescues a session that went quiet; it does not refuse the stop.
+#   the harness Stop gate refuses a turn-end that asks a question or claims to be continuing.
+#                         "I am done for now, here is what is next" is neither, so it passes.
+#   a stall gate          asks "did anything move this turn". A turn that read files, published
+#                         a page and edited tickets answers yes and still leaves a Crawler inert.
+# The unmet question is narrower than all three: IS SOMEBODY WAITING ON A MESSAGE FROM ME.
+#
+# FAILS OPEN ON EVERY UNKNOWN. No binary, an unparseable answer, an unreadable record — all exit
+# 0. A gate that blocks when it cannot see blocks forever the day it breaks, and this one sits on
+# the human's own turn-end.
+#
+# READ --porcelain, NOT the human output. The obvious spelling is
+# `waiting 2>/dev/null | grep BLOCKED`, and it CANNOT WORK: `waiting` prints BLOCKED lines to
+# STDERR (they are printed on both branches, deliberately), and it exits NON-ZERO precisely when
+# it is not waiting — which is the state a blocked Crawler produces. So the natural script
+# discards the channel the finding is on and then treats the exit code as "cannot see". Both
+# halves fail toward silence. The JSON is a contract; the prose is for a person.
+set -u
+
+FIXTURE="${INERT_CRAWLER_GATE_FIXTURE:-}"      # a recorded --porcelain payload, for testing
+SR="${SHOWRUNNER_BIN:-}"
+
+if [ -n "$FIXTURE" ]; then
+  [ -r "$FIXTURE" ] || exit 0
+  payload="$(cat "$FIXTURE")"
+else
+  common="$(git rev-parse --git-common-dir 2>/dev/null)" || exit 0
+  case "$common" in /*) ;; *) common="$PWD/$common" ;; esac
+  root="$(cd "$(dirname "$common")" 2>/dev/null && pwd)" || exit 0
+
+  # THIS IS THE ORCHESTRATOR'S GATE, AND ONLY THE ORCHESTRATOR'S. `.claude/settings.json` is
+  # tracked, so the registration crosses into every Crawler worktree — and a Crawler refused at
+  # its own turn-end because a SIBLING is inert would be a gate demanding an action it cannot
+  # take: it has no channel to its siblings and no authority to reap them. So a session standing
+  # in a linked worktree is not this gate's business. Same jurisdiction rule the lease uses:
+  # the main checkout is where the orchestrator lives.
+  top="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+  [ "$(cd "$top" && pwd)" = "$root" ] || exit 0
+
+  if [ -z "$SR" ]; then
+    for candidate in "$root/.showrunner/bin/showrunner" "$root/bin/showrunner"; do
+      [ -x "$candidate" ] && { SR="$candidate"; break; }
+    done
+  fi
+  [ -n "$SR" ] || exit 0
+  # Exit code deliberately ignored: `waiting` returns 1 for "not waiting", which is the ordinary
+  # state AND the state a blocked Crawler produces. The payload is the answer, not the code.
+  payload="$("$SR" waiting --porcelain 2>/dev/null)" || true
+fi
+
+[ -n "$payload" ] || exit 0
+
+blocked="$(printf '%s' "$payload" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)                      # unparseable is UNKNOWN, and unknown allows
+for c in d.get("blocked_crawlers") or []:
+    print("  %s (%s) — %s" % (c.get("crawler"), c.get("leaf"), c.get("why")))
+' 2>/dev/null)" || exit 0
+
+[ -n "$blocked" ] || exit 0
+
+{
+  echo "STOP REFUSED — a Crawler is ALIVE AND DOING NOTHING. It needs a message, not time."
+  echo
+  printf '%s\n' "$blocked"
+  echo
+  echo "Ending your turn here leaves it inert until a human notices the run has stalled."
+  echo "That has happened; it is why this gate exists."
+  echo
+  echo "  MESSAGE IT — it was refused at its own turn-end and is waiting to be told what next."
+  echo "  Its channel and identity are in the campaign record (\`showrunner status\`)."
+  echo
+  echo "  OR REAP IT — a block can mean GONE rather than waiting, and an agent that cannot tell"
+  echo "  the difference will sit re-messaging a corpse:"
+  echo "      showrunner reap            # what it would do"
+  echo "      showrunner reap --apply    # release the leaf and surface the tree"
+  echo
+  echo "Commit anything outstanding before either — a Crawler's work is uncommitted more often"
+  echo "than not at the moment it blocks."
+} >&2
+exit 2

@@ -548,6 +548,28 @@ def guard_health(cfg):
                                 % (matcher, ", ".join(missing))))
         else:
             out.append(("ok", "worktree guard registered on PreToolUse (%s)" % matcher))
+
+    # THE SECOND GATE, checked the same way. An unregistered gate nobody mentions is the exact
+    # failure #32 describes one layer up: every fact was computed and nothing consulted it.
+    trigger = os.path.join(cfg.root, STOP_TRIGGER)
+    if not os.path.exists(trigger):
+        out.append(("warn", "%s is MISSING, so nothing refuses the orchestrator's turn-end while "
+                            "a Crawler is alive and inert. Re-run install.sh." % STOP_TRIGGER))
+    elif not os.access(trigger, os.X_OK):
+        out.append(("warn", "%s exists but is not executable, so the Stop hook cannot run it. "
+                            "`chmod +x %s`" % (STOP_TRIGGER, STOP_TRIGGER)))
+    else:
+        stop_reg, _ = _stop_registration(settings)
+        if stop_reg:
+            out.append(("ok", "inert-Crawler stop trigger registered on Stop"))
+        else:
+            # WARN, not error, and the difference is stated: the worktree guard protects work
+            # from being silently overwritten, while this one protects a RUN from stalling. A
+            # stalled run is expensive and recoverable; a clobbered tree is not.
+            out.append(("warn", "nothing registers the inert-Crawler stop trigger on Stop, so a "
+                                "turn-end will not be refused while a Crawler sits alive and "
+                                "doing nothing — `waiting` already knows, and nobody asks it at "
+                                "the moment it decides anything. Fix: `%s`" % fix))
     return out
 
 
@@ -578,24 +600,25 @@ def register_guard(cfg):
     # entry and both append one, or the second could overwrite whatever the first added.
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with file_lock(path + ".sr-lock"):
-        return _register_guard_locked(cfg, path, entry, json, atomic_write_json)
+        return _register_locked(cfg, path, entry, json, atomic_write_json,
+                                "PreToolUse", _guard_registration, "worktree guard")
 
 
-def _register_guard_locked(cfg, path, entry, json, atomic_write_json):
+def _register_locked(cfg, path, entry, json, atomic_write_json, event, present, what):
     data = {}
     if os.path.exists(path):
         try:
             with open(path) as fh:
                 data = json.load(fh)
         except (OSError, ValueError) as exc:
-            return False, ("%s could not be read (%s) and was NOT modified — add the worktree "
-                           "guard's PreToolUse entry by hand, or `doctor` will keep reporting "
-                           "it missing." % (rel_or(path, cfg.root), exc))
+            return False, ("%s could not be read (%s) and was NOT modified — add the %s's %s "
+                           "entry by hand, or `doctor` will keep reporting it missing."
+                           % (rel_or(path, cfg.root), exc, what, event))
         if not isinstance(data, dict):
             return False, ("%s is not a JSON object and was NOT modified."
                            % rel_or(path, cfg.root))
 
-    registered, _ = _guard_registration(path)
+    registered, _ = present(path)
     if registered:
         return False, ""
 
@@ -603,10 +626,10 @@ def _register_guard_locked(cfg, path, entry, json, atomic_write_json):
     if not isinstance(hooks, dict):
         return False, ("%s has a non-object \"hooks\" key and was NOT modified."
                        % rel_or(path, cfg.root))
-    pre = hooks.setdefault("PreToolUse", [])
+    pre = hooks.setdefault(event, [])
     if not isinstance(pre, list):
-        return False, ("%s has a non-list \"hooks.PreToolUse\" and was NOT modified."
-                       % rel_or(path, cfg.root))
+        return False, ("%s has a non-list \"hooks.%s\" and was NOT modified."
+                       % (rel_or(path, cfg.root), event))
     pre.append(entry)
 
     # WRITE-THEN-RENAME, through the helper that already exists for this. A plain `open(w)` +
@@ -617,8 +640,7 @@ def _register_guard_locked(cfg, path, entry, json, atomic_write_json):
     # not rare. `.claude/settings.json` belongs to Claude Code and to whoever else registered a
     # hook in it; it is not ours to lose.
     atomic_write_json(path, data)
-    return True, ("registered the worktree guard in %s (PreToolUse on %s)"
-                  % (rel_or(path, cfg.root), "|".join(GUARD_TOOLS)))
+    return True, ("registered the %s in %s (%s)" % (what, rel_or(path, cfg.root), event))
 
 
 def _sr(cfg):
@@ -634,12 +656,41 @@ def rel_or(path, root):
         return path
 
 
-def _guard_registration(settings_path):
-    """(registered, matcher) for the guard's PreToolUse entry.
+STOP_TRIGGER = os.path.join(".showrunner", "hooks", "inert-crawler-gate.sh")
+
+
+def register_stop_trigger(cfg):
+    """Add the inert-Crawler Stop trigger to .claude/settings.json. Returns (changed, message).
+
+    SAME ARGUMENT AS THE WORKTREE GUARD, one event over: a gate whose registration is left as an
+    instruction is one that never runs. `waiting` already knew a Crawler was alive and inert;
+    nothing consulted it at the one moment that decides anything, and the human was who noticed
+    the run had stalled (#32).
+    """
+    import json
+    from .util import atomic_write_json, file_lock
+
+    path = os.path.join(cfg.root, ".claude", "settings.json")
+    entry = {"hooks": [{"type": "command",
+                        "command": "\"$CLAUDE_PROJECT_DIR\"/" + STOP_TRIGGER,
+                        "timeout": 30,
+                        "statusMessage": "showrunner: is a Crawler waiting on a message?"}]}
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with file_lock(path + ".sr-lock"):
+        return _register_locked(cfg, path, entry, json, atomic_write_json,
+                                "Stop", _stop_registration, "inert-Crawler stop trigger")
+
+
+def _registration(settings_path, event, marker):
+    """(registered, matcher) for OUR entry on `event`, matched by `marker` in its command.
 
     `registered` is None when the settings file is absent or unreadable — a state kept
     distinct from False, because "nobody configured hooks here" and "hooks are configured and
     ours is not among them" are different problems with different remedies.
+
+    Keyed on the EVENT as well as the command, because showrunner now registers on two of them
+    and a detector that only knew one would report the Stop trigger as missing while it sat
+    there working, or as present because a PreToolUse entry happened to match.
     """
     import json
     try:
@@ -649,13 +700,21 @@ def _guard_registration(settings_path):
         return None, None
     if not isinstance(data, dict):
         return None, None
-    for entry in (data.get("hooks") or {}).get("PreToolUse") or []:
+    for entry in (data.get("hooks") or {}).get(event) or []:
         if not isinstance(entry, dict):
             continue
         for hook in entry.get("hooks") or []:
-            if isinstance(hook, dict) and "worktree-guard" in str(hook.get("command") or ""):
+            if isinstance(hook, dict) and marker in str(hook.get("command") or ""):
                 return True, entry.get("matcher") or ""
     return False, None
+
+
+def _guard_registration(settings_path):
+    return _registration(settings_path, "PreToolUse", "worktree-guard")
+
+
+def _stop_registration(settings_path):
+    return _registration(settings_path, "Stop", "inert-crawler-gate")
 
 
 def base_sha_of(cfg, tree):

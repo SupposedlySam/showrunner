@@ -543,9 +543,13 @@ NOT_SWEPT = {
                     "0 on a clean pin, 2 on a directory edited since it was pinned. WHAT THAT "
                     "DOES NOT COVER: the two argument refusals (--pin without --dest, --dest "
                     "without either), which are asserted nowhere.",
-    "lease._register_guard_locked": "the body of register_guard, split out only so the whole "
-                                    "read-modify-write sits under one file lock. Stubbing "
-                                    "register_guard (which IS swept) neuters this with it.",
+    "lease._register_locked": "the shared body of register_guard and register_stop_trigger, "
+                              "split out so the whole read-modify-write sits under one file "
+                              "lock. Stubbing register_guard (which IS swept) neuters it.",
+    "lease._registration": "the shared reader behind _guard_registration and "
+                           "_stop_registration. An always-None answer makes `doctor` report "
+                           "both gates unregistered and makes register_* write a duplicate — "
+                           "both loud, and both asserted through guard_health, which IS swept.",
     "cli.cmd_worktree_register": "CLI wrapper over lease.register_guard, which IS swept. Its "
                                  "effect is asserted end to end through install.sh, on the "
                                  "UPGRADE path that had the bug: a repo with an existing config "

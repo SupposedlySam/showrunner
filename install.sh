@@ -111,6 +111,9 @@ mkdir -p "$TARGET/.showrunner/hooks"
 cp "$SRC/.showrunner/hooks/worktree-guard.sh" "$TARGET/.showrunner/hooks/worktree-guard.sh"
 chmod +x "$TARGET/.showrunner/hooks/worktree-guard.sh"
 echo "  copied  .showrunner/hooks/worktree-guard.sh (COMMIT THIS — it must cross into worktrees)"
+cp "$SRC/.showrunner/hooks/inert-crawler-gate.sh" "$TARGET/.showrunner/hooks/inert-crawler-gate.sh"
+chmod +x "$TARGET/.showrunner/hooks/inert-crawler-gate.sh"
+echo "  copied  .showrunner/hooks/inert-crawler-gate.sh (Stop: refuses a turn-end while a Crawler is inert)"
 
 if [ ! -f "$TARGET/.showrunner/.gitignore" ]; then
   cat >"$TARGET/.showrunner/.gitignore" <<'EOF'
@@ -209,8 +212,11 @@ fi
 # and got no registration: a hook that exists and can never fire, plus a `doctor` error the
 # installer itself created. Found by upgrading a real consumer. It is the same shape as the
 # ignore rules above, and it is idempotent for the same reason: a second run appends nothing.
+# TWO HOOKS NOW, and the line says so. `worktree register` writes both — the PreToolUse guard
+# and the Stop trigger that refuses a turn-end while a Crawler sits alive and inert — and a
+# report naming only one is how a reader concludes the other was never installed.
 if (cd "$TARGET" && "$SRC/bin/showrunner" worktree register 2>/dev/null | grep -q registered); then
-  echo "  hooked  the worktree guard is registered in .claude/settings.json"
+  echo "  hooked  .claude/settings.json — PreToolUse (worktree guard) and Stop (inert-Crawler gate)"
 fi
 
 # ------------------------------------------------------------------- skills
