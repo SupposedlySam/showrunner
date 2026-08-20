@@ -206,3 +206,165 @@ def claim(cfg, role, session, pid, who=None, seat=0):
     ok = lock.acquire(pid, who or session or "?", session=session,
                       extra={"role": role, "seat": str(seat)})
     return ok, lock.holder()
+
+
+# ------------------------------------------------------------------- the seat
+# THE SEAT IS DERIVED, NEVER DECLARED (#36). A consumer's prototype kept it in a one-word file
+# containing `lead` or `worker`, with two PreToolUse guards gated on `^lead`. The file said
+# `worker`, written mid-run, so both guards exited 0 for the remaining 16 hours — a one-word file
+# was a global off switch and nothing announced its value. There is no state a session can write
+# to become something else here, which is the entire point.
+CRAWLER, ORCHESTRATOR, SOLO, UNKNOWN = "crawler", "orchestrator", "solo", "unknown"
+
+
+def seat(cfg):
+    """Where this session STANDS. Returns (seat, evidence). Never raises.
+
+    Derived from two facts showrunner already has: whether the cwd is a linked worktree, and
+    whether this repo carries a campaign. UNKNOWN is a real answer and is announced as one — an
+    announcer that cannot tell and says nothing is indistinguishable from a healthy one, which is
+    exactly how the reported failure went unnoticed for a whole run.
+    """
+    from .util import run
+    from . import campaign as _campaign
+
+    rc, common, _ = run(["git", "rev-parse", "--git-common-dir"], cwd=os.getcwd())
+    rc2, top, _ = run(["git", "rev-parse", "--show-toplevel"], cwd=os.getcwd())
+    if rc != 0 or rc2 != 0:
+        return UNKNOWN, "not inside a git repository, so neither seat can be derived"
+    common, top = (common or "").strip(), (top or "").strip()
+    if not common or not top:
+        return UNKNOWN, "git answered neither --git-common-dir nor --show-toplevel"
+    main = os.path.realpath(os.path.dirname(
+        common if os.path.isabs(common) else os.path.join(os.getcwd(), common)))
+
+    if os.path.realpath(top) != main:
+        leaf = None
+        try:
+            here = os.path.basename(os.path.realpath(top))
+            for c in (_campaign.load(cfg).get("crawlers") or []):
+                if c.get("crawler") == here:
+                    leaf = c.get("leaf")
+                    break
+        except Exception:                                       # noqa: BLE001
+            leaf = None
+        return CRAWLER, ("standing in a linked worktree (%s)%s"
+                         % (os.path.basename(top),
+                            "; the campaign record names its leaf %s" % leaf if leaf else
+                            "; no campaign record names it, so it was not placed by spawn"))
+
+    try:
+        crawlers = _campaign.load(cfg).get("crawlers") or []
+    except Exception:                                           # noqa: BLE001
+        return UNKNOWN, "the campaign record could not be read, so this cannot tell an "\
+                        "orchestrator from a solo session"
+    if crawlers:
+        return ORCHESTRATOR, ("standing in the main checkout of a repo that carries a campaign "
+                              "(%d recorded Crawler(s))" % len(crawlers))
+    return SOLO, ("standing in the main checkout, and no campaign has been started here — this "
+                  "is said rather than left to look like an idle orchestrator")
+
+
+def enforced_lines(role_def):
+    """The ENFORCED block, GENERATED from the role's own fields (#40).
+
+    Announcement prose in one place and enforcement in another is two independent statements of
+    one policy, free to disagree — and a session told something no guard enforces has been given
+    a rule that is not one. So every line here is derived from a field a guard actually reads.
+    `notes` is deliberately NOT included: it is consumer prose and is announced separately as
+    unchecked.
+    """
+    d = role_def or {}
+    out = []
+    may = d.get("may_create") or []
+    out.append("may dispatch: %s" % (", ".join(may) if may else
+                                     "NOTHING — `dispatch guard` refuses a raw `claude -p` from "
+                                     "this seat"))
+    if d.get("writes"):
+        out.append("writes: %s" % d["writes"])
+    if d.get("reports_to"):
+        out.append("reports to: %s" % d["reports_to"])
+    if d.get("acquire"):
+        out.append("acquired by: %s" % d["acquire"])
+    return out
+
+
+# A MANIFEST, NOT A POINTER (#36). Telling a session where to read is the same bet that just
+# lost: the reported run had showrunner installed, wired, and a campaign with 38 leaves done, and
+# the orchestrator still hand-rolled `git worktree add` 42 times. The load-bearing lines are
+# carried HERE, at every session boundary, because that is the only place they are certain to be
+# read. It is paid for at every start and every compaction, which is the price of it working.
+_SEAT_MANIFEST = {
+    ORCHESTRATOR: [
+        "You dispatch through the tool, never around it:",
+        "    {sr} spawn <leaf> --actor <name> --launch",
+        "A raw `claude -p` gets no worktree, no lease, no claim a reaper can reclaim, no",
+        "leaf-scoped stop gate and no room. That path was taken 42 times in one real run and",
+        "every guarantee was absent for all 42.",
+        "`{sr} ready` is the only discovery surface; `{sr} plan` says what may run together.",
+    ],
+    CRAWLER: [
+        "You work ONE leaf, in THIS tree, and close through the gate:",
+        "    {sr} close <leaf> --proof <path> --premise holds|partial|refuted|unverifiable",
+        "Verify the premise against the real source FIRST — a refuted premise is a successful",
+        "outcome, not a failure. Your report is read by an orchestrator that cannot cheaply",
+        "check it, so a confident wrong sentence costs more than a wrong commit.",
+    ],
+    SOLO: [
+        "No campaign has been started in this checkout. Nothing here is orchestrating anything,",
+        "and that is stated rather than left to look like an idle orchestrator.",
+        "    {sr} add <title>     then     {sr} spawn <leaf> --launch",
+    ],
+    UNKNOWN: [
+        "THE SEAT COULD NOT BE DERIVED, so nothing below is known to apply to you. This is not",
+        "a quiet pass: an announcer that cannot tell and says nothing is indistinguishable from",
+        "a healthy one, which is how a broken one went unnoticed for a whole run.",
+        "    {sr} doctor",
+    ],
+}
+
+
+def whoami(cfg, session=None):
+    """What this session is, what it may do, and what it may not. Returns a list of lines.
+
+    Printed at SessionStart AND PostCompact, because a compaction is where the last one was lost:
+    every compaction refreshed the harness that owned those seams and eroded the tool that did
+    not. A rule that survives only until the next compaction is a rule for the first hour.
+    """
+    from .brief import sr_bin
+
+    sr = sr_bin(cfg)
+    where, evidence = seat(cfg)
+    defs, problems = spec(cfg)
+
+    out = ["showrunner: you are the %s here." % where.upper(), "  %s." % evidence]
+    if cfg.campaign:
+        out.append("  campaign: %s" % cfg.campaign)
+
+    for line in _SEAT_MANIFEST.get(where, []):
+        out.append("  " + line.replace("{sr}", sr))
+
+    if problems:
+        out.append("  ROLE DEFINITIONS UNREADABLE: %s" % problems[0])
+        out.append("  Nothing below is enforced, and that is said rather than left blank.")
+    elif defs:
+        role, how = _resolved(cfg, session, defs)
+        out.append("  role: %s (%s)" % (role, how))
+        for line in enforced_lines(defs.get(role)):
+            out.append("    ENFORCED  " + line)
+        notes = (defs.get(role) or {}).get("notes")
+        if notes:
+            out.append("    note      %s" % notes)
+            out.append("    ...which is prose your project wrote. Nothing checks it.")
+    else:
+        out.append("  no roles are defined, so no dispatch policy is enforced for any seat.")
+    return out
+
+
+def _resolved(cfg, session, defs):
+    """(role, how) — a held claim, else the fallback. Assignment has no writer yet (#40)."""
+    for entry in roster(cfg):
+        holder = entry.get("holder") or {}
+        if entry.get("state") == locks.HELD and holder.get("session") == session:
+            return holder.get("role") or entry["role"], "claimed"
+    return FALLBACK, "fallback — nothing assigned or claimed this session"

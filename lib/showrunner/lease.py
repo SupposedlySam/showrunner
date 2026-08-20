@@ -693,6 +693,36 @@ def rel_or(path, root):
 
 
 STOP_TRIGGER = os.path.join(".showrunner", "hooks", "inert-crawler-gate.sh")
+WHOAMI_HOOK = os.path.join(".showrunner", "hooks", "whoami.sh")
+
+
+def register_whoami(cfg):
+    """Announce the seat on SessionStart AND PostCompact (#36). Returns (changed, message).
+
+    BOTH SEAMS, and the second is the whole point. The reported failure had showrunner installed,
+    wired, and carrying a campaign — and every compaction refreshed the harness that owned these
+    events while eroding the tool that owned neither. A rule that survives only until the next
+    compaction is a rule for the first hour.
+    """
+    import json
+    from .util import atomic_write_json, file_lock
+
+    path = os.path.join(cfg.root, ".claude", "settings.json")
+    entry = {"hooks": [{"type": "command",
+                        "command": "\"$CLAUDE_PROJECT_DIR\"/" + WHOAMI_HOOK,
+                        "timeout": 20,
+                        "statusMessage": "showrunner: what is this session?"}]}
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    changed_any, notes = False, []
+    with file_lock(_register_lock(cfg)):
+        for event in ("SessionStart", "PostCompact"):
+            present = lambda p, e=event: _registration(p, e, "whoami.sh")   # noqa: E731
+            changed, note = _register_locked(cfg, path, entry, json, atomic_write_json,
+                                             event, present, "seat announcement (%s)" % event)
+            changed_any = changed_any or changed
+            if note:
+                notes.append(note)
+    return changed_any, "\n".join(n for n in notes if n)
 
 
 def register_stop_trigger(cfg):

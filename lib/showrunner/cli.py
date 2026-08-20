@@ -807,7 +807,8 @@ def cmd_worktree_register(args):
     # existing but unregistered is precisely the state this verb was built to end.
     rc = 0
     for register, what in ((lease.register_guard, "worktree guard"),
-                           (lease.register_stop_trigger, "inert-Crawler stop trigger")):
+                           (lease.register_stop_trigger, "inert-Crawler stop trigger"),
+                           (lease.register_whoami, "seat announcement (SessionStart+PostCompact)")):
         changed, note = register(cfg)
         if changed:
             print(note)
@@ -853,6 +854,32 @@ def _allow_loudly(notice):
     """
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
                                              "additionalContext": notice}}))
+    return 0
+
+
+def cmd_whoami(args):
+    """SessionStart / PostCompact: say what this session IS, and what it may not do (#36).
+
+    THE OUTPUT IS THE ENTIRE MECHANISM. A SessionStart hook cannot block, so there is nothing
+    else this can do — which means silence is the one unacceptable outcome. It prints on every
+    path, including the ones where it could not work out the answer, because an announcer that
+    cannot tell and says nothing is indistinguishable from a healthy one.
+
+    ON BOTH SEAMS, and the second is the one that matters. A consumer had showrunner installed,
+    wired, and a campaign with 38 leaves done, and its orchestrator still hand-rolled worktree
+    isolation 42 times — because nothing fired at a session boundary, so every compaction
+    refreshed the harness that owned those seams and eroded the tool that did not.
+    """
+    try:
+        cfg = _cfg(args, required=False)
+        lines = roles.whoami(cfg, args.session or os.environ.get("SHOWRUNNER_SESSION") or "")
+    except Exception as exc:                                    # noqa: BLE001 — see docstring
+        print("showrunner: COULD NOT SAY WHAT THIS SESSION IS — %s: %s. That is printed rather "
+              "than swallowed: an announcer that fails quietly is indistinguishable from one "
+              "that had nothing to say." % (type(exc).__name__, exc))
+        return 0
+    for line in lines:
+        print(line)
     return 0
 
 
@@ -2015,6 +2042,13 @@ def build_parser():
                    help="seconds between heartbeat frames; the journal is sparse and a view "
                         "built on it alone freezes during long quiet work")
     s.set_defaults(func=cmd_watch)
+
+    s = sub.add_parser("whoami",
+                       help="what this session IS — the seat is DERIVED from where it stands, "
+                            "never declared, so there is no file a session can write to become "
+                            "something else. Register on SessionStart AND PostCompact")
+    s.add_argument("--session")
+    s.set_defaults(func=cmd_whoami)
 
     s = sub.add_parser("dispatch",
                        help="the dispatch seam. `dispatch guard` is a PreToolUse hook ON BASH "

@@ -163,6 +163,13 @@ TARGETS = [
     ("routing gaps, read back", "lanes.unmatched", "lib/showrunner/lanes.py",
      r"(def unmatched\(cfg, tail=200\):\n)",
      "    return None, None\ndef _neutered_unmatched(cfg, tail=200):\n"),
+    # THE ENFORCED BLOCK (#36/#40). An empty answer means a session is greeted, told its seat,
+    # and told NOTHING about what it may not do — while the guards go on refusing. Announcement
+    # and enforcement disagreeing is the failure generating one from the other exists to prevent,
+    # and an empty generation is the quietest form of that disagreement.
+    ("what the seat may not do", "roles.enforced_lines", "lib/showrunner/roles.py",
+     r"(def enforced_lines\(role_def\):\n)",
+     "    return []\ndef _neutered_enforced_lines(role_def):\n"),
     # THE CHEAP DISPATCH PATH. An always-allow guard is the state this issue reports: 42 raw
     # `claude -p` calls in one run, every showrunner guarantee absent for all 42, and nothing
     # said a word. "Allowed" and "never looked" are the same observation from outside.

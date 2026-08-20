@@ -2982,6 +2982,102 @@ def test_worktree_guard_from_inside_a_worktree():
        "exited 1" in broke.stdout and "Traceback" in broke.stdout, broke.stdout[:300])
 
 
+def test_seat_and_whoami():
+    group("The session seam: a derived seat, announced where compaction cannot erode it (#36)")
+    from showrunner import roles as R
+
+    # THE SEAT IS DERIVED, NEVER DECLARED. A consumer's prototype kept it in a one-word file with
+    # two PreToolUse guards gated on `^lead`; the file said `worker`, written mid-run, so both
+    # guards exited 0 for the remaining 16 hours. A one-word file was a global off switch and
+    # nothing announced its value. There is no state a session can write to change these.
+    cfg = make_repo()
+    cwd = os.getcwd()
+    try:
+        os.chdir(cfg.root)
+        where, why = R.seat(cfg)
+        eq("the main checkout of a repo with NO campaign is SOLO, said out loud rather than left "
+           "to look like an idle orchestrator", where, R.SOLO)
+        ok("...and the evidence names what was looked at", "main checkout" in why, why)
+
+        g = new_graph(cfg)
+        g.add("work", leaf_id="s1", labels=["backend"])
+        rec = worktree.spawn(cfg, g.show("s1"), actor="crawler-s")
+        campaign.record_spawn(cfg, rec, pid=os.getpid())
+        where2, why2 = R.seat(cfg)
+        eq("...and once a campaign exists, the same checkout is the ORCHESTRATOR", where2,
+           R.ORCHESTRATOR)
+
+        os.chdir(rec["worktree"])
+        where3, why3 = R.seat(cfg)
+        eq("a linked worktree is a CRAWLER — derived from --git-common-dir against "
+           "--show-toplevel, which no file can override", where3, R.CRAWLER)
+        ok("...and the campaign record names its leaf, so the announcement can say which work "
+           "this tree is for", "s1" in why3, why3)
+    finally:
+        os.chdir(cwd)
+
+    # UNKNOWN IS A REAL ANSWER AND IS ANNOUNCED AS ONE. An announcer that cannot tell and says
+    # nothing is indistinguishable from a healthy one, which is exactly how the reported failure
+    # went unnoticed for a whole run.
+    outside = tmpdir("not-a-repo")
+    try:
+        os.chdir(outside)
+        where4, why4 = R.seat(cfg)
+        eq("outside any git repository the seat is UNKNOWN, not guessed", where4, R.UNKNOWN)
+    finally:
+        os.chdir(cwd)
+
+    # THE ANNOUNCEMENT IS A MANIFEST, NOT A POINTER. Telling a session where to READ is the same
+    # bet that just lost: the reported run had showrunner installed, wired, and 38 leaves done.
+    lines = R.whoami(cfg, "sess-x")
+    body = "\n".join(lines)
+    ok("the announcement names the seat in its first line", "ORCHESTRATOR" in lines[0], lines[0])
+    ok("...and carries the load-bearing instruction itself rather than a path to go and read",
+       "spawn" in body and "--launch" in body, body[:200])
+    ok("...including what the seat may NOT do, which is the half a pointer never delivers",
+       "raw `claude -p`" in body, body[:400])
+    ok("...and says plainly when no roles are defined, so an unenforced policy is visible",
+       "no roles are defined" in body, body[-200:])
+
+    # THE ENFORCED BLOCK IS GENERATED FROM THE FIELDS A GUARD READS (#40). Announcement prose in
+    # one dict and enforcement in another is two statements of one policy, free to disagree — and
+    # a session told something no guard enforces has been given a rule that is not one.
+    gen = R.enforced_lines({"acquire": "claim", "may_create": ["worker"],
+                            "reports_to": "lead", "writes": ["src/**"], "notes": "prose"})
+    ok("every ENFORCED line comes from a field a guard actually reads",
+       any("worker" in l for l in gen) and any("src/**" in l for l in gen), gen)
+    ok("...and `notes` is NOT among them, because it is consumer prose and nothing checks it",
+       not any("prose" in l for l in gen), gen)
+    # `or [""]` so a producer that stopped producing FAILS this rather than raising out of the
+    # group — an IndexError here made the mutant unscoreable and the sweep reported a floor from
+    # a truncated run as though it were coverage.
+    none_line = (R.enforced_lines({"acquire": "claim"}) or [""])[0]
+    ok("a role that may create NOTHING says so in the terms the guard will use, rather than "
+       "omitting the line and leaving the reader to infer permission",
+       "NOTHING" in none_line, none_line)
+
+    # AND THE ANNOUNCEMENT CARRIES THEM, which is the integration the issue asks for: a session
+    # is greeted with what it may not do, generated from the fields the guards read, at the seam
+    # that survives compaction. Without this, `enforced_lines` is only proved in isolation and
+    # could stop reaching the text a session actually sees.
+    home = tmpdir("whoami-roles")
+    os.makedirs(os.path.join(home, "showrunner"), exist_ok=True)
+    rp = os.path.join(home, "showrunner", "roles.json")
+    with open(rp, "w") as fh:
+        json.dump({"roles": {R.FALLBACK: {"acquire": "claim", "notes": "consumer prose here"}}},
+                  fh)
+    orig = R.USER_PATH
+    R.USER_PATH = rp
+    try:
+        told = "\n".join(R.whoami(cfg, "sess-y"))
+        ok("with roles defined, the announcement carries the ENFORCED block generated from them",
+           "ENFORCED" in told and "NOTHING" in told, told[-300:])
+        ok("...and labels `notes` as prose nothing checks, beside it rather than mixed into it",
+           "consumer prose here" in told and "Nothing checks it" in told, told[-300:])
+    finally:
+        R.USER_PATH = orig
+
+
 def test_dispatch_guard():
     group("The cheap dispatch path has a gate on it now (#37)")
     from showrunner import roles as R
@@ -6190,7 +6286,8 @@ def main():
                test_harness_provisioning, test_waiting, test_concurrency,
                test_integration, test_worktree_lease, test_worktree_guard_from_inside_a_worktree,
                test_self_pin, test_self_vendored_pin, test_roles,
-               test_harness_installer_provenance, test_void_run, test_dispatch_guard, test_campaign_scoping,
+               test_harness_installer_provenance, test_void_run, test_dispatch_guard,
+               test_seat_and_whoami, test_campaign_scoping,
                test_issue_waker,
                test_central_install,
                test_installer_leaves_no_vendored_copy,
