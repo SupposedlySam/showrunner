@@ -33,8 +33,10 @@ the very session they constrain — the same defect as a seat file a session can
 path outside every allow_write_root is denied and needs an explicit human authorization to change,
 which is the right bar for a policy about what a session may do.
 
-    ~/.config/showrunner/roles.json     authoritative
-    .showrunner/config.json  "roles"    a project may ADD a role, never redefine one
+    ~/.config/showrunner/roles.json          authoritative
+    .showrunner/config.json  "roles"         a project may ADD a role, never redefine one
+    ...either file's "seat_roles"            {seat: role} — a project may map a seat the user
+                                             left unmapped, never REMAP one, for the same reason
 
 Note for other setups: `~/.claude` is an allow_write_root on a default install and is therefore
 NOT such a path, even though it is denied in this checkout.
@@ -60,6 +62,11 @@ ACQUIRE = ("claim", "assign")
 
 # The shape of a role, and the whole vocabulary showrunner has for one.
 FIELDS = ("acquire", "capacity", "reports_to", "may_create", "writes", "notes")
+
+# The one seat whose assignment showrunner already records. Kept as config rather than code for
+# the same reason the roles themselves are: a taxonomy in the tool is a taxonomy its consumers
+# have to argue with.
+SEAT_ROLES_KEY = "seat_roles"
 
 
 def _read(path):
@@ -104,6 +111,47 @@ def spec(cfg):
                 continue
             roles[name] = d
     return roles, problems
+
+
+def _read_seat_roles(path):
+    """({seat: role}, problem). A missing file or a missing map is not a problem."""
+    if not os.path.exists(path):
+        return {}, None
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return {}, "%s could not be read (%s)" % (path, exc)
+    if not isinstance(data, dict):
+        return {}, None
+    m = data.get(SEAT_ROLES_KEY) or {}
+    if not isinstance(m, dict):
+        return {}, "%s has a %r that is not a JSON object, so no seat resolves through it" % (
+            path, SEAT_ROLES_KEY)
+    return dict((str(k), str(v)) for k, v in m.items()), None
+
+
+def seat_roles(cfg):
+    """Merged {seat: role}. Returns (map, problems).
+
+    USER LEVEL IS AUTHORITATIVE AND A PROJECT MAY ONLY ADD, exactly as for the definitions. A
+    project that could remap its own seat would hand itself any role in the catalog, which is the
+    widening the definitions left the repo to prevent.
+    """
+    m, err = _read_seat_roles(USER_PATH)
+    problems = [err] if err else []
+    m = dict(m)
+    project = (cfg.get(SEAT_ROLES_KEY) or {}) if hasattr(cfg, "get") else {}
+    if isinstance(project, dict):
+        for where, role in project.items():
+            if str(where) in m:
+                problems.append(
+                    "the seat %r is mapped in this project AND at user level; the user-level "
+                    "mapping wins. A project may map a seat the user left unmapped, never remap "
+                    "one." % where)
+                continue
+            m[str(where)] = str(role)
+    return m, problems
 
 
 def validate(roles):
@@ -217,6 +265,30 @@ def claim(cfg, role, session, pid, who=None, seat=0):
 CRAWLER, ORCHESTRATOR, SOLO, UNKNOWN = "crawler", "orchestrator", "solo", "unknown"
 
 
+def crawler_leaf(cfg):
+    """The leaf the campaign record names for THIS worktree, or None. Never raises.
+
+    Its own function because the distinction it draws is load-bearing for policy and not only for
+    the announcement: a worktree `spawn` placed is a record showrunner wrote BEFORE the session
+    existed, and a worktree somebody added by hand is not. Only the former may resolve to a
+    working role -- otherwise `git worktree add` is a way to grant yourself one.
+    """
+    from .util import run
+    from . import campaign as _campaign
+
+    rc, top, _ = run(["git", "rev-parse", "--show-toplevel"], cwd=os.getcwd())
+    if rc != 0 or not (top or "").strip():
+        return None
+    here = os.path.basename(os.path.realpath(top.strip()))
+    try:
+        for c in (_campaign.load(cfg).get("crawlers") or []):
+            if c.get("crawler") == here:
+                return c.get("leaf")
+    except Exception:                                           # noqa: BLE001
+        return None
+    return None
+
+
 def seat(cfg):
     """Where this session STANDS. Returns (seat, evidence). Never raises.
 
@@ -239,15 +311,7 @@ def seat(cfg):
         common if os.path.isabs(common) else os.path.join(os.getcwd(), common)))
 
     if os.path.realpath(top) != main:
-        leaf = None
-        try:
-            here = os.path.basename(os.path.realpath(top))
-            for c in (_campaign.load(cfg).get("crawlers") or []):
-                if c.get("crawler") == here:
-                    leaf = c.get("leaf")
-                    break
-        except Exception:                                       # noqa: BLE001
-            leaf = None
+        leaf = crawler_leaf(cfg)
         return CRAWLER, ("standing in a linked worktree (%s)%s"
                          % (os.path.basename(top),
                             "; the campaign record names its leaf %s" % leaf if leaf else
@@ -363,6 +427,11 @@ def whoami(cfg, session=None):
     elif defs:
         role, how = _resolved(cfg, session, defs)
         out.append("  role: %s (%s)" % (role, how))
+        # A MAPPING THAT WAS DROPPED is announced next to the role it did not produce. Silently
+        # falling back is how a session ends up told it is `unassigned` while a file it cannot
+        # see says otherwise, with nothing connecting the two.
+        for msg in seat_roles(cfg)[1]:
+            out.append("  SEAT MAPPING IGNORED: %s" % msg)
         for line in enforced_lines(defs.get(role)):
             out.append("    ENFORCED  " + line)
         notes = (defs.get(role) or {}).get("notes")
@@ -380,9 +449,39 @@ def whoami(cfg, session=None):
 
 
 def _resolved(cfg, session, defs):
-    """(role, how) — a held claim, else the fallback. Assignment has no writer yet (#40)."""
+    """(role, how) — a held claim, else a seat the campaign record vouches for, else the fallback.
+
+    `assign` never had a writer (#40), so every Crawler resolved to the fallback and ran under the
+    fallback's policy INSIDE the worktree spawn had just made for it. With a deny-everything
+    fallback that is not a safe default, it is a broken tool: an audit leaf finished only by
+    routing its evidence around the guard with shell redirection, and a leaf that had to edit code
+    would have been stopped outright. A guard whose reward for holding is a workaround teaches
+    every later session to route around it.
+
+    The campaign record IS the assignment. `spawn` writes the tree's leaf into it before the
+    session exists, keyed to its worktree — which is what `assign` was specified to mean. So the
+    seat is not a second source of truth being invented here; it is the one showrunner already
+    kept, finally read.
+
+    Deliberately NOT symmetric: a seat resolves only through a mapping the user wrote, and
+    mapping `orchestrator` is left to them precisely because standing in the main checkout is a
+    location, not a record. Authority by location is what put a `lead` in every session that
+    happened to be in the right directory.
+    """
     for entry in roster(cfg):
         holder = entry.get("holder") or {}
         if entry.get("state") == locks.HELD and holder.get("session") == session:
             return holder.get("role") or entry["role"], "claimed"
+
+    mapped, _problems = seat_roles(cfg)
+    if mapped:
+        where, _why = seat(cfg)
+        role = mapped.get(where)
+        if role in defs:
+            if where != CRAWLER:
+                return role, "mapped from the %s seat" % where
+            leaf = crawler_leaf(cfg)
+            if leaf:
+                return role, ("assigned by the campaign record, which names this worktree's "
+                              "leaf %s" % leaf)
     return FALLBACK, "fallback — nothing assigned or claimed this session"

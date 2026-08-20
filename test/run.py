@@ -3091,6 +3091,111 @@ def test_seat_and_whoami():
         R.USER_PATH = orig
 
 
+def test_crawler_seat_resolves_to_a_role():
+    group("A Crawler spawn placed is not write-denied in the worktree made for it (#40)")
+    from showrunner import roles as R
+
+    cfg = make_repo()
+    g = new_graph(cfg)
+    g.add("work", leaf_id="c1", labels=["backend"])
+    rec = worktree.spawn(cfg, g.show("c1"), actor="crawler-c")
+    campaign.record_spawn(cfg, rec, pid=os.getpid())
+
+    home = tmpdir("seat-roles-home")
+    os.makedirs(os.path.join(home, "showrunner"), exist_ok=True)
+    rp = os.path.join(home, "showrunner", "roles.json")
+    ROLES = {"campaign-lead": {"acquire": "claim", "capacity": 1, "may_create": ["worker"]},
+             "worker": {"acquire": "assign", "reports_to": "campaign-lead",
+                        "writes": {"allow": ["**"]}},
+             R.FALLBACK: {"acquire": "claim", "writes": {"deny": ["**"]}}}
+
+    def write(seat_map):
+        body = {"roles": ROLES}
+        if seat_map is not None:
+            body["seat_roles"] = seat_map
+        with open(rp, "w") as fh:
+            json.dump(body, fh)
+
+    orig, cwd = R.USER_PATH, os.getcwd()
+    R.USER_PATH = rp
+    try:
+        # THE FIXTURE BEFORE THE READ. `spec` over a file that does not exist yet returns {}, and
+        # `_resolved` refuses a role it cannot find in `defs` — so computing this first made every
+        # fallback assertion below hold no matter what the code did, which is the shape of a test
+        # that certifies the defect it was written to catch.
+        write(None)
+        defs, _ = R.spec(cfg)
+        ok("the fixture's roles are actually loaded, so the fallback assertions below could have "
+           "resolved to `worker` and did not", "worker" in defs, sorted(defs))
+        os.chdir(rec["worktree"])
+
+        # THE REGRESSION. Every Crawler resolved to the fallback, whose policy denies writes
+        # everywhere, INSIDE the tree spawn had just made for it to work in. An audit leaf
+        # finished only by routing its evidence around the guard with shell redirection.
+        role_before, how_before = R._resolved(cfg, "sess-c", defs)
+        eq("WITHOUT a mapping the Crawler still resolves to the fallback, so this stays opt-in "
+           "for every consumer who has written none", role_before, R.FALLBACK)
+
+        write({"crawler": "worker"})
+        role, how = R._resolved(cfg, "sess-c", defs)
+        eq("with the seat mapped, the Crawler resolves to the role the USER named for it",
+           role, "worker")
+        ok("...and says it was the campaign record that assigned it, naming the leaf — the "
+           "record spawn wrote before the session existed IS the assignment `assign` meant",
+           "campaign record" in how and "c1" in how, how)
+
+        # A WORKTREE NOBODY RECORDED GRANTS NOTHING, or `git worktree add` is a way to hand
+        # yourself a role. This is the half that keeps the derivation record-based rather than
+        # location-based.
+        hand = os.path.join(tmpdir("hand-rolled-tree"), "wt")
+        rc, _out, _err = util.run(["git", "worktree", "add", "-b", "by-hand", hand],
+                                  cwd=cfg.root)
+        if rc != 0:
+            skip("a hand-added worktree grants nothing", "git worktree add failed")
+        else:
+            os.chdir(hand)
+            eq("a linked worktree NO campaign record names resolves to the fallback even with "
+               "the seat mapped", R._resolved(cfg, "sess-h", defs)[0], R.FALLBACK)
+
+        # AND THE MAIN CHECKOUT IS NOT A CREDENTIAL. Shipping `orchestrator` mapped would put a
+        # lead in every session that happened to be in the right directory, which is the failure
+        # this whole seam replaced.
+        os.chdir(cfg.root)
+        eq("the orchestrator seat is left unmapped, so standing in the main checkout of a repo "
+           "with a campaign confers no role by itself",
+           R._resolved(cfg, "sess-o", defs)[0], R.FALLBACK)
+
+        # A PROJECT MAY NOT REMAP ITS OWN SEAT -- it could otherwise hand itself any role in the
+        # catalog, the widening the definitions left the repo to prevent.
+        merged, problems = R.seat_roles({"seat_roles": {"crawler": "campaign-lead"}})
+        eq("a project remapping a seat the user already mapped loses to the user-level mapping",
+           merged.get("crawler"), "worker")
+        ok("...and the conflict is reported rather than resolved silently",
+           any("user-level" in x for x in problems), problems)
+
+        # A DROPPED MAPPING IS ANNOUNCED, not merely returned. `whoami` is the seam a session
+        # actually reads, and a mapping silently ignored there leaves it told `unassigned` while
+        # a file it cannot see says otherwise.
+        cfg.data["seat_roles"] = {"crawler": "campaign-lead"}
+        os.chdir(rec["worktree"])
+        body = "\n".join(R.whoami(cfg, session="sess-c"))
+        ok("`whoami` says a seat mapping was IGNORED rather than dropping it quietly",
+           "SEAT MAPPING IGNORED" in body, body[-300:])
+        cfg.data.pop("seat_roles", None)
+
+        # A SEAT MAPPED AT A ROLE NOBODY DEFINED resolves to the fallback, which looks exactly
+        # like having written no mapping at all. One typo buys the whole bug back, so `doctor`
+        # refuses rather than leaving it to be discovered as a write denial mid-run.
+        write({"crawler": "wroker"})
+        rc, out, _err = util.run([os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                                 cwd=cfg.root, env=dict(os.environ, XDG_CONFIG_HOME=home))
+        ok("`doctor` FAILS on a seat mapped at a role no definition provides, naming the seat "
+           "and the typo", rc != 0 and "wroker" in out and "crawler" in out, (rc, out[-400:]))
+    finally:
+        os.chdir(cwd)
+        R.USER_PATH = orig
+
+
 def test_dispatch_guard():
     group("The cheap dispatch path has a gate on it now (#37)")
     from showrunner import roles as R
@@ -5821,6 +5926,10 @@ def test_retracted_doc_claims():
         ("compares every\nrule file **byte-for-byte** against the main checkout",
          "lib/showrunner/harness.py", "showrunner keeps no list of its own",
          "the harness answers which files are rules; showrunner asks and never compares"),
+        ("Nothing writes assignments yet",
+         "lib/showrunner/roles.py", "The campaign record IS the assignment",
+         "`spawn` wrote the assignment all along — keyed to the worktree, before the session "
+         "existed — and `seat_roles` is what finally reads it back"),
     ]
     # WHITESPACE-NORMALISED, because the first version of this scan was VACUOUS and passed. The
     # docs wrap at 96 columns, so "minus the conversation" is stored as "minus the\nconversation"
@@ -6355,7 +6464,8 @@ def main():
                test_integration, test_worktree_lease, test_worktree_guard_from_inside_a_worktree,
                test_self_pin, test_self_vendored_pin, test_roles,
                test_harness_installer_provenance, test_void_run, test_dispatch_guard,
-               test_seat_and_whoami, test_campaign_scoping,
+               test_seat_and_whoami, test_crawler_seat_resolves_to_a_role,
+               test_campaign_scoping,
                test_issue_waker,
                test_central_install,
                test_installer_leaves_no_vendored_copy,

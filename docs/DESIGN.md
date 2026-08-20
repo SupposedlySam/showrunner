@@ -121,12 +121,22 @@ for read-only fan-out — both cheaper than what was refused.
 that registers it. `doctor` reports the registration separately for the same reason it does for the
 worktree-guard shim.
 
-**What is still inert, measured on a real consumer.** `roles.claim()` is lock-backed, campaign-scoped
-and carries liveness — and nothing calls it. There is no CLI verb, and `_resolved` says so in its own
-docstring: *"Assignment has no writer yet."* So every session resolves to the fallback, which is
-fail-closed and correct and is also the whole policy collapsed onto one seat. `spawn` still passes the
-dispatch guard from there, so an orchestrator can work; it is the role *model* that is inert, not the
-tool (#42).
+**Half of that was inert, and the half that was not is the more interesting story.** `_resolved`
+used to say it in its own docstring — *"Assignment has no writer yet"* — so every role declaring
+`assign` fell through to the fallback. With a deny-everything fallback that is not a safe default:
+a Crawler ran write-denied INSIDE the worktree `spawn` had just made for it, and an audit leaf
+finished only by routing its evidence around the guard with shell redirection. A guard whose reward
+for holding is a workaround teaches every later session to route around it.
+
+The assignment had been written all along. `spawn` records the tree's leaf before the session
+exists, keyed to its worktree, which is what `assign` was specified to mean — so `seat_roles` reads
+back a fact showrunner already kept rather than inventing a second source of truth. Deliberately
+asymmetric: only a worktree the campaign record NAMES resolves, or `git worktree add` becomes a way
+to grant yourself a role, and `orchestrator` ships unmapped because standing in the main checkout is
+a location, not a record.
+
+`roles.claim()` is still lock-backed, campaign-scoped and carries liveness, and still has no caller
+(#42).
 
 **And the identity layers have nowhere to live.** `FIELDS` covers the mechanism — acquire, capacity,
 reports_to, may_create, writes, notes — and an unknown key warns rather than rejecting, so nothing
@@ -385,7 +395,7 @@ missed one costs a merge conflict in an unattended run with nobody watching.
 
 ## Validated primitives
 
-`test/run.py` — 920 assertions, Python 3 + git, no other setup. Assertions needing `br` or `tmux`
+`test/run.py` — 932 assertions, Python 3 + git, no other setup. Assertions needing `br` or `tmux`
 skip loudly, naming the dependency. `prototype/` holds the original shell POC (7 assertions run
 anywhere, 5 skip), kept for the record; `prototype/br_gate.sh` is superseded by
 `lib/showrunner/gates.py`, which parses the graph as JSON instead of splitting records on a literal
@@ -395,8 +405,9 @@ anywhere, 5 skip), kept for the record; `prototype/br_gate.sh` is superseded by
 
 ## Still open
 
-- **A role cannot be acquired.** The claim machinery exists and has no caller, so the role model is
-  built and unreachable. Until it has a verb, `whoami` tells every session it is the fallback (#42).
+- **A role cannot be CLAIMED.** `assign` now resolves through `seat_roles`, so a Crawler the
+  campaign record names gets the role its consumer mapped. `claim` still has no caller and no verb,
+  so that half of the model remains unreachable (#42).
 - **`charter` and `description` are unmodelled**, so the layer that says *who you are* before *what
   you may not do* has to be folded into `notes` by the consumer, duplicated per role (#42).
 - **Lock completeness / rung.** The PreToolUse guard is only as good as its verb classifier; a
