@@ -385,7 +385,7 @@ missed one costs a merge conflict in an unattended run with nobody watching.
 
 ## Validated primitives
 
-`test/run.py` — 908 assertions, Python 3 + git, no other setup. Assertions needing `br` or `tmux`
+`test/run.py` — 917 assertions, Python 3 + git, no other setup. Assertions needing `br` or `tmux`
 skip loudly, naming the dependency. `prototype/` holds the original shell POC (7 assertions run
 anywhere, 5 skip), kept for the record; `prototype/br_gate.sh` is superseded by
 `lib/showrunner/gates.py`, which parses the graph as JSON instead of splitting records on a literal

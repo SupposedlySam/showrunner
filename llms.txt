@@ -38,9 +38,14 @@ path, a worktree root outside the repo, a configured chat path that does not res
 around it.
 
 It also **warns** about the one thing a human has to do by hand: arming the harness's idle
-watchdog with `showrunner waiting`. It prints the exact line and the exact file. You cannot do
-this for the operator — a probe an agent can set is a watchdog an agent can switch off — so if
-you are running unattended, say that it is unarmed rather than proceeding quietly.
+watchdog. Point it at `.showrunner/hooks/waiting-probe.sh`, **not** at `showrunner waiting`
+directly — the verb answers three exit codes (0 waiting, 1 not waiting, 3 a Crawler is BLOCKED)
+and a two-state watchdog reads that third one as "the probe is broken". The probe maps them, and
+never answers "waiting" from inside a worktree, where a Crawler would otherwise silence its own
+watchdog with a sibling's liveness.
+
+You cannot do this for the operator — a probe an agent can set is a watchdog an agent can switch
+off — so if you are running unattended, say that it is unarmed rather than proceeding quietly.
 
 ## If you are the ORCHESTRATOR
 
@@ -68,6 +73,9 @@ showrunner reap                      # dry run; --apply to reclaim dead Crawlers
                                      # outlived their leaf. `close` already closed the room and
                                      # marked the Crawler finished; this catches what died badly.
 showrunner reconcile                 # on resume: merged / abandoned / live / BLOCKED — ask FIRST
+showrunner amend <leaf> --premise .. # correct a CLOSED leaf's premise by SUPERSEDING it: the
+                                     # original verdict stays readable, because a record that can
+                                     # be edited is one nobody can cite later
 ```
 
 ## Watching a campaign live
@@ -141,7 +149,11 @@ showrunner lease status [<tree>]     # which trees are held, by whom, and on wha
 showrunner worktree enter            # SessionStart: take this tree's lease, or report who holds it
 showrunner worktree fork --from <t>  # your own tree, off the same base commit as a held one
 showrunner worktree guard            # PreToolUse: DENY a write into a tree another live session holds
-showrunner worktree register         # put BOTH hooks in .claude/settings.json (idempotent)
+showrunner worktree register         # put ALL FOUR hooks in .claude/settings.json (idempotent):
+                                     # the worktree guard and the dispatch guard on PreToolUse,
+                                     # the inert-Crawler gate on Stop, and the seat announcement
+                                     # on SessionStart AND PostCompact
+showrunner whoami                    # what this session IS — a seat DERIVED from where it stands
 ```
 
 `enter` never blocks — a SessionStart hook cannot — so it is where the *prompt* lives. `guard` is
@@ -183,9 +195,11 @@ that decides anything, and a run stalled until a human noticed. It fails open on
 offers `reap` beside messaging (a block can mean gone rather than waiting), and it does not fire
 inside a Crawler's own worktree — a Crawler cannot message or reap its siblings.
 
-Read `waiting --porcelain`, not the prose, if you build anything on this: the BLOCKED lines go to
-**stderr**, and `waiting` exits non-zero for "not waiting", which is the state a blocked Crawler
-produces. A gate written against the human output allows in exactly the case it exists for.
+Read `waiting --porcelain`, not the prose, if you build anything on this. The BLOCKED lines are
+printed on stdout AND stderr now, and BLOCKED has its own exit code — but a verb whose finding,
+verdict and status live on three channels will be integrated against incorrectly, and the idiom
+`waiting || exit 0` still swallows the blocked case because it collapses every non-zero code. The
+JSON is the contract; the prose is for a person.
 
 A worktree had an owner on paper (`campaign.json`) and no holder in fact — nothing consulted that
 record when a second session opened the directory and started editing. A lease's holder is a live
@@ -213,17 +227,113 @@ independent confirmation with line numbers is worth strictly more than either re
 **On resume, reconcile before doing anything.** An abandoned worktree may hold the only copy of real
 work: surface it, do not silently reuse it and do not silently delete it.
 
+## Several CAMPAIGNS in one checkout
+
+A campaign is smaller than a repo. The natural unit of a body of work is often a story, and the
+handoff a showrunner charges — worktrees, briefs, rooms, integration — is only paid for by the
+parallelism it buys. So more than one at a time in one checkout is the ORDINARY case.
+
+```
+SHOWRUNNER_CAMPAIGN=DROP-4130 showrunner status    # state nests under a per-campaign directory
+```
+
+Graph, campaign record, event journal and scratch all follow the campaign. **Locks deliberately do
+not.** A lock names a physical single-consumer resource — a device, a bound port — shared by the
+machine and not by a body of work, so two campaigns flashing the same TV must serialize against
+each other. Per-campaign lock roots would give each its own and let both hold it at once: a mutex
+that is quietly a no-op.
+
+With no campaign selected every path resolves exactly as it always did, so an existing checkout is
+untouched. An env var rather than a flag because a flag has to be threaded through every verb, and
+any verb that forgot it would silently answer about a different campaign.
+
+The worktree root stays repo-wide, so two campaigns naming the same leaf collide on a path — a loud
+refusal, not a clobber. The project name still defaults to the repo's own, so campaigns in one
+checkout share a chat prefix unless you set one.
+
+## Roles: showrunner checks the shape, never the meaning
+
+Names and meaning are yours, the way lane rules already are. showrunner knows only two things: how
+a seat is obtained, and what the fields a guard reads say. Definitions live at a user-level path
+(`roles.json` under your config home) because an in-repo config is writable by the very session it
+constrains — measured, not assumed. A project may ADD a role there, never redefine one.
+
+Two acquisition modes are the whole model, and they replace any lead/worker taxonomy, because that
+distinction was never about names — it was about how the seat is obtained:
+
+| | |
+|---|---|
+| `claim` | a session TAKES an open seat. Exclusive, first-come, with pid+boot liveness so a dead holder's seat is reclaimable. The only way a from-scratch session can get one. |
+| `assign` | written by whoever CREATED the session, before it existed. A session holding one cannot claim. **Nothing writes assignments yet** — `spawn` records no role — so today every session resolves through a claim or the fallback. |
+
+Fields showrunner checks: `acquire`, `capacity`, `reports_to`, `may_create`, `writes`. `notes` is
+your prose and is announced as explicitly unchecked. `doctor` refuses a dangling `reports_to` or
+`may_create`, a `reports_to` cycle, an org with no root, nothing claimable at all, and a fallback
+role that may create something — which would make the fallback a way around the policy.
+
+**With no roles defined, no dispatch policy is enforced for anybody.** That is deliberate:
+inventing one would refuse the dispatches of every consumer who never wrote any.
+
+## The two seams showrunner did not own, and now does
+
+```
+showrunner whoami                    # SessionStart AND PostCompact  (whoami.sh)
+showrunner dispatch guard            # PreToolUse on BASH            (dispatch-guard.sh)
+```
+
+Both run from tracked shims under `.showrunner/hooks/`, beside `worktree-guard.sh`,
+`inert-crawler-gate.sh` and `waiting-probe.sh`. `worktree register` wires all of them; a guard
+nobody registers has never once run, which was true of one of these between building it and
+noticing.
+
+`whoami` announces what this session IS. The seat is **derived** — a linked worktree is a CRAWLER
+and the campaign record names its leaf; the main checkout of a repo carrying a campaign is the
+ORCHESTRATOR; no campaign is SOLO, said out loud rather than left to look like an idle
+orchestrator; and UNKNOWN is a real answer, announced as one. There is no file a session can write
+to become something else.
+
+On **both** seams, because a rule that survives only until the next compaction is a rule for the
+first hour. The announcement carries the load-bearing lines rather than pointing at a file to
+read, and its ENFORCED block is generated from the role fields the guards actually read — prose in
+one place and enforcement in another is two statements of one policy, free to disagree.
+
+`dispatch guard` refuses a raw headless `claude` dispatch from a session whose role may not create
+one. On BASH, which is the mechanism actually used: a version of this matched on `Agent` guarded
+the in-process subagent tool while 42 consecutive real dispatches went out through Bash, reporting
+nothing. It cannot see a command built from a shell variable, a wrapper script, or any non-Bash
+tool — the LEASE is what protects a tree from whatever gets in anyway.
+
+## When a run could not measure anything
+
+```
+showrunner check     # exit 0 no new failures · 2 new failures · 3 VOID · 1 no baseline
+```
+
+A run that could not reach the world did not measure anything, and its failure count carries no
+information. That is strictly worse than a degraded comparison, because a degraded comparison is
+still about the code. `check` screens for unreachable-world signatures — DNS failure, connection
+refused, no route to host — ahead of the comparison and exits **3**, distinct from 2, so a caller
+treating non-zero as "the code is bad" gets a code it did not map rather than a wrong answer it
+will believe. Add your own with `void_patterns`; a pattern that will not compile is reported as
+UNSCREENED rather than skipped.
+
+VALID means "no evidence the world was unreachable" — never "the environment was sound". A partial
+outage that resolved mid-run, a backend serving wrong data, or a device degrading without a network
+error all read as VALID, and the verdict says so.
+
 ## If several orchestrators are running at once
 
 Supported. Do NOT read `ready` and claim its first entry — everyone gets the same list:
 
 ```
 showrunner claim --next --actor <you>    # atomically take any free leaf; exit 1 when dry
-showrunner waiting                       # exit 0 while dispatched work has a WORKING owner (a
-                                         # live PID that is not blocked) or an explicit park.
+showrunner waiting                       # exit 0 waiting · 1 not waiting · 3 a Crawler is BLOCKED
                                          # A Crawler refused at a turn-end is live and counts as
-                                         # NEITHER — it is doing nothing and only a message
-                                         # restarts it. Reported separately; go prompt it.
+                                         # NEITHER waiting nor parked — only a message restarts
+                                         # it. 3 is its own code so a caller treating non-zero as
+                                         # "no" cannot miss the one case it exists for. Build on
+                                         # --porcelain: the finding is on BOTH streams now, but
+                                         # three exit codes and two streams combine wrongly.
 ```
 
 Losing a claim race is not an error; a sibling got there first. Integration and single-consumer
@@ -442,7 +552,7 @@ what is there now. Nothing hashes the contents.
 ## Verifying the tool itself
 
 ```
-python3 test/run.py        # 908 assertions; needs only Python 3 + git
+python3 test/run.py        # 917 assertions; needs only Python 3 + git
 bash prototype/demo.sh     # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 

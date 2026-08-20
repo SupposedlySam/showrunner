@@ -4147,6 +4147,31 @@ def test_installer_leaves_no_vendored_copy():
     # which is a proxy that cannot tell "names the event it registered on" from "hands you JSON
     # to paste" — and it failed the moment the installer's report started naming both events
     # correctly. The thing that must not appear is a pasteable hook entry.
+    # EVERY GUARD THIS PROJECT SHIPS IS REGISTERED, and this assertion exists because the
+    # dispatch guard was built, tested, committed and shipped WITHOUT being registered — a verb
+    # nobody registers has never once run, which is the exact failure #37 reports, arriving
+    # inside the fix for #37. `lock guard` was in that state for this repo's entire life.
+    reg_settings = json.load(open(os.path.join(ROOT, ".claude", "settings.json")))
+    reg_cmds = [h.get("command", "")
+                for ev in ("PreToolUse", "Stop", "SessionStart", "PostCompact")
+                for e in reg_settings.get("hooks", {}).get(ev, [])
+                for h in e.get("hooks", [])]
+    for shim, why in ((lease.GUARD_SHIM, "the worktree guard"),
+                      (lease.STOP_TRIGGER, "the inert-Crawler stop trigger"),
+                      (lease.WHOAMI_HOOK, "the seat announcement"),
+                      (lease.DISPATCH_SHIM, "the dispatch guard")):
+        name = os.path.basename(shim)
+        ok("%s is REGISTERED in this repo's own settings, not merely built — a guard nobody "
+           "registers has never once run" % why,
+           any(name in c for c in reg_cmds), sorted(os.path.basename(c) for c in reg_cmds))
+    ok("...and the dispatch guard is matched on BASH, which is the mechanism actually used — a "
+       "version matched on `Agent` guarded the subagent tool while 42 real dispatches went "
+       "through Bash",
+       any(e.get("matcher") == "Bash"
+           for e in reg_settings["hooks"]["PreToolUse"]
+           for h in e.get("hooks", []) if "dispatch-guard" in h.get("command", "")),
+       [e.get("matcher") for e in reg_settings["hooks"]["PreToolUse"]])
+
     ok("...and therefore does NOT also print a hook ENTRY for the reader to paste, which would "
        "register it a second time — the entry has exactly one author, `lease.register_guard`",
        '"matcher"' not in quiet.stdout and '"type": "command"' not in quiet.stdout
@@ -5044,6 +5069,12 @@ def test_claims_about_the_layer_below():
         "lib/showrunner/cli.py": "doctor's account of what a worktree inherits and when spawn refuses",
         "docs/DESIGN.md": "a retracted claim about the gate, and what replaced it",
         "README.md": "the per-tree gate and the blank-verify.yaml consequence",
+        # Not a bystander that merely mentions the harness: its NOT_FRONT_DOOR list excuses
+        # eight verbs from the front-door docs BECAUSE game_loop is what calls them. If the
+        # harness stopped calling one, that verb becomes user-facing and this file would keep
+        # it undocumented — silently, since the excuse is what suppresses the finding.
+        "test/docs_surface.py": "which verbs are harness-facing, and therefore which ones a "
+                                "human never has to be told about",
         ".gitignore": "tracking .game_loop/ is JUSTIFIED by the per-tree gate holding",
         # A PLAN, and it still states the layer below as fact — the fail-open posture of
         # game_loop's central shim, quoted as the model showrunner's would copy. Planned
@@ -5091,6 +5122,30 @@ def test_claims_about_the_layer_below():
     ok("...and the payload it hashes is the one that actually enforces the claims — the guards, "
        "not the installer that placed them",
        any(f.startswith("guard-") for f in payload), payload)
+
+    # ── the front-door docs, checked by the ORDINARY suite ───────────────────────────────────
+    # This ran nowhere for its whole life. It shipped TRACKED -- so consumers received it, which
+    # is better than the gitignored variant of this bug -- but tracked and reachable is not run,
+    # and nothing invoked it. Meanwhile I stated in public that the ordinary suite ran it, and
+    # another project ported the design partly on that claim. A check whose PASS is silence and
+    # whose invocation is a human remembering to type it has the same output as one that does not
+    # exist: nothing, forever.
+    sys.path.insert(0, os.path.join(ROOT, "test"))
+    import docs_surface
+    missing, excluded, unreadable = docs_surface.unnamed()
+    ok("every verb, env var and hook showrunner ships is at least NAMED in the front-door docs "
+       "-- %d surface(s) excluded with a stated reason" % excluded,
+       not missing, missing)
+    # A doc that could not be OPENED must not read as "nothing is undocumented" -- the empty
+    # `missing` list is what both answers look like.
+    ok("...and a front-door doc that could not be read is reported as unreadable rather than "
+       "silently contributing no surfaces", not unreadable, unreadable)
+    # The limits are part of the check, not commentary: without them a green tick here reads as
+    # "the docs are correct", which is the one thing this cannot determine.
+    ok("...and the tool still states what it CANNOT check, so a pass is not read as "
+       "'the docs are right'",
+       "NOT EXPLAINED" in open(os.path.join(ROOT, "test", "docs_surface.py")).read().upper()
+       or "explains anything" in open(os.path.join(ROOT, "test", "docs_surface.py")).read())
 
     tokens = ("guard-writes", "commit gate", "blast radius", "the gate")
     tracked = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,

@@ -19,5 +19,8 @@
     "enabled": true,
     "support_name": "SupposedlySam",
     "support_url": "https://github.com/sponsors/SupposedlySam"
-  }
+  },
+  "mcp_trusted_servers": [
+    "mcp__llm_chat__"
+  ]
 }
