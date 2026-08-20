@@ -387,8 +387,21 @@ def enforced_lines(role_def):
     out.append("may dispatch: %s" % (", ".join(may) if may else
                                      "NOTHING — `dispatch guard` refuses a raw `claude -p` from "
                                      "this seat"))
-    if d.get("writes"):
-        out.append("writes: %s" % d["writes"])
+    w = d.get("writes")
+    # This printed `writes: {'deny': ['**']}` — a Python repr in the block whose entire job is to
+    # be the readable, generated statement of what a guard enforces. Rendered per shape rather
+    # than assumed: the suite's fixture is a LIST of allowed globs, and a consumer may reasonably
+    # hand a mapping. Anything else is printed as-is rather than crashed on, because a renderer
+    # that raises takes the whole announcement down and silence is the one unacceptable outcome.
+    if isinstance(w, (list, tuple)) and w:
+        out.append("may write: %s" % ", ".join(str(x) for x in w))
+    elif isinstance(w, dict):
+        if w.get("deny"):
+            out.append("may NOT write: %s" % ", ".join(str(x) for x in w["deny"]))
+        if w.get("allow") and not w.get("deny"):
+            out.append("may write: %s" % ", ".join(str(x) for x in w["allow"]))
+    elif w:
+        out.append("writes: %s" % w)
     if d.get("reports_to"):
         out.append("reports to: %s" % d["reports_to"])
     if d.get("acquire"):
@@ -504,7 +517,12 @@ def whoami(cfg, session=None):
         for line in enforced_lines(r["policy"]):
             out.append("    ENFORCED  " + line)
         if r["notes"]:
-            out.append("    note      %s" % r["notes"])
+            # `%s` on a list prints a Python repr on one line, so a multi-line note arrives as an
+            # unreadable wall — and an announcement nobody can read is one that did not happen.
+            # A string stays one line; a list becomes lines.
+            out.append("    note")
+            for line in ([r["notes"]] if isinstance(r["notes"], str) else r["notes"]):
+                out.append("      " + str(line))
             out.append("    ...which is prose your project wrote. Nothing checks it.")
     else:
         out.append("  no roles are defined, so no dispatch policy is enforced for any seat.")
