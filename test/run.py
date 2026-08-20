@@ -3051,6 +3051,19 @@ def test_seat_and_whoami():
     # `or [""]` so a producer that stopped producing FAILS this rather than raising out of the
     # group — an IndexError here made the mutant unscoreable and the sweep reported a floor from
     # a truncated run as though it were coverage.
+    # A REPR IS NOT A RENDERING. `writes` reached this block through `%s`, so a mapping printed
+    # as `{'deny': ['**']}` and a list as `['src/**']` — Python syntax in the one block whose job
+    # is to state plainly what a guard enforces. Both shapes are asserted because the suite's own
+    # fixture is a list and a consumer may reasonably hand a mapping; neither may render as code,
+    # and neither may raise, since a renderer that raises takes the whole announcement down.
+    listed = R.enforced_lines({"acquire": "claim", "writes": ["src/**", "docs/**"]})
+    ok("a `writes` LIST renders as paths a reader can act on, not as a Python literal",
+       any("src/**, docs/**" in l for l in listed) and not any("[" in l for l in listed), listed)
+    mapped = R.enforced_lines({"acquire": "claim", "writes": {"deny": ["app/**", "backend/**"]}})
+    ok("a `writes` MAPPING renders its denials in words, and does not leak brace syntax",
+       any("may NOT write: app/**, backend/**" in l for l in mapped)
+       and not any("{" in l for l in mapped), mapped)
+
     none_line = (R.enforced_lines({"acquire": "claim"}) or [""])[0]
     ok("a role that may create NOTHING says so in the terms the guard will use, rather than "
        "omitting the line and leaving the reader to infer permission",
