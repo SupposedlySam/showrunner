@@ -2982,6 +2982,48 @@ def test_worktree_guard_from_inside_a_worktree():
        "exited 1" in broke.stdout and "Traceback" in broke.stdout, broke.stdout[:300])
 
 
+def test_issue_waker():
+    group("The issue waker: who may be acted on, and who is only read")
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "issue_waker", os.path.join(ROOT, ".showrunner", "hooks", "issue-waker.py"))
+    w = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(w)
+
+    # THE TRUST RULE IS THE SECURITY-RELEVANT HALF, and it is matched on BOTH login and display
+    # name on purpose: a work bot posts under its own login carrying its owner's name, and either
+    # half identifies it. Everything else is a claim from a stranger — read, verified, not built
+    # from. Both directions asserted, because a rule that trusts everyone and one that trusts the
+    # right people are the same observation from inside a single passing case.
+    for author, want, why in (
+            ({"login": "SupposedlySam", "name": "Jonah Walker"}, True, "the maintainer"),
+            ({"login": "mrgnhnt96", "name": "Morgan Hunt"}, True, "a named collaborator by login"),
+            ({"login": "some-work-bot", "name": "Morgan Hunt"}, True,
+             "a work BOT posting under a trusted NAME — the login is unknown and the name is not"),
+            ({"login": "SUPPOSEDLYSAM", "name": None}, True, "a login differing only in case"),
+            ({"login": "driveby", "name": "A Stranger"}, False, "a stranger"),
+            ({"login": "morganhunt-fan", "name": "Not Morgan"}, False,
+             "a LOOKALIKE login — substring matching here would trust it"),
+            ({"login": None, "name": None}, False, "an author carrying no identity at all")):
+        eq("%s is %s" % (why, "TRUSTED" if want else "not trusted"), w.trusted(author), want)
+
+    # AN UNREADABLE BASELINE MUST NOT WAKE ON THE WHOLE BACKLOG. Treating it as empty would make
+    # every open issue "new" and hand the session a backlog at a turn-end, which is a gate
+    # somebody switches off.
+    scratch = tmpdir("waker-state")
+    w.STATE = os.path.join(scratch, "seen-issues.json")
+    eq("with no baseline at all, the waker declines rather than comparing", w.baseline(), None)
+    with open(w.STATE, "w") as fh:
+        fh.write("{not json")
+    eq("...and an unreadable one declines too — 'could not read' is never 'nothing seen yet'",
+       w.baseline(), None)
+    eq("...so it exits QUIETLY rather than waking, leaving the session_start check to report it "
+       "properly", w.main(), 0)
+    with open(w.STATE, "w") as fh:
+        json.dump({"seen": [1, 2]}, fh)
+    eq("...while a readable baseline is used", w.baseline(), {1, 2})
+
+
 def test_self_vendored_pin():
     group("Self-vendoring: editing the tool must not disarm the tool (game_loop's .game_loop_self)")
     if not have("git"):
@@ -5814,7 +5856,8 @@ def main():
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_waiting, test_concurrency,
                test_integration, test_worktree_lease, test_worktree_guard_from_inside_a_worktree,
-               test_self_pin, test_self_vendored_pin, test_central_install,
+               test_self_pin, test_self_vendored_pin, test_issue_waker,
+               test_central_install,
                test_installer_leaves_no_vendored_copy,
                test_publishable, test_dispatch, test_filed_issues_15_to_21,
                test_claims_about_the_layer_below, test_observability,

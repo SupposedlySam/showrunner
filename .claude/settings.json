@@ -97,6 +97,17 @@
             "type": "command"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "asyncRewake": true,
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.showrunner/hooks/issue-waker.py",
+            "statusMessage": "showrunner: watching for new issues",
+            "timeout": 1860,
+            "type": "command"
+          }
+        ]
       }
     ]
   },
