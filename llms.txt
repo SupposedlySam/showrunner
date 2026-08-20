@@ -238,7 +238,7 @@ handoff a showrunner charges — worktrees, briefs, rooms, integration — is on
 parallelism it buys. So more than one at a time in one checkout is the ORDINARY case.
 
 ```
-SHOWRUNNER_CAMPAIGN=DROP-4130 showrunner status    # state nests under a per-campaign directory
+SHOWRUNNER_CAMPAIGN=my-campaign showrunner status    # state nests under a per-campaign directory
 ```
 
 Graph, campaign record, event journal and scratch all follow the campaign. **Locks deliberately do

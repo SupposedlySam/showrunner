@@ -3747,8 +3747,12 @@ def test_campaign_scoping():
        cfg.state_dir, os.path.join(cfg.root, ".showrunner"))
     eq("...and the campaign is None rather than a campaign named ''", cfg.campaign, None)
 
-    a = config.load(start=cfg.root, campaign="DROP-4130 search relevance")
-    b = config.load(start=cfg.root, campaign="DROP-9000")
+    # The name is a placeholder ON PURPOSE, and its SHAPE is load-bearing: mixed case, a space,
+    # a digit and a run of non-alphanumerics are what `slug` has to fold, and this fixture is the
+    # only place that is observed. Rename it and keep those, or the slug assertions below stop
+    # checking anything.
+    a = config.load(start=cfg.root, campaign="My Campaign #2")
+    b = config.load(start=cfg.root, campaign="Another Campaign")
     ok("a selected campaign nests under .showrunner/campaigns/, so it sits beside the default "
        "rather than replacing it",
        a.state_dir.startswith(os.path.join(cfg.root, ".showrunner", "campaigns")), a.state_dir)
@@ -3778,7 +3782,7 @@ def test_campaign_scoping():
     os.environ["SHOWRUNNER_CAMPAIGN"] = "something-else-entirely"
     try:
         ok("a loaded config does not change its answers when the environment moves under it",
-           "drop-4130" in a.graph_db, a.graph_db)
+           "my-campaign-2" in a.graph_db, a.graph_db)
         env_cfg = config.load(start=cfg.root)
         eq("...while a config loaded AFTER the change reads the new value, so the env var is "
            "still the selector and not a one-shot", env_cfg.campaign, "something-else-entirely")
