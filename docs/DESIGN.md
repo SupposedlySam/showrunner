@@ -135,8 +135,21 @@ asymmetric: only a worktree the campaign record NAMES resolves, or `git worktree
 to grant yourself a role, and `orchestrator` ships unmapped because standing in the main checkout is
 a location, not a record.
 
-`roles.claim()` is still lock-backed, campaign-scoped and carries liveness, and still has no caller
-(#42).
+`roles.claim()` had no caller either, so BOTH declared modes were unreachable and the whole role
+model resolved to one seat on a stock install. `role claim` / `role release` / `role roster` expose
+it, and `claim` refuses a role declaring `assign`: that one is decided by whoever created the
+session, so taking it here would be self-nomination into a seat the model says cannot be
+self-nominated.
+
+The liveness that made it a lock is also what made the first version of the verb useless. A pid
+plus a boot token means a claim keyed to the short-lived process that MADE the call reports success
+and reads STALE the instant that call returns — so the claimer is told it holds a seat while the
+resolver skips it and `whoami` announces the fallback. `util.session_pid` already resolved the
+long-lived session and already returned a `basis` separating "proved it" from "could not tell";
+`lease` already consumed it and refused when nothing resolved; `lock acquire` already printed the
+warning. The roles path shared `locks.Lock` with all three and inherited none of the mitigation. It
+does now, and `role roster` surfaces STALE, because the only way to see a dead claim used to be
+calling `roles.roster()` from Python (#42, #48).
 
 **And the identity layers have nowhere to live.** `FIELDS` covers the mechanism — acquire, capacity,
 reports_to, may_create, writes, notes — and an unknown key warns rather than rejecting, so nothing
@@ -395,7 +408,7 @@ missed one costs a merge conflict in an unattended run with nobody watching.
 
 ## Validated primitives
 
-`test/run.py` — 932 assertions, Python 3 + git, no other setup. Assertions needing `br` or `tmux`
+`test/run.py` — 964 assertions, Python 3 + git, no other setup. Assertions needing `br` or `tmux`
 skip loudly, naming the dependency. `prototype/` holds the original shell POC (7 assertions run
 anywhere, 5 skip), kept for the record; `prototype/br_gate.sh` is superseded by
 `lib/showrunner/gates.py`, which parses the graph as JSON instead of splitting records on a literal
@@ -405,11 +418,11 @@ anywhere, 5 skip), kept for the record; `prototype/br_gate.sh` is superseded by
 
 ## Still open
 
-- **A role cannot be CLAIMED.** `assign` now resolves through `seat_roles`, so a Crawler the
-  campaign record names gets the role its consumer mapped. `claim` still has no caller and no verb,
-  so that half of the model remains unreachable (#42).
-- **`charter` and `description` are unmodelled**, so the layer that says *who you are* before *what
-  you may not do* has to be folded into `notes` by the consumer, duplicated per role (#42).
+- **A role's identity layers are unmodelled.** Both acquisition modes are reachable now — `assign`
+  through `seat_roles`, `claim` through the `role` verb — so what remains of #42 is not the
+  mechanism but the prose: there is no per-role `description` and no top-level `charter`.
+  The layer that says *who you are* before *what you may not do* still has to be folded into
+  `notes` by the consumer, duplicated per role (#42).
 - **Lock completeness / rung.** The PreToolUse guard is only as good as its verb classifier; a
   rogue raw command escapes it. Rung-1 IMPOSSIBLE needs the lock *inside* the consumer tool as
   well as in the guard. `lock run` is the belt, the guard is the suspenders.

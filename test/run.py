@@ -3196,6 +3196,263 @@ def test_crawler_seat_resolves_to_a_role():
         R.USER_PATH = orig
 
 
+def test_close_resolves_paths_against_the_callers_tree():
+    group("A relative proof belongs to the tree the closer is standing in, not the main checkout")
+
+    # THE TWO FILES SHARING A PATH ARE THE WHOLE BUG. The main checkout carries a stale copy of
+    # the same relative path, so joining against `cfg.root` finds a real, non-empty, OLD file and
+    # the gate reports the one verdict it exists to catch — proof that predates the claim —
+    # against a file the closer never touched.
+    SHARED = os.path.join("evidence", "witness.txt")
+    cfg = make_repo(files={"README.md": "seed\n", SHARED: "the main checkout's stale copy\n"})
+    stale_in_main = os.path.join(cfg.root, SHARED)
+    long_ago = time.time() - 86400
+    os.utime(stale_in_main, (long_ago, long_ago))
+
+    g = new_graph(cfg)
+    g.add("work", leaf_id="c1", labels=["backend"])
+    rec = worktree.spawn(cfg, g.show("c1"), actor="crawler-c")
+    tree = rec["worktree"]
+
+    def close(leaf_id, proof, premise_read="only-in-this-tree.md"):
+        """The leaf status, or the refusal TEXT. A `Refused` is the finding under test here — the
+        bug is a false refusal — so it is captured and asserted on rather than left to abort the
+        test and hide which assertion the mutation broke."""
+        try:
+            leaf, _notes = gates.close_gate(cfg, g, leaf_id, proof, "done", premise="holds",
+                                            premise_read=premise_read)
+            return leaf["status"]
+        except Refused as exc:
+            return "REFUSED: %s" % exc
+
+    def fresh(leaf_id, rel_path=SHARED):
+        """Claim a leaf, THEN write the artifact, so its mtime is unambiguously after the claim."""
+        g.claim(leaf_id, "crawler-c")
+        full = os.path.join(tree, rel_path)
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "w") as fh:
+            fh.write("the proof this agent just wrote for %s\n" % leaf_id)
+        return full
+
+    first = fresh("c1")
+    with open(os.path.join(tree, "only-in-this-tree.md"), "w") as fh:
+        fh.write("read to check the premise\n")
+
+    ok("the fixture really does have two files at one relative path, one stale and one fresh, or "
+       "this proves nothing",
+       os.path.exists(stale_in_main) and int(os.path.getmtime(stale_in_main))
+       < int(os.path.getmtime(first)),
+       (int(os.path.getmtime(stale_in_main)), int(os.path.getmtime(first))))
+
+    cwd = os.getcwd()
+    try:
+        os.chdir(tree)
+
+        # THE REPORTED FAILURE, ISOLATED. `--premise-read` names a file present in BOTH trees, so
+        # the only thing this can be refused for is the PROOF path — which is the whole point: the
+        # verdict the mis-join manufactured was "proof predates the claim", the one verdict the
+        # gate exists to produce, against a file the closer had never touched.
+        eq("a relative --proof written in the closer's own worktree CLOSES the leaf, instead of "
+           "being refused as proof that predates the claim — the gate was reading the main "
+           "checkout's stale copy of the same path",
+           close("c1", SHARED, premise_read="README.md"), G.CLOSED)
+
+        # THE OTHER HALF: `--premise-read` shared the join, so the file an agent actually read
+        # was reported as not existing when it lived only in the worktree.
+        g.add("more", leaf_id="c2", labels=["backend"])
+        fresh("c2")
+        eq("...so a --premise-read naming a file that exists ONLY in the worktree is accepted "
+           "rather than reported as missing", close("c2", SHARED), G.CLOSED)
+
+        # AN ABSOLUTE PATH ALWAYS WORKED, which is exactly why the bug was invisible to anyone
+        # who passed one and fatal to anyone who typed the relative form.
+        g.add("third", leaf_id="c3", labels=["backend"])
+        abs_proof = fresh("c3")
+        eq("an absolute --proof still closes, so the fix did not trade one form for the other",
+           close("c3", abs_proof, premise_read=os.path.join(tree, "only-in-this-tree.md")),
+           G.CLOSED)
+
+        # AND A GENUINELY STALE PROOF IS STILL REFUSED. Turning a false refusal into a false
+        # acceptance would be strictly worse than the bug.
+        g.add("fourth", leaf_id="c4", labels=["backend"])
+        g.claim("c4", "crawler-c")
+        genuinely_old = os.path.join(tree, "predates.txt")
+        with open(genuinely_old, "w") as fh:
+            fh.write("written before the claim\n")
+        os.utime(genuinely_old, (long_ago, long_ago))
+        ok("a proof in the closer's OWN tree that really does predate the claim is STILL refused "
+           "— the gate was repaired, not disabled",
+           "older than the work" in close("c4", "predates.txt"), close("c4", "predates.txt"))
+
+        # THE REFUSAL NAMES THE TREE IT LOOKED IN. The failure this replaces was undiagnosable
+        # from outside: a path the caller recognised, and a verdict about a file it never saw.
+        g.add("fifth", leaf_id="c5", labels=["backend"])
+        g.claim("c5", "crawler-c")
+        missing = close("c5", "no/such/artifact.txt")
+        ok("a missing relative path says WHICH tree it was resolved against, so the next agent "
+           "to hit this can see the resolution rather than doubting its own artifact",
+           tree in missing and "absolute" in missing, missing[:300])
+    finally:
+        os.chdir(cwd)
+
+    # FROM THE MAIN CHECKOUT NOTHING CHANGES, because there the caller's tree IS cfg.root. That
+    # is what makes this a repair rather than a relocation of the same bug.
+    g.add("sixth", leaf_id="c6", labels=["backend"])
+    g.claim("c6", "orchestrator")
+    with open(os.path.join(cfg.root, "from-main.txt"), "w") as fh:
+        fh.write("closed from the main checkout\n")
+    try:
+        os.chdir(cfg.root)
+        eq("a relative path from the MAIN checkout still resolves there",
+           close("c6", "from-main.txt", premise_read="README.md"), G.CLOSED)
+    finally:
+        os.chdir(cwd)
+
+    # A CWD IN A DIFFERENT REPO IS NOT "THE TREE THE CLOSER IS STANDING IN". Resolving a proof
+    # into a stranger checkout would be this same bug pointed somewhere new, so an unrelated cwd
+    # falls back to `cfg.root` — which was always the right answer for that case.
+    stranger = make_repo(files={"README.md": "a different repo entirely\n"})
+    g.add("seventh", leaf_id="c7", labels=["backend"])
+    g.claim("c7", "orchestrator")
+    with open(os.path.join(cfg.root, "from-main-again.txt"), "w") as fh:
+        fh.write("still the campaign's own checkout\n")
+    try:
+        os.chdir(stranger.root)
+        eq("standing in an UNRELATED repo falls back to the campaign's own checkout rather than "
+           "resolving the proof into a stranger tree",
+           close("c7", "from-main-again.txt", premise_read="README.md"), G.CLOSED)
+    finally:
+        os.chdir(cwd)
+
+
+def test_role_seat_verbs():
+    group("Both acquire modes are reachable, and a claim outlives the call that made it (#40)")
+    from showrunner import roles as R
+
+    SR = [sys.executable, os.path.join(ROOT, "bin", "showrunner")]
+    cfg = make_repo()
+    home = tmpdir("role-verb-home")
+    os.makedirs(os.path.join(home, "showrunner"), exist_ok=True)
+    rp = os.path.join(home, "showrunner", "roles.json")
+    with open(rp, "w") as fh:
+        json.dump({"roles": {
+            "campaign-lead": {"acquire": "claim", "capacity": 1, "may_create": ["worker"],
+                              "writes": {"allow": ["**"]}},
+            "worker": {"acquire": "assign", "reports_to": "campaign-lead"},
+            R.FALLBACK: {"acquire": "claim", "writes": {"deny": ["**"]}}}}, fh)
+
+    def sr(*argv, **kw):
+        env = dict(os.environ, XDG_CONFIG_HOME=kw.pop("xdg", home), NO_COLOR="1")
+        p = subprocess.run(SR + list(argv), cwd=kw.pop("cwd", cfg.root),
+                           capture_output=True, text=True, env=env)
+        return p.returncode, p.stdout, p.stderr
+
+    # NEITHER ACQUISITION MODE WAS REACHABLE. `assign` had no reader until a seat could resolve
+    # through `seat_roles`, and `claim` had no writer at all: `roles.claim` was a library function
+    # with zero callers, and the `claim` VERB claims a leaf. On a stock install that made every
+    # session the fallback whatever its roles said, and seating anything meant importing the
+    # library from Python.
+    rc, out, _err = sr("role", "claim", "campaign-lead", "--session", "sess-1", "--who", "agent-a")
+    eq("`role claim` seats a role from the CLI, which no verb could do", rc, 0)
+    ok("...and states the liveness basis rather than only success — a claim whose pid exits "
+       "reports success too, which is what made the failure silent", "liveness basis" in out, out)
+
+    entries = json.loads(sr("role", "roster", "--json")[1])
+    eq("...and the roster shows that seat HELD",
+       [(e["role"], e["state"]) for e in entries], [("campaign-lead#0", locks.HELD)])
+    ok("...with the basis recorded on the holder, so a reader sees which fact liveness rests on",
+       (entries[0].get("holder") or {}).get("pid_basis"), entries)
+
+    rc, out, _err = sr("whoami", "--session", "sess-1")
+    ok("`whoami` announces the CLAIMED role — the whole path from CLI to announcement, which "
+       "had no first step before", "campaign-lead" in out and "claimed" in out, out[-300:])
+
+    # ONE RESOLVER, TWO RENDERINGS. A hook author with only prose to read reimplements the
+    # resolver, and the copy drifts: a consumer's write guard kept one, did not learn
+    # `seat_roles`, and enforced the deny-everything fallback while `whoami` announced a role.
+    def porcelain(*argv, **kw):
+        """(doc or None). A parse failure is a FINDING, not a traceback — the claim under test is
+        that a hook can consume this, and `None` lets that fail as an assertion."""
+        body = sr(*argv, **kw)[1]
+        try:
+            return json.loads(body)
+        except ValueError:
+            return None
+
+    doc = porcelain("whoami", "--porcelain", "--session", "sess-1")
+    ok("`whoami --porcelain` emits JSON a hook can parse at all — having no machine-readable "
+       "answer is what forced a hook author to keep a copy of the resolver", doc is not None,
+       sr("whoami", "--porcelain", "--session", "sess-1")[1][:200])
+    eq("...resolving the SAME role the prose announced, so a guard and a human cannot be told "
+       "different things", (doc or {}).get("role"), "campaign-lead")
+    ok("...and carries the writes rule a guard has to enforce, which is the field whose absence "
+       "forced the copy", (doc or {}).get("policy", {}).get("writes"), doc)
+    ok("...and exposes `enforced` to branch on, so a parser never has to infer policy from a "
+       "role name", (doc or {}).get("enforced") is True, doc)
+
+    empty = tmpdir("no-roles-home")
+    blind = porcelain("whoami", "--porcelain", xdg=empty) or {}
+    ok("with NO roles defined it says enforced=false and role=null — a guard must not be able "
+       "to read 'no policy exists' as 'this write is permitted'",
+       blind.get("enforced") is False and blind.get("role", "x") is None, blind)
+
+    # A ROLE DECLARING `assign` IS NOT CLAIMABLE. Its entire meaning is that whoever created the
+    # session decided; taking it here would be self-nomination into a seat the model says cannot
+    # be self-nominated.
+    rc, out, err = sr("role", "claim", "worker", "--session", "sess-2")
+    eq("a role declaring acquire=assign is REFUSED, with the PreToolUse deny code", rc, 2)
+    ok("...and the refusal names how an assigned role IS obtained instead of only saying no",
+       "seat_roles" in (out + err), (out + err)[-240:])
+
+    rc, out, err = sr("role", "claim", "nonesuch")
+    eq("an undefined role is refused", rc, 2)
+    ok("...naming what IS defined, so the refusal is actionable rather than a wall",
+       "campaign-lead" in (out + err), (out + err)[-240:])
+
+    rc, out, _err = sr("role", "release", "campaign-lead")
+    eq("`role release` gives the seat back — the counterpart `claim` never had, so a seat could "
+       "previously only be surrendered by outliving it or deleting a file", rc, 0)
+    eq("...and the roster is empty again", json.loads(sr("role", "roster", "--json")[1]), [])
+    ok("...and `whoami` returns to the fallback, so releasing is observable end to end",
+       R.FALLBACK in sr("whoami", "--session", "sess-1")[1], "")
+
+    # THE REPORTED FAILURE, and it is the worst of the three possible outcomes: success reported,
+    # nothing held. A claim keyed to a short-lived process reads STALE the moment that process
+    # exits, so `whoami` announces the fallback while the claimer was told `ok: True`.
+    dead = DeadPid().pid
+    got, h = R.claim(cfg, "campaign-lead", "sess-3", pid=dead, who="agent-c")
+    ok("a claim handed a pid that has ALREADY exited still reports success at the moment of "
+       "claiming, which is precisely why this was silent", got, h)
+    eq("...while the roster reads STALE immediately",
+       [(e["role"], e["state"]) for e in R.roster(cfg)], [("campaign-lead#0", locks.STALE)])
+    orig = R.USER_PATH
+    R.USER_PATH = rp
+    try:
+        defs, _ = R.spec(cfg)
+        eq("...and the resolver skips it, so the session is announced as the fallback despite "
+           "having been told it took the seat", R._resolved(cfg, "sess-3", defs)[0], R.FALLBACK)
+    finally:
+        R.USER_PATH = orig
+    rc, out, err = sr("role", "roster")
+    ok("`role roster` NAMES the stale seat and says those sessions announce the fallback — "
+       "before this the only way to see a dead claim was calling roles.roster() from Python",
+       "STALE" in out and "fallback" in err, (out, err))
+
+    # THE FIX. The pid is DISCOVERED rather than handed over, so the seat outlives the call.
+    R.release(cfg, "campaign-lead", force=True)
+    rc, out, _err = sr("role", "claim", "campaign-lead", "--session", "sess-4")
+    eq("claiming through the verb succeeds", rc, 0)
+    eq("...and the seat is still HELD once the claiming process has EXITED — the CLI process is "
+       "gone by the time this reads, which is exactly the case that produced STALE",
+       [(e["role"], e["state"]) for e in json.loads(sr("role", "roster", "--json")[1])],
+       [("campaign-lead#0", locks.HELD)])
+    ok("...on a pid that is NOT the exited CLI process, which is the whole mechanism",
+       (json.loads(sr("role", "roster", "--json")[1])[0].get("holder") or {}).get("pid_basis")
+       in ("ancestor-claude", "ppid-fallback"),
+       json.loads(sr("role", "roster", "--json")[1]))
+    R.release(cfg, "campaign-lead", force=True)
+
+
 def test_dispatch_guard():
     group("The cheap dispatch path has a gate on it now (#37)")
     from showrunner import roles as R
@@ -6465,6 +6722,8 @@ def main():
                test_self_pin, test_self_vendored_pin, test_roles,
                test_harness_installer_provenance, test_void_run, test_dispatch_guard,
                test_seat_and_whoami, test_crawler_seat_resolves_to_a_role,
+               test_role_seat_verbs,
+               test_close_resolves_paths_against_the_callers_tree,
                test_campaign_scoping,
                test_issue_waker,
                test_central_install,

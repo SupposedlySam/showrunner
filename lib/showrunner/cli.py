@@ -12,7 +12,8 @@ import sys
 
 from . import (__version__, brief, campaign, collide, config, dispatch, events, gates,
                graph as G, harness, lanes, lease, locks, pin, roles, worktree)
-from .util import (Refused, die, eprint, git, now, rel, run, short_session, slug, stamp)
+from .util import (RESOLVED_BASIS, Refused, die, eprint, git, now, rel,
+                   resolve_from_caller, run, short_session, slug, stamp)
 
 BOLD, DIM, RED, GRN, YEL, OFF = "\033[1m", "\033[2m", "\033[31m", "\033[32m", "\033[33m", "\033[0m"
 if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
@@ -883,16 +884,116 @@ def cmd_whoami(args):
     isolation 42 times — because nothing fired at a session boundary, so every compaction
     refreshed the harness that owned those seams and eroded the tool that did not.
     """
+    session = args.session or os.environ.get("SHOWRUNNER_SESSION") or ""
     try:
         cfg = _cfg(args, required=False)
-        lines = roles.whoami(cfg, args.session or os.environ.get("SHOWRUNNER_SESSION") or "")
+        # ONE RESOLVER, TWO RENDERINGS. The porcelain is not a second answer computed a second
+        # way — `roles.whoami` renders the same dict this prints, so a guard reading the JSON and
+        # a human reading the prose cannot be told different things.
+        if getattr(args, "porcelain", False):
+            print(json.dumps(roles.resolution(cfg, session), indent=2, sort_keys=True))
+            return 0
+        lines = roles.whoami(cfg, session)
     except Exception as exc:                                    # noqa: BLE001 — see docstring
+        if getattr(args, "porcelain", False):
+            # A PARSER MUST NOT READ A CRASH AS A PERMISSIVE ANSWER. The prose path prints and
+            # exits 0 because a SessionStart hook cannot block; a guard consuming this has to be
+            # able to fail closed, so this reports the failure in-band AND exits non-zero.
+            print(json.dumps({"version": roles.PORCELAIN_VERSION, "enforced": False,
+                              "role": None, "problems": ["%s: %s" % (type(exc).__name__, exc)]},
+                             indent=2, sort_keys=True))
+            return 1
         print("showrunner: COULD NOT SAY WHAT THIS SESSION IS — %s: %s. That is printed rather "
               "than swallowed: an announcer that fails quietly is indistinguishable from one "
               "that had nothing to say." % (type(exc).__name__, exc))
         return 0
     for line in lines:
         print(line)
+    return 0
+
+
+# ------------------------------------------------------- role seats (claim/release/roster)
+# BOTH ACQUISITION MODES WERE UNREACHABLE FROM THE CLI. `assign` had no reader until a seat could
+# resolve through `seat_roles`; `claim` had no writer at all — `roles.claim` existed as a library
+# function nothing called, and the `claim` verb claims a LEAF. So on a stock install every
+# session resolved to the fallback whatever its roles said, and the only way to seat anything was
+# to import the library and call it from Python.
+def cmd_role_claim(args):
+    cfg = _cfg(args)
+    defs, problems = roles.spec(cfg)
+    for msg in problems:
+        eprint("note: %s" % msg)
+    if not defs:
+        die("no roles are defined, so there is no seat to claim. Define them at %s"
+            % roles.USER_PATH, code=2)
+    if args.role not in defs:
+        die("no role named %r is defined (known: %s)" % (args.role, ", ".join(sorted(defs))),
+            code=2)
+    acquire = (defs[args.role] or {}).get("acquire")
+    if acquire and acquire != "claim":
+        # A ROLE THAT SAYS `assign` MUST NOT BE CLAIMABLE. Its whole meaning is that whoever
+        # created the session decided; letting a session take it here would be self-nomination
+        # into a seat the model says it cannot nominate itself for.
+        die("role %r declares acquire=%r, so it cannot be claimed — it is assigned by whoever "
+            "creates the session, through `seat_roles`" % (args.role, acquire), code=2)
+
+    session = args.session or os.environ.get("SHOWRUNNER_SESSION") or ""
+    ok, holder = roles.claim(cfg, args.role, session, pid=args.pid, who=args.who, seat=args.seat)
+    if not ok and holder.get("pid_basis") == "unresolved":
+        print("showrunner: %s.\n  Nothing was claimed; that is said out loud rather than left to "
+              "look like success." % holder.get("why"))
+        return 1
+    if not ok:
+        eprint("BLOCKED: seat %s#%d is held by pid %s (%s)"
+               % (args.role, args.seat, holder.get("pid"), holder.get("who")))
+        return 1
+    print("CLAIMED %s#%d (pid %s — liveness basis: %s)"
+          % (args.role, args.seat, holder.get("pid"), holder.get("pid_basis") or "?"))
+    if holder.get("pid_basis") != RESOLVED_BASIS:
+        # DEAD ON ARRIVAL IS THE WORST OUTCOME, so it is named at the moment of claiming rather
+        # than discovered later as a fallback role. `lock acquire` prints the same warning for
+        # the same reason; this path shared its mechanism and not its mitigation.
+        eprint("NOTE: liveness rests on %r, not on a resolved session process. If that pid exits, "
+               "this seat reads STALE and `whoami` will announce the fallback again — check with "
+               "`%s role roster`." % (holder.get("pid_basis") or "?", brief.sr_bin(cfg)))
+    return 0
+
+
+def cmd_role_release(args):
+    cfg = _cfg(args)
+    ok, before = roles.release(cfg, args.role, pid=args.pid, seat=args.seat, force=args.force)
+    if not ok:
+        eprint("nothing to release: seat %s#%d is not held" % (args.role, args.seat))
+        return 1
+    print("RELEASED %s#%d (was pid %s — %s)"
+          % (args.role, args.seat, before.get("pid"), before.get("who")))
+    return 0
+
+
+def cmd_role_roster(args):
+    """Every seat and the state of its holder — the read that made a dead claim diagnosable.
+
+    A claim keyed to a process that had already exited reported success and then read STALE, and
+    the only way to SEE that was to call `roles.roster` from Python. A state nothing surfaces is
+    a state nobody debugs.
+    """
+    cfg = _cfg(args)
+    entries = roles.roster(cfg)
+    if args.json:
+        print(json.dumps(entries, indent=2, sort_keys=True))
+        return 0
+    if not entries:
+        print("no role seats have been claimed in this campaign.")
+        return 0
+    for e in entries:
+        h = e.get("holder") or {}
+        print("%-24s %-6s pid %s (%s) basis %s" % (e["role"], e["state"], h.get("pid") or "-",
+                                                   h.get("who") or "-",
+                                                   h.get("pid_basis") or "-"))
+    stale = [e["role"] for e in entries if e["state"] == locks.STALE]
+    if stale:
+        eprint("NOTE: %d seat(s) read STALE — the holder is proved dead, so `_resolved` skips "
+               "them and those sessions announce the fallback: %s" % (len(stale), ", ".join(stale)))
     return 0
 
 
@@ -1436,9 +1537,12 @@ def cmd_amend(args):
     """
     cfg = _cfg(args)
     g = _graph(cfg)
-    path = args.evidence if os.path.isabs(args.evidence) else os.path.join(cfg.root, args.evidence)
+    # SAME JOIN, SAME DEFECT as the close gate had: a session standing in a worktree supplies
+    # this path, so resolving it against the main checkout reads a different file of the same name.
+    path, ev_root = resolve_from_caller(cfg, args.evidence)
     if not os.path.exists(path):
-        die("--evidence names a path that does not exist: %s" % args.evidence, code=2)
+        die("--evidence names a path that does not exist: %s%s"
+            % (args.evidence, "" if not ev_root else " (resolved against %s)" % ev_root), code=2)
     if os.path.isfile(path) and os.path.getsize(path) == 0:
         die("--evidence names an empty file: %s" % args.evidence, code=2)
     before = g.show(args.id)
@@ -2061,7 +2165,41 @@ def build_parser():
                             "never declared, so there is no file a session can write to become "
                             "something else. Register on SessionStart AND PostCompact")
     s.add_argument("--session")
+    s.add_argument("--porcelain", action="store_true",
+                   help="the SAME resolution as data: seat, role, how, and the writes/"
+                        "may_create/reports_to a guard has to enforce. Build a hook against "
+                        "this instead of keeping a copy of the resolver — a copy is a second "
+                        "statement of one policy and it will disagree. Branch on `enforced`; "
+                        "exits non-zero if it could not resolve, so a parser can fail closed")
     s.set_defaults(func=cmd_whoami)
+
+    s = sub.add_parser("role", help="role SEATS — claim one, give it back, or see who holds what. "
+                                    "`claim` claims a LEAF; this claims a role")
+    rsub = s.add_subparsers(dest="rolecmd")
+
+    t = rsub.add_parser("claim", help="take an open seat (only a role declaring acquire=claim)")
+    t.add_argument("role")
+    t.add_argument("--seat", type=int, default=0)
+    t.add_argument("--who")
+    t.add_argument("--session")
+    t.add_argument("--pid", type=int,
+                   help="override the discovered session pid. The default DISCOVERS the "
+                        "long-lived session process, because a seat keyed to a process that "
+                        "exits when this call returns reports success and reads STALE forever "
+                        "after")
+    t.set_defaults(func=cmd_role_claim)
+
+    t = rsub.add_parser("release", help="give a seat back")
+    t.add_argument("role")
+    t.add_argument("--seat", type=int, default=0)
+    t.add_argument("--pid", type=int)
+    t.add_argument("--force", action="store_true")
+    t.set_defaults(func=cmd_role_release)
+
+    t = rsub.add_parser("roster", help="every seat, its state, and the liveness basis of its "
+                                       "holder — STALE is where a dead claim becomes visible")
+    t.add_argument("--json", action="store_true")
+    t.set_defaults(func=cmd_role_roster)
 
     s = sub.add_parser("dispatch",
                        help="the dispatch seam. `dispatch guard` is a PreToolUse hook ON BASH "

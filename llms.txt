@@ -154,6 +154,10 @@ showrunner worktree register         # put ALL FOUR hooks in .claude/settings.js
                                      # the inert-Crawler gate on Stop, and the seat announcement
                                      # on SessionStart AND PostCompact
 showrunner whoami                    # what this session IS — a seat DERIVED from where it stands
+showrunner whoami --porcelain        # the SAME resolution as JSON, for a guard to consume
+showrunner role claim <role>         # take an open seat (a role declaring acquire=claim)
+showrunner role release <role>       # give it back
+showrunner role roster               # every seat, its state, and its holder's liveness basis
 ```
 
 `enter` never blocks — a SessionStart hook cannot — so it is where the *prompt* lives. `guard` is
@@ -296,6 +300,59 @@ and one typo would otherwise buy the whole write denial back, silently.
 **With no roles defined, no dispatch policy is enforced for anybody.** That is deliberate:
 inventing one would refuse the dispatches of every consumer who never wrote any.
 
+### Getting a seat, and keeping it
+
+Both modes had to become reachable before either worked. `assign` had no reader until a seat could
+resolve through `seat_roles`; `claim` had no writer at all — `roles.claim` was a library function
+nothing called, and the `claim` VERB claims a leaf. So on a stock install every session resolved
+to the fallback whatever its roles said.
+
+```
+showrunner role claim campaign-lead --who agent-a
+showrunner role roster
+showrunner role release campaign-lead
+```
+
+`role claim` refuses a role declaring `acquire: "assign"`: its whole meaning is that whoever
+created the session decided, so taking it here would be self-nomination into a seat the model says
+cannot be self-nominated. That one is obtained by `seat_roles`.
+
+**A CLAIM'S PID IS DISCOVERED, NOT HANDED OVER**, and this is the difference between a seat and a
+seat-shaped file. Liveness is a pid plus a boot token, so a claim keyed to the short-lived process
+that *made* the call is dead the moment that call returns: it reports success, the roster reads
+STALE, the resolver skips it, and `whoami` announces the fallback again. Reported from a real
+seating attempt and recovered only by walking the process ancestry by hand — which `util.session_pid`
+already did, with a `basis` separating "proved it" from "could not tell". `lock acquire` prints the
+same warning for the same reason; the roles path shared its mechanism and not its mitigation. A pid
+that cannot be resolved is REFUSED rather than recorded, following `lease`: a claim with no
+liveness is not a weaker claim, it is a lock nothing can ever reclaim.
+
+`role roster` exists because that state had nowhere to be seen. The only way to notice a dead
+claim was calling `roles.roster()` from Python, and a state nothing surfaces is a state nobody
+debugs.
+
+### A guard cannot consume prose
+
+`whoami` emitted prose and nothing else, so a hook author who needed the resolved role had no way
+to ask for it. A consumer's `PreToolUse` write guard therefore carried its own copy of the
+resolver; when a seat learned to resolve through `seat_roles` the copy did not, so the
+announcement said one role while the guard enforced the deny-everything fallback and a session was
+correctly unable to edit the file it had been dispatched to edit. Two statements of one policy,
+free to disagree — the failure `enforced_lines` prevents *inside* the announcement, arriving from
+outside it.
+
+```
+showrunner whoami --porcelain
+```
+
+emits the seat, the evidence, the resolved role and how it was resolved, and the
+`writes`/`may_create`/`reports_to`/`acquire` a guard actually enforces. `whoami` RENDERS this same
+dict, so the prose and the JSON cannot drift. Branch on **`enforced`**: it is false whenever
+showrunner enforces nothing, and a null `role` must never be read as "no restriction" — that is
+the fail-open reading, and `problems` says which case it is. The porcelain exits non-zero if it
+could not resolve at all, so a parser can fail closed; the prose path still exits 0, because a
+SessionStart hook cannot block.
+
 ## The two seams showrunner did not own, and now does
 
 ```
@@ -386,6 +443,13 @@ than your claim*, and unless you state the premise verdict with the file you che
 showrunner close <leaf> --proof <path> --premise holds|partial|refuted|unverifiable \
     --premise-read <path> --reason "<what you did>"
 ```
+
+A RELATIVE PATH IS RESOLVED AGAINST THE TREE YOU ARE STANDING IN, so the artifact you just wrote
+in your own worktree is the one read. It used to be joined against the main checkout, which found
+that checkout's stale copy of the same relative path and refused the close as proof older than the
+claim — the one verdict the gate exists to produce, manufactured from a correct submission, and
+invisible to anyone who happened to pass absolute paths. A cwd outside this repo's trees falls back
+to the main checkout, and a refusal now names the tree it read from.
 
 **4. Write non-repo files in YOUR OWN scratch dir**, the one named in your brief. Commit messages,
 captured output, fixtures, before/after artifacts. Not a shared temp dir. In a real run two Crawlers
@@ -574,7 +638,7 @@ what is there now. Nothing hashes the contents.
 ## Verifying the tool itself
 
 ```
-python3 test/run.py        # 932 assertions; needs only Python 3 + git
+python3 test/run.py        # 964 assertions; needs only Python 3 + git
 bash prototype/demo.sh     # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 
