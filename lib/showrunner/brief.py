@@ -263,8 +263,26 @@ def sr_bin(cfg):
     `git worktree add` correctly does not carry. `bin/showrunner` is the fallback for a repo
     that IS showrunner. When neither exists the canonical path is returned anyway, so the
     message still names the right place, and `doctor` says it is missing.
+
+    AND A SELF-VENDORED PIN WINS OVER BOTH, for the one repo where the tool and the work are the
+    same files. showrunner develops itself, so its guards, hooks and briefs run the very code
+    being edited — and ONE syntax error under `lib/showrunner/` kills every verb at import, which
+    was measured to leave the worktree guard exiting 1 with empty stdout: neither a refusal nor
+    an announcement. Editing this tool silently disarmed its own guard.
+
+    `.showrunner_self/` is a gitignored copy pinned at a commit (`self --pin --dest
+    .showrunner_self`), so the plumbing runs code a mid-edit cannot break while the working tree
+    is free to be broken. Borrowed wholesale from game_loop, which solves the same problem with
+    `.game_loop_self/` and the same ordered fallback — and the fallback is the load-bearing part:
+    a fresh clone has no pin and simply uses the source, so nothing has to be installed for the
+    repo to work.
+
+    STATE IS NOT AFFECTED, and that is why this needs no equivalent of game_loop's
+    GAME_LOOP_HOME: `config.load` already resolves the project from the cwd's git root, so a
+    binary anywhere reads THIS repo's `.showrunner/`. Only the CODE moves.
     """
-    for path in (os.path.join(cfg.root, ".showrunner", "bin", "showrunner"),
+    for path in (os.path.join(cfg.root, ".showrunner_self", "bin", "showrunner"),
+                 os.path.join(cfg.root, ".showrunner", "bin", "showrunner"),
                  os.path.join(cfg.root, "bin", "showrunner")):
         if os.access(path, os.X_OK):
             return path

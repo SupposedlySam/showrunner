@@ -2946,6 +2946,106 @@ def test_worktree_guard_from_inside_a_worktree():
        "agent on an allow", "DID NOT RUN" in res.stdout
        and "additionalContext" in res.stdout, res.stdout[:200])
 
+    # FOUND-AND-BROKEN IS NOT FOUND-AND-MISSING, and only the second was covered. showrunner
+    # develops itself: the guard runs the very code being edited, and ONE syntax error anywhere
+    # under lib/showrunner/ kills every verb at import. The shim used to `exec` the binary, so a
+    # half-edited tool exited 1 with EMPTY stdout — neither a deny (2) nor a loud allow — and
+    # editing this tool silently disarmed its own guard. Measured before it was fixed.
+    with open(real_bin, "w") as fh:
+        fh.write("#!/usr/bin/env python3\nimport sys\n"
+                 "sys.stderr.write('Traceback (most recent call last):\\n')\n"
+                 "sys.exit(1)\n")
+    os.chmod(real_bin, 0o755)
+    broke = subprocess.run(["bash", os.path.join(wt, lease.GUARD_SHIM)], cwd=wt,
+                           input=json.dumps({"session_id": "sess-B", "cwd": wt,
+                                             "tool_name": "Write", "tool_input": {}}),
+                           capture_output=True, text=True)
+    eq("a binary that is FOUND and BROKEN also allows — a half-edited tool must not block the "
+       "edit that repairs it", broke.returncode, 0)
+    ok("...and says so on the channel that reaches the agent, rather than exiting 1 with an "
+       "empty stdout, which is neither a refusal nor an announcement",
+       "DID NOT RUN" in broke.stdout and "additionalContext" in broke.stdout, broke.stdout[:200])
+    ok("...naming the exit code and the first line of what it printed, so a reader can tell a "
+       "syntax error from a missing dependency without re-running it",
+       "exited 1" in broke.stdout and "Traceback" in broke.stdout, broke.stdout[:300])
+
+
+def test_self_vendored_pin():
+    group("Self-vendoring: editing the tool must not disarm the tool (game_loop's .game_loop_self)")
+    if not have("git"):
+        skip("the self-vendor group", "git is not installed")
+        return
+
+    # THE PROBLEM, WHICH IS SPECIFIC TO A TOOL THAT DEVELOPS ITSELF. showrunner's guards, hooks
+    # and briefs run showrunner — so they run the very code being edited, and ONE syntax error
+    # anywhere under lib/showrunner/ kills every verb at import. Measured: the worktree guard
+    # then exited 1 with EMPTY stdout, which is neither a deny (2) nor a loud allow. Editing the
+    # tool silently disarmed its own guard.
+    #
+    # Borrowed from game_loop, which hit this first: a gitignored PINNED copy that the plumbing
+    # resolves BEFORE the working tree, with a fallback so a fresh clone needs nothing installed.
+    cfg = make_repo()
+    src = os.path.join(cfg.root, "bin")
+    os.makedirs(src, exist_ok=True)
+    real = os.path.join(src, "showrunner")
+    with open(real, "w") as fh:
+        fh.write("#!/bin/sh\necho 'the working tree answered'\n")
+    os.chmod(real, 0o755)
+
+    # THREE TIERS, asserted in order. The fixture supplies an INSTALLED copy the way a consumer
+    # has one, so "no pin" falls back to that rather than to the working tree — which is the
+    # correct answer and not the one this test first assumed. `bin/` is the last resort, for the
+    # repo that IS showrunner and never runs its own installer.
+    installed = os.path.join(cfg.root, ".showrunner", "bin", "showrunner")
+    eq("with no pin, the resolver falls back to the INSTALLED copy — the one a consumer has, "
+       "and the one `git worktree add` correctly does not carry", brief.sr_bin(cfg), installed)
+    moved = installed + ".aside"
+    os.rename(installed, moved)
+    eq("...and with no installed copy either, to the working tree — so a fresh clone of this "
+       "repo needs nothing installed for the tool to work", brief.sr_bin(cfg), real)
+    os.rename(moved, installed)
+
+    pinned_dir = os.path.join(cfg.root, ".showrunner_self")
+    os.makedirs(os.path.join(pinned_dir, "bin"))
+    pinned = os.path.join(pinned_dir, "bin", "showrunner")
+    with open(pinned, "w") as fh:
+        fh.write("#!/bin/sh\necho 'the pin answered'\n")
+    os.chmod(pinned, 0o755)
+    eq("...and a self-vendored pin WINS over it, which is the whole mechanism: the plumbing runs "
+       "code a mid-edit cannot break", brief.sr_bin(cfg), pinned)
+
+    # THE PROPERTY, exercised end to end rather than asserted from the resolver. Break the
+    # working copy the way a half-finished save does, and the guard must still ANSWER.
+    with open(real, "w") as fh:
+        fh.write("#!/bin/sh\necho 'Traceback (most recent call last):' >&2\nexit 1\n")
+    os.chmod(real, 0o755)
+    shim = os.path.join(cfg.root, lease.GUARD_SHIM)
+    os.makedirs(os.path.dirname(shim), exist_ok=True)
+    shutil.copy2(os.path.join(ROOT, lease.GUARD_SHIM), shim)
+    res = subprocess.run(["bash", shim], cwd=cfg.root,
+                         input=json.dumps({"session_id": "s", "cwd": cfg.root,
+                                           "tool_name": "Write", "tool_input": {}}),
+                         capture_output=True, text=True)
+    eq("a BROKEN working tree does not disarm the guard — the shim reaches the pin first",
+       res.returncode, 0)
+    ok("...and the answer comes from the PIN, not from a fail-open notice about the broken one: "
+       "'allowed without being checked' and 'checked, and allowed' are different outcomes and "
+       "only one of them is a guard",
+       "DID NOT RUN" not in res.stdout, res.stdout[:200])
+
+    # THE PAIR. Remove the pin and the same broken tree must now degrade LOUDLY, or the
+    # assertion above would pass just as well against a shim that ignores its own failures.
+    shutil.rmtree(pinned_dir)
+    res2 = subprocess.run(["bash", shim], cwd=cfg.root,
+                          input=json.dumps({"session_id": "s", "cwd": cfg.root,
+                                            "tool_name": "Write", "tool_input": {}}),
+                          capture_output=True, text=True)
+    eq("...while with the pin gone the broken tree still ALLOWS, because a half-edited tool must "
+       "not block the edit that repairs it", res2.returncode, 0)
+    ok("...but now says the guard did not run, on the channel that reaches the agent — the "
+       "difference between the two runs is the whole value of the pin",
+       "DID NOT RUN" in res2.stdout and "additionalContext" in res2.stdout, res2.stdout[:200])
+
 
 def test_self_pin():
     group("Pinning the tool's own code at a ref (CI-02)")
@@ -5671,7 +5771,8 @@ def main():
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_waiting, test_concurrency,
                test_integration, test_worktree_lease, test_worktree_guard_from_inside_a_worktree,
-               test_self_pin, test_central_install, test_installer_leaves_no_vendored_copy,
+               test_self_pin, test_self_vendored_pin, test_central_install,
+               test_installer_leaves_no_vendored_copy,
                test_publishable, test_dispatch, test_filed_issues_15_to_21,
                test_claims_about_the_layer_below, test_observability,
                test_cross_branch_overlap_and_lingering,

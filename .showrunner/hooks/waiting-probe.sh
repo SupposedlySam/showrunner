@@ -39,7 +39,10 @@ top="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 2
 # not on PATH exits non-zero with nothing to say — which reads as "there is work" and is the
 # failure game_loop reported spending five rounds on.
 SR=""
-for candidate in "$root/.showrunner/bin/showrunner" "$root/bin/showrunner"; do
+# A self-vendored PIN first: showrunner develops itself, so this would otherwise run the
+# very code being edited, and one syntax error under lib/showrunner/ kills every verb.
+for candidate in "$root/.showrunner_self/bin/showrunner" \
+                 "$root/.showrunner/bin/showrunner" "$root/bin/showrunner"; do
   [ -x "$candidate" ] && { SR="$candidate"; break; }
 done
 [ -n "$SR" ] || { echo "no showrunner binary under $root — cannot tell" >&2; exit 2; }

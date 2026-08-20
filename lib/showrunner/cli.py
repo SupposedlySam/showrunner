@@ -12,7 +12,7 @@ import sys
 
 from . import (__version__, brief, campaign, collide, config, dispatch, events, gates,
                graph as G, harness, lanes, lease, locks, pin, worktree)
-from .util import (Refused, die, eprint, now, rel, run, short_session, slug, stamp)
+from .util import (Refused, die, eprint, git, now, rel, run, short_session, slug, stamp)
 
 BOLD, DIM, RED, GRN, YEL, OFF = "\033[1m", "\033[2m", "\033[31m", "\033[32m", "\033[33m", "\033[0m"
 if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
@@ -328,6 +328,33 @@ def cmd_doctor(args):
     sr = brief.sr_bin(cfg)
     if os.access(sr, os.X_OK):
         print("  %s the binary every brief names resolves: %s" % (GRN + "ok   " + OFF, rel(sr, cfg.root)))
+        # WHICH COPY, AND HOW OLD. A self-vendored pin is what lets this repo edit the tool its
+        # own guards run — but a pin nobody refreshes guards with rules from whenever it was
+        # taken, and that is invisible: the guard answers normally, it just answers an older
+        # question. Same "configured but inert" class as a hook that is registered and dead.
+        if os.path.realpath(sr).startswith(os.path.realpath(
+                os.path.join(cfg.root, ".showrunner_self")) + os.sep):
+            stamp_at = pin.read_pin(os.path.join(cfg.root, ".showrunner_self")) or {}
+            sha = stamp_at.get("sha")
+            rc_h, head, _ = git(["rev-parse", "HEAD"], cwd=cfg.root)
+            head = (head or "").strip() if rc_h == 0 else ""
+            if stamp_at.get("unreadable") or not sha:
+                print("  %s .showrunner_self is in force but its stamp is UNREADABLE — the "
+                      "plumbing is running code whose commit cannot be named. Re-pin it: "
+                      "`%s self --pin HEAD --dest .showrunner_self`"
+                      % (YEL + "warn " + OFF, rel(sr, cfg.root)))
+            elif head and sha == head:
+                print("  %s   ...from the self-vendored pin at %s, which IS this checkout's "
+                      "HEAD — your guards run the same rules you are reading"
+                      % (GRN + "ok   " + OFF, sha[:12]))
+            elif head:
+                rc_c, behind, _ = git(["rev-list", "--count", "%s..HEAD" % sha], cwd=cfg.root)
+                n = (behind or "").strip() if rc_c == 0 else "?"
+                print("  %s   ...from the self-vendored pin at %s, which is %s commit(s) BEHIND "
+                      "HEAD. Your guards are enforcing the rules as of that commit, not the ones "
+                      "you are editing — deliberate while you work, stale if you forget. Refresh: "
+                      "`%s self --pin HEAD --dest .showrunner_self`"
+                      % (YEL + "warn " + OFF, sha[:12], n, rel(sr, cfg.root)))
     else:
         print("  %s %s does not exist or is not executable, and every Crawler brief tells its "
               "agent to run it. Run install.sh, or work from a checkout that carries "

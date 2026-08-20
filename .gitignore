@@ -26,3 +26,8 @@ __pycache__/
 # Session handoff docs — local only. `.claude/` is tracked here so settings.json crosses
 # into every Crawler worktree; handoff notes must NOT ride along into them or into a public clone.
 .claude/handoff/
+
+# A PINNED copy of showrunner that its own guards and hooks run, so a mid-edit cannot disarm
+# them. Created by `showrunner self --pin HEAD --dest .showrunner_self`; never committed,
+# because it is a build of this repo rather than part of it.
+.showrunner_self/

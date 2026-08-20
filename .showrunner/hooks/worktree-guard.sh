@@ -51,13 +51,31 @@ case "$common" in
 esac
 root="$(cd "$(dirname "$common")" 2>/dev/null && pwd)" || root=""
 
-# THE SAME ORDER brief.sr_bin resolves in, and deliberately not a second resolver: the
-# installed copy wins because it is the one a consumer has, and bin/showrunner is the fallback
-# for the repo that IS showrunner and never runs its own installer. Two resolvers that
-# disagree about which binary is real is a failure nobody would see until they disagreed.
-for candidate in "$root/.showrunner/bin/showrunner" "$root/bin/showrunner"; do
+# THE SAME ORDER brief.sr_bin resolves in, and deliberately not a second resolver: a
+# self-vendored PINNED copy first (see .showrunner_self — code a mid-edit cannot break), then
+# the installed copy a consumer has, then bin/showrunner for the repo that IS showrunner and
+# never runs its own installer. Two resolvers that disagree about which binary is real is a
+# failure nobody would see until they disagreed.
+for candidate in "$root/.showrunner_self/bin/showrunner" \
+                 "$root/.showrunner/bin/showrunner" \
+                 "$root/bin/showrunner"; do
   if [ -x "$candidate" ]; then
-    exec "$candidate" worktree guard
+    # NOT `exec`, AND THAT IS THE FIX. A binary that is FOUND and BROKEN — one syntax error
+    # anywhere under lib/showrunner/ kills every verb at import — exited 1 with EMPTY stdout,
+    # which is neither a deny (2) nor a loud allow. So editing this tool silently disarmed its
+    # own guard, and the "fails open, never in silence" property below only ever covered the
+    # binary being MISSING. Measured, not reasoned: a one-line syntax error reproduced it.
+    out="$("$candidate" worktree guard 2>/tmp/.sr-guard-err.$$)"; rc=$?
+    err="$(cat /tmp/.sr-guard-err.$$ 2>/dev/null)"; rm -f /tmp/.sr-guard-err.$$
+    if [ "$rc" = 0 ]; then
+      printf '%s\n' "$out"
+      exit 0
+    fi
+    if [ "$rc" = 2 ]; then
+      printf '%s\n' "$err" >&2          # the refusal's reason, on the channel a denial uses
+      exit 2
+    fi
+    notice "⚠ THE WORKTREE GUARD DID NOT RUN — $candidate exited $rc instead of answering, so this tool call was ALLOWED WITHOUT BEING CHECKED. That is what a half-edited showrunner looks like from here: one syntax error under lib/showrunner/ kills every verb at import. A worktree held by another live session is NOT protected right now. First line: $(printf '%s' "$err" | head -1)"
   fi
 done
 

@@ -48,7 +48,10 @@ else
   [ "$(cd "$top" && pwd)" = "$root" ] || exit 0
 
   if [ -z "$SR" ]; then
-    for candidate in "$root/.showrunner/bin/showrunner" "$root/bin/showrunner"; do
+    # A self-vendored PIN first: showrunner develops itself, so this would otherwise run the
+# very code being edited, and one syntax error under lib/showrunner/ kills every verb.
+for candidate in "$root/.showrunner_self/bin/showrunner" \
+                 "$root/.showrunner/bin/showrunner" "$root/bin/showrunner"; do
       [ -x "$candidate" ] && { SR="$candidate"; break; }
     done
   fi
