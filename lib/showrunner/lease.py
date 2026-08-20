@@ -694,6 +694,32 @@ def rel_or(path, root):
 
 STOP_TRIGGER = os.path.join(".showrunner", "hooks", "inert-crawler-gate.sh")
 WHOAMI_HOOK = os.path.join(".showrunner", "hooks", "whoami.sh")
+DISPATCH_SHIM = os.path.join(".showrunner", "hooks", "dispatch-guard.sh")
+
+
+def register_dispatch_guard(cfg):
+    """Register the dispatch guard on PreToolUse (Bash). Returns (changed, message).
+
+    ON BASH SPECIFICALLY, because the matcher IS the fix: a consumer's version matched `Agent`
+    and guarded the in-process subagent tool while every real dispatch went out through Bash.
+    Registered separately from the worktree guard rather than folded into its entry — that one
+    matches Write|Edit|NotebookEdit|Bash, and widening this to match them too would run a
+    dispatch check on every file write for nothing.
+    """
+    import json
+    from .util import atomic_write_json, file_lock
+
+    path = os.path.join(cfg.root, ".claude", "settings.json")
+    entry = {"matcher": "Bash",
+             "hooks": [{"type": "command",
+                        "command": "\"$CLAUDE_PROJECT_DIR\"/" + DISPATCH_SHIM,
+                        "timeout": 10,
+                        "statusMessage": "showrunner: is this session allowed to dispatch?"}]}
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with file_lock(_register_lock(cfg)):
+        return _register_locked(
+            cfg, path, entry, json, atomic_write_json, "PreToolUse",
+            lambda p: _registration(p, "PreToolUse", "dispatch-guard"), "dispatch guard")
 
 
 def register_whoami(cfg):

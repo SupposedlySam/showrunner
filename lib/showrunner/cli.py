@@ -808,7 +808,8 @@ def cmd_worktree_register(args):
     rc = 0
     for register, what in ((lease.register_guard, "worktree guard"),
                            (lease.register_stop_trigger, "inert-Crawler stop trigger"),
-                           (lease.register_whoami, "seat announcement (SessionStart+PostCompact)")):
+                           (lease.register_whoami, "seat announcement (SessionStart+PostCompact)"),
+                           (lease.register_dispatch_guard, "dispatch guard (PreToolUse on Bash)")):
         changed, note = register(cfg)
         if changed:
             print(note)

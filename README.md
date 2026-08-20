@@ -10,7 +10,7 @@ single Crawler can see, and keeps the campaign coherent across sessions.
 > Status: **implemented and self-hosting.** The orchestration loop is real code
 > ([`lib/showrunner/`](lib/showrunner/)), it installs in one line with no packages, and it has been
 > run against its own issue list — see [Dogfooding](#dogfooding-showrunner-on-its-own-issues).
-> `python3 test/run.py` → **910 assertions, no setup beyond Python 3 and git.**
+> `python3 test/run.py` → **918 assertions, no setup beyond Python 3 and git.**
 
 ## Requirements
 
@@ -212,6 +212,52 @@ run stops and rewinds on the first failure rather than stacking onto a broken tr
 **no *new* failures versus a recorded baseline**, never "all green": a repo with pre-existing failures
 cannot satisfy "all green", so that version of the gate gets switched off on contact with reality.
 
+**showrunner greets its own sessions.** Its guards used to read only showrunner's own state, so a
+session that never registered held no lease and was no Crawler — and both guards correctly exited
+0 while it ran. In one 16-hour unattended run, 42 worker sessions were dispatched in a repo that
+had showrunner installed, wired, and carrying a campaign with 38 leaves done, and not one went
+through it. `showrunner whoami` fires on **SessionStart and PostCompact** and announces what this
+session IS. The second seam is the point: a rule that survives only until the next compaction is a
+rule for the first hour.
+
+The seat is **derived, never declared** — a linked worktree is a CRAWLER, the main checkout of a
+repo carrying a campaign is the ORCHESTRATOR, no campaign is SOLO, and UNKNOWN is a real answer
+announced as one. A prototype of this idea kept the seat in a one-word file; the file said
+`worker`, written mid-run, and both guards that read it exited 0 for the remaining 16 hours.
+
+**The cheap dispatch path has a gate on it.** `spawn --launch` is the correct way to start a
+Crawler; the competing path is one Bash line — a raw headless `claude` — which gets no worktree,
+no lease, no claim a reaper can reclaim, no leaf-scoped stop gate and no room. `dispatch guard`
+refuses it from a session whose role may not create one. Registered on **Bash**, which is the
+mechanism actually used: an earlier version matched `Agent`, guarded the in-process subagent tool,
+and reported nothing while 42 real dispatches went past it.
+
+**Roles are yours; showrunner checks the shape.** It never learns what a role *means* — the way
+lane rules already work. It knows two acquisition modes, `claim` (a session takes an open seat,
+exclusive, with pid+boot liveness) and `assign` (written by whoever created the session), and it
+refuses a configuration that cannot resolve: a dangling `reports_to`, a cycle, an org with no
+root, nothing claimable at all, or a fallback role that may create something. Definitions live at
+a user-level path, because an in-repo config is writable by the very session it constrains.
+
+**A campaign is smaller than a repo.** The natural unit of a body of work is often a story, and
+the handoff a showrunner charges is only paid for by the parallelism it buys — so several
+campaigns in one checkout is the ordinary case. `SHOWRUNNER_CAMPAIGN` scopes graph, record, events
+and scratch. **Locks deliberately do not follow it:** a lock names a physical resource shared by
+the machine, so two campaigns flashing the same TV must serialize against each other.
+
+**A run that could not measure anything is not a degraded comparison.** `check` already declined
+to let reduced resolution read as a clean comparison; it now refuses to let *no* resolution read
+as reduced. A suite that could not reach the world did not measure anything, and its failure count
+carries no information — so a VOID run exits **3**, distinct from 2, because "your code broke" and
+"nothing was measured" must not be the same number. Reported from a real run: 156 minutes, 43
+failures, several hours of interpretation, and a dead router.
+
+**showrunner runs a pinned copy of itself.** It develops itself, so its guards run the very code
+being edited — and one syntax error under `lib/showrunner/` kills every verb at import, which left
+the worktree guard exiting 1 with empty stdout: neither a refusal nor an announcement. Editing the
+tool silently disarmed it. The hooks now resolve a gitignored `.showrunner_self` pin first, so the
+plumbing runs code a mid-edit cannot break, and `doctor` says how far behind that pin has drifted.
+
 ## Lanes
 
 | Lane | Runs | Parallel? |
@@ -295,7 +341,7 @@ gone, and nothing but running it finds them.
 ## Verifying it
 
 ```bash
-python3 test/run.py            # 908 CORE assertions — Python 3 + git, nothing else
+python3 test/run.py            # 918 CORE assertions — Python 3 + git, nothing else
 bash prototype/demo.sh         # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 
@@ -391,19 +437,29 @@ Two things stay deliberately single: **integration** (it merges, runs checks, an
 resource** you have configured. Both refuse loudly instead of waiting silently, because a
 multi-minute silent wait is indistinguishable from a hang.
 
-`showrunner waiting` exits 0 while dispatched work has a **working** owner — a live PID that is
-not blocked — or an explicit park. That is the recomputable fact an idle watchdog needs, since it
-cannot see a subagent. A Crawler refused at a turn-end is live and is deliberately *not* counted:
+`showrunner waiting` answers in three codes: **0** waiting, **1** not waiting, **3** a Crawler is
+BLOCKED. That is the recomputable fact an idle watchdog needs, since it cannot see a subagent. A
+Crawler refused at a turn-end is live and is deliberately counted as NEITHER waiting nor parked:
 it is doing nothing, only a message restarts it, and calling that "waiting" would silence the
-watchdog on the one run that needs it. Those are reported separately, because somebody has to go
-and prompt them.
+watchdog on the one run that needs it.
 
-**Arming that watchdog is a manual step, once per install.** `showrunner doctor` names it and
-prints the exact line to paste, including the absolute path. It cannot do it for you: the verb
-that would arm it is callable by the sessions being watched, and a probe that always exits 0
-reads as "always waiting" — the watchdog switched off by the thing it watches. Until it is armed,
-an orchestrator that has correctly dispatched a full wave looks exactly like one that fell
-asleep, gets rung, and eventually pages you for a run that was behaving perfectly.
+BLOCKED has its own exit code because it used to share 1 with "not waiting", so the case the gate
+exists for produced the same number as an ordinary quiet campaign — and a real stop gate written
+against this verb never fired once. Build on `--porcelain`: a verb whose finding, verdict and
+status live on three channels gets integrated against incorrectly, and `waiting || exit 0` still
+swallows the blocked case, because that idiom collapses every non-zero code.
+
+**Arming that watchdog is a manual step, once per install.** Point it at
+`.showrunner/hooks/waiting-probe.sh`, **not** at `showrunner waiting` directly — the probe maps
+the three codes above onto the two-plus-unknown contract a watchdog expects, so a BLOCKED Crawler
+rings rather than being reported as a broken probe, and it never answers "waiting" from inside a
+worktree, where a Crawler would otherwise silence its own watchdog with a sibling's liveness.
+`showrunner doctor` names the file and says whether it is armed.
+
+It cannot arm it for you: a probe an agent can set is a watchdog an agent can switch off, and one
+that always exits 0 reads as "always waiting". Until it is armed, an orchestrator that has
+correctly dispatched a full wave looks exactly like one that fell asleep, gets rung, and
+eventually pages you for a run that was behaving perfectly.
 
 ## What a Crawler's harness gets
 
