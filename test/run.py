@@ -2982,6 +2982,58 @@ def test_worktree_guard_from_inside_a_worktree():
        "exited 1" in broke.stdout and "Traceback" in broke.stdout, broke.stdout[:300])
 
 
+def test_campaign_scoping():
+    group("A campaign is smaller than a repo (#39)")
+    cfg = make_repo()
+
+    # THE PREMISE, CHECKED FIRST. Everything was scoped per git root: one graph, one record, one
+    # event stream, one scratch — so `ready` returned the UNION and `claim --next` could hand
+    # campaign A a leaf belonging to B. The docs described that as intended, correctly, because
+    # the model was many orchestrators on ONE campaign rather than many campaigns.
+    eq("with no campaign selected, state lives where it always has — an existing checkout is "
+       "untouched, which is the property that makes this safe to adopt",
+       cfg.state_dir, os.path.join(cfg.root, ".showrunner"))
+    eq("...and the campaign is None rather than a campaign named ''", cfg.campaign, None)
+
+    a = config.load(start=cfg.root, campaign="DROP-4130 search relevance")
+    b = config.load(start=cfg.root, campaign="DROP-9000")
+    ok("a selected campaign nests under .showrunner/campaigns/, so it sits beside the default "
+       "rather than replacing it",
+       a.state_dir.startswith(os.path.join(cfg.root, ".showrunner", "campaigns")), a.state_dir)
+    ok("...slugged, because a campaign is named by a human and a story title is not a path",
+       " " not in os.path.basename(a.state_dir), a.state_dir)
+    ok("two campaigns get SEPARATE graphs, records, event streams and scratch — the union that "
+       "let one campaign's `ready` hand out another's leaf is gone",
+       len({a.graph_db, b.graph_db}) == 2 and len({a.state_dir, b.state_dir}) == 2,
+       (a.graph_db, b.graph_db))
+
+    # THE ONE THING THAT MUST NOT MOVE, and the only change here that could lose somebody's
+    # hardware. A lock names a PHYSICAL single-consumer resource — a device, a bound port — which
+    # is shared by the machine and not by a body of work. Per-campaign lock roots would let two
+    # campaigns hold "the device" at once: a mutex that is quietly a no-op, which is the failure
+    # `config.validate` already refuses in its other form because it looks like it works.
+    eq("the LOCK root stays repo-wide across campaigns, so two campaigns flashing the same "
+       "device still serialize against each other", a.lock_root, b.lock_root)
+    eq("...and it is the repo's, not either campaign's",
+       a.lock_root, os.path.join(cfg.root, ".showrunner", "locks"))
+    ok("...which is the opposite of every other state path, so the two rules are visibly "
+       "different rather than one rule with an exception nobody notices",
+       a.graph_db != b.graph_db and a.lock_root == b.lock_root)
+
+    # A CONFIG IS A STABLE ANSWER ABOUT ONE CAMPAIGN. The first version read the environment
+    # lazily inside each path property, so two configs loaded for two campaigns both reported
+    # whichever was selected LAST — a value that changes after you hold it.
+    os.environ["SHOWRUNNER_CAMPAIGN"] = "something-else-entirely"
+    try:
+        ok("a loaded config does not change its answers when the environment moves under it",
+           "drop-4130" in a.graph_db, a.graph_db)
+        env_cfg = config.load(start=cfg.root)
+        eq("...while a config loaded AFTER the change reads the new value, so the env var is "
+           "still the selector and not a one-shot", env_cfg.campaign, "something-else-entirely")
+    finally:
+        del os.environ["SHOWRUNNER_CAMPAIGN"]
+
+
 def test_issue_waker():
     group("The issue waker: who may be acted on, and who is only read")
     import importlib.util
@@ -5856,7 +5908,8 @@ def main():
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_waiting, test_concurrency,
                test_integration, test_worktree_lease, test_worktree_guard_from_inside_a_worktree,
-               test_self_pin, test_self_vendored_pin, test_issue_waker,
+               test_self_pin, test_self_vendored_pin, test_campaign_scoping,
+               test_issue_waker,
                test_central_install,
                test_installer_leaves_no_vendored_copy,
                test_publishable, test_dispatch, test_filed_issues_15_to_21,

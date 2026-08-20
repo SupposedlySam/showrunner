@@ -38,6 +38,17 @@
       "model": "opus"
     },
     {
+      "name": "core",
+      "lane": "headless",
+      "match": {
+        "labels": [
+          "backend",
+          "core"
+        ]
+      },
+      "model": "opus"
+    },
+    {
       "name": "implementation",
       "lane": "headless",
       "match": {

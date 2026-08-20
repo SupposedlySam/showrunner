@@ -459,6 +459,13 @@ NOT_PRODUCT = (
     # noticed" are the two states this whole exercise exists to keep apart.
     ".game_loop/",
     ".claude/",
+    # SITE WIRING, not product. `.showrunner/hooks/issue-waker.py` names ONE repo and ONE trusted
+    # set of authors — this repo's, and its maintainer's. `install.sh` does not copy it for that
+    # reason, so no consumer receives it and no consumer's behaviour depends on it. Generalising
+    # it (repo and trust set from config, the way lane rules and the chat path already are) would
+    # make it product and bring it into the swept set; until then, declaring it is the honest
+    # state rather than letting a tracked Python file sit outside the denominator unnoticed.
+    ".showrunner/hooks/issue-waker.py",
 )
 
 

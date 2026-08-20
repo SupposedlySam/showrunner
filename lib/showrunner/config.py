@@ -10,7 +10,7 @@ look like they are working right up until the run that they ruin.
 import json
 import os
 
-from .util import Refused, die, main_checkout
+from .util import Refused, die, main_checkout, slug
 
 CONFIG_NAME = "config.json"
 CONFIG_LOCAL_NAME = "config.local.json"
@@ -37,11 +37,22 @@ DEFAULTS = {
 }
 
 
+def _campaign_from_env():
+    """The selected campaign, or None. Read at LOAD time — see Config.__init__."""
+    return (os.environ.get("SHOWRUNNER_CAMPAIGN") or "").strip() or None
+
+
 class Config:
-    def __init__(self, data, root, path):
+    def __init__(self, data, root, path, campaign=None):
         self.data = data
         self.root = root          # the MAIN checkout, absolute
         self.path = path          # where config.json was read from (may not exist)
+        # CAPTURED ONCE, NOT READ ON EVERY ACCESS. The first version resolved the campaign
+        # lazily from the environment inside each path property, so a loaded Config changed its
+        # answers when os.environ moved — two configs loaded for two campaigns both reported the
+        # second one's paths. A config object has to be a stable answer about ONE campaign, or
+        # nothing downstream can hold one and trust it.
+        self._campaign = campaign if campaign is not None else _campaign_from_env()
 
     # -- accessors ---------------------------------------------------------
     def get(self, key, default=None):
@@ -52,8 +63,38 @@ class Config:
         return self.get("project_name") or os.path.basename(self.root)
 
     @property
+    def campaign(self):
+        """Which campaign this process is speaking for, or None for the repo-wide one.
+
+        A CAMPAIGN IS SMALLER THAN A REPO (#39). The natural size of a body of work is often a
+        story, and the handoff a showrunner charges — worktrees, briefs, rooms, integration — is
+        only paid for by the parallelism it buys. So several campaigns in one checkout is the
+        ORDINARY case, not a monorepo edge, and scoping everything per git root was wrong by
+        default rather than wrong in an unusual layout.
+
+        Read from the environment because the alternative is worse in a way this project has
+        already recorded: a flag would have to be threaded through every verb, and any verb that
+        forgot it would silently answer about a different campaign. An env var is inherited by a
+        subtree, which is exactly right HERE — a Crawler dispatched into a campaign belongs to it,
+        and its children do too. (That same inheritance is what makes an env var wrong for a
+        per-generation fact like a role: see #38.)
+
+        None is not a campaign named "": an empty or whitespace value means unset, and the
+        repo-wide layout is used unchanged.
+        """
+        return self._campaign
+
+    @property
     def state_dir(self):
-        return os.path.join(self.root, STATE_DIR)
+        """Where this campaign's state lives. `.showrunner/` when there is only one.
+
+        NAMED CAMPAIGNS NEST rather than sitting beside the default, so an existing checkout is
+        untouched: with no campaign selected every path below resolves byte-identically to what
+        it did before this existed, which is the property that makes adopting it safe.
+        """
+        base = os.path.join(self.root, STATE_DIR)
+        c = self.campaign
+        return os.path.join(base, "campaigns", slug(c, 60)) if c else base
 
     @property
     def graph_db(self):
@@ -71,17 +112,33 @@ class Config:
 
     @property
     def lock_root(self):
+        """The ONE thing that must not follow a campaign (#39).
+
+        A lock names a PHYSICAL single-consumer resource — a device, a bound port, a deploy
+        target. Those are shared by the machine, not by a body of work, so two campaigns in one
+        checkout both flashing the same TV must serialize against EACH OTHER. Scoping locks per
+        campaign would give each its own lock root and let both hold "the device" at once: a
+        mutex that is quietly a no-op, which config.validate already refuses in its other form
+        (a worktree-relative lock root) as the worst available failure, because it looks like it
+        works.
+
+        So this resolves against the REPO, deliberately bypassing the campaign re-rooting in
+        `abspath`. Caught by looking at the output rather than by reasoning: the first version
+        of the campaign selector moved it, and moving it is the one change here that could lose
+        somebody's hardware.
+        """
         v = self.get("lock_root")
         if v:
             # Resolve a relative entry against the REPO ROOT, like every other configured
             # path here — never against the process cwd. `os.path.abspath` resolves against
             # cwd, which made the lock root differ per caller while still passing an
             # `isabs()` check, because abspath makes anything absolute.
-            return self.abspath(v)
-        # Default: inside the MAIN checkout's state dir. Absolute by construction, and
-        # identical from every linked worktree because state_dir derives from
-        # --git-common-dir, not from the cwd.
-        return os.path.join(self.state_dir, "locks")
+            v = os.path.expanduser(v)
+            return v if os.path.isabs(v) else os.path.join(self.root, v)
+        # Default: inside the MAIN checkout's state dir — the REPO-WIDE one, never the
+        # campaign's. Absolute by construction, and identical from every linked worktree
+        # because the root derives from --git-common-dir, not from the cwd.
+        return os.path.join(self.root, STATE_DIR, "locks")
 
     @property
     def worktree_root(self):
@@ -96,10 +153,23 @@ class Config:
         return self.abspath(self.get("baseline"))
 
     def abspath(self, p):
+        """A configured path, resolved against the repo root — or against the CAMPAIGN.
+
+        A value written as `.showrunner/graph.db` names state, and state belongs to a campaign.
+        So under a selected campaign such a path is re-rooted at `state_dir` and follows it,
+        while anything else — `.worktrees`, an absolute path, a path outside `.showrunner/` — is
+        resolved against the root exactly as before. That keeps ONE rule for a reader ("state
+        paths follow the campaign") without a second config key to keep in sync.
+        """
         if not p:
             return None
         p = os.path.expanduser(p)
-        return p if os.path.isabs(p) else os.path.join(self.root, p)
+        if os.path.isabs(p):
+            return p
+        prefix = STATE_DIR + os.sep
+        if self.campaign and p.startswith(prefix):
+            return os.path.join(self.state_dir, p[len(prefix):])
+        return os.path.join(self.root, p)
 
     def resource(self, name):
         for r in self.get("resources") or []:
@@ -248,13 +318,13 @@ def find_root(start=None):
     return root
 
 
-def load(start=None, required=False):
+def load(start=None, required=False, campaign=None):
     root = find_root(start)
     path = os.path.join(root, STATE_DIR, CONFIG_NAME)
     if not os.path.exists(path):
         if required:
             die("no %s — run `showrunner init` first" % path, code=2)
-        return Config(dict(DEFAULTS), root, path)
+        return Config(dict(DEFAULTS), root, path, campaign=campaign)
     with open(path) as fh:
         try:
             data = json.load(fh)
@@ -283,7 +353,7 @@ def load(start=None, required=False):
         if not isinstance(local, dict):
             die("%s must be a JSON object" % local_path, code=2)
         merged.update(local)
-    return Config(merged, root, path)
+    return Config(merged, root, path, campaign=campaign)
 
 
 def write(cfg):
