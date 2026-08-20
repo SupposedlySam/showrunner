@@ -2982,6 +2982,90 @@ def test_worktree_guard_from_inside_a_worktree():
        "exited 1" in broke.stdout and "Traceback" in broke.stdout, broke.stdout[:300])
 
 
+def test_roles():
+    group("Roles as consumer config: shape is checked, meaning never is (#40)")
+    from showrunner import roles as R
+
+    good = {"lead": {"acquire": "claim", "capacity": 1, "may_create": ["worker"]},
+            "worker": {"acquire": "assign", "reports_to": "lead"},
+            R.FALLBACK: {"acquire": "claim"}}
+    lv = R.validate(good)
+    ok("a well-formed role set passes with no errors — showrunner checked the SHAPE and formed no "
+       "opinion about what 'lead' means", not [f for f in lv if f[0] == "error"], lv)
+
+    # EACH RULE EXERCISED SEPARATELY. A validator tested only against one broken config reports
+    # whichever rule happens to fire first, and the others are never known to work at all.
+    for label, defs, want in (
+            ("a reports_to naming no defined role",
+             {"a": {"acquire": "claim", "reports_to": "nobody"}}, "not a defined role"),
+            ("a may_create naming no defined role",
+             {"a": {"acquire": "claim", "may_create": ["ghost"]}}, "may_create"),
+            ("an acquire mode that is neither claim nor assign",
+             {"a": {"acquire": "sideways"}}, "must be one of"),
+            ("a capacity that is not a positive integer",
+             {"a": {"acquire": "claim", "capacity": 0}}, "positive integer"),
+            ("a reports_to CYCLE",
+             {"a": {"acquire": "claim", "reports_to": "b"},
+              "b": {"acquire": "claim", "reports_to": "a"}}, "CYCLE"),
+            ("an org with NO ROOT, so escalation never ends",
+             {"a": {"acquire": "claim", "reports_to": "b"},
+              "b": {"acquire": "claim", "reports_to": "a"}}, "no ROOT"),
+            ("NOTHING CLAIMABLE, so a from-scratch session could never acquire a role",
+             {"t": {"acquire": "assign"}, "w": {"acquire": "assign", "reports_to": "t"}},
+             "nothing is claimable"),
+            ("a FALLBACK that may_create, which would be a way around the policy",
+             {"x": {"acquire": "claim"},
+              R.FALLBACK: {"acquire": "claim", "may_create": ["x"]}}, "fallback")):
+        errs = [m for l, m in R.validate(defs) if l == "error"]
+        ok("%s is an ERROR" % label, any(want.lower() in m.lower() for m in errs), errs[:2])
+
+    ok("an unknown field is a WARNING naming what IS checked, not an error — a consumer may "
+       "carry their own keys, they just do not mean anything here",
+       any(l == "warn" and "colour" in m
+           for l, m in R.validate({"a": {"acquire": "claim", "colour": "blue"}})),
+       R.validate({"a": {"acquire": "claim", "colour": "blue"}}))
+    ok("...and `notes` is NOT warned about, because it is the one field declared as prose "
+       "showrunner deliberately does not check",
+       not any("notes" in m for l, m in R.validate({"a": {"acquire": "claim", "notes": "hi"}})))
+
+    # A CLAIM IS A LOCK, reused rather than reinvented: exclusive, held by a live process,
+    # reclaimable when that process is proved dead. A second mutex would drift from the first.
+    cfg = make_repo()
+    holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        got, h = R.claim(cfg, "lead", "sess-A", holder.pid, who="agent-a")
+        ok("a session can CLAIM an open seat", got, h)
+        eq("...and the roster shows it HELD by a live process",
+           [(r["role"], r["state"]) for r in R.roster(cfg)], [("lead#0", locks.HELD)])
+        got2, h2 = R.claim(cfg, "lead", "sess-B", os.getpid(), who="agent-b")
+        ok("...and a SECOND session cannot take the same seat — 'two sessions believing they "
+           "lead with nobody told' is the hazard, and exclusivity is what answers it", not got2)
+        eq("...with the roster naming who actually holds it, so the loser can see why",
+           (h2 or {}).get("session"), "sess-A")
+        # A SECOND, REAL CONSUMER rather than a second assertion over the same one: `doctor`
+        # reads the roster so a human can see who holds what. An empty roster reads as "no seat
+        # is held", which is precisely what a session checks before claiming one.
+        doc = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                             cwd=cfg.root, capture_output=True, text=True,
+                             env=dict(os.environ, NO_COLOR="1"))
+        ok("doctor reports the held seat and who holds it, so a roster that went empty would be "
+           "visible to a human rather than only to the next claimer",
+           "lead#0" in doc.stdout and "agent-a" in doc.stdout,
+           [l for l in doc.stdout.splitlines() if "seat" in l][:1])
+    finally:
+        holder.terminate()
+        holder.wait()
+
+    # THE CLAIM ROOT FOLLOWS THE CAMPAIGN, unlike the lock root. Two campaigns each want their
+    # own lead; a physical device stays shared (#39).
+    a = config.load(start=cfg.root, campaign="one")
+    b = config.load(start=cfg.root, campaign="two")
+    ok("role claims are per-CAMPAIGN, so two campaigns can each have a lead",
+       R._claims_root(a) != R._claims_root(b), (R._claims_root(a), R._claims_root(b)))
+    eq("...while the lock root stays shared, because a device is shared by the machine and not "
+       "by a body of work", a.lock_root, b.lock_root)
+
+
 def test_campaign_scoping():
     group("A campaign is smaller than a repo (#39)")
     cfg = make_repo()
@@ -5908,7 +5992,7 @@ def main():
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_waiting, test_concurrency,
                test_integration, test_worktree_lease, test_worktree_guard_from_inside_a_worktree,
-               test_self_pin, test_self_vendored_pin, test_campaign_scoping,
+               test_self_pin, test_self_vendored_pin, test_roles, test_campaign_scoping,
                test_issue_waker,
                test_central_install,
                test_installer_leaves_no_vendored_copy,

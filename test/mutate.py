@@ -163,6 +163,18 @@ TARGETS = [
     ("routing gaps, read back", "lanes.unmatched", "lib/showrunner/lanes.py",
      r"(def unmatched\(cfg, tail=200\):\n)",
      "    return None, None\ndef _neutered_unmatched(cfg, tail=200):\n"),
+    # THE ROLE VALIDATOR. An always-empty answer is the silent half of having no policy: doctor
+    # prints nothing, every config reads as valid, and an org whose escalation cycles or whose
+    # fallback may dispatch passes review. A validator that never objects and a configuration
+    # with nothing wrong are the same output.
+    ("role shape validation", "roles.validate", "lib/showrunner/roles.py",
+     r"(def validate\(roles\):\n)",
+     "    return []\ndef _neutered_validate(roles):\n"),
+    # An empty roster reads as "no seat is held", which is exactly what a session checks before
+    # claiming one — so it is the answer that lets two sessions hold the same role.
+    ("the role roster", "roles.roster", "lib/showrunner/roles.py",
+     r"(def roster\(cfg\):\n)",
+     "    return []\ndef _neutered_roster(cfg):\n"),
     ("locks present on disk", "locks.LockSet.on_disk", "lib/showrunner/locks.py",
      r"(    def on_disk\(self\):\n)",
      "        return []\n    def _neutered_on_disk(self):\n"),

@@ -11,7 +11,7 @@ import shutil
 import sys
 
 from . import (__version__, brief, campaign, collide, config, dispatch, events, gates,
-               graph as G, harness, lanes, lease, locks, pin, worktree)
+               graph as G, harness, lanes, lease, locks, pin, roles, worktree)
 from .util import (Refused, die, eprint, git, now, rel, run, short_session, slug, stamp)
 
 BOLD, DIM, RED, GRN, YEL, OFF = "\033[1m", "\033[2m", "\033[31m", "\033[32m", "\033[33m", "\033[0m"
@@ -216,6 +216,22 @@ def cmd_doctor(args):
     else:
         print("  %s all %d recorded routing decision(s) matched a lane rule"
               % (GRN + "ok   " + OFF, seen))
+
+    # ROLES, SHAPE ONLY (#40). showrunner never learns what a role MEANS — it checks that the
+    # org can be resolved: escalation ends somewhere, nothing dangles, something is obtainable by
+    # a session nobody created for a purpose. `notes` is consumer prose and says so.
+    role_defs, role_problems = roles.spec(cfg)
+    for msg in role_problems:
+        print("  %s %s" % (YEL + "warn " + OFF, msg))
+    for level, msg in roles.validate(role_defs):
+        mark = {"error": RED + "ERROR" + OFF, "warn": YEL + "warn " + OFF,
+                "ok": GRN + "ok   " + OFF}[level]
+        print("  %s %s" % (mark, msg))
+        bad += level == "error"
+    held = [r for r in roles.roster(cfg) if r["state"] == locks.HELD]
+    if held:
+        print("  %s %d role seat(s) held: %s" % (GRN + "ok   " + OFF, len(held),
+              ", ".join("%s by %s" % (r["role"], (r["holder"].get("who") or "?")) for r in held)))
 
     ls = locks.LockSet(cfg)
     if ls.names():
