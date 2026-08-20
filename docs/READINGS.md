@@ -29,13 +29,13 @@ One line per reading, newest last:
   my own commit message against the file. That is the failure mode this file has, demonstrated on
   day one, and it is why the section above says do not build a gate to check these entries: a gate
   would have passed this line too.
-- llms.txt — read whole at HEAD on 2026-08-20 — lines 1–235 found four stale passages a search
+- llms.txt — read whole at ac2b9db on 2026-08-20 — lines 1–235 found four stale passages a search
   would not have: `doctor`'s watchdog remedy still pointed at `showrunner waiting` directly, which
   became a trap the day that verb grew a third exit code; `worktree register` said "BOTH hooks"
   after it became four across three events; and two descriptions of `waiting`'s exit codes predated
   the BLOCKED case. Lines 235–558 found nothing stale — recorded because "read and found nothing"
   and "not read" are the two states this file exists to tell apart, and only one of them is work.
-- README.md — read whole at HEAD on 2026-08-20 — carried **the same two stale claims** as llms.txt:
+- README.md — read whole at ac2b9db on 2026-08-20 — carried **the same two stale claims** as llms.txt:
   the watchdog remedy naming the verb rather than `waiting-probe.sh`, and `waiting` described
   without exit 3. Fixing llms.txt had not fixed them, and nothing connected the two. That is the
   argument for this file in one line: the defect was duplicated across the front door, and the

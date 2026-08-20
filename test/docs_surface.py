@@ -123,7 +123,13 @@ def main():
         head = subprocess.run(["git", "-C", ROOT, "rev-parse", "--short", "HEAD"],
                               capture_output=True, text=True).stdout.strip()
         for d in DOCS:
-            hits = [l for l in body.splitlines() if l.strip().startswith("- ") and d in l]
+            # Anchor on the entry's own prefix, never a substring anywhere in the line: one
+            # entry mentioned the OTHER file while describing a shared defect, and a plain
+            # `d in l` reported README's reading as llms.txt's. A ledger that answers for the
+            # wrong file is worse than one that answers "never" -- it retires the question.
+            # Struck entries (leading ~~) are corrections, not readings, and never count.
+            hits = [l for l in body.splitlines()
+                    if l.strip().startswith("- " + d + " ")]
             last = hits[-1] if hits else None
             if not last:
                 print("  %-11s NEVER read end to end on the record" % d)
