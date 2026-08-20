@@ -51,7 +51,7 @@ import json
 import os
 
 from . import locks
-from .util import slug
+from .util import session_pid, slug
 
 USER_PATH = os.path.join(
     os.path.expanduser(os.environ.get("XDG_CONFIG_HOME") or "~/.config"),
@@ -67,6 +67,10 @@ FIELDS = ("acquire", "capacity", "reports_to", "may_create", "writes", "notes")
 # the same reason the roles themselves are: a taxonomy in the tool is a taxonomy its consumers
 # have to argue with.
 SEAT_ROLES_KEY = "seat_roles"
+
+# The porcelain contract's version, so a guard parsing it can refuse a shape it does not
+# know rather than silently misread one. Bump it when a field changes meaning.
+PORCELAIN_VERSION = 1
 
 
 def _read(path):
@@ -247,13 +251,52 @@ def roster(cfg):
     return out
 
 
-def claim(cfg, role, session, pid, who=None, seat=0):
-    """Take an open seat. Returns (ok, holder). Exclusivity and liveness come from locks.Lock."""
-    name = "%s#%d" % (slug(role, 40), seat)
-    lock = locks.Lock(_claims_root(cfg), name)
+def _seat_lock(cfg, role, seat):
+    return locks.Lock(_claims_root(cfg), "%s#%d" % (slug(role, 40), seat))
+
+
+def claim(cfg, role, session, pid=None, who=None, seat=0):
+    """Take an open seat. Returns (ok, holder). Exclusivity and liveness come from locks.Lock.
+
+    THE PID IS DISCOVERED, NOT HANDED OVER, when the caller does not supply one — because a
+    claim keyed to a process that exits when the call returns is DEAD ON ARRIVAL. It reports
+    success, and the very next read of the roster says STALE, so `whoami` announces the fallback
+    while the claimer was told `claimed: True`. Reported from a real seating attempt, recovered
+    only by walking the ancestry by hand to find the long-lived session — which is exactly what
+    `util.session_pid` already does, with a `basis` that separates "proved it" from "could not
+    tell". This is the same hazard `lock acquire` warns about in its own output; the roles path
+    shared the mechanism and not the mitigation.
+
+    A pid that cannot be resolved is REFUSED rather than recorded, following `lease`: a claim
+    with no liveness is not a weaker claim, it is a lock nothing can ever reclaim. `pid_basis`
+    travels with the holder so a reader sees which fact the liveness rests on.
+    """
+    basis = "supplied"
+    if pid is None:
+        pid, basis = session_pid()
+        if pid is None:
+            return False, {"pid_basis": basis, "role": role,
+                           "why": "no session process could be resolved, so this claim would "
+                                  "have no liveness at all and was NOT taken"}
+    lock = _seat_lock(cfg, role, seat)
     ok = lock.acquire(pid, who or session or "?", session=session,
-                      extra={"role": role, "seat": str(seat)})
+                      extra={"role": role, "seat": str(seat), "pid_basis": basis})
     return ok, lock.holder()
+
+
+def release(cfg, role, pid=None, seat=0, force=False):
+    """Give a seat back. Returns (ok, holder-before).
+
+    The counterpart `claim` never had, which is why a seat could only be given up by outliving
+    it or by deleting a file. The pid is discovered the same way `claim` discovers it, because
+    `locks.Lock.release` checks the releaser against the recorded holder and the process calling
+    a CLI verb is never the process that was recorded.
+    """
+    lock = _seat_lock(cfg, role, seat)
+    before = lock.holder()
+    if pid is None:
+        pid = session_pid()[0] or os.getpid()
+    return lock.release(pid=pid, force=force), before
 
 
 # ------------------------------------------------------------------- the seat
@@ -388,6 +431,46 @@ _SEAT_MANIFEST = {
 }
 
 
+def resolution(cfg, session=None):
+    """Everything a guard needs in order to enforce, as DATA. Returns a dict.
+
+    THE ANNOUNCEMENT AND THE POLICY COME FROM HERE, both of them. `whoami` renders this and
+    `whoami --porcelain` prints it, so the prose cannot drift from the answer a guard acts on.
+
+    That is not hypothetical tidiness. `whoami` emitted prose and nothing else, so a hook author
+    who needed the resolved role had no way to ask for it and reimplemented the resolver. A
+    consumer's write guard carried such a copy; when a seat learned to resolve through
+    `seat_roles` the copy did not, so the announcement said one role while the guard enforced the
+    deny-everything fallback, and a session was correctly unable to edit the file it had been
+    dispatched to edit. Two statements of one policy, free to disagree — which is the failure
+    `enforced_lines` exists to prevent INSIDE the announcement, arriving from outside it.
+
+    `enforced` is the field to branch on, and it is false whenever showrunner is enforcing
+    nothing — no definitions, or definitions it could not read. A guard must not read a null
+    `role` as "no restriction"; that is the fail-open reading, and `problems` says which it is.
+    """
+    where, evidence = seat(cfg)
+    defs, problems = spec(cfg)
+    role, how = (None, None)
+    if defs and not problems:
+        role, how = _resolved(cfg, session, defs)
+    d = (defs.get(role) or {}) if role else {}
+    return {
+        "version": PORCELAIN_VERSION,
+        "seat": where,
+        "evidence": evidence,
+        "campaign": cfg.campaign,
+        "role": role,
+        "how": how,
+        "enforced": bool(role),
+        "policy": {"writes": d.get("writes"), "may_create": d.get("may_create") or [],
+                   "reports_to": d.get("reports_to"), "acquire": d.get("acquire")},
+        "notes": d.get("notes"),
+        "problems": list(problems),
+        "ignored_seat_mappings": seat_roles(cfg)[1],
+    }
+
+
 def whoami(cfg, session=None):
     """What this session is, what it may do, and what it may not. Returns a list of lines.
 
@@ -398,32 +481,30 @@ def whoami(cfg, session=None):
     from .brief import sr_bin
 
     sr = sr_bin(cfg)
-    where, evidence = seat(cfg)
-    defs, problems = spec(cfg)
+    r = resolution(cfg, session)
+    where = r["seat"]
 
-    out = ["showrunner: you are the %s here." % where.upper(), "  %s." % evidence]
-    if cfg.campaign:
-        out.append("  campaign: %s" % cfg.campaign)
+    out = ["showrunner: you are the %s here." % where.upper(), "  %s." % r["evidence"]]
+    if r["campaign"]:
+        out.append("  campaign: %s" % r["campaign"])
 
     for line in _SEAT_MANIFEST.get(where, []):
         out.append("  " + line.replace("{sr}", sr))
 
-    if problems:
-        out.append("  ROLE DEFINITIONS UNREADABLE: %s" % problems[0])
+    if r["problems"]:
+        out.append("  ROLE DEFINITIONS UNREADABLE: %s" % r["problems"][0])
         out.append("  Nothing below is enforced, and that is said rather than left blank.")
-    elif defs:
-        role, how = _resolved(cfg, session, defs)
-        out.append("  role: %s (%s)" % (role, how))
+    elif r["enforced"]:
+        out.append("  role: %s (%s)" % (r["role"], r["how"]))
         # A MAPPING THAT WAS DROPPED is announced next to the role it did not produce. Silently
         # falling back is how a session ends up told it is `unassigned` while a file it cannot
         # see says otherwise, with nothing connecting the two.
-        for msg in seat_roles(cfg)[1]:
+        for msg in r["ignored_seat_mappings"]:
             out.append("  SEAT MAPPING IGNORED: %s" % msg)
-        for line in enforced_lines(defs.get(role)):
+        for line in enforced_lines(r["policy"]):
             out.append("    ENFORCED  " + line)
-        notes = (defs.get(role) or {}).get("notes")
-        if notes:
-            out.append("    note      %s" % notes)
+        if r["notes"]:
+            out.append("    note      %s" % r["notes"])
             out.append("    ...which is prose your project wrote. Nothing checks it.")
     else:
         out.append("  no roles are defined, so no dispatch policy is enforced for any seat.")

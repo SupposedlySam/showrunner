@@ -10,7 +10,7 @@ single Crawler can see, and keeps the campaign coherent across sessions.
 > Status: **implemented and self-hosting.** The orchestration loop is real code
 > ([`lib/showrunner/`](lib/showrunner/)), it installs in one line with no packages, and it has been
 > run against its own issue list — see [Dogfooding](#dogfooding-showrunner-on-its-own-issues).
-> `python3 test/run.py` → **930 assertions, no setup beyond Python 3 and git.**
+> `python3 test/run.py` → **962 assertions, no setup beyond Python 3 and git.**
 
 ## Requirements
 
@@ -252,6 +252,34 @@ main checkout is a location, not a record, and authority by location is the fail
 replaced. `doctor` refuses a seat mapped at a role nothing defines — that seat resolves to the
 fallback, so one typo buys the whole write denial back and nothing else would have said so.
 
+**Both acquisition modes had to become reachable before either worked.** `assign` had no reader;
+`claim` had no writer — `roles.claim` was a library function nothing called, and the `claim` verb
+claims a *leaf*. On a stock install every session got the fallback whatever its roles said.
+
+```
+showrunner role claim campaign-lead --who agent-a   # a role declaring acquire=claim
+showrunner role roster                              # every seat, its state, its liveness basis
+showrunner role release campaign-lead
+```
+
+A role declaring `assign` is refused here — its meaning is that whoever created the session
+decided, so claiming it would be self-nomination into a seat the model says cannot be
+self-nominated; `seat_roles` is how that one is obtained. **A claim's pid is discovered, not handed
+over:** liveness is a pid plus a boot token, so a seat keyed to the short-lived process that made
+the call reports success and reads STALE the instant that call returns, and `whoami` announces the
+fallback again. `lock acquire` warns about exactly this; the roles path shared its mechanism and
+not its mitigation. A pid that cannot be resolved is refused rather than recorded, because a claim
+with no liveness is not a weaker claim — it is a lock nothing can ever reclaim.
+
+**A guard cannot consume prose.** `whoami` emitted only prose, so a hook author needing the
+resolved role had no way to ask and reimplemented the resolver — and a copy drifts. One did: when a
+seat learned to resolve through `seat_roles` the copy did not, so the announcement said one role
+while the guard still enforced the deny-everything fallback. `showrunner whoami --porcelain` emits
+the seat, the resolved role, how it resolved, and the `writes`/`may_create`/`reports_to` a guard
+enforces. `whoami` renders that same dict, so the two cannot disagree. Branch on `enforced`; a null
+`role` is not "no restriction", and the porcelain exits non-zero if it could not resolve so a
+parser can fail closed.
+
 **A campaign is smaller than a repo.** The natural unit of a body of work is often a story, and
 the handoff a showrunner charges is only paid for by the parallelism it buys — so several
 campaigns in one checkout is the ordinary case. `SHOWRUNNER_CAMPAIGN` scopes graph, record, events
@@ -354,7 +382,7 @@ gone, and nothing but running it finds them.
 ## Verifying it
 
 ```bash
-python3 test/run.py            # 930 CORE assertions — Python 3 + git, nothing else
+python3 test/run.py            # 962 CORE assertions — Python 3 + git, nothing else
 bash prototype/demo.sh         # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 

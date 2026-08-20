@@ -149,6 +149,9 @@ def pid_alive(pid):
 
 
 SESSION_PROCESS = "claude"
+# The one basis that proves a resolved session process. Named because a caller
+# checking "did this actually resolve?" must not spell it a second time.
+RESOLVED_BASIS = "ancestor-claude"
 MAX_ANCESTRY = 12
 
 
@@ -184,7 +187,7 @@ def session_pid(start=None):
             break
         ppid, comm = parts[0].strip(), os.path.basename(parts[1].strip())
         if comm.startswith(SESSION_PROCESS):
-            return pid, "ancestor-%s" % SESSION_PROCESS
+            return pid, RESOLVED_BASIS
         if first_parent is None:
             first_parent = ppid
         if ppid in ("0", "1"):
@@ -196,6 +199,55 @@ def session_pid(start=None):
     if first_parent and first_parent not in ("0", "1"):
         return int(first_parent), "ppid-fallback"
     return None, "unresolved"
+
+
+def git_common_dir(path):
+    """The shared git dir behind `path`, absolute, or None. Two worktrees of one repo agree here."""
+    rc, out, _ = run(["git", "rev-parse", "--git-common-dir"], cwd=path)
+    out = (out or "").strip()
+    if rc != 0 or not out:
+        return None
+    return os.path.realpath(out if os.path.isabs(out) else os.path.join(path, out))
+
+
+def caller_tree(cwd=None):
+    """The worktree the caller is STANDING IN, or None. Never raises."""
+    rc, top, _ = run(["git", "rev-parse", "--show-toplevel"], cwd=cwd or os.getcwd())
+    top = (top or "").strip()
+    return os.path.realpath(top) if rc == 0 and top else None
+
+
+def resolve_from_caller(cfg, given, cwd=None):
+    """(path, root) for a path a SESSION supplied. Never raises.
+
+    A RELATIVE PATH BELONGS TO THE TREE THE CALLER IS STANDING IN, not to the main checkout.
+    Joining it against `cfg.root` reads a DIFFERENT FILE THAT HAPPENS TO SHARE THE PATH, and the
+    proof gate turned that into its worst possible verdict: an agent working a leaf passed a
+    relative path to a test it had just written in its own worktree, the join found the main
+    checkout's stale copy of the same path, and the close was refused as proof that predates the
+    claim. The proof was real and fresh. The gate read another file and manufactured exactly the
+    verdict it exists to catch, which gives the agent no reason to suspect path resolution.
+
+    Absolute paths were unaffected, so the bug was invisible to anyone who passed those and
+    reliably fatal to anyone who typed the relative path that is natural when you are standing in
+    the directory.
+
+    From the main checkout the caller's tree IS `cfg.root`, so nothing changes there. `root` comes
+    back so a refusal can NAME where it looked — the fix for the confusion is not only resolving
+    correctly, it is saying which tree the answer came from.
+    """
+    if os.path.isabs(given):
+        return given, None
+    root = caller_tree(cwd)
+    # ...BUT ONLY A TREE OF *THIS* REPO. A cwd in some unrelated checkout is not "the tree the
+    # closer is standing in" in any sense the campaign knows about, and silently resolving a
+    # proof path into a stranger repo would be the same class of bug pointed somewhere new. When
+    # the cwd is not ours the answer falls back to `cfg.root`, which is the behaviour that was
+    # always correct for that case.
+    if root and git_common_dir(root) != git_common_dir(cfg.root):
+        root = None
+    root = root or cfg.root
+    return os.path.join(root, given), root
 
 
 def run(cmd, cwd=None, check=False, timeout=None, env=None):

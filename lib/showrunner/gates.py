@@ -29,7 +29,7 @@ import os
 import re
 import time
 
-from .util import Refused, die, git, now, rel, run
+from .util import Refused, die, git, now, rel, resolve_from_caller, run
 
 DEFAULT_FAILURE_PATTERN = (
     r"^(?:FAILED|FAIL|ERROR|E\s)\b.*|"
@@ -78,10 +78,10 @@ def close_gate(cfg, graph, leaf_id, proof, reason, refuted=False, evidence=None,
             "premise against." % leaf_id,
             hint="An unsourced premise verdict is the same wish as an unsourced 'done'.")
     if premise_read:
-        pr = premise_read if os.path.isabs(premise_read) else os.path.join(cfg.root, premise_read)
+        pr, pr_root = resolve_from_caller(cfg, premise_read)
         if not os.path.exists(pr):
             raise Refused("REFUSED to close %s: --premise-read names a path that does not "
-                          "exist: %s" % (leaf_id, premise_read))
+                          "exist: %s%s" % (leaf_id, premise_read, _looked_in(pr_root)))
     artifact = evidence if refuted else proof
     label = "--evidence" if refuted else "--proof"
 
@@ -92,10 +92,10 @@ def close_gate(cfg, graph, leaf_id, proof, reason, refuted=False, evidence=None,
             if not refuted else
             "Name the file you checked the premise against. A refutation is an assertion too.")
 
-    path = artifact if os.path.isabs(artifact) else os.path.join(cfg.root, artifact)
+    path, art_root = resolve_from_caller(cfg, artifact)
     if not os.path.exists(path):
-        raise Refused("REFUSED to close %s: %s names a path that does not exist: %s"
-                      % (leaf_id, label, artifact))
+        raise Refused("REFUSED to close %s: %s names a path that does not exist: %s%s"
+                      % (leaf_id, label, artifact, _looked_in(art_root)))
     if os.path.isfile(path) and os.path.getsize(path) == 0:
         raise Refused("REFUSED to close %s: %s names an empty file: %s" % (leaf_id, label, artifact))
 
@@ -117,8 +117,8 @@ def close_gate(cfg, graph, leaf_id, proof, reason, refuted=False, evidence=None,
                 raise Refused(
                     "REFUSED to close %s: %s (%s) has not changed since before the leaf was "
                     "claimed (artifact %s, claim %s). An artifact older than the work is "
-                    "evidence about something else."
-                    % (leaf_id, label, artifact, _ts(mtime), _ts(claim_ts)),
+                    "evidence about something else. Read from %s."
+                    % (leaf_id, label, artifact, _ts(mtime), _ts(claim_ts), path),
                     hint="If a pre-existing artifact genuinely is the proof (e.g. a test that "
                          "already covered this and now passes for a new reason), say why:\n"
                          "  --stale-proof-reason \"<why this older file proves this work>\"\n"
@@ -143,6 +143,15 @@ def close_gate(cfg, graph, leaf_id, proof, reason, refuted=False, evidence=None,
         "checkable; relevance is not. The proof is recorded on the close so a reviewer can "
         "judge it later — that is the boundary, stated rather than papered over.")
     return graph.show(leaf_id), notes
+
+
+def _looked_in(root):
+    """The tree a relative path was resolved against, or nothing for an absolute one.
+
+    Said in the refusal because the failure it replaces was undiagnosable from the outside: the
+    gate named a path the caller recognised and a verdict about a file it had never seen.
+    """
+    return "" if not root else " (resolved against %s — pass an absolute path to override)" % root
 
 
 def _ts(epoch):
