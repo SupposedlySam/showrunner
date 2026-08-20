@@ -4147,6 +4147,31 @@ def test_installer_leaves_no_vendored_copy():
     # which is a proxy that cannot tell "names the event it registered on" from "hands you JSON
     # to paste" — and it failed the moment the installer's report started naming both events
     # correctly. The thing that must not appear is a pasteable hook entry.
+    # EVERY GUARD THIS PROJECT SHIPS IS REGISTERED, and this assertion exists because the
+    # dispatch guard was built, tested, committed and shipped WITHOUT being registered — a verb
+    # nobody registers has never once run, which is the exact failure #37 reports, arriving
+    # inside the fix for #37. `lock guard` was in that state for this repo's entire life.
+    reg_settings = json.load(open(os.path.join(ROOT, ".claude", "settings.json")))
+    reg_cmds = [h.get("command", "")
+                for ev in ("PreToolUse", "Stop", "SessionStart", "PostCompact")
+                for e in reg_settings.get("hooks", {}).get(ev, [])
+                for h in e.get("hooks", [])]
+    for shim, why in ((lease.GUARD_SHIM, "the worktree guard"),
+                      (lease.STOP_TRIGGER, "the inert-Crawler stop trigger"),
+                      (lease.WHOAMI_HOOK, "the seat announcement"),
+                      (lease.DISPATCH_SHIM, "the dispatch guard")):
+        name = os.path.basename(shim)
+        ok("%s is REGISTERED in this repo's own settings, not merely built — a guard nobody "
+           "registers has never once run" % why,
+           any(name in c for c in reg_cmds), sorted(os.path.basename(c) for c in reg_cmds))
+    ok("...and the dispatch guard is matched on BASH, which is the mechanism actually used — a "
+       "version matched on `Agent` guarded the subagent tool while 42 real dispatches went "
+       "through Bash",
+       any(e.get("matcher") == "Bash"
+           for e in reg_settings["hooks"]["PreToolUse"]
+           for h in e.get("hooks", []) if "dispatch-guard" in h.get("command", "")),
+       [e.get("matcher") for e in reg_settings["hooks"]["PreToolUse"]])
+
     ok("...and therefore does NOT also print a hook ENTRY for the reader to paste, which would "
        "register it a second time — the entry has exactly one author, `lease.register_guard`",
        '"matcher"' not in quiet.stdout and '"type": "command"' not in quiet.stdout
