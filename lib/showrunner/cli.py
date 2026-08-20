@@ -217,6 +217,16 @@ def cmd_doctor(args):
         print("  %s all %d recorded routing decision(s) matched a lane rule"
               % (GRN + "ok   " + OFF, seen))
 
+    # WHERE THE HARNESS COMES FROM (#41). An installer inside somebody's working tree provisions
+    # every Crawler from whatever is uncommitted there at that moment — a per-machine, per-minute
+    # artifact deciding what the whole party is guarded by, and nothing else would say so.
+    prov = harness.installer_provenance(cfg)
+    if prov:
+        level, msg = prov
+        print("  %s %s" % ({"error": RED + "ERROR" + OFF, "warn": YEL + "warn " + OFF,
+                            "ok": GRN + "ok   " + OFF}[level], msg))
+        bad += level == "error"
+
     # ROLES, SHAPE ONLY (#40). showrunner never learns what a role MEANS — it checks that the
     # org can be resolved: escalation ends somewhere, nothing dangles, something is obtainable by
     # a session nobody created for a purpose. `notes` is consumer prose and says so.
@@ -1606,6 +1616,21 @@ def cmd_baseline(args):
 def cmd_check(args):
     cfg = _cfg(args)
     current = gates.run_checks(cfg)
+
+    # VALIDITY IS A PRECONDITION, NOT A FINDING (#41). A run that could not reach the world did
+    # not measure anything, so its failure count carries no information — and comparing it would
+    # produce a confident, detailed verdict about code that was never exercised. Exit 3, its own
+    # code, because folding it into 2 ("new failures") is exactly the substitution this gate
+    # exists to refuse: the same number for "your code broke" and "nothing was measured".
+    valid, void_report = gates.validity(cfg, current)
+    if not valid:
+        for line in void_report:
+            eprint(line)
+        eprint("VOID — nothing was compared. Exit 3, distinct from 2 (new failures) so a caller "
+               "that treats non-zero as 'the code is bad' gets a code it did not map rather than "
+               "a wrong answer it will believe.")
+        return 3
+
     ok, report = gates.compare_to_baseline(cfg, current, gates.load_baseline(cfg))
     for line in report:
         print(line)

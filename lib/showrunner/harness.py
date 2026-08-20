@@ -179,6 +179,52 @@ def tracked_top_levels(cfg):
 
 
 # ------------------------------------------------------------------- provisioning
+def installer_provenance(cfg, sp=None):
+    """Is the configured harness installer a RELEASE, or somebody's working tree? (#41)
+
+    A consumer pointed `harness.installer` at a developer's local clone, so every Crawler in the
+    party was provisioned with whatever happened to be uncommitted in that checkout at that
+    moment. Nothing said so. The party's guards were then a per-machine, per-minute artifact —
+    and a harness that is PRESENT but different is worse than one that is absent, because absent
+    is loud and this is not.
+
+    Same argument `--version` already makes about a working-tree copy: no commit names this code
+    and none can be invented. So this reports the provenance rather than refusing it — pointing
+    at a clone is legitimate while developing the harness, and the failure is that it is
+    invisible, not that it is wrong.
+
+    Returns (level, message) or None. Never raises: an installer that cannot be resolved is
+    already reported by `_install`, and two verbs answering the same question differently is the
+    disagreement this project keeps out of its own guards.
+    """
+    sp = sp or spec(cfg)
+    installer = sp.get("installer")
+    if not installer:
+        return None
+    path = installer if os.path.isabs(installer) else os.path.join(cfg.root, installer)
+    if not os.path.exists(path):
+        return ("error", "harness.installer points at %s, which does not exist — every spawn "
+                         "will fail to provision" % path)
+    d = os.path.dirname(os.path.realpath(path))
+    rc, top, _ = run(["git", "-C", d, "rev-parse", "--show-toplevel"])
+    top = (top or "").strip() if rc == 0 else ""
+    if not top:
+        return ("ok", "harness installer is outside any git working tree: %s" % path)
+
+    rc, dirty, _ = run(["git", "-C", top, "status", "--porcelain"])
+    unclean = bool((dirty or "").strip()) if rc == 0 else None
+    rc, sha, _ = run(["git", "-C", top, "rev-parse", "--short", "HEAD"])
+    sha = (sha or "").strip() if rc == 0 else "?"
+    detail = ("with UNCOMMITTED changes" if unclean else
+              "clean at %s" % sha if unclean is False else "state unreadable")
+    return ("warn",
+            "harness.installer is inside a git WORKING TREE (%s, %s), so every Crawler is "
+            "provisioned from whatever is in that checkout right now rather than from a release. "
+            "That is a per-machine, per-moment artifact deciding what the whole party is guarded "
+            "by, and nothing else would say so. Legitimate while developing the harness; point "
+            "it at an installed copy or a released channel otherwise." % (top, detail))
+
+
 def _install(cfg, sp, worktree_path):
     installer = sp["installer"]
     if not installer:

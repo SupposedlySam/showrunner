@@ -293,8 +293,14 @@ def run_checks(cfg, cwd=None):
     results = []
     for chk in _checks(cfg):
         rc, out, err = run(chk["cmd"], cwd=cwd or cfg.root, timeout=3600)
-        sigs = _signatures(out + "\n" + err, chk["failure_pattern"])
+        blob = out + "\n" + err
+        sigs = _signatures(blob, chk["failure_pattern"])
+        # SCANNED HERE, WHERE THE OUTPUT IS. Keeping the raw text on the result so a later pass
+        # could scan it would put a full suite run into every baseline.json; keeping only the
+        # HITS answers the same question at a fixed size.
+        void_hits = _void_hits(cfg, blob)
         results.append({
+            "void": void_hits,
             "name": chk["name"],
             "cmd": chk["cmd"],
             "rc": rc,
@@ -320,6 +326,82 @@ def load_baseline(cfg):
         return None
     with open(cfg.baseline_path) as fh:
         return json.load(fh)
+
+
+def _void_hits(cfg, blob):
+    """Which unreachable-world signatures appear in this output, and how often.
+
+    A BAD REGEX IS REPORTED, NEVER SKIPPED IN SILENCE: a consumer's pattern that will not compile
+    means that check was not screened at all, and a validity gate that quietly screened nothing
+    is worse than none — it turns "not looked" into "looked and found nothing".
+    """
+    out = []
+    for p in (cfg.get("void_patterns") or VOID_PATTERNS):
+        try:
+            n = len(re.findall(p, blob, re.I))
+        except re.error as exc:
+            out.append("UNSCREENED: void_patterns entry %r is not a valid regex (%s)" % (p, exc))
+            continue
+        if n:
+            out.append("%d x %s" % (n, p))
+    return out
+
+
+# SIGNATURES OF A RUN THAT COULD NOT REACH THE WORLD (#41). Narrow and conservative on purpose:
+# each one can only mean the harness could not get out, never that the code is wrong. Anything
+# ambiguous belongs in a consumer's own list rather than here, because a false VOID hides a real
+# regression — which is the opposite failure and the worse one.
+VOID_PATTERNS = (
+    r"hostname could not be found",
+    r"getaddrinfo (?:ENOTFOUND|EAI_AGAIN)",
+    r"Temporary failure in name resolution",
+    r"Name or service not known",
+    r"could not resolve host",
+    r"Connection refused",
+    r"No route to host",
+    r"Network is unreachable",
+)
+
+
+def validity(cfg, current):
+    """Could this run measure anything at all? Returns (valid, report).
+
+    A RUN THAT COULD NOT REACH THE WORLD DID NOT MEASURE ANYTHING, and its failure count carries
+    no information. That is strictly worse than a degraded comparison, because a degraded
+    comparison is still ABOUT THE CODE — and this module already refuses to let reduced
+    resolution read as a clean one. This takes that one step further: no resolution must not read
+    as reduced.
+
+    Reported from a real run: 156 minutes, 21 passed and 43 failed, several tool calls spent on
+    duration-dependent state, CDN throttling and a suspected licensing defect. The cause was a
+    router dying mid-run, and the evidence was already in the output — 20 x "hostname could not
+    be found", which is DNS and can only mean the network was gone.
+
+    VALIDITY IS A PRECONDITION, NOT A FINDING, so this runs AHEAD of the comparison and answers
+    one question only: could the harness reach the world. What it deliberately cannot see, said
+    here because a gate that overstates its reach buys false confidence — a partial outage that
+    resolved mid-run, a backend that was up and serving wrong data, a device that degraded
+    without producing a network error. A VALID verdict means "no evidence the world was
+    unreachable", never "the environment was sound".
+
+    Patterns are configurable because the signatures are per-stack; the defaults are the ones
+    that can only mean one thing.
+    """
+    report, void = [], False
+    for chk in current.get("checks", []):
+        hits = chk.get("void") or []
+        if hits:
+            void = True
+            report.append("%s: THE RUN COULD NOT REACH THE WORLD — %s" % (chk["name"],
+                                                                          "; ".join(hits)))
+    if void:
+        report.append("This is NOT a degraded comparison and NOT a set of failures: nothing was "
+                      "measured, so the counts above carry no information about the code. "
+                      "Re-run once the environment is back.")
+        report.append("What this does NOT establish: that the environment was otherwise sound. "
+                      "A partial outage that resolved mid-run, a backend serving wrong data, or "
+                      "a device degrading without a network error all read as VALID here.")
+    return (not void), report
 
 
 def compare_to_baseline(cfg, current, baseline):

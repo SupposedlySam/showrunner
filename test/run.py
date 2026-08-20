@@ -36,7 +36,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
-from showrunner import brief, campaign, collide, config, dispatch, gates, graph as G, lanes, lease, locks, pin, util, worktree  # noqa: E402
+from showrunner import brief, campaign, collide, config, dispatch, gates, graph as G, harness, lanes, lease, locks, pin, roles, util, worktree  # noqa: E402
 from showrunner.util import Refused, boot_token as boot_token_for_test  # noqa: E402
 
 VERBOSE = "-v" in sys.argv or "--verbose" in sys.argv
@@ -2980,6 +2980,124 @@ def test_worktree_guard_from_inside_a_worktree():
     ok("...naming the exit code and the first line of what it printed, so a reader can tell a "
        "syntax error from a missing dependency without re-running it",
        "exited 1" in broke.stdout and "Traceback" in broke.stdout, broke.stdout[:300])
+
+
+def test_void_run():
+    group("A run that could not measure anything is not a degraded comparison (#41)")
+
+    # THE REPORTED CASE: 156 minutes, 21 passed / 43 failed, several tool calls spent on
+    # duration-dependent state, CDN throttling and a suspected licensing defect. The cause was a
+    # router dying mid-run, and the evidence was already in the output — 20 x "hostname could not
+    # be found", which is DNS and can only mean the network was gone. This module already refuses
+    # to let reduced resolution read as a clean comparison; this is that one step further, and it
+    # is the same shape as UNSCOREABLE-is-not-THIN: no resolution must not read as reduced.
+    cfg = make_repo(extra_config={"checks": [
+        {"name": "suite", "cmd": ["sh", "-c",
+                                  "echo 'Error: hostname could not be found'; "
+                                  "echo 'FAIL test_a'; exit 1"],
+         "failure_pattern": "^FAIL (.*)$"}]})
+    current = gates.run_checks(cfg)
+    valid, report = gates.validity(cfg, current)
+    ok("a run whose output says the hostname could not be found is VOID — it did not measure "
+       "anything, and its failure count carries no information about the code", not valid, report)
+    ok("...and says so in those terms rather than as another failure line",
+       any("COULD NOT REACH THE WORLD" in l for l in report), report[:1])
+    ok("...and states what it CANNOT see, because a gate that overstates its reach buys false "
+       "confidence: a partial outage, a backend serving wrong data, a device degrading without "
+       "a network error", any("does NOT establish" in l for l in report), report[-1:])
+
+    # THE PAIR. A run with REAL failures and no network trouble must still compare — otherwise
+    # the assertion above passes just as well against a gate that calls everything void, which
+    # would hide every regression rather than one.
+    real = make_repo(extra_config={"checks": [
+        {"name": "suite", "cmd": ["sh", "-c", "echo 'FAIL test_a'; exit 1"],
+         "failure_pattern": "^FAIL (.*)$"}]})
+    valid2, _ = gates.validity(real, gates.run_checks(real))
+    ok("a run that genuinely failed, with the world reachable, is VALID — the failures are "
+       "about the code and must be compared, not excused", valid2)
+
+    # THE EXIT CODE, END TO END. Folding VOID into 2 would give "your code broke" and "nothing
+    # was measured" the same number, which is the substitution this exists to refuse.
+    exe = os.path.join(ROOT, "bin", "showrunner")
+    gates.record_baseline(cfg)
+    res = subprocess.run([sys.executable, exe, "check"], cwd=cfg.root,
+                         capture_output=True, text=True, env=dict(os.environ, NO_COLOR="1"))
+    eq("`check` exits 3 on a VOID run — its own code, so a caller treating non-zero as 'the code "
+       "is bad' gets one it did not map rather than a wrong answer it will believe",
+       res.returncode, 3)
+    ok("...with the reason on stderr", "COULD NOT REACH" in res.stderr, res.stderr[:160])
+    real_res = subprocess.run([sys.executable, exe, "check"], cwd=real.root,
+                              capture_output=True, text=True, env=dict(os.environ, NO_COLOR="1"))
+    ok("...while a run with real failures does NOT exit 3, so the two are distinguishable by a "
+       "caller", real_res.returncode != 3, real_res.returncode)
+
+    # A PATTERN THAT WILL NOT COMPILE MEANS THAT CHECK WAS NOT SCREENED AT ALL. Skipping it in
+    # silence turns 'not looked' into 'looked and found nothing', which is the failure the whole
+    # validity idea exists to prevent, one level down.
+    bad = make_repo(extra_config={
+        "void_patterns": ["(unclosed"],
+        "checks": [{"name": "suite", "cmd": ["sh", "-c", "echo hi"],
+                    "failure_pattern": "^FAIL (.*)$"}]})
+    hits = gates.run_checks(bad)["checks"][0]["void"]
+    ok("an uncompilable void_pattern is REPORTED as unscreened rather than skipped quietly",
+       any("UNSCREENED" in h for h in hits), hits)
+
+
+def test_harness_installer_provenance():
+    group("Where the harness comes from: an installer inside a working tree (#41)")
+    if not have("git"):
+        skip("the installer-provenance group", "git is not installed")
+        return
+
+    # A consumer pointed harness.installer at a developer's local clone, so every Crawler was
+    # provisioned with whatever was UNCOMMITTED there at that moment — a per-machine, per-minute
+    # artifact deciding what the whole party is guarded by, and nothing said so. This repo's own
+    # rule: a harness that is PRESENT but different is worse than one that is absent, because
+    # absent is loud. It REPORTS rather than refuses: pointing at a clone is legitimate while
+    # developing the harness, and the defect is that it was invisible.
+    def with_installer(path):
+        # `or (None, "")` so a producer that stopped producing FAILS these assertions rather than
+        # raising out of the group — a mutant that crashes its group is unscoreable, and the
+        # sweep then reports a floor from a truncated run as though it were coverage.
+        c = make_repo(extra_config={"harness": {"provision": "auto", "installer": path}})
+        return harness.installer_provenance(c) or (None, "")
+
+    outside = os.path.join(tmpdir("no-git"), "install.sh")
+    with open(outside, "w") as fh:
+        fh.write("#!/bin/sh\nexit 0\n")
+    os.chmod(outside, 0o755)
+    lvl, msg = with_installer(outside)
+    eq("an installer OUTSIDE any git working tree is reported ok — it is not a moving target",
+       lvl, "ok")
+
+    clone = make_repo()
+    inner = os.path.join(clone.root, "install.sh")
+    with open(inner, "w") as fh:
+        fh.write("#!/bin/sh\nexit 0\n")
+    os.chmod(inner, 0o755)
+    sh(["git", "add", "-A"], clone.root)
+    sh(["git", "commit", "-q", "-m", "add installer"], clone.root)
+    lvl, msg = with_installer(inner)
+    eq("an installer INSIDE a git working tree is a WARNING even when that tree is clean — the "
+       "point is that it tracks a checkout rather than a release, not that it is dirty today",
+       lvl, "warn")
+    ok("...naming the tree and the commit, so a reader can go and look at what their Crawlers "
+       "are actually guarded by", clone.root in msg and "clean at" in msg, msg[:150])
+
+    with open(os.path.join(clone.root, "uncommitted.txt"), "w") as fh:
+        fh.write("a developer mid-edit\n")
+    lvl, msg = with_installer(inner)
+    ok("...and says UNCOMMITTED when the tree is dirty, which is the reported case: every "
+       "Crawler gets whatever is in that clone right now",
+       lvl == "warn" and "UNCOMMITTED" in msg, msg[:150])
+
+    lvl, msg = with_installer(os.path.join(clone.root, "not-there.sh"))
+    eq("an installer that does not exist is an ERROR, not a warning — every spawn will fail to "
+       "provision", lvl, "error")
+
+    ok("...while NO installer configured reports nothing at all, so this is silent for the "
+       "consumers it does not concern",
+       harness.installer_provenance(make_repo()) is None)
 
 
 def test_roles():
@@ -5992,7 +6110,8 @@ def main():
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_waiting, test_concurrency,
                test_integration, test_worktree_lease, test_worktree_guard_from_inside_a_worktree,
-               test_self_pin, test_self_vendored_pin, test_roles, test_campaign_scoping,
+               test_self_pin, test_self_vendored_pin, test_roles,
+               test_harness_installer_provenance, test_void_run, test_campaign_scoping,
                test_issue_waker,
                test_central_install,
                test_installer_leaves_no_vendored_copy,

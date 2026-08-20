@@ -163,6 +163,17 @@ TARGETS = [
     ("routing gaps, read back", "lanes.unmatched", "lib/showrunner/lanes.py",
      r"(def unmatched\(cfg, tail=200\):\n)",
      "    return None, None\ndef _neutered_unmatched(cfg, tail=200):\n"),
+    # THE VALIDITY PRECONDITION (#41). An always-empty answer is the exact silence it exists to
+    # break: a run that could not reach the world reports its failure count as though the count
+    # meant something, and a confident verdict lands about code that was never exercised.
+    ("could this run measure anything", "gates._void_hits", "lib/showrunner/gates.py",
+     r"(def _void_hits\(cfg, blob\):\n)",
+     "    return []\ndef _neutered_void_hits(cfg, blob):\n"),
+    # An always-None answer is the silent half of not having it: doctor says nothing, and every
+    # Crawler keeps being provisioned from whatever is uncommitted in somebody's clone.
+    ("where the harness came from", "harness.installer_provenance", "lib/showrunner/harness.py",
+     r"(def installer_provenance\(cfg, sp=None\):\n)",
+     "    return None\ndef _neutered_installer_provenance(cfg, sp=None):\n"),
     # THE ROLE VALIDATOR. An always-empty answer is the silent half of having no policy: doctor
     # prints nothing, every config reads as valid, and an org whose escalation cycles or whose
     # fallback may dispatch passes review. A validator that never objects and a configuration
