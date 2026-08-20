@@ -10,7 +10,7 @@ single Crawler can see, and keeps the campaign coherent across sessions.
 > Status: **implemented and self-hosting.** The orchestration loop is real code
 > ([`lib/showrunner/`](lib/showrunner/)), it installs in one line with no packages, and it has been
 > run against its own issue list — see [Dogfooding](#dogfooding-showrunner-on-its-own-issues).
-> `python3 test/run.py` → **917 assertions, no setup beyond Python 3 and git.**
+> `python3 test/run.py` → **930 assertions, no setup beyond Python 3 and git.**
 
 ## Requirements
 
@@ -239,6 +239,19 @@ refuses a configuration that cannot resolve: a dangling `reports_to`, a cycle, a
 root, nothing claimable at all, or a fallback role that may create something. Definitions live at
 a user-level path, because an in-repo config is writable by the very session it constrains.
 
+**A seat with no role is a guard that gets routed around.** `assign` had no reader, so every
+Crawler resolved to the fallback and ran under the fallback's policy *inside the worktree `spawn`
+had just made for it* — with a deny-everything fallback, an audit leaf finished only by routing
+its evidence around the write guard with shell redirection. `seat_roles` maps a derived seat onto
+one of your roles, `{"seat_roles": {"crawler": "worker"}}`, and the campaign record is the
+assignment being read back: `spawn` names the tree's leaf before the session exists. User level
+wins and a project may only map a seat the user left unmapped — one that could remap its own seat
+would hand itself any role in the catalog. Only a worktree the record NAMES resolves, so `git
+worktree add` grants nothing, and **`orchestrator` ships unmapped on purpose**: standing in the
+main checkout is a location, not a record, and authority by location is the failure this seam
+replaced. `doctor` refuses a seat mapped at a role nothing defines — that seat resolves to the
+fallback, so one typo buys the whole write denial back and nothing else would have said so.
+
 **A campaign is smaller than a repo.** The natural unit of a body of work is often a story, and
 the handoff a showrunner charges is only paid for by the parallelism it buys — so several
 campaigns in one checkout is the ordinary case. `SHOWRUNNER_CAMPAIGN` scopes graph, record, events
@@ -341,7 +354,7 @@ gone, and nothing but running it finds them.
 ## Verifying it
 
 ```bash
-python3 test/run.py            # 917 CORE assertions — Python 3 + git, nothing else
+python3 test/run.py            # 930 CORE assertions — Python 3 + git, nothing else
 bash prototype/demo.sh         # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 

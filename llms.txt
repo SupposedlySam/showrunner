@@ -264,12 +264,34 @@ distinction was never about names — it was about how the seat is obtained:
 | | |
 |---|---|
 | `claim` | a session TAKES an open seat. Exclusive, first-come, with pid+boot liveness so a dead holder's seat is reclaimable. The only way a from-scratch session can get one. |
-| `assign` | written by whoever CREATED the session, before it existed. A session holding one cannot claim. **Nothing writes assignments yet** — `spawn` records no role — so today every session resolves through a claim or the fallback. |
+| `assign` | written by whoever CREATED the session, before it existed. A session holding one cannot claim. The campaign record IS that writing: `spawn` names the tree's leaf before the session exists, keyed to its worktree, and `seat_roles` is what reads it back. |
+
+`seat_roles` maps a **derived seat** onto one of your roles. Without it `assign` had no reader, so
+every Crawler resolved to the fallback and ran under the fallback's policy *inside the worktree
+`spawn` had just made for it* — with a deny-everything fallback, an audit leaf finished only by
+routing its evidence around the write guard with shell redirection. A guard whose reward for
+holding is a workaround teaches every later session to route around it.
+
+```json
+{"roles": {"...": {}}, "seat_roles": {"crawler": "worker"}}
+```
+
+Same authority as the definitions: **user level wins**, and a project may map a seat the user left
+unmapped but never remap one — a project that could remap its own seat would hand itself any role
+in the catalog, which is the widening the definitions left the repo to prevent. A conflict is
+reported, not resolved silently.
+
+Two halves keep this record-based rather than location-based. Only a worktree the campaign record
+NAMES resolves, so `git worktree add` is not a way to grant yourself a role. And **`orchestrator`
+ships unmapped on purpose** — standing in the main checkout is a location, not a record, and
+authority by location is the failure this whole seam replaced. Map it yourself if you want it.
 
 Fields showrunner checks: `acquire`, `capacity`, `reports_to`, `may_create`, `writes`. `notes` is
 your prose and is announced as explicitly unchecked. `doctor` refuses a dangling `reports_to` or
-`may_create`, a `reports_to` cycle, an org with no root, nothing claimable at all, and a fallback
-role that may create something — which would make the fallback a way around the policy.
+`may_create`, a `reports_to` cycle, an org with no root, nothing claimable at all, a fallback
+role that may create something — which would make the fallback a way around the policy — and a
+`seat_roles` entry pointing at a role nothing defines, because that seat resolves to the fallback
+and one typo would otherwise buy the whole write denial back, silently.
 
 **With no roles defined, no dispatch policy is enforced for anybody.** That is deliberate:
 inventing one would refuse the dispatches of every consumer who never wrote any.
@@ -552,7 +574,7 @@ what is there now. Nothing hashes the contents.
 ## Verifying the tool itself
 
 ```
-python3 test/run.py        # 917 assertions; needs only Python 3 + git
+python3 test/run.py        # 930 assertions; needs only Python 3 + git
 bash prototype/demo.sh     # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 

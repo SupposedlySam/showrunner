@@ -233,6 +233,18 @@ def cmd_doctor(args):
     role_defs, role_problems = roles.spec(cfg)
     for msg in role_problems:
         print("  %s %s" % (YEL + "warn " + OFF, msg))
+    # A SEAT MAPPED AT A ROLE NOBODY DEFINED resolves to the fallback, which is indistinguishable
+    # from having written no mapping at all. One typo would otherwise buy back the whole bug this
+    # map exists to fix, and buy it back silently.
+    seat_map, seat_problems = roles.seat_roles(cfg)
+    for msg in seat_problems:
+        print("  %s %s" % (YEL + "warn " + OFF, msg))
+    for where, role in sorted(seat_map.items()):
+        if role_defs and role not in role_defs:
+            print("  %s seat_roles maps the %s seat to %r, which no role defines — that seat "
+                  "resolves to %s and nothing else would have said so"
+                  % (RED + "ERROR" + OFF, where, role, roles.FALLBACK))
+            bad += 1
     for level, msg in roles.validate(role_defs):
         mark = {"error": RED + "ERROR" + OFF, "warn": YEL + "warn " + OFF,
                 "ok": GRN + "ok   " + OFF}[level]
