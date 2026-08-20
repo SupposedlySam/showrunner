@@ -10,7 +10,7 @@ single Crawler can see, and keeps the campaign coherent across sessions.
 > Status: **implemented and self-hosting.** The orchestration loop is real code
 > ([`lib/showrunner/`](lib/showrunner/)), it installs in one line with no packages, and it has been
 > run against its own issue list — see [Dogfooding](#dogfooding-showrunner-on-its-own-issues).
-> `python3 test/run.py` → **913 assertions, no setup beyond Python 3 and git.**
+> `python3 test/run.py` → **914 assertions, no setup beyond Python 3 and git.**
 
 ## Requirements
 
@@ -341,7 +341,7 @@ gone, and nothing but running it finds them.
 ## Verifying it
 
 ```bash
-python3 test/run.py            # 913 CORE assertions — Python 3 + git, nothing else
+python3 test/run.py            # 914 CORE assertions — Python 3 + git, nothing else
 bash prototype/demo.sh         # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 
@@ -437,19 +437,29 @@ Two things stay deliberately single: **integration** (it merges, runs checks, an
 resource** you have configured. Both refuse loudly instead of waiting silently, because a
 multi-minute silent wait is indistinguishable from a hang.
 
-`showrunner waiting` exits 0 while dispatched work has a **working** owner — a live PID that is
-not blocked — or an explicit park. That is the recomputable fact an idle watchdog needs, since it
-cannot see a subagent. A Crawler refused at a turn-end is live and is deliberately *not* counted:
+`showrunner waiting` answers in three codes: **0** waiting, **1** not waiting, **3** a Crawler is
+BLOCKED. That is the recomputable fact an idle watchdog needs, since it cannot see a subagent. A
+Crawler refused at a turn-end is live and is deliberately counted as NEITHER waiting nor parked:
 it is doing nothing, only a message restarts it, and calling that "waiting" would silence the
-watchdog on the one run that needs it. Those are reported separately, because somebody has to go
-and prompt them.
+watchdog on the one run that needs it.
 
-**Arming that watchdog is a manual step, once per install.** `showrunner doctor` names it and
-prints the exact line to paste, including the absolute path. It cannot do it for you: the verb
-that would arm it is callable by the sessions being watched, and a probe that always exits 0
-reads as "always waiting" — the watchdog switched off by the thing it watches. Until it is armed,
-an orchestrator that has correctly dispatched a full wave looks exactly like one that fell
-asleep, gets rung, and eventually pages you for a run that was behaving perfectly.
+BLOCKED has its own exit code because it used to share 1 with "not waiting", so the case the gate
+exists for produced the same number as an ordinary quiet campaign — and a real stop gate written
+against this verb never fired once. Build on `--porcelain`: a verb whose finding, verdict and
+status live on three channels gets integrated against incorrectly, and `waiting || exit 0` still
+swallows the blocked case, because that idiom collapses every non-zero code.
+
+**Arming that watchdog is a manual step, once per install.** Point it at
+`.showrunner/hooks/waiting-probe.sh`, **not** at `showrunner waiting` directly — the probe maps
+the three codes above onto the two-plus-unknown contract a watchdog expects, so a BLOCKED Crawler
+rings rather than being reported as a broken probe, and it never answers "waiting" from inside a
+worktree, where a Crawler would otherwise silence its own watchdog with a sibling's liveness.
+`showrunner doctor` names the file and says whether it is armed.
+
+It cannot arm it for you: a probe an agent can set is a watchdog an agent can switch off, and one
+that always exits 0 reads as "always waiting". Until it is armed, an orchestrator that has
+correctly dispatched a full wave looks exactly like one that fell asleep, gets rung, and
+eventually pages you for a run that was behaving perfectly.
 
 ## What a Crawler's harness gets
 

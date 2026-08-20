@@ -5069,6 +5069,12 @@ def test_claims_about_the_layer_below():
         "lib/showrunner/cli.py": "doctor's account of what a worktree inherits and when spawn refuses",
         "docs/DESIGN.md": "a retracted claim about the gate, and what replaced it",
         "README.md": "the per-tree gate and the blank-verify.yaml consequence",
+        # Not a bystander that merely mentions the harness: its NOT_FRONT_DOOR list excuses
+        # eight verbs from the front-door docs BECAUSE game_loop is what calls them. If the
+        # harness stopped calling one, that verb becomes user-facing and this file would keep
+        # it undocumented — silently, since the excuse is what suppresses the finding.
+        "test/docs_surface.py": "which verbs are harness-facing, and therefore which ones a "
+                                "human never has to be told about",
         ".gitignore": "tracking .game_loop/ is JUSTIFIED by the per-tree gate holding",
         # A PLAN, and it still states the layer below as fact — the fail-open posture of
         # game_loop's central shim, quoted as the model showrunner's would copy. Planned

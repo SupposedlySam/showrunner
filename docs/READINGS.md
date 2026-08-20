@@ -21,11 +21,29 @@ One line per reading, newest last:
 
 ## Readings
 
-- llms.txt — read whole at 0608d32 on 2026-08-20 — found four stale passages a search would not
-  have: `doctor`'s watchdog remedy still pointed at `showrunner waiting` directly, which became a
-  trap the day that verb grew a third exit code; `worktree register` said "BOTH hooks" after it
-  became four across three events; and two descriptions of `waiting`'s exit codes predated the
-  BLOCKED case. Also added five sections for surfaces that existed in neither doc.
-- README.md — NOT YET read whole since the campaign/roles/seams work landed. Recorded as an
-  absence rather than left blank: an empty ledger and an unread file look identical, and that is
-  the confusion this file exists to remove.
+- ~~llms.txt — read whole at 0608d32 on 2026-08-20~~ — **this entry was false when written.** The
+  reading behind it covered lines 1–235 of 457, roughly half. Struck rather than edited down to
+  what was true, because the useful record is not "half a file was read" — it is that the ledger's
+  own first entry overclaimed, in the commit that introduced the ledger, written by the agent that
+  had just finished arguing why whole-file reads matter. Nothing caught it; I found it re-reading
+  my own commit message against the file. That is the failure mode this file has, demonstrated on
+  day one, and it is why the section above says do not build a gate to check these entries: a gate
+  would have passed this line too.
+- llms.txt — read whole at HEAD on 2026-08-20 — lines 1–235 found four stale passages a search
+  would not have: `doctor`'s watchdog remedy still pointed at `showrunner waiting` directly, which
+  became a trap the day that verb grew a third exit code; `worktree register` said "BOTH hooks"
+  after it became four across three events; and two descriptions of `waiting`'s exit codes predated
+  the BLOCKED case. Lines 235–558 found nothing stale — recorded because "read and found nothing"
+  and "not read" are the two states this file exists to tell apart, and only one of them is work.
+- README.md — read whole at HEAD on 2026-08-20 — carried **the same two stale claims** as llms.txt:
+  the watchdog remedy naming the verb rather than `waiting-probe.sh`, and `waiting` described
+  without exit 3. Fixing llms.txt had not fixed them, and nothing connected the two. That is the
+  argument for this file in one line: the defect was duplicated across the front door, and the
+  half-read that found it in one file left it standing in the other.
+
+## What a reading is
+
+Lines read end to end, in order, in one pass — not a search, not a section, not "I wrote most of
+this file so I know what is in it". If a reading covered part of a file, say which part. A partial
+reading recorded as partial is worth having; recorded as whole it is worse than no entry, because
+it retires the question.
