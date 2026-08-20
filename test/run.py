@@ -3045,6 +3045,37 @@ def test_self_vendored_pin():
        "only one of them is a guard",
        "DID NOT RUN" not in res.stdout, res.stdout[:200])
 
+    # THE REMEDY DOCTOR PRINTS MUST BE RUNNABLE BY THE THING IT IS PRINTED TO. `self --pin`
+    # extracts from the checkout the RUNNING code lives in, and a pinned copy is NOT a checkout —
+    # so naming the resolved binary produced a remedy that exits 2 telling the reader to run it
+    # from a clone. `lease.REMEDIES` says this project has shipped a dead remedy twice; this
+    # would have been the fourth, and it was caught by RUNNING it rather than reading it.
+    #
+    # Driven against a fixture with a DELIBERATELY STALE pin, not against this repo's live state:
+    # a test whose subject is "what doctor says when the pin is behind" must construct behind.
+    with open(os.path.join(cfg.root, "extra.txt"), "w") as fh:
+        fh.write("moves HEAD past the pin\n")
+    sh(["git", "add", "-A"], cfg.root)
+    sh(["git", "commit", "-q", "-m", "move HEAD past the pin"], cfg.root)
+    first = sh(["git", "rev-parse", "HEAD~1"], cfg.root).stdout.strip()
+    os.makedirs(os.path.join(cfg.root, ".showrunner_self", "bin"), exist_ok=True)
+    with open(os.path.join(cfg.root, ".showrunner_self", "bin", "showrunner"), "w") as fh:
+        fh.write("#!/bin/sh\nexit 0\n")
+    os.chmod(os.path.join(cfg.root, ".showrunner_self", "bin", "showrunner"), 0o755)
+    for name, val in (("PINNED", json.dumps({"ref": "HEAD", "sha": first})), ("VERSION", first)):
+        with open(os.path.join(cfg.root, ".showrunner_self", name), "w") as fh:
+            fh.write(val + "\n")
+    doc = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                         cwd=cfg.root, capture_output=True, text=True,
+                         env=dict(os.environ, NO_COLOR="1"))
+    repin = [l for l in doc.stdout.splitlines() if "--dest .showrunner_self" in l]
+    ok("a pin BEHIND head is reported rather than answering normally from old rules — it is the "
+       "same guard giving an older answer, which is invisible without this",
+       repin and "BEHIND HEAD" in repin[0], doc.stdout[-400:])
+    ok("...and the remedy names a binary in a CHECKOUT, never the pinned copy, because the pin "
+       "cannot re-pin itself and refuses when asked",
+       repin and ".showrunner_self/bin/showrunner self --pin" not in repin[0], repin[:1])
+
     # THE PAIR. Remove the pin and the same broken tree must now degrade LOUDLY, or the
     # assertion above would pass just as well against a shim that ignores its own failures.
     shutil.rmtree(pinned_dir)

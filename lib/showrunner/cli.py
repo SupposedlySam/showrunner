@@ -334,6 +334,14 @@ def cmd_doctor(args):
         # question. Same "configured but inert" class as a hook that is registered and dead.
         if os.path.realpath(sr).startswith(os.path.realpath(
                 os.path.join(cfg.root, ".showrunner_self")) + os.sep):
+            # THE REMEDY MUST NAME A BINARY THAT CAN ACTUALLY RE-PIN, and the resolved one
+            # cannot: `self --pin` extracts from the checkout the RUNNING code lives in, and the
+            # pinned copy is not a checkout — it refuses, correctly. Printing `sr` here named the
+            # pin re-pinning itself, which is a remedy that exits 2. `lease.REMEDIES` says this
+            # project has shipped a dead remedy twice; this would have been the fourth.
+            repin = os.path.join(cfg.root, "bin", "showrunner")
+            repin = rel(repin, cfg.root) if os.access(repin, os.X_OK) else (
+                "<from a showrunner checkout> bin/showrunner")
             stamp_at = pin.read_pin(os.path.join(cfg.root, ".showrunner_self")) or {}
             sha = stamp_at.get("sha")
             rc_h, head, _ = git(["rev-parse", "HEAD"], cwd=cfg.root)
@@ -342,7 +350,7 @@ def cmd_doctor(args):
                 print("  %s .showrunner_self is in force but its stamp is UNREADABLE — the "
                       "plumbing is running code whose commit cannot be named. Re-pin it: "
                       "`%s self --pin HEAD --dest .showrunner_self`"
-                      % (YEL + "warn " + OFF, rel(sr, cfg.root)))
+                      % (YEL + "warn " + OFF, repin))
             elif head and sha == head:
                 print("  %s   ...from the self-vendored pin at %s, which IS this checkout's "
                       "HEAD — your guards run the same rules you are reading"
@@ -354,7 +362,7 @@ def cmd_doctor(args):
                       "HEAD. Your guards are enforcing the rules as of that commit, not the ones "
                       "you are editing — deliberate while you work, stale if you forget. Refresh: "
                       "`%s self --pin HEAD --dest .showrunner_self`"
-                      % (YEL + "warn " + OFF, sha[:12], n, rel(sr, cfg.root)))
+                      % (YEL + "warn " + OFF, sha[:12], n, repin))
     else:
         print("  %s %s does not exist or is not executable, and every Crawler brief tells its "
               "agent to run it. Run install.sh, or work from a checkout that carries "
