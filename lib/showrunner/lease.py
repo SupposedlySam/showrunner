@@ -591,6 +591,18 @@ def guard_health(cfg):
     return out
 
 
+def _register_lock(cfg):
+    """One lock for both registrars, in showrunner's own state dir.
+
+    Named for the FILE being guarded rather than for the caller, because `register_guard` and
+    `register_stop_trigger` do a read-modify-write of the SAME settings.json — two locks would
+    serialise each verb against itself and neither against the other, which is a mutex that looks
+    present and is not.
+    """
+    os.makedirs(cfg.state_dir, exist_ok=True)
+    return os.path.join(cfg.state_dir, "claude-settings.lock")
+
+
 def register_guard(cfg):
     """Add the guard's PreToolUse entry to .claude/settings.json. Returns (changed, message).
 
@@ -617,7 +629,13 @@ def register_guard(cfg):
     # and `install.sh` runs this on every invocation — could otherwise both read a file with no
     # entry and both append one, or the second could overwrite whatever the first added.
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with file_lock(path + ".sr-lock"):
+    # THE LOCK LIVES IN OUR STATE DIR, NOT BESIDE THEIR FILE. It used to sit at
+    # `.claude/settings.json.sr-lock.lock` — runtime state deposited in a directory that belongs
+    # to Claude Code, ignored by nothing, and committed into this repo the first time `register`
+    # ran. A consumer would get the identical stray file, and their `.gitignore` is not ours to
+    # edit. `.showrunner/` already ignores `*.lock`, and runtime state living there is the
+    # convention every other lock in this project follows.
+    with file_lock(_register_lock(cfg)):
         return _register_locked(cfg, path, entry, json, atomic_write_json,
                                 "PreToolUse", _guard_registration, "worktree guard")
 
@@ -694,7 +712,13 @@ def register_stop_trigger(cfg):
                         "timeout": 30,
                         "statusMessage": "showrunner: is a Crawler waiting on a message?"}]}
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with file_lock(path + ".sr-lock"):
+    # THE LOCK LIVES IN OUR STATE DIR, NOT BESIDE THEIR FILE. It used to sit at
+    # `.claude/settings.json.sr-lock.lock` — runtime state deposited in a directory that belongs
+    # to Claude Code, ignored by nothing, and committed into this repo the first time `register`
+    # ran. A consumer would get the identical stray file, and their `.gitignore` is not ours to
+    # edit. `.showrunner/` already ignores `*.lock`, and runtime state living there is the
+    # convention every other lock in this project follows.
+    with file_lock(_register_lock(cfg)):
         return _register_locked(cfg, path, entry, json, atomic_write_json,
                                 "Stop", _stop_registration, "inert-Crawler stop trigger")
 

@@ -31,3 +31,9 @@ __pycache__/
 # them. Created by `showrunner self --pin HEAD --dest .showrunner_self`; never committed,
 # because it is a build of this repo rather than part of it.
 .showrunner_self/
+
+# `worktree register` takes a file lock beside .claude/settings.json so two installs cannot
+# both read-modify-write it. The lock file is runtime state, not configuration — it was
+# committed once because nothing ignored it, and a consumer running `register` would get the
+# same stray file in their repo.
+.claude/*.sr-lock.lock

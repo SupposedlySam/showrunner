@@ -2607,6 +2607,18 @@ def test_worktree_lease():
     changed2, _ = lease.register_stop_trigger(reg)
     ok("...and registering twice is a no-op, so an installer that runs on every upgrade does "
        "not accumulate duplicates", not changed2)
+    # AND IT LEAVES NOTHING IN A DIRECTORY THAT IS NOT OURS. The read-modify-write takes a file
+    # lock, and that lock used to be created beside settings.json — runtime state deposited in
+    # Claude Code's directory, ignored by nothing, which this repo committed the first time
+    # `register` ran. A consumer would get the same stray file and their .gitignore is not ours
+    # to edit, so the lock moved into showrunner's own state dir, where `*.lock` is already
+    # ignored and every other lock in this project lives.
+    strays = [f for f in os.listdir(os.path.join(reg.root, ".claude")) if f.endswith(".lock")]
+    ok("registering leaves no lock file in .claude/ — that directory belongs to Claude Code and "
+       "to whoever else configured a hook there", not strays, strays)
+    ok("...because the lock is in showrunner's own state dir, where it is already ignored",
+       os.path.exists(os.path.join(reg.state_dir, "claude-settings.lock.lock")),
+       sorted(os.listdir(reg.state_dir)))
 
     # ---- DOES IT CROSS, when the install is deliberately untracked? (#31) ------------
     # `git worktree add` carries TRACKED files only, so an untracked shim is present in the
