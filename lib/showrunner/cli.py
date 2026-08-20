@@ -856,6 +856,53 @@ def _allow_loudly(notice):
     return 0
 
 
+def cmd_dispatch_guard(args):
+    """PreToolUse on Bash: refuse a raw `claude -p` from a session whose role may not create (#37).
+
+    ON BASH, WHICH IS THE MECHANISM ACTUALLY USED. A consumer's prototype registered this on
+    `Agent` and guarded the in-process subagent tool while every real dispatch went out through
+    Bash — 42 consecutive times, reporting nothing. A guard matched on the wrong tool is
+    indistinguishable from a world with nothing to guard, which is why the matcher is part of
+    the fix and not a detail of it.
+
+    Same fail-open posture as `worktree guard`, for the same reason: this runs before every Bash
+    call in the repo, so a bug here that exited non-zero would lock the repo against its own
+    repair. Every unknown allows AND SAYS the call went unchecked.
+    """
+    # THE PAYLOAD IS ONLY READ WHEN THERE IS ONE TO READ. `_hook_payload` blocks on stdin, so
+    # calling it unconditionally made `--command` — the flag that exists to test the rule
+    # WITHOUT constructing a hook event — hang forever waiting for a payload nobody was going to
+    # send. Found by running it.
+    payload, problem = ({}, None) if args.command is not None else _hook_payload()
+    if problem:
+        return _allow_loudly(
+            "⚠ THE DISPATCH GUARD DID NOT RUN — it could not read its PreToolUse payload (%s), "
+            "so this tool call was ALLOWED WITHOUT BEING CHECKED. A raw `claude -p` would skip "
+            "the worktree, the lease, the claim and the room." % problem)
+    try:
+        cfg = _cfg(args)
+        session = (args.session or payload.get("session_id")
+                   or os.environ.get("SHOWRUNNER_SESSION") or "")
+        tool = payload.get("tool_name") or ""
+        tool_input = payload.get("tool_input") or {}
+        if args.command is not None:
+            tool, tool_input = "Bash", {"command": args.command}
+        allow, message, detail = dispatch.dispatch_guard(cfg, session, tool=tool,
+                                                         tool_input=tool_input)
+    except Exception as exc:                                    # noqa: BLE001 — see docstring
+        return _allow_loudly(
+            "⚠ THE DISPATCH GUARD DID NOT RUN — it raised %s: %s. This tool call was ALLOWED "
+            "WITHOUT BEING CHECKED." % (type(exc).__name__, exc))
+
+    if allow:
+        if message:
+            return _allow_loudly(message)
+        print(message or "allow: %s" % (detail.get("why") or "not a dispatch"))
+        return 0
+    eprint(message)
+    return 2
+
+
 def cmd_worktree_guard(args):
     """PreToolUse: refuse a write into a tree another LIVE session holds. Exit 2 denies.
 
@@ -1968,6 +2015,20 @@ def build_parser():
                    help="seconds between heartbeat frames; the journal is sparse and a view "
                         "built on it alone freezes during long quiet work")
     s.set_defaults(func=cmd_watch)
+
+    s = sub.add_parser("dispatch",
+                       help="the dispatch seam. `dispatch guard` is a PreToolUse hook ON BASH "
+                            "that refuses a raw `claude -p` from a session whose role may not "
+                            "create one — the cheap path that skips the worktree, the lease, "
+                            "the claim and the room")
+    dsub = s.add_subparsers(dest="dispatchcmd", required=True)
+    d = dsub.add_parser("guard", help="PreToolUse (Bash): refuse a raw headless dispatch. Exit 2 "
+                                      "denies; every unknown allows and says it went unchecked")
+    d.add_argument("--session")
+    d.add_argument("--command", default=None,
+                   help="check this command instead of reading a hook payload — for testing the "
+                        "rule without constructing a PreToolUse event")
+    d.set_defaults(func=cmd_dispatch_guard)
 
     s = sub.add_parser("waiting",
                        help="is this orchestrator legitimately waiting? exit 0 waiting, 1 not "

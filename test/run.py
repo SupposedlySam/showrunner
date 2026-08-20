@@ -2982,6 +2982,85 @@ def test_worktree_guard_from_inside_a_worktree():
        "exited 1" in broke.stdout and "Traceback" in broke.stdout, broke.stdout[:300])
 
 
+def test_dispatch_guard():
+    group("The cheap dispatch path has a gate on it now (#37)")
+    from showrunner import roles as R
+
+    RAW = ('GAME_LOOP_SESSION=lane-x nohup claude -p --permission-mode bypassPermissions '
+           '--model sonnet "$(cat BRIEF.md)" < /dev/null > /tmp/lane-x.out 2>&1 &')
+    cfg = make_repo()
+
+    # NO ROLES CONFIGURED MEANS NO POLICY, AND SO NO REFUSAL. showrunner never learns what a role
+    # means (#40); inventing one here would refuse the dispatches of every consumer who has not
+    # written any, by a rule nobody wrote.
+    allow, _, det = dispatch.dispatch_guard(cfg, "s", tool="Bash", tool_input={"command": RAW})
+    ok("with no roles configured the raw dispatch is ALLOWED, and marked unchecked rather than "
+       "passed — there is no policy to enforce", allow and not det.get("checked"), det)
+
+    # WITH A POLICY, the fallback role may create nothing, so the 42-times command is refused.
+    home = tmpdir("roles-home")
+    os.makedirs(os.path.join(home, "showrunner"), exist_ok=True)
+    rp = os.path.join(home, "showrunner", "roles.json")
+    with open(rp, "w") as fh:
+        json.dump({"roles": {"lead": {"acquire": "claim", "may_create": ["worker"]},
+                             "worker": {"acquire": "assign", "reports_to": "lead"},
+                             R.FALLBACK: {"acquire": "claim"}}}, fh)
+    orig_path = R.USER_PATH
+    R.USER_PATH = rp
+    try:
+        allow, msg, det = dispatch.dispatch_guard(cfg, "s", tool="Bash",
+                                                  tool_input={"command": RAW})
+        ok("the exact command used 42 times in one real run is DENIED once a policy exists — no "
+           "worktree, no lease, no claim a reaper can reclaim, no room", not allow, det)
+        ok("...naming the role that was refused and pointing at `spawn --launch`, so the refusal "
+           "is actionable rather than a wall", R.FALLBACK in msg and "spawn" in msg, msg[:200])
+
+        # A GUARD THAT DENIES ITS OWN REMEDY GETS SWITCHED OFF. `spawn --launch` builds a claude
+        # command line of its own, so the tool's own dispatch must pass.
+        through = RAW.replace("nohup claude", "nohup showrunner-launched claude")
+        allow2, _, _ = dispatch.dispatch_guard(cfg, "s", tool="Bash",
+                                               tool_input={"command": through})
+        ok("...while a command that goes through showrunner passes, because a guard that refuses "
+           "its own remedy is one that gets turned off", allow2)
+
+        allow3, _, _ = dispatch.dispatch_guard(cfg, "s", tool="Bash",
+                                               tool_input={"command": "claude --version"})
+        ok("...and `claude` WITHOUT -p passes: this is not a ban on the binary, it is a check "
+           "that a session may dispatch at all", allow3)
+
+        # THE PROTOTYPE'S BLIND SPOT, asserted as a stated LIMIT rather than left to be found.
+        # A consumer's version matched PreToolUse on `Agent` and guarded the in-process subagent
+        # tool while every real dispatch went out through Bash — 42 times, reporting nothing.
+        allow4, _, det4 = dispatch.dispatch_guard(cfg, "s", tool="Agent",
+                                                  tool_input={"command": RAW})
+        ok("the SAME command through a non-Bash tool is allowed and marked UNCHECKED — the tool "
+           "this is matched on is part of the guard, and a version matched on `Agent` guarded "
+           "the subagent tool while every real dispatch went through Bash",
+           allow4 and not det4.get("checked"), det4)
+
+        # A ROLE THAT MAY CREATE dispatches freely — otherwise the assertion above would pass
+        # against a guard that refuses everyone.
+        with open(rp, "w") as fh:
+            json.dump({"roles": {R.FALLBACK: {"acquire": "claim", "may_create": ["x"]},
+                                 "x": {"acquire": "assign", "reports_to": R.FALLBACK}}}, fh)
+        allow5, _, det5 = dispatch.dispatch_guard(cfg, "s", tool="Bash",
+                                                  tool_input={"command": RAW})
+        ok("...and a role that MAY create is not refused, so the rule tracks the policy rather "
+           "than refusing everybody", allow5, det5)
+
+        # UNREADABLE POLICY ALLOWS, LOUDLY. A PreToolUse that hard-fails on its own plumbing
+        # blocks the write that would repair it.
+        with open(rp, "w") as fh:
+            fh.write("{not json")
+        allow6, msg6, det6 = dispatch.dispatch_guard(cfg, "s", tool="Bash",
+                                                     tool_input={"command": RAW})
+        ok("an unreadable role file ALLOWS and says the dispatch went unchecked — a guard that "
+           "blocks when it cannot see blocks forever the day it breaks",
+           allow6 and "UNCHECKED" in msg6, msg6[:120])
+    finally:
+        R.USER_PATH = orig_path
+
+
 def test_void_run():
     group("A run that could not measure anything is not a degraded comparison (#41)")
 
@@ -6111,7 +6190,7 @@ def main():
                test_harness_provisioning, test_waiting, test_concurrency,
                test_integration, test_worktree_lease, test_worktree_guard_from_inside_a_worktree,
                test_self_pin, test_self_vendored_pin, test_roles,
-               test_harness_installer_provenance, test_void_run, test_campaign_scoping,
+               test_harness_installer_provenance, test_void_run, test_dispatch_guard, test_campaign_scoping,
                test_issue_waker,
                test_central_install,
                test_installer_leaves_no_vendored_copy,

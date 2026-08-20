@@ -163,6 +163,13 @@ TARGETS = [
     ("routing gaps, read back", "lanes.unmatched", "lib/showrunner/lanes.py",
      r"(def unmatched\(cfg, tail=200\):\n)",
      "    return None, None\ndef _neutered_unmatched(cfg, tail=200):\n"),
+    # THE CHEAP DISPATCH PATH. An always-allow guard is the state this issue reports: 42 raw
+    # `claude -p` calls in one run, every showrunner guarantee absent for all 42, and nothing
+    # said a word. "Allowed" and "never looked" are the same observation from outside.
+    ("the dispatch guard", "dispatch.dispatch_guard", "lib/showrunner/dispatch.py",
+     r"(def dispatch_guard\(cfg, session=None, tool=None, tool_input=None\):\n)",
+     "    return True, '', {}\n"
+     "def _neutered_dispatch_guard(cfg, session=None, tool=None, tool_input=None):\n"),
     # THE VALIDITY PRECONDITION (#41). An always-empty answer is the exact silence it exists to
     # break: a run that could not reach the world reports its failure count as though the count
     # meant something, and a confident verdict lands about code that was never exercised.
@@ -586,6 +593,9 @@ NOT_SWEPT = {
                            "_stop_registration. An always-None answer makes `doctor` report "
                            "both gates unregistered and makes register_* write a duplicate — "
                            "both loud, and both asserted through guard_health, which IS swept.",
+    "cli.cmd_dispatch_guard": "CLI wrapper over dispatch.dispatch_guard, which IS swept below. "
+                              "It reads a hook payload and maps the verdict onto exit codes; "
+                              "the decision it reports is not made here.",
     "cli.cmd_worktree_register": "CLI wrapper over lease.register_guard, which IS swept. Its "
                                  "effect is asserted end to end through install.sh, on the "
                                  "UPGRADE path that had the bug: a repo with an existing config "

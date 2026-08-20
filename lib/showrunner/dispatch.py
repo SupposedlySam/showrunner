@@ -29,11 +29,12 @@ failure you get, not for which is tidier.
 
 import json
 import os
+import re
 import subprocess
 import uuid
 
-from . import campaign
-from .util import Refused, boot_token, die, eprint, now, pid_alive, rel
+from . import campaign, locks
+from .util import Refused, boot_token, die, eprint, now, pid_alive, rel, short_session
 
 # MEASURED, AND THE OPPOSITE OF WHAT I FIRST REASONED. This was `acceptEdits`, chosen because
 # bypassPermissions "is a wider door than the problem needs". The prediction was wrong: under
@@ -415,3 +416,113 @@ def model_finding(cfg, entry):
                 "why": "dispatched as %s, ran as %s" % (declared, models[0])}
     return {"verdict": "match" if declared else "undeclared",
             "declared": declared, "observed": models}
+
+
+# ---------------------------------------------------------------- dispatch guard
+# THE CHEAP PATH HAS NO GATE ON IT (#37). `spawn --launch` is the correct way to start a Crawler;
+# the competing path is ONE Bash call —
+#
+#     GAME_LOOP_SESSION=lane-x nohup claude -p --permission-mode bypassPermissions \
+#       --model sonnet "$(cat BRIEF.md)" < /dev/null > /tmp/lane-x.out 2>&1 &
+#
+# — which was used 42 consecutive times in one real run. It is strictly worse in every way
+# showrunner exists to fix: no worktree, no lease, no claim a reaper can reclaim, no leaf-scoped
+# stop gate, no room. And it is one line, available immediately, with nothing in the way.
+#
+# THE PROTOTYPE THAT MISSED IT IS THE LESSON. A consumer's guard registered its PreToolUse matcher
+# on `Agent`, so it guarded the in-process subagent tool while every real dispatch went out through
+# `Bash`. The guard built specifically to stop flat dispatch was blind to the mechanism actually
+# used, 42 times, and reported nothing. A guard matched on the wrong tool is indistinguishable
+# from a world with nothing to guard.
+_CLAUDE_CALL = re.compile(r"(?:^|[;&|]|\s)(?:[^\s;|&]*/)?claude\s", re.I)
+_PRINT_FLAG = re.compile(r"(?:^|\s)(?:-p|--print)(?:\s|=|$)")
+
+
+def dispatch_guard(cfg, session=None, tool=None, tool_input=None):
+    """PreToolUse verdict for a raw `claude -p` dispatch: (allow, message, detail).
+
+    DENIES ON EXACTLY ONE CONDITION — a Bash command that starts a headless `claude` and does not
+    go through showrunner, made by a session whose ROLE may not create anything. Every other
+    state allows, and none of them is an oversight:
+
+      no roles configured   showrunner has no policy to enforce. It never learns what a role
+                            MEANS (#40), and inventing one here would be exactly that: a consumer
+                            who has not written roles would find their own dispatches refused by
+                            a rule nobody wrote.
+      the role may create   the policy permits it; this is not a ban on `claude`, it is a check
+                            that the session is allowed to dispatch at all.
+      it mentions showrunner  `spawn --launch` builds its own command line, so the tool's own
+                            dispatch must pass — a guard that denies its own remedy is one that
+                            gets switched off (INV5).
+      anything unknown      unparseable payload, no session, no roles file, a bad regex. A
+                            PreToolUse that hard-fails on its own plumbing blocks the write that
+                            would repair it, so it allows AND SAYS the call went unchecked.
+
+    WHAT IT CANNOT SEE, stated rather than implied: a command built from a shell variable, a
+    wrapper script that calls `claude` internally, or a dispatch through any tool that is not
+    Bash. It catches the honest one-liner — which is the one that was used 42 times — and the
+    LEASE is what protects a tree from whatever gets in anyway.
+    """
+    tool_input = tool_input or {}
+    if (tool or "") != "Bash":
+        return True, "", {"checked": False, "why": "not a Bash call"}
+    command = tool_input.get("command") or ""
+    if not command:
+        return True, "", {"checked": False, "why": "no command"}
+
+    if not (_CLAUDE_CALL.search(command) and _PRINT_FLAG.search(command)):
+        return True, "", {"checked": True, "why": "not a headless claude dispatch"}
+    if "showrunner" in command:
+        return True, "", {"checked": True, "why": "routed through showrunner"}
+
+    from . import roles as _roles
+    defs, problems = _roles.spec(cfg)
+    if problems:
+        return True, ("showrunner: DISPATCH WENT UNCHECKED — the role definitions could not be "
+                      "read (%s), so this raw `claude -p` was ALLOWED without being checked "
+                      "against any policy." % problems[0]), {"checked": False}
+    if not defs:
+        return True, "", {"checked": False, "why": "no roles configured — no policy to enforce"}
+
+    role, seat = resolved_role(cfg, session, defs)
+    if (defs.get(role) or {}).get("may_create"):
+        return True, "", {"checked": True, "role": role, "why": "role may create"}
+
+    return False, DISPATCH_DENIED.format(
+        role=role, session=short_session(session) if session else "?",
+        seat=seat or "unresolved"), {"checked": True, "role": role}
+
+
+def resolved_role(cfg, session, defs=None):
+    """(role, how) for this session. Assignment first, then a held claim, then the fallback.
+
+    ASSIGNMENT WINS, because a session holding one had its role decided before it existed and
+    must not be able to claim a different one (#40). Nothing writes assignments yet — `spawn`
+    does not record a role — so today this resolves through claims and the fallback, and saying
+    that plainly is better than implying a path that has no writer.
+    """
+    from . import roles as _roles
+    defs = defs if defs is not None else _roles.spec(cfg)[0]
+    for entry in _roles.roster(cfg):
+        holder = entry.get("holder") or {}
+        if entry.get("state") == locks.HELD and holder.get("session") == session:
+            return holder.get("role") or entry["role"], "claimed"
+    return _roles.FALLBACK, "fallback"
+
+
+DISPATCH_DENIED = """\
+showrunner: DENIED — a raw `claude -p` dispatch, from a session whose role may not create one.
+
+  role     {role}  ({seat})
+  session  {session}
+
+That one line skips everything showrunner exists to provide: no worktree, so two agents edit one
+tree; no lease, so nothing refuses the second; no claim, so a reaper cannot tell the work was
+abandoned; no leaf-scoped stop gate; and no room, so nobody can reach it. In one real run this
+path was taken 42 times and every guarantee was absent for all 42.
+
+  Dispatch through the tool instead:
+      showrunner spawn <leaf> --actor <name> --launch
+
+  Or, if this session SHOULD be able to dispatch, give its role a `may_create` naming what it
+  may start. Roles are yours to define — showrunner checks the shape and never the meaning."""
