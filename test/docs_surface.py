@@ -85,15 +85,22 @@ def hooks():
                   if os.path.isfile(os.path.join(d, f)) and not f.startswith("."))
 
 
-def main():
-    text = ""
+def unnamed():
+    """(missing, excluded, unreadable) — the finding, separated from the reporting.
+
+    Exists so test/run.py can ASSERT on this rather than shelling out for an exit code. A check
+    that only a human runs by hand has never run: this module shipped tracked, reachable and
+    invoked by nothing, while I claimed in public that the ordinary suite ran it. A doc file that
+    could not be opened is returned as its own value and never folded into "nothing missing" --
+    a failed READ must not be stored as the fact "no surface is undocumented".
+    """
+    text, unreadable = "", []
     for d in DOCS:
         try:
             with open(os.path.join(ROOT, d)) as fh:
                 text += fh.read()
         except OSError:
-            print("COULD NOT READ %s — this report is about the docs it could open, not all of "
-                  "them" % d)
+            unreadable.append(d)
     missing, excluded = [], 0
     for kind, names in (("verb", verbs()), ("env", env_vars()), ("hook", hooks())):
         for n in names:
@@ -102,6 +109,14 @@ def main():
                 continue
             if n not in text:
                 missing.append("%-5s %s" % (kind, n))
+    return missing, excluded, unreadable
+
+
+def main():
+    missing, excluded, unreadable = unnamed()
+    for d in unreadable:
+        print("COULD NOT READ %s — this report is about the docs it could open, not all of "
+              "them" % d)
 
     print("checked %d doc(s) · %d surface(s) excluded with a reason" % (len(DOCS), excluded))
     if missing:

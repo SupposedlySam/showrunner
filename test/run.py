@@ -5123,6 +5123,30 @@ def test_claims_about_the_layer_below():
        "not the installer that placed them",
        any(f.startswith("guard-") for f in payload), payload)
 
+    # ── the front-door docs, checked by the ORDINARY suite ───────────────────────────────────
+    # This ran nowhere for its whole life. It shipped TRACKED -- so consumers received it, which
+    # is better than the gitignored variant of this bug -- but tracked and reachable is not run,
+    # and nothing invoked it. Meanwhile I stated in public that the ordinary suite ran it, and
+    # another project ported the design partly on that claim. A check whose PASS is silence and
+    # whose invocation is a human remembering to type it has the same output as one that does not
+    # exist: nothing, forever.
+    sys.path.insert(0, os.path.join(ROOT, "test"))
+    import docs_surface
+    missing, excluded, unreadable = docs_surface.unnamed()
+    ok("every verb, env var and hook showrunner ships is at least NAMED in the front-door docs "
+       "-- %d surface(s) excluded with a stated reason" % excluded,
+       not missing, missing)
+    # A doc that could not be OPENED must not read as "nothing is undocumented" -- the empty
+    # `missing` list is what both answers look like.
+    ok("...and a front-door doc that could not be read is reported as unreadable rather than "
+       "silently contributing no surfaces", not unreadable, unreadable)
+    # The limits are part of the check, not commentary: without them a green tick here reads as
+    # "the docs are correct", which is the one thing this cannot determine.
+    ok("...and the tool still states what it CANNOT check, so a pass is not read as "
+       "'the docs are right'",
+       "NOT EXPLAINED" in open(os.path.join(ROOT, "test", "docs_surface.py")).read().upper()
+       or "explains anything" in open(os.path.join(ROOT, "test", "docs_surface.py")).read())
+
     tokens = ("guard-writes", "commit gate", "blast radius", "the gate")
     tracked = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
                              text=True).stdout.split()
