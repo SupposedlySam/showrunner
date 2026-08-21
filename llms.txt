@@ -400,6 +400,25 @@ VALID means "no evidence the world was unreachable" — never "the environment w
 outage that resolved mid-run, a backend serving wrong data, or a device degrading without a network
 error all read as VALID, and the verdict says so.
 
+### A blocked report is a fact about the past
+
+`waiting` no longer reports a Crawler as BLOCKED when its **tree disagrees**. A commit on its
+branch, or a tracked file in its own worktree changed since the block was recorded, means it is
+working without a channel to report on — legitimate waiting, and it is counted as live.
+
+This exists because a chat outage produced the opposite: a Crawler went inert (its only
+reporting channel was gone), the gate refused the ORCHESTRATOR's turn-end, and both remedies it
+offered were unavailable or destructive — message it, which needed the dead bus, or reap it,
+which releases the claim and surfaces a tree holding live uncommitted work. After an
+out-of-band wake it kept refusing while the Crawler was demonstrably working, because "inert"
+was inferred from the room and never from the tree.
+
+**Tree evidence only ever RELEASES.** No recorded block, an unreadable tree, a missing branch or
+a disagreeing clock all yield no evidence, which is exactly today's behaviour. Only TRACKED
+files count: a log the harness writes or an editor swapfile would otherwise release a gate with
+nobody having done any work, and a false positive is the expensive direction for a signal whose
+job is to stop refusing.
+
 ## If several orchestrators are running at once
 
 Supported. Do NOT read `ready` and claim its first entry — everyone gets the same list:
@@ -638,7 +657,7 @@ what is there now. Nothing hashes the contents.
 ## Verifying the tool itself
 
 ```
-python3 test/run.py        # 980 assertions; needs only Python 3 + git
+python3 test/run.py        # 985 assertions; needs only Python 3 + git
 bash prototype/demo.sh     # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 

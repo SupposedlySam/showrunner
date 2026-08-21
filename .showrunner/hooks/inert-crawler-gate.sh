@@ -83,6 +83,11 @@ for c in d.get("blocked_crawlers") or []:
   echo "Ending your turn here leaves it inert until a human notices the run has stalled."
   echo "That has happened; it is why this gate exists."
   echo
+  echo "THE TREE WAS ASKED. A Crawler whose worktree shows a commit or a tracked-file change"
+  echo "since the block was recorded is NOT listed above — it is working without a channel to"
+  echo "report on, and this gate releases for it. The ones named here showed neither, so the"
+  echo "block report and the tree agree."
+  echo
   echo "  MESSAGE IT — it was refused at its own turn-end and is waiting to be told what next."
   echo "  Its channel and identity are in the campaign record (\`showrunner status\`)."
   echo

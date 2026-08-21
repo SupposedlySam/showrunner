@@ -516,6 +516,59 @@ def reap(cfg, graph, base="HEAD", apply=False):
     return actions, warnings
 
 
+def work_since_block(cfg, crawler, branch, worktree):
+    """Has this Crawler worked SINCE showrunner recorded it blocked? (issue #54)
+
+    `harness.stop_gate` says outright that `blocked` alone is a fact about the past: it reports
+    that a turn-end was refused and when, and cannot report that nothing has happened since.
+    The gate consumed `blocked` as a present-tense fact anyway. This supplies the corroborating
+    signal that docstring names, from the one place a Crawler's activity is attributable -- its
+    OWN worktree, which is the same jurisdiction argument the lease already rests on.
+
+    The failure that produced this: the chat bus went down, a Crawler went inert because its
+    only reporting channel was gone, and the gate then refused the ORCHESTRATOR's turn-end and
+    offered two remedies -- message it (needs the dead bus) or reap it (releases the claim and
+    surfaces a tree holding live uncommitted work). After an out-of-band wake it kept refusing
+    while the Crawler was demonstrably working. A gate whose only remedies are "use the broken
+    thing" or "destroy the work" is one a later orchestrator learns to route around.
+
+    Returns (bool, why). ONLY EVER RELEASES. Every unknown -- no recorded block, an unreadable
+    tree, a missing branch, a clock that disagrees -- returns False, which is today's behaviour
+    exactly. This must never become the one place in showrunner where a failure to read
+    something makes a gate stricter.
+    """
+    ev = events.latest(cfg, ("crawler.blocked",), "crawler", crawler)
+    since = (ev or {}).get("ts")
+    if not isinstance(since, int):
+        return False, ""                    # never recorded blocked here: not our call to make
+
+    if branch:
+        rc, out, _ = run(["git", "log", "-1", "--format=%ct", branch], cwd=cfg.root)
+        if rc == 0 and (out or "").strip().isdigit() and int(out.strip()) > since:
+            return True, "committed on %s after the block was recorded" % branch
+
+    tree = worktree if os.path.isabs(worktree or "") else os.path.join(cfg.root, worktree or "")
+    if not os.path.isdir(tree):
+        return False, ""
+    # TRACKED files only. An untracked build artefact, a log the harness writes, or an editor
+    # swapfile would all report "work" without anybody having done any -- and this signal
+    # releases a gate, so a false positive here is the expensive direction.
+    rc, out, _ = run(["git", "ls-files", "-z"], cwd=tree)
+    if rc != 0:
+        return False, ""
+    newest = 0
+    for rel in (out or "").split("\0"):
+        if not rel:
+            continue
+        try:
+            newest = max(newest, int(os.path.getmtime(os.path.join(tree, rel))))
+        except OSError:
+            continue                        # a file that vanished mid-scan is not evidence
+    if newest > since:
+        return True, "a tracked file in its worktree changed after the block was recorded"
+    return False, ""
+
+
 def waiting(cfg, graph, base="HEAD"):
     """Is this orchestrator legitimately waiting on work it dispatched? (game_loop#32)
 
@@ -535,7 +588,11 @@ def waiting(cfg, graph, base="HEAD"):
     """
     live, parked, blocked = [], [], []
     for f in reconcile(cfg, graph, base):
+        worked, why_worked = (False, "")
         if f["blocked"]:
+            worked, why_worked = work_since_block(cfg, f["crawler"], f.get("branch"),
+                                                  f.get("worktree") or "")
+        if f["blocked"] and not worked:
             # NOT WAITING. This orchestrator is not waiting on work it cannot hurry — it is
             # sitting next to a session that stopped and can only be restarted from outside.
             # Counting it as legitimate waiting is a false "waiting", which silences the
@@ -544,6 +601,11 @@ def waiting(cfg, graph, base="HEAD"):
             # and somebody has to go and prompt it.
             blocked.append({"crawler": f["crawler"], "leaf": f["leaf"],
                             "why": f["blocked_detail"]})
+        elif f["blocked"] and worked:
+            # Blocked report, and the TREE disagrees. It is working without a phone line --
+            # which is legitimate waiting, and the case that produced this issue.
+            live.append({"crawler": f["crawler"], "leaf": f["leaf"], "branch": f["branch"],
+                         "was_blocked": True, "evidence": why_worked})
         elif f["alive"]:
             live.append({"crawler": f["crawler"], "leaf": f["leaf"], "branch": f["branch"]})
         elif f["parked"]:

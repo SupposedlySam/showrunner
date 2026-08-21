@@ -1556,6 +1556,57 @@ def test_harness_provisioning():
     ok("...but doctor still says so out loud", any("OFF" in l for l in H.report(off)), H.report(off))
 
 
+def test_work_since_block():
+    group("A blocked report is a fact about the PAST; the tree can disagree with it (#54)")
+    cfg = make_repo()
+    from showrunner import events as EV
+
+    # No recorded block at all -> False. Not "no evidence of work"; there is no question to
+    # answer, and answering it anyway is how a gate becomes stricter on missing data.
+    got, why = campaign.work_since_block(cfg, "c-none", None, "")
+    ok("with no recorded block, the answer is NO EVIDENCE rather than an opinion — a signal "
+       "that only ever RELEASES must say nothing when it was never asked", got is False, (got, why))
+
+    wt = os.path.join(cfg.worktree_root, "c-work")
+    sh(["git", "worktree", "add", "-q", wt, "-b", "showrunner/c-work"], cfg.root)
+    tracked = os.path.join(wt, "owned.txt")
+    with open(tracked, "w") as fh:
+        fh.write("first\n")
+    sh(["git", "add", "owned.txt"], wt)
+    sh(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "w"], wt)
+
+    # Record the block NOW, with every existing file older than it.
+    EV.emit(cfg, "crawler.blocked", {"crawler": "c-work", "leaf": "L1", "why": "refused"})
+    blocked_at = EV.latest(cfg, ("crawler.blocked",), "crawler", "c-work")["ts"]
+    os.utime(tracked, (blocked_at - 60, blocked_at - 60))
+    got, why = campaign.work_since_block(cfg, "c-work", None, wt)
+    ok("a tree whose tracked files all predate the block yields no evidence, so the gate keeps "
+       "refusing exactly as it does today", got is False, (got, why))
+
+    # Now the Crawler works, without saying anything to anybody.
+    os.utime(tracked, (blocked_at + 60, blocked_at + 60))
+    got, why = campaign.work_since_block(cfg, "c-work", None, wt)
+    ok("a TRACKED file changed after the block IS evidence — this is the case that produced the "
+       "issue: working with no channel to report it on", got is True, (got, why))
+
+    # UNTRACKED files must not count: a log the harness writes, or an editor swapfile, would
+    # otherwise release the gate with nobody having done any work. This signal releases, so a
+    # false positive is the expensive direction.
+    os.utime(tracked, (blocked_at - 60, blocked_at - 60))
+    with open(os.path.join(wt, "scratch.log"), "w") as fh:
+        fh.write("harness noise\n")
+    got, why = campaign.work_since_block(cfg, "c-work", None, wt)
+    ok("...but an UNTRACKED file is not evidence, so harness noise in the tree cannot release "
+       "a gate on a Crawler that has genuinely stopped", got is False, (got, why))
+
+    # Every unknown must land on today's behaviour, never on a stricter one.
+    got, why = campaign.work_since_block(cfg, "c-work", None,
+                                         os.path.join(cfg.root, "no-such-tree"))
+    ok("a worktree that cannot be read yields no evidence rather than an error — tree evidence "
+       "must never be the one place where failing to read something TIGHTENS a gate",
+       got is False, (got, why))
+
+
 def test_waiting():
     group("An orchestrator waiting on dispatched work is a FACT, not a heuristic (game_loop#32)")
     if not have("git"):
@@ -6868,7 +6919,8 @@ def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
     for fn in (test_locks, test_config_refusals, test_every_rule_can_fail, test_graph, test_lifecycle, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
-               test_harness_provisioning, test_waiting, test_concurrency,
+               test_harness_provisioning, test_waiting, test_work_since_block,
+               test_concurrency,
                test_integration, test_worktree_lease, test_worktree_guard_from_inside_a_worktree,
                test_self_pin, test_self_vendored_pin, test_roles,
                test_harness_installer_provenance, test_void_run, test_dispatch_guard,
