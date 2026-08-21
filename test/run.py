@@ -3378,6 +3378,35 @@ def test_role_seat_verbs():
     group("Both acquire modes are reachable, and a claim outlives the call that made it (#40)")
     from showrunner import roles as R
 
+    # crawler_leaf came back THIN from the sweep -- only 2 assertions noticed it answering None
+    # everywhere -- and it is POLICY, not reporting: it is what stops `git worktree add` being a
+    # way to grant yourself a working role. Driven directly here, standing in each tree, because
+    # the two callers reach it through seat() where a None is easy to mistake for "no campaign".
+    cl_cfg = make_repo()
+    _rec = campaign.load(cl_cfg)
+    _rec.setdefault("crawlers", []).append(
+        {"crawler": "placed-wt", "leaf": "L9", "worktree": ".worktrees/placed-wt",
+         "state": "spawned"})
+    campaign.save(cl_cfg, _rec)
+    _here = os.getcwd()
+    try:
+        for _n in ("placed-wt", "hand-added-wt"):
+            _p = os.path.join(cl_cfg.worktree_root, _n)
+            sh(["git", "worktree", "add", "-q", _p, "-b", "showrunner/%s" % _n], cl_cfg.root)
+        os.chdir(os.path.join(cl_cfg.worktree_root, "placed-wt"))
+        eq("a worktree the campaign RECORDED resolves to its leaf — the tree showrunner placed "
+           "before the session existed", R.crawler_leaf(cl_cfg), "L9")
+        os.chdir(os.path.join(cl_cfg.worktree_root, "hand-added-wt"))
+        ok("...and a worktree somebody added BY HAND resolves to nothing, so `git worktree add` "
+           "is not a way to grant yourself a role",
+           R.crawler_leaf(cl_cfg) is None, R.crawler_leaf(cl_cfg))
+        os.chdir(cl_cfg.root)
+        ok("...and the MAIN checkout is not a crawler leaf either, so an orchestrator cannot "
+           "pick up a Crawler's seat by standing still",
+           R.crawler_leaf(cl_cfg) is None, R.crawler_leaf(cl_cfg))
+    finally:
+        os.chdir(_here)
+
     SR = [sys.executable, os.path.join(ROOT, "bin", "showrunner")]
     cfg = make_repo()
     home = tmpdir("role-verb-home")
