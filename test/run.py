@@ -2507,6 +2507,27 @@ def test_worktree_lease():
        with_rc(0).returncode, 0)
     eq("...not waiting (1) passes through, so an orchestrator with nothing outstanding rings",
        with_rc(1).returncode, 1)
+    # THE RECORDED CHANNEL. The harness stores a probe's STDOUT as the `detail` of its last run,
+    # so stdout is the only place this script can identify itself after the fact. Every line it
+    # printed used to go to stderr, which meant the watchdog's own record of showrunner was the
+    # empty string -- "showrunner's probe ran and found nobody waiting" was indistinguishable
+    # from "something ran". Companion assertions, not replacements: the exit codes above are the
+    # contract, and this is the separate claim that the record can name who answered.
+    ok("the probe NAMES ITSELF on stdout when it says waiting, because that is the channel the "
+       "harness records as `detail` -- an unnamed record cannot be attributed later",
+       "showrunner" in with_rc(0).stdout and "WAITING" in with_rc(0).stdout,
+       with_rc(0).stdout)
+    ok("...and when it says NOT waiting, which is the answer that RINGS somebody and therefore "
+       "the one most in need of attribution",
+       "showrunner" in with_rc(1).stdout and "NOT WAITING" in with_rc(1).stdout,
+       with_rc(1).stdout)
+    # The two must be DISTINGUISHABLE in the record, not merely both non-empty: a detail that
+    # reads the same for both verdicts identifies the script and loses the finding.
+    ok("...and the two verdicts do not record the same detail, so the stored line carries the "
+       "ANSWER and not only the identity",
+       with_rc(0).stdout.strip() != with_rc(1).stdout.strip(),
+       (with_rc(0).stdout.strip(), with_rc(1).stdout.strip()))
+
     blocked_probe = with_rc(3)
     eq("...and a BLOCKED Crawler (3) maps to 1 rather than falling through to 'could not tell' — "
        "it IS an answer, and an unmapped code would mark a working probe FAILING for as long as "

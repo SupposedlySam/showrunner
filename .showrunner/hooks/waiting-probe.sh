@@ -47,10 +47,24 @@ for candidate in "$root/.showrunner_self/bin/showrunner" \
 done
 [ -n "$SR" ] || { echo "no showrunner binary under $root — cannot tell" >&2; exit 2; }
 
+# Every line below goes to STDOUT, deliberately. The harness RECORDS a probe's stdout as the
+# `detail` of its last run, so stdout is the only channel on which this script can say, after
+# the fact, that it was the thing that answered. Until this was added every word here went to
+# stderr and the recorded detail was the empty string: the watchdog's own record could not
+# distinguish "showrunner's probe ran and found nobody waiting" from "something ran". That is
+# this repo's own recurring defect -- the finding on one channel, the recorded value on another
+# -- landing on the script whose entire job is to be believed later.
 "$SR" waiting >/dev/null 2>&1
 case "$?" in
-  0) exit 0 ;;                                   # waiting on live dispatched work
-  1) exit 1 ;;                                   # nothing outstanding — ring
-  3) echo "a Crawler is BLOCKED — alive and inert, needs a message not time" >&2; exit 1 ;;
-  *) echo "showrunner waiting returned an unmapped code — cannot tell" >&2; exit 2 ;;
+  0) echo "showrunner: WAITING on live dispatched work"; exit 0 ;;
+  1) echo "showrunner: NOT WAITING — nothing outstanding"; exit 1 ;;
+  3) msg="a Crawler is BLOCKED — alive and inert, needs a message not time"
+     # BOTH channels, and neither is redundant: stderr is what makes the RING actionable to the
+     # human it wakes, stdout is what the harness stores so the record says what was found. An
+     # earlier version of this change moved the line to stdout and silently took the stderr
+     # reason away -- the companion rule, broken on the commit that was enforcing it.
+     echo "showrunner: $msg"
+     echo "$msg" >&2
+     exit 1 ;;
+  *) echo "showrunner: waiting returned an unmapped code — cannot tell" >&2; exit 2 ;;
 esac
