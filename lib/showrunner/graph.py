@@ -32,7 +32,15 @@ OPEN = "open"
 IN_PROGRESS = "in_progress"
 CLOSED = "closed"
 REFUTED = "refuted"
-TERMINAL = (CLOSED, REFUTED)
+# A TRUE premise attached to code nothing reaches (#55). Its own status because the two that
+# existed are both wrong for it: `closed` claims a user-visible change that does not exist, and
+# `refuted` says the analysis was wrong when it was right. A Crawler forced to pick between them
+# picks `closed`, because by then it is holding a real commit and real tests.
+UNREACHABLE = "unreachable"
+# UNREACHABLE is TERMINAL. Omitting it would leave the leaf counted as outstanding forever:
+# `ready` would keep offering it, and the stop gate would refuse a turn-end over work that was
+# correctly finished — the gate punishing the one outcome that took the most care to reach.
+TERMINAL = (CLOSED, REFUTED, UNREACHABLE)
 
 
 class Leaf(dict):
@@ -400,8 +408,8 @@ class SqliteGraph:
         self.db.commit()
 
     def close(self, leaf_id, outcome, proof, reason):
-        if outcome not in (CLOSED, REFUTED):
-            die("outcome must be 'closed' or 'refuted'", code=2)
+        if outcome not in (CLOSED, REFUTED, UNREACHABLE):
+            die("outcome must be one of 'closed', 'refuted', 'unreachable'", code=2)
         self.db.execute(
             "UPDATE leaves SET status=?, outcome=?, proof=?, close_reason=?, closed_ts=? WHERE id=?",
             (outcome, outcome, proof, reason, now(), leaf_id))
@@ -601,7 +609,7 @@ class BrGraph:
         self._br(["update", leaf_id, "--status", OPEN])
 
     def close(self, leaf_id, outcome, proof, reason):
-        tag = "REFUTED" if outcome == REFUTED else "done"
+        tag = {REFUTED: "REFUTED", UNREACHABLE: "UNREACHABLE"}.get(outcome, "done")
         self._br(["close", leaf_id, "--reason", "%s: %s [proof: %s]" % (tag, reason, proof)])
         return self.show(leaf_id)
 

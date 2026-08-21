@@ -563,8 +563,11 @@ def cmd_close(args):
     leaf, notes = gates.close_gate(
         cfg, g, args.id, args.proof, args.reason, refuted=args.refuted,
         evidence=args.evidence, stale_proof_reason=args.stale_proof_reason,
-        premise=args.premise, premise_read=args.premise_read)
-    events.emit(cfg, "leaf.closed", {"leaf": leaf["id"], "outcome": "refuted" if args.refuted else "closed",
+        premise=args.premise, premise_read=args.premise_read,
+        unreachable=args.unreachable)
+    _outcome = ("refuted" if args.refuted else
+                ("unreachable" if args.unreachable else "closed"))
+    events.emit(cfg, "leaf.closed", {"leaf": leaf["id"], "outcome": _outcome,
                 "proof": leaf.get("proof"), "premise": args.premise, "actor": leaf.get("actor")})
     print("%s %s (%s)" % ("REFUTED" if args.refuted else "closed", leaf["id"], leaf.get("proof")))
     # Spin the Crawler down as soon as its leaf closes: mark it finished and close its room.
@@ -2002,6 +2005,10 @@ def build_parser():
     s.add_argument("--proof")
     s.add_argument("--reason")
     s.add_argument("--refuted", action="store_true", help="the premise did not hold (a SUCCESS)")
+    s.add_argument("--unreachable", action="store_true",
+                   help="the premise HELD and nothing reaches the code — a third outcome, not a "
+                        "kind of refuted. Needs --evidence naming the allowlist, caller or "
+                        "enumeration that shows the gap")
     s.add_argument("--evidence", help="the file that refutes the premise")
     s.add_argument("--premise", choices=list(gates.PREMISE_VERDICTS))
     s.add_argument("--premise-read", help="the real file you checked the premise against")

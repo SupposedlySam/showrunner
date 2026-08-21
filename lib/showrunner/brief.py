@@ -55,6 +55,37 @@ smaller version of the thing to have something to show:
 
     {sr} close {leaf_id} --refuted --evidence <file> --reason "<what is actually true>"
 
+## AND SEPARATELY: does anything REACH the code?
+
+A true premise attached to dead code is void, and the premise check cannot catch it — that
+one asks *"is this true of the code?"*, this asks *"does anything get here?"*, and the answer
+lives in files this brief did not point you at.
+
+Two real cases, one run, one hour apart. A UI preset's colour matrix was genuinely malformed
+— measured, +35 luminance, every word correct — and the preset is not in the picker, because
+an allowlist in a different file dropped it five months earlier in a commit that says so.
+And a server branch picking 2 of 4 items was a real defect, gated on `count <= 4`, where the
+only client in the repo sends 40. Both briefs were accurate. Both were void. Neither Crawler
+could have discovered it from the file it was handed.
+
+**Name the entry point and the caller before you build.** If the orchestrator filled in the
+reachability section below, check it rather than trusting it. If it is empty, that is your
+first task and it is usually one grep: who supplies the enum value, the parameter or the flag
+this code is gated on?
+
+**Where a UI is involved, walk the UI.** A rendered list, menu or picker is enumerated
+somewhere the source read will not show you. In the case above, the source supported the brief
+and scrolling the on-device list to the end refuted it in under a minute.
+
+**"Unreachable" is a third close outcome**, not a kind of refuted:
+
+    {sr} close {leaf_id} --unreachable --evidence <the allowlist / caller / enumeration> \
+        --premise holds --reason "<what nothing reaches, and how you know>"
+
+Recording it as `done` claims a user-visible change that does not exist; recording it as
+`refuted` says your analysis was wrong when it was right. Both lose the finding, and `done`
+is the one you will reach for, because you will have a real commit and real tests in hand.
+
 Why this matters more here than in a solo session: a Crawler that quietly implements a
 fix for a bug that is not there is **indistinguishable** from one that did the work — same
 commit, same green tests, same confident report, and the proof-of-done gate is satisfied

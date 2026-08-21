@@ -43,7 +43,7 @@ PREMISE_VERDICTS = ("holds", "partial", "refuted", "unverifiable")
 
 
 def close_gate(cfg, graph, leaf_id, proof, reason, refuted=False, evidence=None,
-               stale_proof_reason=None, premise=None, premise_read=None):
+               stale_proof_reason=None, premise=None, premise_read=None, unreachable=False):
     """Refuse to close unless a real, non-empty artifact is named. Returns (leaf, notes).
 
     `refuted` is a **first-class successful outcome**, not a failure: a run that correctly
@@ -62,8 +62,18 @@ def close_gate(cfg, graph, leaf_id, proof, reason, refuted=False, evidence=None,
     """
     leaf = graph.show(leaf_id)
 
+    # UNREACHABLE IS ORTHOGONAL TO THE PREMISE, not another value of it (#55). The case that
+    # produced this had a premise that was true in every word -- a colour matrix genuinely
+    # malformed, measured before briefing -- attached to a preset an allowlist two directories
+    # away had dropped five months earlier. Premise HOLDS; nothing reaches the code. Folding
+    # that into `refuted` would say the analysis was wrong when it was right, and folding it
+    # into `holds` alone leaves "done" as the only close available -- which is the one a Crawler
+    # will pick, producing a real commit with real tests for work that changes nothing a user
+    # can see. Both existing outcomes are wrong, so this is a third.
     if refuted and not premise:
         premise = "refuted"
+    if unreachable and not premise:
+        premise = "holds"
     if premise not in PREMISE_VERDICTS:
         raise Refused(
             "REFUSED to close %s: --premise is required and must be one of %s."
@@ -72,7 +82,14 @@ def close_gate(cfg, graph, leaf_id, proof, reason, refuted=False, evidence=None,
                  "file you checked it against:\n"
                  "  --premise holds --premise-read <path you verified against>\n"
                  "A fix for a bug that is not there looks exactly like a fix for one that is.")
-    if not premise_read and not (refuted and evidence):
+    if unreachable and not evidence:
+        raise Refused(
+            "REFUSED to close %s: --unreachable must name the file that shows nothing reaches "
+            "this code." % leaf_id,
+            hint="The allowlist that omits the value, the caller that supplies the parameter "
+                 "gating it, or the enumeration you walked. 'Nothing calls this' is a claim "
+                 "about files this leaf never pointed you at, which is why it costs a citation.")
+    if not premise_read and not ((refuted or unreachable) and evidence):
         raise Refused(
             "REFUSED to close %s: --premise-read must name the real file you checked the "
             "premise against." % leaf_id,
@@ -82,8 +99,12 @@ def close_gate(cfg, graph, leaf_id, proof, reason, refuted=False, evidence=None,
         if not os.path.exists(pr):
             raise Refused("REFUSED to close %s: --premise-read names a path that does not "
                           "exist: %s%s" % (leaf_id, premise_read, _looked_in(pr_root)))
-    artifact = evidence if refuted else proof
-    label = "--evidence" if refuted else "--proof"
+    # Unreachable costs a citation for the same reason refuted does: "nothing calls this" is an
+    # assertion about code the Crawler was NOT pointed at, and it is the claim most likely to be
+    # made from a quick look. The artifact is the allowlist, the caller, or the enumeration that
+    # shows the gap.
+    artifact = evidence if (refuted or unreachable) else proof
+    label = "--evidence" if (refuted or unreachable) else "--proof"
 
     if not artifact:
         raise Refused(
@@ -125,7 +146,7 @@ def close_gate(cfg, graph, leaf_id, proof, reason, refuted=False, evidence=None,
                          "It is recorded in the close, not waved through.")
             notes.append("proof predates the claim; accepted with reason: %s" % stale_proof_reason)
 
-    outcome = "refuted" if refuted else "closed"
+    outcome = "refuted" if refuted else ("unreachable" if unreachable else "closed")
     full_reason = reason or ("premise refuted" if refuted else "done")
     full_reason += " [premise: %s%s]" % (premise, "" if not premise_read else " vs %s" % premise_read)
     if stale_proof_reason:
@@ -136,6 +157,14 @@ def close_gate(cfg, graph, leaf_id, proof, reason, refuted=False, evidence=None,
             "correctly declines to build something has produced real value." % premise)
 
     graph.close(leaf_id, outcome, rel(path, cfg.root), full_reason)
+
+    if unreachable:
+        notes.append(
+            "CLOSED UNREACHABLE: the premise held and nothing reaches the code. This is neither "
+            "done nor refuted, and recording it as either loses the finding — 'done' claims a "
+            "user-visible change that does not exist, 'refuted' says the analysis was wrong "
+            "when it was right. What is now known is that the code is dead, which is worth more "
+            "than the fix would have been.")
 
     # INV6: say what the guard does not catch, in the guard itself.
     notes.append(

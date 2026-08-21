@@ -640,6 +640,35 @@ def test_close_gate():
     ok("the gate states what it does NOT check (relevance)",
        any("NOT CHECKED" in n for n in notes), notes)
 
+    # #55: a TRUE premise attached to code nothing reaches. Both existing outcomes are wrong,
+    # and the wrong one a Crawler reaches for is `done`, because it will be holding a real
+    # commit with real tests -- for work that changes nothing a user can see.
+    g.add("unreachable case", leaf_id="u1")
+    g.claim("u1", "crawler")
+    ev = os.path.join(cfg.root, "allowlist.txt")
+    with open(ev, "w") as fh:
+        fh.write("the 18 entries, and this preset is not among them\n")
+    raises("REFUSES --unreachable with no citation — 'nothing calls this' is a claim about "
+           "files this leaf never pointed you at",
+           lambda: gates.close_gate(cfg, g, "u1", None, "dead", unreachable=True,
+                                    premise="holds", premise_read="README.md"),
+           "shows nothing reaches")
+    leaf, notes = gates.close_gate(cfg, g, "u1", None, "nothing renders this preset",
+                                   unreachable=True, evidence="allowlist.txt",
+                                   premise="holds", premise_read="README.md")
+    eq("an unreachable close records its OWN outcome, not `closed` and not `refuted` — the two "
+       "that are already wrong", leaf.get("outcome"), "unreachable")
+    ok("...and it is recorded with the premise HOLDING, because the analysis was right and the "
+       "code is dead — collapsing that into `refuted` would say the Crawler was wrong",
+       (leaf.get("premise") or "holds") == "holds", leaf.get("premise"))
+    ok("...and the gate says why neither `done` nor `refuted` would do, in the note it returns",
+       any("neither done nor refuted" in n for n in notes), notes)
+
+    ok("an unreachable leaf is TERMINAL — otherwise `ready` keeps offering it and the stop gate "
+       "refuses a turn-end over work that was correctly finished, punishing the outcome that "
+       "took the most care to reach",
+       leaf["status"] in G.TERMINAL, (leaf["status"], G.TERMINAL))
+
     g.add("fresh proof", leaf_id="p2")
     g.claim("p2", "crawler")
     fresh = os.path.join(cfg.root, "fresh.txt")

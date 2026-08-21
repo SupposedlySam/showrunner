@@ -448,6 +448,22 @@ longer exists. Three of fourteen issues in one real run described something that
 in a later batch of seven, all seven held. The rate is not the point — you cannot tell which batch
 you are in from the inside, and the two look identical until you read the source.
 
+**2b. "Unreachable" is a THIRD outcome.** A true premise attached to code nothing reaches is
+void, and the premise check cannot catch it — that asks *is this true of the code*, this asks
+*does anything get here*, and the answer is in files the brief never named. Observed twice in
+one hour: a genuinely malformed colour matrix on a preset an allowlist dropped five months
+earlier, and a real branch defect gated on `count <= 4` where the only client sends 40.
+
+```
+showrunner close <leaf> --unreachable --evidence <allowlist|caller|enumeration> \
+    --premise holds --reason "<what nothing reaches, and how you know>"
+```
+
+`done` claims a user-visible change that does not exist; `refuted` says the analysis was wrong
+when it was right. A Crawler forced to choose picks `done`, because by then it holds a real
+commit and real tests. Where a UI is involved, WALK THE UI — a picker is enumerated somewhere
+the source read will not show you.
+
 **2. "Premise refuted" is a success.** Close it and stop; do not build a smaller version of the thing
 so you have something to show:
 
@@ -657,7 +673,7 @@ what is there now. Nothing hashes the contents.
 ## Verifying the tool itself
 
 ```
-python3 test/run.py        # 998 assertions; needs only Python 3 + git
+python3 test/run.py        # 1003 assertions; needs only Python 3 + git
 bash prototype/demo.sh     # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 
