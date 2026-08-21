@@ -2042,7 +2042,23 @@ def build_parser():
     t.set_defaults(func=cmd_worktree_register)
 
     s = sub.add_parser("self", help="pin showrunner's own code at a git ref, for a central "
-                                    "install (nothing consumes it yet — see CI-03)")
+                                    "install. exit 1 no pin there, 2 the pin cannot be trusted",
+                       description=(
+                           "EXIT CODES ARE THE ANSWER, and they are semantic:\n"
+                           "  0  a pin is there and names the commit it holds\n"
+                           "  1  NO pin at that path — the absence of one\n"
+                           "  2  a pin IS there and cannot be trusted: its stamp is unreadable, "
+                           "or VERSION\n     and the stamp DISAGREE, meaning the directory was "
+                           "modified after pinning\n"
+                           "\n"
+                           "1 and 2 are different findings and must not be collapsed. 1 says "
+                           "nothing is\ninstalled. 2 says something IS installed and no commit "
+                           "describes it — which is the\nworse case, because the code is running "
+                           "and its provenance is a guess.\n"
+                           "\n"
+                           "`self --dest X || install` is WRONG: it treats an untrustworthy pin "
+                           "the same as a\nmissing one, and reinstalls over the evidence."),
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
     s.add_argument("--pin", help="the git ref to extract: a commit, tag or branch")
     s.add_argument("--dest", help="where the pinned checkout lands, or which one to report on")
     s.set_defaults(func=cmd_self)
@@ -2219,7 +2235,22 @@ def build_parser():
                        help="is this orchestrator legitimately waiting? exit 0 waiting, 1 not "
                             "waiting, 3 a Crawler is BLOCKED (alive and inert — needs a message, "
                             "not time). Build against --porcelain: three exit codes and two "
-                            "streams are easy to combine wrongly, and every wrong way is quiet")
+                            "streams are easy to combine wrongly, and every wrong way is quiet",
+                       description=(
+                           "EXIT CODES ARE THE ANSWER, and they are semantic:\n"
+                           "  0  waiting on live dispatched work\n"
+                           "  1  NOT waiting — nothing outstanding\n"
+                           "  3  a Crawler is BLOCKED: alive and inert, needs a message not time\n"
+                           "\n"
+                           "3 is separate from 1 because it used to share it, and the case this "
+                           "verb exists for\nproduced the same number as an ordinary quiet "
+                           "campaign — a real stop gate written\nagainst it never fired once.\n"
+                           "\n"
+                           "BLOCKED prints on BOTH streams; the ordinary verdict is stdout only.\n"
+                           "`waiting || exit 0` is WRONG and fails quiet: it collapses every "
+                           "non-zero code,\nso the blocked case reads as 'nothing to wait for'. "
+                           "Build on --porcelain."),
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
     s.add_argument("--base", default="HEAD")
     s.add_argument("--porcelain", action="store_true",
                    help="JSON on stdout — THE CONTRACT. The prose form splits its verdict across "
@@ -2229,7 +2260,26 @@ def build_parser():
     s = sub.add_parser("baseline", help="record the current check results as the comparison point")
     s.set_defaults(func=cmd_baseline)
 
-    s = sub.add_parser("check", help="run checks and compare: NO NEW FAILURES, not 'all green'")
+    s = sub.add_parser("check", help="run checks and compare: NO NEW FAILURES, not 'all green'. "
+                                     "exit 0 clean, 1 no baseline, 2 NEW failures, 3 VOID",
+                       description=(
+                           "EXIT CODES ARE THE ANSWER, and they are semantic:\n"
+                           "  0  no NEW failures against the baseline\n"
+                           "  1  no baseline recorded — nothing to compare, so nothing measured\n"
+                           "  2  NEW failures\n"
+                           "  3  VOID: the run could not reach the world, so it measured nothing\n"
+                           "\n"
+                           "3 is separate from 2 deliberately. A run that could not reach the "
+                           "world did not\nmeasure anything, and its failure count carries no "
+                           "information — which is strictly\nWORSE than a degraded comparison, "
+                           "because a degraded comparison is still about the\ncode. A caller "
+                           "treating non-zero as 'the code is bad' gets a code it did not map\n"
+                           "rather than a wrong answer it will believe.\n"
+                           "\n"
+                           "`check || <fail>` is WRONG: it collapses 1 and 3 — nothing measured — "
+                           "into 2,\nwhich says the code is broken. VALID means 'no evidence the "
+                           "world was unreachable',\nnever 'the environment was sound'."),
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
     s.set_defaults(func=cmd_check)
 
     s = sub.add_parser("integrate", help="merge Crawler branches serially, checks after each")

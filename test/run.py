@@ -2484,6 +2484,63 @@ def test_worktree_lease():
     # the probe FAILING. showrunner's own `waiting` grew a third code (#35): 3 for a BLOCKED
     # Crawler. Passed through unmapped, a working probe reporting a true state would be described
     # as broken for as long as the Crawler stayed blocked.
+    # #35: the exit codes were stated in the parser's `help=`, which argparse shows in the
+    # PARENT's subcommand list -- not in `waiting --help`, which is what somebody integrating
+    # against the verb actually runs. The warning existed on a channel the reader was not
+    # looking at, which is this issue's own defect one level up. Asserted on the SUBCOMMAND
+    # help, because that is the surface that was empty.
+    _wh = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"),
+                          "waiting", "--help"], capture_output=True, text=True).stdout
+    for _code, _what in (("0", "waiting"), ("1", "NOT waiting"), ("3", "BLOCKED")):
+        ok("`waiting --help` names exit %s, so a reader integrating against the verb learns the "
+           "code without reading the source" % _code,
+           _code in _wh and _what.split()[-1].lower() in _wh.lower(), _wh[:120])
+    ok("...and it names the `|| exit 0` idiom as WRONG, which is the specific wrong reading "
+       "that shipped and failed quiet -- naming the trap beats describing the contract",
+       "|| exit 0" in _wh, _wh[:120])
+
+    # #35's GENERAL rule, mechanically. The issue says: "worth checking status, reap and check
+    # against the same question -- this issue is about waiting because that is where it was
+    # caught, not because it is the only one." Derived from the SOURCE rather than a hand list,
+    # so a verb that grows a second non-zero code later cannot ship undocumented. Measured when
+    # written: `check` had four semantic codes and named none of them in its own --help, while
+    # `status` and `reap` always return 0 and carry no trap -- the suspicion was right for one of
+    # the three, which is why this asks the code instead of assuming.
+    _cli_src = open(os.path.join(ROOT, "lib", "showrunner", "cli.py")).read()
+    _pairs = re.findall(r'add_parser\("([a-z-]+)"(.*?)set_defaults\(func=(cmd_[a-z_]+)\)',
+                        _cli_src, re.S)
+    _semantic = []
+    for _verb, _block, _fn in _pairs:
+        _m = re.search(r"\ndef %s\(.*?(?=\ndef )" % _fn, _cli_src, re.S)
+        if not _m:
+            continue
+        # EVERY digit in a return statement, not just the one after `return`. The first version
+        # matched `return (\d)` and so read `return 0 if ok else 2` as returning only 0 --
+        # check's exit 2 was invisible to the rule that exists to document exit codes. Erring
+        # toward over-reporting on purpose: a spurious entry costs a sentence of documentation,
+        # while a missed one is a verb that escapes this check entirely.
+        _codes = set()
+        for _stmt in re.findall(r"\breturn\s+([^\n]*)", _m.group(0)):
+            _codes |= {int(d) for d in re.findall(r"\b(\d)\b", _stmt)}
+        _codes -= {0}
+        if len(_codes) >= 2:
+            _semantic.append((_verb, sorted(_codes), _block))
+    ok("at least one verb carries semantic exit codes, so the rule below is not vacuous -- a "
+       "derived list that silently went empty would pass forever",
+       _semantic, [v for v, _c, _b in _semantic])
+    for _verb, _codes, _block in _semantic:
+        _help = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"),
+                                _verb, "--help"], capture_output=True, text=True).stdout
+        # A BARE DIGIT ANYWHERE IS NOT DOCUMENTATION. The first version of this asked
+        # `str(c) in _help`, and prose like "3 is separate from 2" satisfied it for 2 -- so
+        # deleting 2's actual entry left the assertion green. Require the listing form: the
+        # code at the start of a line, followed by its meaning.
+        _missing = [c for c in _codes
+                    if not re.search(r"^\s*%d\s+\S" % c, _help, re.M)]
+        ok("`%s` carries semantic exit codes %s and names them in its OWN --help -- argparse "
+           "shows `help=` in the PARENT listing, which is not what somebody integrating against "
+           "the verb runs" % (_verb, _codes), not _missing, _missing)
+
     probe = os.path.join(ROOT, ".showrunner", "hooks", "waiting-probe.sh")
     ok("the waiting probe ships and is executable", os.path.isfile(probe) and
        os.access(probe, os.X_OK), probe)
