@@ -5597,6 +5597,18 @@ def test_claims_about_the_layer_below():
     # `missing` list is what both answers look like.
     ok("...and a front-door doc that could not be read is reported as unreadable rather than "
        "silently contributing no surfaces", not unreadable, unreadable)
+    # A VACUOUS EXEMPTION IS A STANDING AUTHORISATION, not dead code. Dead code does nothing;
+    # an exclusion matching no real surface is redeemed by whoever adds a matching one next --
+    # nobody's decision, at no particular moment, with no output. Three of these named CLI verbs
+    # this project has never had, and they masked a live blind spot: env_vars() walked lib/**.py
+    # only, so SHOWRUNNER_BIN and SHOWRUNNER_STATE (read by hook shims) and SHOWRUNNER_CENTRAL
+    # (read by install.sh) were invisible to the check while sitting in the exclusion list --
+    # which made the blindness read as a decision. Deleting the names would have kept the blind
+    # spot and destroyed the only evidence of it.
+    ok("every documentation exclusion names a surface this project actually has -- an exclusion "
+       "matching nothing is a standing permission for whatever matches it later",
+       not docs_surface.vacuous(), docs_surface.vacuous())
+
     # The limits are part of the check, not commentary: without them a green tick here reads as
     # "the docs are correct", which is the one thing this cannot determine.
     ok("...and the tool still states what it CANNOT check, so a pass is not read as "

@@ -33,21 +33,31 @@ READINGS = os.path.join("docs", "READINGS.md")
 
 # Surfaces that are deliberately not front-door material, each with the reason. An exclusion is a
 # stated decision that stays visible here and is counted in the report — never a silent skip.
+# NOTE ON DEAD KEYS: `limitgate`, `statusline` and `sessionstart` were excused here as
+# "harness-facing" and are not showrunner verbs at all -- the CLI has never had them. They
+# excused nothing, and `vacuous()` below now fails the suite on that shape rather than leaving it
+# to be noticed. A vacuous exemption is not dead code: dead code does nothing, while this is a
+# standing authorisation, redeemed by whoever adds a matching surface next -- nobody's decision,
+# at no particular moment, with no output.
+# Variables showrunner HONOURS but never defines. They are not exclusions and must not sit in
+# NOT_FRONT_DOOR: the derivation only ever yields SHOWRUNNER_* names, so a key here could never
+# match one, and an entry that can never match is indistinguishable from a decision somebody
+# made. Kept as prose because the reasoning is worth having, not as a suppression.
+HONOURED_NOT_OURS = {
+    "GAME_LOOP_REPO": "the harness's own variable, read here to cooperate with it; it belongs to "
+                      "game_loop's docs and naming it here would be this project documenting "
+                      "somebody else's surface",
+    "NO_COLOR": "a standard variable this honours rather than defines",
+    "XDG_CONFIG_HOME": "a standard variable this honours rather than defines",
+}
+
 NOT_FRONT_DOOR = {
     "stop-gate": "a hook verb, not something a reader invokes; documented where the gate is",
-    "limitgate": "harness-facing",
-    "statusline": "harness-facing",
-    "sessionstart": "harness-facing",
     "integration-commit": "the second half of `integrate`, described with it",
     "SHOWRUNNER_STATE": "test seam for the issue waker, not a consumer knob",
     "SHOWRUNNER_SESSION": "set by the harness for a Crawler, never by a reader",
     "SHOWRUNNER_BIN": "an override for the probe's own resolution, not consumer surface",
     "SHOWRUNNER_CENTRAL": "central mode, documented in its own section by name",
-    "XDG_CONFIG_HOME": "a standard variable this honours rather than defines",
-    "NO_COLOR": "a standard variable this honours rather than defines",
-    "GAME_LOOP_REPO": "the harness's own variable, read here to cooperate with it; it belongs to "
-                      "game_loop's docs and naming it here would be this project documenting "
-                      "somebody else's surface",
     "SHOWRUNNER_CRAWLER": "set by `spawn` onto a Crawler's session and read back by the lock "
                           "guard; a reader never sets it",
     "issue-waker.py": "SITE WIRING, not product — it names one repo and one trusted author set, "
@@ -64,14 +74,42 @@ def verbs():
     return sorted(set(m.group(1).split(","))) if m else []
 
 
+# Everything a CONSUMER receives, not just the library. This used to walk lib/**.py alone, so
+# every variable read by install.sh or by a hook shim was invisible -- and three of them sat in
+# NOT_FRONT_DOOR by name, which made the blind spot read as a decision somebody had made. Removing
+# those names as "vacuous" would have left the blindness and lost the only trace of it. An
+# exclusion that names something the check cannot see is the shape to watch for.
+_ENV_SOURCES = (("lib", (".py",)), (".showrunner/hooks", (".sh", ".py")), (".", (".sh",)))
+_ENV_PATTERNS = (
+    r'environ(?:\.get)?[\(\[]"([A-Z][A-Z0-9_]+)"',   # python
+    r'\$\{?([A-Z][A-Z0-9_]{3,})\}?',                  # shell reads
+)
+
+
 def env_vars():
+    """Every SHOWRUNNER_* variable this project reads, wherever it reads it."""
     found = set()
-    for base, _, files in os.walk(os.path.join(ROOT, "lib")):
-        for f in files:
-            if f.endswith(".py"):
-                with open(os.path.join(base, f), errors="ignore") as fh:
-                    found |= set(re.findall(r'environ(?:\.get)?[\(\[]"([A-Z][A-Z0-9_]+)"', fh.read()))
-    return sorted(found)
+    for rel, exts in _ENV_SOURCES:
+        base_dir = os.path.join(ROOT, rel)
+        if not os.path.isdir(base_dir):
+            continue
+        walk = os.walk(base_dir) if rel != "." else [(base_dir, [], os.listdir(base_dir))]
+        for base, _, files in walk:
+            if os.sep + ".git" in base:
+                continue
+            for f in files:
+                if not f.endswith(exts):
+                    continue
+                try:
+                    with open(os.path.join(base, f), errors="ignore") as fh:
+                        blob = fh.read()
+                except OSError:
+                    continue
+                for pat in _ENV_PATTERNS:
+                    found |= set(re.findall(pat, blob))
+    # Only this project's own knobs. A shell scan otherwise reports PATH, HOME and every caps
+    # word in a heredoc, and a check that cries wolf is one whose output stops being read.
+    return sorted(v for v in found if v.startswith("SHOWRUNNER_"))
 
 
 def hooks():
@@ -83,6 +121,12 @@ def hooks():
     # project ships, and reporting it as undocumented is the check inventing work.
     return sorted(f for f in os.listdir(d)
                   if os.path.isfile(os.path.join(d, f)) and not f.startswith("."))
+
+
+
+def vacuous():
+    """Exclusion keys naming nothing this project actually has."""
+    return sorted(set(NOT_FRONT_DOOR) - (set(verbs()) | set(env_vars()) | set(hooks())))
 
 
 def unnamed():
