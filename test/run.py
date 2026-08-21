@@ -2707,8 +2707,13 @@ def test_worktree_lease():
                if l.strip() and not l.strip().startswith("#")]
     _uncovered = [e for e in _mine
                   if e not in _theirs and not any(_fn.fnmatch(e, g) for g in _theirs)]
-    ok("every runtime path THIS repo ignores is ignored in the copy a consumer receives -- one "
-       "rule written twice is two rules, and the consumer's is the one that matters",
+    # NAMED FOR THE ARTIFACT IT READS. This said "the copy a consumer receives", which is a
+    # claim about a DELIVERY while the evidence is a read of the template -- and it was green
+    # while no existing consumer received the rule at all. The assertion was never wrong; its
+    # name was, and the name is what made me believe the delivery was covered. The upgrade
+    # assertion below is the one that speaks for consumers.
+    ok("the installer's TEMPLATE ignores every runtime path this repo ignores -- one rule "
+       "written twice is two rules, and this checks only that the two texts agree",
        not _uncovered, _uncovered)
 
     # AND THE UPGRADE PATH, which is a different question the assertion above cannot ask. The
