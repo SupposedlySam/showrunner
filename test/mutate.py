@@ -82,6 +82,14 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # The placeholder-check detector (consumer report). Answering "nothing is unconfigured"
+    # everywhere restores the exact bug: `baseline` accepts a command that cannot fail and
+    # records it as clean, and every later no-new-failures verdict is measured against it. A
+    # detector whose neutered form is SILENT needs a mutant, because silence is also its
+    # ordinary output on a correctly configured repo.
+    ("placeholder-check detector", "gates.unconfigured_checks", "lib/showrunner/gates.py",
+     r"(def unconfigured_checks\(cfg\):\n)",
+     "    return []\ndef _neutered_unconfigured_checks(cfg):\n"),
     # The corroborating signal for a blocked report (#54). Answering "no evidence" everywhere is
     # the SAFE direction -- it restores the old always-refuse gate -- which is exactly why it
     # needs a mutant: a producer that fails safe is one whose death is invisible, and the four

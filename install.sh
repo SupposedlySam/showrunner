@@ -108,16 +108,26 @@ fi
 # cannot guard one. It names no absolute path and no machine, so it is safe to commit — that
 # is the whole reason the registration points at a shim instead of at the binary.
 mkdir -p "$TARGET/.showrunner/hooks"
-cp "$SRC/.showrunner/hooks/worktree-guard.sh" "$TARGET/.showrunner/hooks/worktree-guard.sh"
-chmod +x "$TARGET/.showrunner/hooks/worktree-guard.sh"
-echo "  copied  .showrunner/hooks/worktree-guard.sh (COMMIT THIS — it must cross into worktrees)"
-cp "$SRC/.showrunner/hooks/inert-crawler-gate.sh" "$TARGET/.showrunner/hooks/inert-crawler-gate.sh"
-chmod +x "$TARGET/.showrunner/hooks/inert-crawler-gate.sh"
-echo "  copied  .showrunner/hooks/inert-crawler-gate.sh (Stop: refuses a turn-end while a Crawler is inert)"
-cp "$SRC/.showrunner/hooks/waiting-probe.sh" "$TARGET/.showrunner/hooks/waiting-probe.sh"
-chmod +x "$TARGET/.showrunner/hooks/waiting-probe.sh"
-echo "  copied  .showrunner/hooks/waiting-probe.sh (answers a harness watchdog; NOT wired by this"
-echo "          script — arming a wait is a human decision, see the note at the end)"
+# ONE LIST, LOOPED. This was three `cp` lines naming three files, and the registration wrote
+# FIVE — so `whoami.sh` and `dispatch-guard.sh` shipped in the payload, got registered, and were
+# never copied. A consumer reported a PreToolUse dispatch guard that was REGISTERED AND ABSENT,
+# which is worse than unregistered: the registration is what makes it look present, and doctor
+# reported registration rather than existence, so the diagnostic agreed with the appearance.
+# A per-file `cp` needs somebody to remember; a list is the thing the suite can compare against
+# what the registration actually names.
+for hook_name in worktree-guard.sh inert-crawler-gate.sh waiting-probe.sh whoami.sh \
+                 dispatch-guard.sh; do
+  cp "$SRC/.showrunner/hooks/$hook_name" "$TARGET/.showrunner/hooks/$hook_name"
+  chmod +x "$TARGET/.showrunner/hooks/$hook_name"
+  case "$hook_name" in
+    worktree-guard.sh)      note="COMMIT THIS — it must cross into worktrees" ;;
+    inert-crawler-gate.sh)  note="Stop: refuses a turn-end while a Crawler is inert" ;;
+    waiting-probe.sh)       note="answers a harness watchdog; NOT wired by this script — arming a wait is a human decision, see the note at the end" ;;
+    whoami.sh)              note="SessionStart + PostCompact: announces the derived seat" ;;
+    dispatch-guard.sh)      note="PreToolUse on Bash: refuses a raw dispatch from a seat that may not create one" ;;
+  esac
+  echo "  copied  .showrunner/hooks/$hook_name ($note)"
+done
 
 if [ ! -f "$TARGET/.showrunner/.gitignore" ]; then
   cat >"$TARGET/.showrunner/.gitignore" <<'EOF'
@@ -133,6 +143,11 @@ events.jsonl
 *.lock
 baseline.json
 integration-commit.json
+# Machine-specific overrides. The docs point people here for absolute paths, and without this
+# line the file lands NEITHER TRACKED NOR IGNORED -- the exact state doctor flags elsewhere.
+# Reported by a consumer who had to use .git/info/exclude instead, and who was right that an
+# exclusion living outside the payload vanishes on the next upgrade.
+config.local.json
 EOF
   echo "  wrote   .showrunner/.gitignore (runtime state ignored; config.json is source)"
 fi

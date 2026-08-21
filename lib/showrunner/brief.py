@@ -20,7 +20,7 @@ paragraph is a wish.
 
 import os
 
-from . import lanes, worktree
+from . import dispatch, lanes, worktree
 from .util import rel
 
 TEMPLATE = """\
@@ -204,12 +204,16 @@ ORCH_HEADER = """\
 CHAT_BLOCK = """\
 ## You are reachable
 
-The orchestrator opened a channel for you and installed llm_chat in this worktree. Join it
-once, as yourself, before you start:
+The orchestrator opened a channel for you and wired delivery into this worktree. Join it
+once, as yourself, before you start — **run it by this exact path**:
 
-    llm_chat join {channel} --as {crawler}
+    {chat_cli} join {channel} --as {crawler}
 
-Messages arrive in your context automatically; you do not poll.
+Messages arrive in your context automatically; you do not poll. INBOUND and OUTBOUND are wired
+differently and only one of them is automatic: delivery hooks carry absolute paths, so you
+RECEIVE without doing anything, while sending needs the binary — and it is generally NOT on
+your PATH. A Crawler that reported this had received messages all session and could not answer
+one, which from the orchestrator's side is indistinguishable from a Crawler thinking hard.
 
 **Do not post a start notice.** The orchestrator dispatched you seconds ago and already knows
 what you are doing — it wrote this brief. Under a turn-end gate that blocks on unanswered
@@ -300,7 +304,15 @@ def build(cfg, leaf, spawn_record, decision=None, orchestrator_findings=None,
 
     chat_block = ""
     if chat_channel:
-        chat_block = CHAT_BLOCK.format(channel=chat_channel, crawler=spawn_record["crawler"])
+        # THE RESOLVED ABSOLUTE PATH, never the bare word. `llm_chat` is not on PATH for a
+        # consumer who vendors it, and the bare name shipped in every brief: inbound worked
+        # (the delivery hooks carry absolute paths), outbound did not, and the half that worked
+        # is the half that hid the other. showrunner already has this value and `doctor`
+        # already resolves it -- the same argument as `--version` answering from where the code
+        # lives: the tool knows, so the tool should say.
+        _cli = dispatch.chat_path(cfg, "cli") or "llm_chat"
+        chat_block = CHAT_BLOCK.format(channel=chat_channel, crawler=spawn_record["crawler"],
+                                       chat_cli=_cli)
 
     shares = spawn_record.get("shares") or worktree.audit_shared(cfg)
     shared_block = ""

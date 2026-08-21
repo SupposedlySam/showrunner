@@ -704,6 +704,45 @@ def test_stop_gate():
     ok("stop is OK once the claimed work is closed through the gate", ok_, msg)
 
 
+def test_unconfigured_checks():
+    group("A scaffold's placeholder check is not an empty slot, it is a PASSING GATE")
+    # Reported by a consumer who clean-installed: `init` ships cmd `echo 'configure me: your
+    # test command'`, which exits 0 always. `integrate` re-runs the checks on every merged
+    # result and reported passing; `baseline` recorded "0 failure lines, clean" against it. So
+    # the no-new-failures criterion was measuring a command with no failure mode, and nothing
+    # said so. "Unconfigured" and "passing" produced identical output.
+    cfg = make_repo()
+    ok("the SHIPPED scaffold's own check is detected as one that cannot fail -- this is the "
+       "default every new project starts from, so it is the case that matters",
+       gates.unconfigured_checks({"checks": [{"name": "tests",
+                                              "cmd": "echo 'configure me: your test command'"}]}),
+       )
+    for _noop in ("true", ":"):
+        ok("...and `%s`, which is the same passing gate written shorter" % _noop,
+           gates.unconfigured_checks({"checks": [{"name": "t", "cmd": _noop}]}))
+    ok("a REAL command is left alone -- this refuses at a gate, so a broad guess about somebody "
+       "else's test runner would block work that is fine",
+       not gates.unconfigured_checks({"checks": [{"name": "t", "cmd": "pytest -q"}]}))
+    ok("...including one that merely MENTIONS echo, because the check is the command's failure "
+       "mode and not the presence of a word",
+       not gates.unconfigured_checks({"checks": [{"name": "t", "cmd": "make test && echo done"}]}))
+    # Put the SHIPPED placeholder into this repo's config, because make_repo configures a real
+    # check. Testing the refusal against a config that never had the defect would assert that
+    # baseline refuses -- when it does not -- and pass for the wrong reason.
+    _cpath = os.path.join(cfg.root, ".showrunner", "config.json")
+    with open(_cpath) as _fh:
+        _conf = json.load(_fh)
+    _conf["checks"] = [{"name": "tests", "cmd": "echo 'configure me: your test command'"}]
+    with open(_cpath, "w") as _fh:
+        json.dump(_conf, _fh)
+    _p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "baseline"],
+                        cwd=cfg.root, capture_output=True, text=True)
+    _said = (_p.stderr or "") + (_p.stdout or "")
+    ok("`baseline` REFUSES against a check that cannot fail, the same refusal as no checks at "
+       "all and for the same reason -- a baseline of nothing proves nothing",
+       _p.returncode == 2 and "cannot fail" in _said, (_p.returncode, _said[:100]))
+
+
 def test_baseline():
     group("No NEW failures, not 'all green' (issues #6, #9)")
     flag = os.path.join(tmpdir("checks"), "extra")
@@ -2591,6 +2630,57 @@ def test_worktree_lease():
         ok("`%s` carries semantic exit codes %s and names them in its OWN --help -- argparse "
            "shows `help=` in the PARENT listing, which is not what somebody integrating against "
            "the verb runs" % (_verb, _codes), not _missing, _missing)
+
+    # #REGISTERED-AND-ABSENT. A consumer clean-installed from a release and found a PreToolUse
+    # dispatch guard that was registered and had no file. install.sh named three hooks in three
+    # `cp` lines while the registration wrote five, so two shipped in the payload, got wired,
+    # and were never copied. That is one rung WORSE than the unregistered case this repo already
+    # argues about: the registration is what makes it look present, and doctor reported
+    # registration rather than existence, so the diagnostic agreed with the appearance.
+    # Derived from lease.py rather than listed here -- a hand list in the test is the same
+    # failure as a hand list in the installer, one file along.
+    _lease_src = open(os.path.join(ROOT, "lib", "showrunner", "lease.py")).read()
+    _registered = set(re.findall(r'"([a-z-]+\.sh)"', _lease_src))
+    _install_src = open(os.path.join(ROOT, "install.sh")).read()
+    # THE COPY LIST, not the file. Searching the whole of install.sh passes on a hook that is
+    # merely MENTIONED -- the first version of this did, and a mutation removing whoami.sh from
+    # the loop stayed green because its `case` label still named it. Third time this session a
+    # "substring appears somewhere" assertion has proved unfalsifiable; the fix is always to
+    # anchor on the structure that does the work.
+    _m_loop = re.search(r"for hook_name in (.*?);\s*do", _install_src, re.S)
+    ok("install.sh copies its hooks from a LIST the suite can read, rather than one `cp` per "
+       "file -- a per-file copy is what let two of five go missing", _m_loop is not None)
+    _copied_list = (_m_loop.group(1).replace("\\\n", " ").split() if _m_loop else [])
+    ok("the registration names at least one hook, so the comparison below is not vacuous",
+       _registered, sorted(_registered))
+    _uncopied = sorted(h for h in _registered if h not in _copied_list)
+    ok("every hook the REGISTRATION names is copied by install.sh -- a registered hook with no "
+       "file is worse than an unregistered one, because the registration is what makes it look "
+       "present", not _uncopied, _uncopied)
+    # And the payload must actually contain them, or the installer copies from nothing.
+    _missing_src = sorted(h for h in _registered
+                          if not os.path.isfile(os.path.join(ROOT, ".showrunner", "hooks", h)))
+    ok("...and each of those exists in the payload, so the copy has a source -- `cp` failing at "
+       "install time is the same absence arriving louder", not _missing_src, _missing_src)
+
+    # TWO COPIES OF ONE RULE. This repo's .showrunner/.gitignore and the one install.sh writes
+    # are the same policy stated twice, and they drifted: config.local.json was ignored here and
+    # not in the payload, so the file the docs send people to landed neither tracked nor ignored
+    # in every consumer. Covered-by-a-glob counts -- `*.lock` covers `campaign.json.lock` -- so
+    # this compares MEANING rather than text.
+    import fnmatch as _fn
+    _mine = [l.strip() for l in open(os.path.join(ROOT, ".showrunner", ".gitignore"))
+             if l.strip() and not l.startswith("#")]
+    _m_ig = re.search(r'\.showrunner/\.gitignore" <<.EOF.\n(.*?)\nEOF', open(
+        os.path.join(ROOT, "install.sh")).read(), re.S)
+    ok("install.sh writes a .showrunner/.gitignore the suite can read", _m_ig is not None)
+    _theirs = [l.strip() for l in (_m_ig.group(1).splitlines() if _m_ig else [])
+               if l.strip() and not l.strip().startswith("#")]
+    _uncovered = [e for e in _mine
+                  if e not in _theirs and not any(_fn.fnmatch(e, g) for g in _theirs)]
+    ok("every runtime path THIS repo ignores is ignored in the copy a consumer receives -- one "
+       "rule written twice is two rules, and the consumer's is the one that matters",
+       not _uncovered, _uncovered)
 
     probe = os.path.join(ROOT, ".showrunner", "hooks", "waiting-probe.sh")
     ok("the waiting probe ships and is executable", os.path.isfile(probe) and
@@ -6557,6 +6647,12 @@ def test_cli():
     # and `%s` is not `showrunner` and not `{sr}`, so it was invisible. That is now three
     # spellings of the same idea, and the check keys on all three rather than on the two
     # somebody happened to think of.
+    # Placeholders that hold ANOTHER tool's path. BINARY matches `{name} <verb>` on purpose --
+    # a brief interpolates showrunner's own binary that way -- but not every interpolated path
+    # is showrunner's, and `{chat_cli} join` was read as the non-existent verb `showrunner
+    # join`. Named rather than loosened, and asserted below to actually occur, so this cannot
+    # become a standing permission for a placeholder nobody uses any more.
+    NOT_THE_BINARY = {"chat_cli": "the chat tool's absolute path, not showrunner's"}
     BINARY = r"(?:showrunner|\{[a-z_][a-z_0-9]*\}|%s)"
 
     def joined(text):
@@ -6575,6 +6671,9 @@ def test_cli():
         for span in spans:
             m = re.match(r"\s*%s ([a-z][a-z-]+)((?: [a-z][a-z-]+)?)" % BINARY, span)
             if m:
+                held = re.match(r"\s*\{([a-z_][a-z_0-9]*)\}", span)
+                if held and held.group(1) in NOT_THE_BINARY:
+                    continue
                 yield m.group(1), m.group(2).strip()
 
     # Only the FIRST word was ever checked. `lock` has five subcommands and eight places print
@@ -6618,6 +6717,14 @@ def test_cli():
                 dead.append("%s: showrunner %s" % (rel_path, word))
             elif sub and subverbs_of(word) and sub not in subverbs_of(word):
                 dead.append("%s: showrunner %s %s" % (rel_path, word, sub))
+    # The exclusion above must name a placeholder that REALLY appears, or it is a standing
+    # permission for whatever matches it later -- the same rule this suite applies to the
+    # documentation exclusions.
+    _brief_src = open(os.path.join(ROOT, "lib", "showrunner", "brief.py")).read()
+    ok("the non-binary placeholder exclusion names something the briefs actually interpolate, "
+       "so it cannot outlive what it excuses",
+       all(("{%s}" % k) in _brief_src for k in NOT_THE_BINARY), sorted(NOT_THE_BINARY))
+
     ok("every `showrunner <verb>` this repo prints or documents is a verb the CLI actually "
        "accepts — a remedy naming a command that does not exist is worse than no remedy",
        not dead, sorted(set(dead)))
@@ -6682,7 +6789,12 @@ def test_cli():
         for node in ast.walk(ast.parse(src)):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 seen_here = set(w for w, _ in commands_in(node.value))
-                for m in re.finditer(r"showrunner ([a-z][a-z-]+)", node.value):
+                # NOT preceded by a path character. A rendered ABSOLUTE PATH whose directory
+                # happens to be named showrunner (this repo's own checkout, for one) is a file
+                # location, not the CLI being invoked -- `/dev/showrunner/.../llm_chat join`
+                # was read as the verb `showrunner join`. Loosening this would be gaming the
+                # check; the boundary is what the check meant all along.
+                for m in re.finditer(r"(?<![/\w.-])showrunner ([a-z][a-z-]+)", node.value):
                     if m.group(1) not in verbs:
                         continue          # prose, not a command
                     if m.group(1) in seen_here or m.group(1) in visible:
@@ -6920,6 +7032,7 @@ def main():
     for fn in (test_locks, test_config_refusals, test_every_rule_can_fail, test_graph, test_lifecycle, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_waiting, test_work_since_block,
+               test_unconfigured_checks,
                test_concurrency,
                test_integration, test_worktree_lease, test_worktree_guard_from_inside_a_worktree,
                test_self_pin, test_self_vendored_pin, test_roles,

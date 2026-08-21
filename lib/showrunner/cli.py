@@ -1793,6 +1793,13 @@ def cmd_baseline(args):
     cfg = _cfg(args)
     if not (cfg.get("checks") or []):
         die("no checks configured — a baseline of nothing proves nothing", code=2)
+    stub = gates.unconfigured_checks(cfg)
+    if stub:
+        die("check(s) %s cannot fail, so a baseline of them proves nothing — the same refusal "
+            "as no checks at all, and for the same reason. `init` ships a placeholder command; "
+            "until it is replaced, `integrate` re-runs it after every merge and reports passing "
+            "while measuring nothing. Point it at your real test command in .showrunner/"
+            "config.json." % ", ".join(stub), code=2)
     data = gates.record_baseline(cfg)
     print("recorded baseline at %s" % rel(cfg.baseline_path, cfg.root))
     for c in data["checks"]:

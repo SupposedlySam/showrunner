@@ -372,6 +372,27 @@ VOID_PATTERNS = (
 )
 
 
+PLACEHOLDER_MARK = "configure me"
+# Commands that CANNOT FAIL. A check whose command always exits 0 is not an unconfigured slot,
+# it is a PASSING GATE: `integrate` re-runs these on every merged result and reports success,
+# and `baseline` records "0 failure lines, clean" against them, so the no-new-failures criterion
+# is measuring a command with no failure mode. Reported by a consumer who clean-installed and
+# got exactly that. Kept narrow on purpose -- the shipped scaffold's own marker plus the two
+# shell no-ops -- because a broad guess about somebody's real test command would refuse work
+# that is fine, and this refuses at the gate.
+_CANNOT_FAIL = ("true", ":")
+
+
+def unconfigured_checks(cfg):
+    """Check names whose command cannot fail, so a pass through them means nothing."""
+    out = []
+    for c in (cfg.get("checks") or []):
+        cmd = (c.get("cmd") or "").strip()
+        if PLACEHOLDER_MARK in cmd or cmd in _CANNOT_FAIL:
+            out.append(c.get("name") or cmd or "<unnamed>")
+    return out
+
+
 def validity(cfg, current):
     """Could this run measure anything at all? Returns (valid, report).
 
