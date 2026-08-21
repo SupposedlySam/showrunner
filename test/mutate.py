@@ -82,6 +82,14 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # The corroborating signal for a blocked report (#54). Answering "no evidence" everywhere is
+    # the SAFE direction -- it restores the old always-refuse gate -- which is exactly why it
+    # needs a mutant: a producer that fails safe is one whose death is invisible, and the four
+    # restraint assertions around it agree with a neutered version. Only the positive case can
+    # notice, and this is what proves that is still true.
+    ("work-since-block evidence", "campaign.work_since_block", "lib/showrunner/campaign.py",
+     r"(def work_since_block\(cfg, crawler, branch, worktree\):\n)",
+     "    return False, \"\"\ndef _neutered_work_since_block(cfg, crawler, branch, worktree):\n"),
     # Added when the release gate's accounting refused: five producers arrived from another
     # session unswept. These two are registered rather than excused, because both are POLICY.
     #
