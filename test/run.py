@@ -2711,6 +2711,24 @@ def test_worktree_lease():
        "rule written twice is two rules, and the consumer's is the one that matters",
        not _uncovered, _uncovered)
 
+    # AND THE UPGRADE PATH, which is a different question the assertion above cannot ask. The
+    # heredoc runs only `if [ ! -f ... ]`, so on an upgrade it is skipped entirely: an entry
+    # added there reaches FRESH INSTALLS ONLY and never reaches anybody who already had the
+    # tool. That is what happened to config.local.json -- I asserted the template and the
+    # template was right, while every existing consumer got nothing. A consumer found it with
+    # `git check-ignore -v` after I told them it was fixed.
+    _inst_all = open(os.path.join(ROOT, "install.sh")).read()
+    _m_loop2 = re.search(r'for entry in (.*?);\s*do\s*\n\s*if ! grep -qxF', _inst_all, re.S)
+    ok("install.sh tops the ignore file up from a list the suite can read, rather than only "
+       "creating it when absent", _m_loop2 is not None)
+    _ensured = re.findall(r'"([^"]+)"', _m_loop2.group(1) if _m_loop2 else "")
+    _upgrade_gap = [e for e in _mine
+                    if e not in _ensured and not any(_fn.fnmatch(e, g) for g in _ensured)]
+    ok("...and every one of those paths reaches an UPGRADE, not just a fresh install -- a rule "
+       "that only lands when the file is first created never reaches an existing consumer, and "
+       "is invisible to any check that reads the template",
+       not _upgrade_gap, _upgrade_gap)
+
     probe = os.path.join(ROOT, ".showrunner", "hooks", "waiting-probe.sh")
     ok("the waiting probe ships and is executable", os.path.isfile(probe) and
        os.access(probe, os.X_OK), probe)

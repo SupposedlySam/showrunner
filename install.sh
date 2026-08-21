@@ -171,17 +171,28 @@ fi
 # silently honours an edit that re-opens the hole.
 sr_ignore="$TARGET/.showrunner/.gitignore"
 sr_added=0
-for entry in "bin/" "lib/"; do
+# EVERY tool-owned entry, not just the two added last. The heredoc above runs ONLY when the
+# file is absent, so on an UPGRADE it is skipped entirely -- which meant config.local.json
+# reached fresh installs and never reached anybody who already had showrunner. A consumer found
+# it by running `git check-ignore -v` rather than believing me that it was fixed. bin/ and lib/
+# got here only because they happened to be added through this loop instead.
+#
+# Ensure-present rather than rewrite: these are the TOOL's policy about its own runtime files,
+# so converging a consumer's file to the full set is correct, while clobbering the file would
+# discard entries they added. `grep -qxF` makes it idempotent, so re-running adds nothing.
+for entry in "bin/" "lib/" "graph.db" "graph.db-*" "locks/" "scratch/" "campaign.json" \
+             "routing.jsonl" "waiting.jsonl" "events.jsonl" "*.lock" "baseline.json" \
+             "integration-commit.json" "config.local.json"; do
   if ! grep -qxF "$entry" "$sr_ignore" 2>/dev/null; then
     if [ "$sr_added" = 0 ]; then
-      printf '\n# The TOOL, not this project. Installed by install.sh and replaced wholesale on\n# upgrade — committing it vendors a copy that drifts from the one you installed.\n# `--central` (when it lands) makes this the only thing here.\n' >>"$sr_ignore"
+      printf '\n# showrunner runtime state and the tool itself, added by install.sh. Present on a\n# fresh install and topped up on every upgrade, because a rule that only lands when the\n# file is first created never reaches anybody who already had the tool.\n' >>"$sr_ignore"
     fi
     printf '%s\n' "$entry" >>"$sr_ignore"
     sr_added=$((sr_added + 1))
   fi
 done
 if [ "$sr_added" -gt 0 ]; then
-  echo "  ignored .showrunner/bin/ and lib/ — the tool is not your project's source"
+  echo "  ignored $sr_added runtime path(s) in .showrunner/.gitignore (topped up on upgrade)"
 fi
 
 # OUTSIDE the block above, and a test is why. Nesting this under "we just added the rule" meant
