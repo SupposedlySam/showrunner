@@ -82,6 +82,21 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # Added when the release gate's accounting refused: five producers arrived from another
+    # session unswept. These two are registered rather than excused, because both are POLICY.
+    #
+    # Whether this worktree is one `spawn` PLACED or one somebody added by hand. None everywhere
+    # makes every tree look hand-added -- but this same function is what stops `git worktree add`
+    # being a way to grant yourself a role, and a mutant proves the assertions tell those apart.
+    ("crawler leaf resolution", "roles.crawler_leaf", "lib/showrunner/roles.py",
+     r"(def crawler_leaf\(cfg\):\n)",
+     "    return None\ndef _neutered_crawler_leaf(cfg):\n"),
+    # The identity two worktrees of one repo must AGREE on. None everywhere means no two trees
+    # ever share a git dir, so lease and lock identity silently stop matching -- every check still
+    # runs, still returns, and never fires. Same shape as the jurisdiction mutant below.
+    ("shared git dir identity", "util.git_common_dir", "lib/showrunner/util.py",
+     r"(def git_common_dir\(path\):\n)",
+     "    return None\ndef _neutered_git_common_dir(path):\n"),
     # The lease's JURISDICTION. Answering None everywhere means no path is ever inside a
     # managed worktree, so every lease check silently becomes a no-op — the guard is still
     # called, still returns, and never fires. That is the exact shape this file exists to
@@ -580,6 +595,19 @@ NOT_SWEPT = {
     # group by exit code, which is the contract callers actually depend on.
     "cli.main": "dispatch; asserted by every CLI-group exit code",
     "cli.cmd_claim": "CLI wrapper over graph.claim; exit code asserted",
+    # The roles seam's three verbs, arriving with that work. Excused as wrappers ONLY because
+    # the suite drives each as a real subprocess and asserts its exit code and its output --
+    # checked, not assumed: `role claim` is driven for a free seat, a taken seat and an unknown
+    # role; `whoami` in both human and --porcelain form. The underlying policy they wrap
+    # (roles.validate, roles.roster, roles.enforced_lines, roles.crawler_leaf) is swept above.
+    # Named one key at a time: an unqualified reason here once excused a second function that
+    # returned [] unconditionally, so a shared reason is how an unfailable accept hides.
+    "cli.cmd_whoami": "CLI wrapper; the announcement's content is asserted by name in both "
+                      "human and --porcelain form, and roles.enforced_lines IS swept",
+    "cli.cmd_role_claim": "CLI wrapper over the roster; driven for a free seat, a seat already "
+                          "held and an unknown role, with exit codes asserted",
+    "cli.cmd_role_release": "CLI wrapper; its effect is asserted through roles.roster, which "
+                            "IS swept, rather than through this function's own return",
     "cli.cmd_lock_acquire": "CLI wrapper; lock state asserted directly",
     "cli.cmd_lock_guard": "CLI wrapper; exit 2/0 asserted in the CLI group",
     "cli.cmd_worktree_guard": "CLI wrapper over lease.guard, which IS swept. Its exit 2 and its "
