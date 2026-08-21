@@ -2729,6 +2729,29 @@ def test_worktree_lease():
        "is invisible to any check that reads the template",
        not _upgrade_gap, _upgrade_gap)
 
+    # THE LAST HAND LIST IN THE INSTALLER. SKILL_NAMES is enumerated by hand, and it is the same
+    # shape as the hooks bug: the payload ships N, the installer names M, and the difference is
+    # silent because a skill that never installs produces no output at all. It matches today,
+    # which is exactly when a hand list is cheapest to protect -- it goes stale toward a FALSE
+    # PASS at the moment somebody adds one, which is the moment it was supposed to help.
+    _skills_dir = os.path.join(ROOT, ".claude", "skills")
+    _shipped = sorted(d for d in os.listdir(_skills_dir)
+                      if os.path.isdir(os.path.join(_skills_dir, d))) \
+        if os.path.isdir(_skills_dir) else []
+    _m_sk = re.search(r'SKILL_NAMES="([^"]*)"', _install_src)
+    ok("install.sh names the skills it installs in a list the suite can read", _m_sk is not None)
+    _declared = (_m_sk.group(1).split() if _m_sk else [])
+    ok("at least one skill ships, so the comparison below is not vacuous", _shipped, _shipped)
+    ok("every skill directory in the payload is one install.sh actually installs -- a skill that "
+       "ships and is never installed produces NO output, so nothing distinguishes it from one "
+       "that installed fine",
+       not [d for d in _shipped if d not in _declared],
+       [d for d in _shipped if d not in _declared])
+    ok("...and every name it installs really ships, so a typo is a refusal rather than a skill "
+       "silently absent from every consumer",
+       not [n for n in _declared if n not in _shipped],
+       [n for n in _declared if n not in _shipped])
+
     probe = os.path.join(ROOT, ".showrunner", "hooks", "waiting-probe.sh")
     ok("the waiting probe ships and is executable", os.path.isfile(probe) and
        os.access(probe, os.X_OK), probe)
