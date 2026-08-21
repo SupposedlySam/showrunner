@@ -36,6 +36,20 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
+# ── the suite must not read the machine it runs on (#46) ─────────────────────────────────────────
+#
+# roles.USER_PATH is computed AT IMPORT from XDG_CONFIG_HOME, so this has to happen before the
+# import below and cannot be a fixture. Two tests monkeypatch USER_PATH for their own cases, which
+# is why this went unnoticed: those passed, while every OTHER assertion that reaches a roles-aware
+# path -- doctor, the dispatch guard, seat resolution -- read the DEVELOPER'S real ~/.config file.
+# Six of them fail on a machine that actually uses roles, which is to say the suite was green here
+# and red for the people the feature was built for. Setting the env var rather than patching the
+# module covers the subprocess tests too, since they inherit it.
+_CFG_HOME = tempfile.mkdtemp(prefix="sr-suite-config-")
+os.environ["XDG_CONFIG_HOME"] = _CFG_HOME
+import atexit
+atexit.register(shutil.rmtree, _CFG_HOME, True)
+
 from showrunner import brief, campaign, collide, config, dispatch, gates, graph as G, harness, lanes, lease, locks, pin, roles, util, worktree  # noqa: E402
 from showrunner.util import Refused, boot_token as boot_token_for_test  # noqa: E402
 
@@ -3068,6 +3082,20 @@ def test_seat_and_whoami():
     ok("a role that may create NOTHING says so in the terms the guard will use, rather than "
        "omitting the line and leaving the reader to infer permission",
        "NOTHING" in none_line, none_line)
+
+    # #46: the suite reads a config home it created, never the developer's. Asserted rather than
+    # trusted, because the setup is 4 lines near the imports that a later edit could drop or move
+    # below the import -- and the failure it causes is invisible on any machine without a real
+    # roles.json, which is every CI box and was this one. What made it real: with roles configured
+    # the way the feature intends, SIX assertions failed. Green here, red for the people it was
+    # built for.
+    ok("the suite resolves roles from its OWN config home, never the machine's -- a developer "
+       "who uses the feature must not get a red suite from their own configuration",
+       R.USER_PATH.startswith(_CFG_HOME), R.USER_PATH)
+    ok("...and that home is real and empty of roles, so 'no roles defined' is a FACT here rather "
+       "than an accident of the box",
+       os.path.isdir(_CFG_HOME) and not os.path.exists(
+           os.path.join(_CFG_HOME, "showrunner", "roles.json")))
 
     # AND THE ANNOUNCEMENT CARRIES THEM, which is the integration the issue asks for: a session
     # is greeted with what it may not do, generated from the fields the guards read, at the seam
