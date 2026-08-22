@@ -7273,24 +7273,49 @@ def main():
     # verify. Making the suite runnable fixed that and then the number rotted anyway: four
     # tracked files said 117 while the suite reported 182. Stale in the repo's own headline
     # credibility line, which is the one place nobody re-derives.
-    group("The counts this repo claims about itself")
-    claimed = {}
+    group("The setup cost this repo claims about itself")
+    # THE CLAIM THAT DOES NOT DRIFT. This used to enforce a hand-synced assertion COUNT in four
+    # tracked files, and the check worked exactly as written -- which was the problem. It made a
+    # stale-prone figure LOAD-BEARING rather than removing it: adding one assertion broke the
+    # build in four documentation files, and the fix was to hand-edit a number a reader could
+    # have obtained by running the command printed beside it. It also charged the cost to the
+    # contribution this repo most wants, at the moment they make it.
+    #
+    # The durable claim is the SETUP COST -- Python 3 and git, nothing else -- so that is what
+    # is checked now. Derived from the probes rather than from a list: a new hard dependency
+    # sneaking into CORE arrives as a new `have("x")` and fails here, which is the regression
+    # worth catching, and it never fires on a legitimate assertion.
+    # PARSED, NOT GREPPED. The first version scanned the file text and picked up `have("x")`
+    # from the COMMENT four lines above — a matcher satisfied by prose ABOUT the mechanism,
+    # inside the check written to replace a different broken check. The AST cannot be satisfied
+    # by a comment, which is the only reason to prefer it here.
+    probed = set()
+    for _node in ast.walk(ast.parse(open(os.path.join(ROOT, "test", "run.py")).read())):
+        if (isinstance(_node, ast.Call) and isinstance(_node.func, ast.Name)
+                and _node.func.id == "have" and _node.args
+                and isinstance(_node.args[0], ast.Constant)
+                and isinstance(_node.args[0].value, str)):
+            probed.add(_node.args[0].value)
+    ok("the suite probes for external binaries at all, so the comparison below is not vacuous",
+       probed, sorted(probed))
+    unexpected = sorted(probed - {"git", "br", "tmux"})
+    ok("CORE needs nothing beyond Python 3 and git — every other binary the suite probes for "
+       "(%s) is OPTIONAL and skips loudly. A new hard dependency arrives here as a new probe, "
+       "which is the regression a stale COUNT never caught"
+       % ", ".join(sorted(probed & {"br", "tmux"})), not unexpected, unexpected)
+    stale_counts = {}
     for rel_path in ("README.md", "llms.txt", "docs/DESIGN.md"):
         full = os.path.join(ROOT, rel_path)
         if not os.path.exists(full):
             continue
         with open(full) as fh:
-            for n in re.findall(r"(\d{2,4})\s+(?:CORE\s+)?assertions?", fh.read()):
-                claimed.setdefault(rel_path, set()).add(int(n))
-    ok("the docs actually claim an assertion count, so this check is not vacuous",
-       bool(claimed), claimed)
-    # Computed AFTER the vacuity check has run and BEFORE the last one, so +1 counts exactly
-    # the assertion still to come. Computing it earlier made `total` one short of the RESULT
-    # line — a check about stale numbers publishing a stale number.
-    total = len(PASS) + len(FAIL) + 1
-    wrong = {f: sorted(v) for f, v in claimed.items() if v != {total}}
-    ok("every assertion count claimed in tracked docs matches what the suite reports (%d)"
-       % total, not wrong, wrong)
+            found = re.findall(r"(\d{2,4})\s+(?:CORE\s+)?assertions?", fh.read())
+        if found:
+            stale_counts[rel_path] = found
+    ok("...and no tracked doc commits an assertion COUNT again — the number carries nothing a "
+       "reader cannot get by running the command printed beside it, and committing one puts a "
+       "figure that rots into the repo's own credibility line",
+       not stale_counts, stale_counts)
 
     print("\n" + "=" * 72)
     print("RESULT: %d passed, %d failed, %d skipped" % (len(PASS), len(FAIL), len(SKIP)))
