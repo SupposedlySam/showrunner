@@ -324,6 +324,38 @@ def cmd_doctor(args):
                   "wiring RUNS, not just that it is registered. It cannot tell a Stop trigger "
                   "firing from somebody running `waiting` by hand."
                   % (GRN + "ok   " + OFF, _n, _ago, rel(_wj, cfg.root)))
+            # FRESHNESS AS A RELATION, NOT A DURATION. "Is this too old" needs a tolerance
+            # somebody invents about an event showrunner does not schedule — the same defect as
+            # printing a clock time for a trigger. The answerable question is whether the probe
+            # has answered SINCE the thing that would have changed its answer, and the campaign
+            # journal already timestamps exactly those things. With no such event, this says it
+            # cannot tell rather than picking a default.
+            try:
+                _last_ts = int(json.loads(_last).get("ts") or 0)
+            except (ValueError, TypeError):
+                _last_ts = 0
+            _ev_ts, _ev_kind = 0, None
+            try:
+                with open(events.path_for(cfg)) as _efh:
+                    for _el in _efh:
+                        if not _el.strip():
+                            continue
+                        try:
+                            _e = json.loads(_el)
+                        except ValueError:
+                            continue
+                        if int(_e.get("ts") or 0) >= _ev_ts:
+                            _ev_ts, _ev_kind = int(_e.get("ts") or 0), _e.get("kind")
+            except OSError:
+                pass
+            if not _ev_ts:
+                print("       (no campaign event to compare against, so freshness is UNKNOWN "
+                      "rather than assumed — nothing has happened that would change the answer)")
+            elif _last_ts < _ev_ts:
+                print("  %s the journal's newest entry PREDATES the last campaign event (%s). "
+                      "The wiring has not answered since something changed, which is what makes "
+                      "an old entry wrong — not its age."
+                      % (YEL + "warn " + OFF, _ev_kind))
         else:
             print("  %s the waiting journal is writable but EMPTY (%s) — nothing has answered "
                   "yet. Registered and never fired looks exactly like registered and content, "

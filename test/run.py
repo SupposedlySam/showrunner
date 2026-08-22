@@ -2812,6 +2812,23 @@ def test_worktree_lease():
        "somebody running the verb by hand, which is a weaker claim than 'the hook fired'",
        "by hand" in _p_fired.stdout, _p_fired.stdout[-220:])
 
+    # FRESHNESS AS A RELATION, NOT A DURATION. I had this open with "I have no defensible
+    # number for too old" -- and reaching for a number is the trap: any tolerance is invented
+    # about an event showrunner does not schedule, the same defect as printing a clock time for
+    # a trigger. The answerable question is whether the probe has answered SINCE the thing that
+    # would have changed its answer, and the campaign journal already timestamps those.
+    ok("with a journal entry and no campaign event, freshness is reported UNKNOWN rather than "
+       "assumed fresh — nothing has happened that would change the answer",
+       "UNKNOWN" in _p_fired.stdout, _p_fired.stdout[-260:])
+    with open(os.path.join(_dj.root, ".showrunner", "events.jsonl"), "a") as _fh:
+        _fh.write(json.dumps({"ts": int(time.time()) + 60, "kind": "leaf.closed"}) + "\n")
+    _p_stale = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                              cwd=_dj.root, capture_output=True, text=True)
+    ok("...and a journal whose newest entry PREDATES the last campaign event warns, naming the "
+       "event kind — an old entry is not wrong because it is old, it is wrong because something "
+       "happened since",
+       "PREDATES" in _p_stale.stdout and "leaf.closed" in _p_stale.stdout, _p_stale.stdout[-300:])
+
     _blocked_dir = os.path.join(_dj.root, ".showrunner", "waiting.jsonl")
     if os.path.exists(_blocked_dir):
         os.remove(_blocked_dir)
