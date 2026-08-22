@@ -287,6 +287,27 @@ def cmd_doctor(args):
                   "HEAD's copy, so every spawn will refuse until this is committed — commit "
                   "first, then fan out." % (YEL + "warn " + OFF, ", ".join(pending[:3])))
 
+    # THE WAITING JOURNAL'S WRITABILITY, checked here because this is the only surface a human
+    # runs on purpose. `waiting` reports a failed journal write in its porcelain, which is the
+    # right channel for the probe that could not act on it — and a channel with no proactive
+    # consumer is a file somebody has to remember to open. This is the consumer.
+    #
+    # It matters because that journal is the evidence a consumer needs before adopting the
+    # watchdog at all: a write that stops silently makes "the gate never fired" and "the record
+    # could not be written" the same reading, and the second one argues FOR adoption.
+    _wj = os.path.join(cfg.state_dir, "waiting.jsonl")
+    try:
+        os.makedirs(cfg.state_dir, exist_ok=True)
+        with open(_wj, "a"):
+            pass
+        print("  %s the waiting journal is writable (%s) — the record a watchdog's evidence "
+              "accumulates in" % (GRN + "ok   " + OFF, rel(_wj, cfg.root)))
+    except OSError as _e:
+        print("  %s the waiting journal CANNOT BE WRITTEN (%s): %s. `waiting` keeps answering; "
+              "what stops is the record of what it answered, and an empty journal reads as a "
+              "watchdog that never fired." % (RED + "ERROR" + OFF, rel(_wj, cfg.root), _e))
+        bad += 1
+
     # THE WORKTREE GUARD'S WIRING. Not "does the verb work" — the suite answers that — but
     # "would it ever run". The guard fails OPEN by design, so nothing at runtime can be loud
     # about its own absence without blocking the repair it needs; this is where that loudness

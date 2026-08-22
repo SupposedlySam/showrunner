@@ -2785,6 +2785,28 @@ def test_worktree_lease():
        "and export-ignore silently separates them for `archive` but not for `clone`",
        not (_in_head - _delivered), sorted(_in_head - _delivered)[:8])
 
+    # A CHANNEL WITH NO PROACTIVE CONSUMER IS RUNG 6 WEARING A FILE'S CLOTHES. `waiting` reports
+    # a failed journal write in its porcelain, which is right for the probe that cannot act on
+    # it -- but nothing reads porcelain unprompted. `doctor` is the surface a human runs on
+    # purpose, so that is where the alarm has to land.
+    _dj = make_repo()
+    _p_ok = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                           cwd=_dj.root, capture_output=True, text=True)
+    ok("`doctor` reports the waiting journal at all — the evidence a watchdog accumulates in, "
+       "and the one record whose ABSENCE argues for adopting the thing it was meant to prove",
+       "waiting journal" in _p_ok.stdout, _p_ok.stdout[-200:])
+    _blocked_dir = os.path.join(_dj.root, ".showrunner", "waiting.jsonl")
+    if os.path.exists(_blocked_dir):
+        os.remove(_blocked_dir)
+    os.makedirs(_blocked_dir)          # a DIRECTORY where the journal goes: open(..,"a") fails
+    _p_bad = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                            cwd=_dj.root, capture_output=True, text=True)
+    ok("...and says CANNOT BE WRITTEN when it cannot, rather than staying quiet -- `waiting` "
+       "keeps answering, so nothing else in the system goes red",
+       "CANNOT BE WRITTEN" in _p_bad.stdout, _p_bad.stdout[-260:])
+    ok("...and that is an ERROR, not a note: a silent journal and a watchdog that never fired "
+       "produce the same empty file", _p_bad.returncode != 0, _p_bad.returncode)
+
     probe = os.path.join(ROOT, ".showrunner", "hooks", "waiting-probe.sh")
     ok("the waiting probe ships and is executable", os.path.isfile(probe) and
        os.access(probe, os.X_OK), probe)

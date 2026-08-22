@@ -639,8 +639,18 @@ def waiting(cfg, graph, base="HEAD"):
                 "leaves": [c["leaf"] for c in live + parked],
                 "blocked_leaves": [c["leaf"] for c in blocked],
             }, sort_keys=True) + "\n")
-    except OSError:
-        pass
+        detail["journal"] = "written"
+    except OSError as e:
+        # SILENT BECAUSE THE READER CANNOT ACT IS STILL SILENT. This runs from a probe under a
+        # watchdog, which can do nothing about a read-only state dir -- so swallowing was right
+        # for that reader and wrong for everybody. The comment above calls this record "the
+        # evidence a consumer needs before adopting this at all", and a write that stops
+        # silently makes "the gate never fired" and "the journal could not be written" the same
+        # reading, with the second one arguing FOR adoption.
+        #
+        # So it goes on the channel that reaches somebody who CAN act: the porcelain a human or
+        # a doctor reads, rather than a stderr line the probe discards.
+        detail["journal"] = "FAILED: %s" % e
     return bool(live or parked), detail
 
 
