@@ -38,16 +38,33 @@ notice() {
   exit 0
 }
 
+# CWD IS WHERE THE SHELL STANDS; IT IS NOT WHAT THE COMMAND WRITES. Resolving only from cwd
+# made this guard strongest exactly where it is least needed — already inside the repo — and
+# absent exactly where a stray absolute path is most likely, which is a scratch directory.
+# Working from a scratchpad is the ordinary shape of orchestration, not a mistake, and a
+# consumer reported DOZENS of unchecked calls in one session from precisely that.
+#
+# So when cwd cannot answer, ask the HARNESS. CLAUDE_PROJECT_DIR is the session's own notion of
+# where it is working and is set for every hook invocation; in a worktree it is the WORKTREE,
+# which is the answer this guard wants. Failing open is now what happens when BOTH cannot
+# answer, rather than when the shell happens to be standing somewhere else.
+anchor="$PWD"
 common="$(git rev-parse --git-common-dir 2>/dev/null)" || common=""
+if [ -z "$common" ] && [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
+  common="$(git -C "$CLAUDE_PROJECT_DIR" rev-parse --git-common-dir 2>/dev/null)" || common=""
+  [ -n "$common" ] && anchor="$CLAUDE_PROJECT_DIR"
+fi
 if [ -z "$common" ]; then
-  notice "⚠ THE WORKTREE GUARD DID NOT RUN — git could not resolve a repository here, so this tool call was ALLOWED WITHOUT BEING CHECKED. A worktree held by another live session is NOT protected. Check: showrunner doctor"
+  notice "⚠ THE WORKTREE GUARD DID NOT RUN — neither the working directory nor CLAUDE_PROJECT_DIR resolves to a git repository, so this tool call was ALLOWED WITHOUT BEING CHECKED. A worktree held by another live session is NOT protected. Check: showrunner doctor"
 fi
 
 # --git-common-dir answers relatively (\".git\") when the cwd is the repo root, so resolve it
-# against the cwd before taking its parent. Skipping this made the root's parent the repo.
+# against the ANCHOR it was computed in before taking its parent. Skipping this made the root's
+# parent the repo — and using $PWD here after resolving via CLAUDE_PROJECT_DIR would reintroduce
+# the same bug from the other direction.
 case "$common" in
   /*) ;;
-   *) common="$PWD/$common" ;;
+   *) common="$anchor/$common" ;;
 esac
 root="$(cd "$(dirname "$common")" 2>/dev/null && pwd)" || root=""
 
@@ -65,7 +82,7 @@ for candidate in "$root/.showrunner_self/bin/showrunner" \
     # which is neither a deny (2) nor a loud allow. So editing this tool silently disarmed its
     # own guard, and the "fails open, never in silence" property below only ever covered the
     # binary being MISSING. Measured, not reasoned: a one-line syntax error reproduced it.
-    out="$("$candidate" worktree guard 2>/tmp/.sr-guard-err.$$)"; rc=$?
+    out="$((cd "$root" && "$candidate" worktree guard) 2>/tmp/.sr-guard-err.$$)"; rc=$?
     err="$(cat /tmp/.sr-guard-err.$$ 2>/dev/null)"; rm -f /tmp/.sr-guard-err.$$
     if [ "$rc" = 0 ]; then
       printf '%s\n' "$out"

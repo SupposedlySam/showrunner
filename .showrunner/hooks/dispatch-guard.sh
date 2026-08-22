@@ -19,18 +19,27 @@ notice() {
   exit 0
 }
 
+# ASK THE HARNESS WHEN CWD CANNOT ANSWER. Same fix and same reason as worktree-guard.sh: a
+# scratch directory is the ordinary place orchestration work happens, and resolving only from
+# cwd made this guard absent for every call made from one. CLAUDE_PROJECT_DIR is the session's
+# own notion of where it works and is set for every hook invocation.
+anchor="$PWD"
 common="$(git rev-parse --git-common-dir 2>/dev/null)" || common=""
-if [ -z "$common" ]; then
-  notice "⚠ THE DISPATCH GUARD DID NOT RUN — git could not resolve a repository here, so this call was ALLOWED WITHOUT BEING CHECKED. A raw \`claude -p\` would skip the worktree, the lease, the claim and the room. Check: showrunner doctor"
+if [ -z "$common" ] && [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
+  common="$(git -C "$CLAUDE_PROJECT_DIR" rev-parse --git-common-dir 2>/dev/null)" || common=""
+  [ -n "$common" ] && anchor="$CLAUDE_PROJECT_DIR"
 fi
-case "$common" in /*) ;; *) common="$PWD/$common" ;; esac
+if [ -z "$common" ]; then
+  notice "⚠ THE DISPATCH GUARD DID NOT RUN — neither the working directory nor CLAUDE_PROJECT_DIR resolves to a git repository, so this call was ALLOWED WITHOUT BEING CHECKED. A raw \`claude -p\` would skip the worktree, the lease, the claim and the room. Check: showrunner doctor"
+fi
+case "$common" in /*) ;; *) common="$anchor/$common" ;; esac
 root="$(cd "$(dirname "$common")" 2>/dev/null && pwd)" || root=""
 
 for candidate in "$root/.showrunner_self/bin/showrunner" \
                  "$root/.showrunner/bin/showrunner" \
                  "$root/bin/showrunner"; do
   if [ -x "$candidate" ]; then
-    out="$("$candidate" dispatch guard 2>/tmp/.sr-dispatch-err.$$)"; rc=$?
+    out="$((cd "$root" && "$candidate" dispatch guard) 2>/tmp/.sr-dispatch-err.$$)"; rc=$?
     err="$(cat /tmp/.sr-dispatch-err.$$ 2>/dev/null)"; rm -f /tmp/.sr-dispatch-err.$$
     if [ "$rc" = 0 ]; then
       printf '%s\n' "$out"

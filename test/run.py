@@ -1675,6 +1675,46 @@ def test_work_since_block():
        got is False, (got, why))
 
 
+def test_guards_anchor_off_cwd():
+    group("A guard's precondition was the shell's cwd; its subject is what the command writes (#56)")
+    # Reported with a reproduction: every Bash call made from a scratch directory produced
+    # "ALLOWED WITHOUT BEING CHECKED" from BOTH PreToolUse guards, and the call went through.
+    # Dozens in one session. Working from a scratchpad is the ordinary shape of orchestration --
+    # the harness hands you one and tells you to prefer it over /tmp -- so the guards were
+    # strongest exactly where they are least needed (already inside the repo) and absent exactly
+    # where a stray absolute path is most likely.
+    # THIS repo as the anchor, not a fixture: the anchoring only pays off when the resolved root
+    # actually carries a showrunner, and a bare `git init` fixture fails at the NEXT blind path
+    # (no binary) for a reason that has nothing to do with what is under test. Using a fixture
+    # here made this assertion fail while the mechanism worked.
+    outside = tmpdir("guard-anchor-outside")          # deliberately NOT a git repo
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "echo hi"}})
+
+    for name in ("worktree-guard.sh", "dispatch-guard.sh"):
+        shim = os.path.join(ROOT, ".showrunner", "hooks", name)
+        anchored = subprocess.run(["bash", shim], cwd=outside, input=payload,
+                                  capture_output=True, text=True,
+                                  env=dict(os.environ, CLAUDE_PROJECT_DIR=ROOT))
+        said = anchored.stdout + anchored.stderr
+        ok("%s standing OUTSIDE any repo still CHECKS, by asking the harness where the session "
+           "works rather than the shell where it stands" % name,
+           "DID NOT RUN" not in said, said[:170])
+
+        blind = subprocess.run(["bash", shim], cwd=outside, input=payload,
+                               capture_output=True, text=True,
+                               env={k: v for k, v in os.environ.items()
+                                    if k != "CLAUDE_PROJECT_DIR"})
+        blind_said = blind.stdout + blind.stderr
+        # THE POSITIVE CONTROL. Every assertion above is equally satisfied by a guard that has
+        # stopped failing open at all -- including one broken to refuse nothing and say nothing.
+        # With no anchor there IS no question this guard can answer, and it must still say so.
+        ok("...and with NO anchor at all it still fails open and SAYS it was not checked — the "
+           "fix narrows when that happens, it does not remove it",
+           "ALLOWED WITHOUT BEING CHECKED" in blind_said, blind_said[:170])
+        ok("...and the notice names BOTH things it tried, so the remedy is not a guess",
+           "CLAUDE_PROJECT_DIR" in blind_said, blind_said[:170])
+
+
 def test_waiting():
     group("An orchestrator waiting on dispatched work is a FACT, not a heuristic (game_loop#32)")
     if not have("git"):
@@ -7239,7 +7279,8 @@ def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
     for fn in (test_locks, test_config_refusals, test_every_rule_can_fail, test_graph, test_lifecycle, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
-               test_harness_provisioning, test_waiting, test_work_since_block,
+               test_harness_provisioning, test_guards_anchor_off_cwd,
+               test_waiting, test_work_since_block,
                test_unconfigured_checks,
                test_concurrency,
                test_integration, test_worktree_lease, test_worktree_guard_from_inside_a_worktree,
