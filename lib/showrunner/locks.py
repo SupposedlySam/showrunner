@@ -250,11 +250,28 @@ class LockSet:
         return Lock(self.root, name)
 
     def on_disk(self):
-        """Every lock directory under the root, configured or not."""
+        """Every lock directory under the root, configured or not.
+
+        A root that CANNOT BE LISTED answers [] — the same answer as a machine holding no locks
+        — so the failure is recorded on the instance instead of being inferred from an empty
+        list. `reap` reads this to find the locks a dead Crawler left behind, and its own
+        comment says that loop exists to end the "silently absorbed" case; an unreadable root
+        silently absorbing every stale lock is that failure wearing the loop's own clothes.
+
+        [] is still the return, because every caller wants a list and a raise here would take
+        out `reap` entirely — losing the other actions it had already found.
+        """
+        self.on_disk_error = None
         try:
             return sorted(d[:-len(".lock")] for d in os.listdir(self.root)
                           if d.endswith(".lock"))
-        except OSError:
+        except OSError as e:
+            # A root that does not EXIST is not a failure to look — no lock has ever been taken
+            # here, and that is an answer. Only a root that is there and cannot be listed is a
+            # blindness worth reporting. Recording both identically would make every fresh repo
+            # cry wolf, and a check that cries wolf stops being read.
+            if os.path.isdir(self.root):
+                self.on_disk_error = str(e)
             return []
 
     def existing(self, name):

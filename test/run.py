@@ -226,6 +226,43 @@ def test_locks():
     device = ls.lock("device")
     pg = ls.lock("pg-port")
 
+    # THE SWEEP CALLED on_disk THIN AT 2, and it had no direct assertion at all -- only callers
+    # noticing indirectly. It is the producer `reap` reads to find the locks a dead Crawler left
+    # behind, and a neutered version answers [] for everything, which is exactly what a machine
+    # holding no locks answers. An assertion that a producer stays QUIET is held equally by a
+    # producer that is dead; what a dead one cannot fake is CONTENT.
+    device.acquire(os.getpid(), "probe-a")
+    pg.acquire(os.getpid(), "probe-b")
+    eq("on_disk NAMES the locks actually present, in sorted order — a dead producer answers the "
+       "empty list, which reads identically to a machine holding none",
+       ls.on_disk(), ["device", "pg-port"])
+    device.release(os.getpid())
+    pg.release(os.getpid())
+    # CHECKED RATHER THAN ASSUMED: I wrote this expecting a released lock to leave its directory
+    # behind, which would have made `reap`'s interest in on_disk obvious. `release` rmtree's it,
+    # so the answer shrinks — and that is the assertion worth having, because a producer stuck
+    # returning its previous answer passes every "names what is present" check taken alone.
+    eq("...and on_disk SHRINKS when locks are released — a stuck producer replaying its last "
+       "answer satisfies the assertion above and fails this one", ls.on_disk(), [])
+    # AN UNLISTABLE ROOT ANSWERS [] TOO, and that is the collapse. Recorded on the instance
+    # instead of inferred from an empty list, so `reap` finding nothing stale can be told from
+    # `reap` being unable to look.
+    ok("a root that does not EXIST is not an error — no lock has ever been taken here, and a "
+       "fresh repo crying wolf is a check that stops being read",
+       locks.LockSet(make_repo()).on_disk() == []
+       and not getattr(locks.LockSet(make_repo()), "on_disk_error", None))
+    _broken = locks.LockSet(cfg)
+    _unreadable = os.path.join(tmpdir("lock-root-unreadable"), "root")
+    os.makedirs(_unreadable)
+    os.chmod(_unreadable, 0o000)                   # a real directory that cannot be listed
+    _broken.root = _unreadable
+    eq("...but a root that is THERE and cannot be listed still answers [], because every caller "
+       "wants a list and raising here would take `reap` out entirely",
+       _broken.on_disk(), [])
+    ok("...and records WHY, so 'no stale locks' and 'could not look for stale locks' are "
+       "different readings rather than the same empty list",
+       bool(getattr(_broken, "on_disk_error", None)), _broken.on_disk_error)
+
     # WHAT A CALLER WRITES, A CALLER CAN READ BACK. `acquire(extra=...)` was added for the
     # worktree lease and only the WRITE half existed — `holder()` returned five fixed fields, so
     # the lease reached through `Lock._read` for its own value. It worked and was tested one

@@ -287,6 +287,17 @@ def cmd_doctor(args):
                   "HEAD's copy, so every spawn will refuse until this is committed — commit "
                   "first, then fan out." % (YEL + "warn " + OFF, ", ".join(pending[:3])))
 
+    # THE LOCK ROOT'S READABILITY. `on_disk` answers [] for a root it cannot list, which is the
+    # same answer as a machine holding no locks — and `reap` reads it to find what a dead
+    # Crawler left behind, so an unreadable root turns every stale lock into "nothing to do".
+    _lsx = locks.LockSet(cfg)
+    _lsx.on_disk()
+    if getattr(_lsx, "on_disk_error", None):
+        print("  %s the lock root CANNOT BE LISTED (%s): %s. `reap` reads it to find locks a "
+              "dead Crawler left, so every stale lock currently reads as nothing to do."
+              % (RED + "ERROR" + OFF, rel(_lsx.root, cfg.root), _lsx.on_disk_error))
+        bad += 1
+
     # THE WAITING JOURNAL'S WRITABILITY, checked here because this is the only surface a human
     # runs on purpose. `waiting` reports a failed journal write in its porcelain, which is the
     # right channel for the probe that could not act on it — and a channel with no proactive
