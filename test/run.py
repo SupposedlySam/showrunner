@@ -1734,6 +1734,83 @@ def test_work_since_block():
        got is False, (got, why))
 
 
+def test_path_problem():
+    group("A config path that will not mean what its author thinks")
+    # THE LAST OWED DEBT. It gates an ACCEPT: returning None means "this path is fine", so a
+    # neutered version lets every unexpanded variable through and the caller keeps a belief the
+    # config does not support. Measured at 3 kills before this.
+    from showrunner import config as C
+    msg = C.path_problem("lock_root", "$HOME/locks")
+    ok("a `$VAR` path is REPORTED — expanduser handles a leading ~ and nothing else, so the most "
+       "portable-LOOKING entry is a literal string resolving against the caller's cwd",
+       msg is not None, msg)
+    ok("...and the message names the offending path AND the fix, because 'invalid' sends the "
+       "reader back to guess which of several paths and what to write instead",
+       msg and "lock_root" in msg and "~/" in msg, msg)
+    # WHY THIS ONE IS WORSE THAN A WRONG PATH, and the reason it gates an accept at all: it
+    # survived an isabs() check, because abspath makes anything absolute. For a lock root it
+    # means a different directory per caller — a mutex that is quietly a no-op.
+    ok("...and it is caught for a lock_root specifically, which is the case that turns a"
+       " single-consumer guarantee into a per-caller directory",
+       C.path_problem("lock_root", "$HOME/locks") is not None)
+    for good in ("~/locks", "/var/tmp/locks", ".showrunner/locks"):
+        ok("a path that WILL mean what it says is accepted: %r — a gate that flags everything "
+           "is one people route around" % good, C.path_problem("lock_root", good) is None,
+           C.path_problem("lock_root", good))
+    ok("an empty or non-string entry is not a path problem — there is no path to be wrong about, "
+       "and inventing one here would make every unset optional key an error",
+       C.path_problem("lock_root", "") is None and C.path_problem("lock_root", None) is None)
+
+
+def test_harness_gap():
+    group("A gitignored harness never crosses into a worktree, and the Crawler is denied its first commit")
+    if not have("git"):
+        skip("the harness-gap group", "git is not installed")
+        return
+    # LAST TWO FROM THE OWED QUEUE. Measured at 1 kill, so this note was accurate. The producer
+    # answers a warning or None, and None is also what "no problem here" looks like — so a
+    # neutered version removes doctor's only warning about the most invisible spawn failure
+    # there is, and doctor keeps reporting a healthy install.
+    from showrunner import worktree as W
+    cfg = make_repo()
+    hd = os.path.join(cfg.root, W.HARNESS_DIRS[0])
+    os.makedirs(hd, exist_ok=True)
+    with open(os.path.join(hd, "rules.md"), "w") as fh:
+        fh.write("the harness's own rules\n")
+
+    note = W.harness_gap(cfg)
+    ok("an UNTRACKED harness in the main checkout is reported — `git worktree add` copies "
+       "tracked files only, so it never crosses and the Crawler's first commit is denied",
+       note and W.HARNESS_DIRS[0] in note, note)
+    ok("...and the note says what the harness will DO about it, since 'missing' is not "
+       "actionable and 'your commit gate will deny the Crawler' is",
+       note and "DENY" in note, note)
+
+    sh(["git", "add", "-A"], cfg.root)
+    sh(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "track it"],
+       cfg.root)
+    ok("...and a TRACKED harness reports nothing, because it crosses on its own — the assertion "
+       "a producer stuck answering its last warning cannot pass",
+       W.harness_gap(cfg) is None, W.harness_gap(cfg))
+
+    # ALREADY-PROVISIONED IS ALSO NOTHING TO SAY. The gap is about what the Crawler LANDS in,
+    # so a worktree that already has the directory is not a gap even when the main checkout
+    # does not track it.
+    cfg2 = make_repo()
+    hd2 = os.path.join(cfg2.root, W.HARNESS_DIRS[0])
+    os.makedirs(hd2, exist_ok=True)
+    with open(os.path.join(hd2, "rules.md"), "w") as fh:
+        fh.write("x\n")
+    wt = tmpdir("gap-worktree")
+    os.makedirs(os.path.join(wt, W.HARNESS_DIRS[0]), exist_ok=True)
+    ok("a worktree that ALREADY carries the harness is not a gap — the question is what the "
+       "Crawler lands in, not what the main checkout tracks",
+       W.harness_gap(cfg2, worktree_path=wt) is None, W.harness_gap(cfg2, worktree_path=wt))
+    ok("...while one that does not is still reported, so the worktree-aware path cannot answer "
+       "None for everything",
+       W.harness_gap(cfg2, worktree_path=tmpdir("gap-bare")) is not None)
+
+
 def test_attribution():
     group("The provenance declaration an integration commit is told to make")
     # PAID FROM THE OWED QUEUE, and this one measured ZERO. Its note said an always-None would
@@ -7450,7 +7527,9 @@ def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
     for fn in (test_locks, test_config_refusals, test_every_rule_can_fail, test_graph, test_lifecycle, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
-               test_harness_provisioning, test_attribution, test_worktree_dirty,
+               test_harness_provisioning, test_attribution, test_harness_gap,
+               test_path_problem,
+               test_worktree_dirty,
                test_guards_anchor_off_cwd,
                test_waiting, test_work_since_block,
                test_unconfigured_checks,

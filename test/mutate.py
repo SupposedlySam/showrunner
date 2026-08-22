@@ -82,6 +82,19 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # It gates an ACCEPT: None means "this path is fine", so a neutered version lets every
+    # unexpanded variable through silently. `$HOME/x` survives an isabs() check because abspath
+    # makes anything absolute, and for a lock root that is a different directory per caller — a
+    # mutex that is quietly a no-op.
+    ("a path that will not mean what it says", "config.path_problem", "lib/showrunner/config.py",
+     r"(def path_problem\(label, raw\):\n)",
+     "    return None\ndef _neutered_path_problem(label, raw):\n"),
+    # An always-None removes doctor's only warning about the most invisible spawn failure there
+    # is: a gitignored harness never crosses into a worktree, so the Crawler is denied its first
+    # commit and nothing said so at spawn time.
+    ("the untracked-harness warning", "worktree.harness_gap", "lib/showrunner/worktree.py",
+     r"(def harness_gap\(cfg, worktree_path=None\):\n)",
+     "    return None\ndef _neutered_harness_gap(cfg, worktree_path=None):\n"),
     # MEASURED ZERO — the only genuinely unprotected producer the OWED queue held. Its note said
     # an always-None "would silently drop the provenance command from integration", and nothing
     # noticed: `integration-commit` still exits 0, still reports every staged file accounted
@@ -700,15 +713,8 @@ NOT_SWEPT = {
 
     # Honest gaps. Named rather than excused, because a false exclusion is the failure this
     # file is about and an admitted hole is worth more than a tidy list.
-    "config.path_problem": "SHOULD BE SWEPT, IS NOT YET — it gates an accept and a silent "
-                           "always-None would let every unexpanded variable through, which is "
-                           "the exact defect that produced this file. Its reachability is "
-                           "asserted by the reachable-rules group, so it is covered but not "
-                           "by this tool.",
     "harness.inject_conflicts": "REPORTING over the rule, not the rule. It is a loop that\n                                 calls harness.owns_path, which IS swept — sweeping the\n                                 wrapper would count the same predicate twice and read as\n                                 more coverage than exists.",
     "cli.cmd_overlap": "A COMMAND, not a producer — it formats what collide.overlap\n                       returns and chooses an exit code. collide.overlap carries the\n                       rule and is swept above; sweeping the printer too would count\n                       one finding twice.",
-    "worktree.harness_gap": "SHOULD BE SWEPT, IS NOT YET — an always-None would remove the "
-                            "doctor warning about an untracked harness.",
 }
 
 
