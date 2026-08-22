@@ -297,6 +297,20 @@ def models_agree(declared, observed):
 # the process is still mid-call: writing its last commit, flushing its transcript, running the
 # Stop gate. Terminating there truncates the work it just certified. The grace window is the
 # difference between "spun down" and "killed while finishing".
+# WHY AN INVENTED NUMBER IS RIGHT HERE, when it is wrong for freshness. `doctor` refuses to
+# pick a "too old" tolerance for the waiting journal and asserts a RELATION instead — has the
+# probe answered since the thing that would have changed its answer — because that number would
+# have produced a VERDICT about an event showrunner does not schedule.
+#
+# This one produces no verdict. It budgets a RISK, and the costs are asymmetric and known: too
+# short truncates work a Crawler has already certified; too long leaves a dead process for one
+# more sweep. There is no relation to assert, because the question is not "has anything happened
+# since" — a process mid-flush between two writes has, by that measure, done nothing.
+#
+# So the rule is not "never invent a number". It is: an invented number that yields a FACT is a
+# fabrication; one that bounds a DESTRUCTIVE action toward caution is a budget, and a budget is
+# defensible as long as the direction of error is stated. Stated: this errs toward leaving a
+# process alone.
 LINGER_GRACE_SECONDS = 120
 
 ERROR_MARKERS = ("Execution error", "API Error", "Invalid API key", "rate limit")
