@@ -2757,6 +2757,34 @@ def test_worktree_lease():
        not [n for n in _declared if n not in _shipped],
        [n for n in _declared if n not in _shipped])
 
+    # WHAT A CONSUMER RECEIVES, MEASURED RATHER THAN ASSUMED. Several checks here reason about
+    # consumers from `git ls-files` -- every claim file, every tracked hook. That is sound only
+    # while TRACKED and DELIVERED are the same set, and exactly one common thing separates them:
+    # `export-ignore` in .gitattributes, which `git archive` honours and `git clone` ignores.
+    # Releases here are cut by archive. Surfaced by another project that found its own
+    # "what a clone receives" assertions resting on this, unverified, and holding only because
+    # it happened to have no .gitattributes.
+    #
+    # Asserted by RUNNING the delivery rather than by testing for the one mechanism that breaks
+    # it -- a check for `.gitattributes` would pass for any OTHER cause of divergence, and the
+    # point is the set, not the file.
+    _in_head = set(subprocess.run(["git", "ls-tree", "-r", "HEAD", "--name-only"], cwd=ROOT,
+                                  capture_output=True, text=True).stdout.split())
+    _arch = subprocess.run("git archive HEAD | tar -t", shell=True, cwd=ROOT,
+                           capture_output=True, text=True)
+    _delivered = {l for l in _arch.stdout.split() if not l.endswith("/")}
+    ok("the archive delivers something at all, so the comparison below is not vacuous -- an "
+       "empty archive would make every set-difference trivially empty", _delivered, len(_delivered))
+    # PROVED IN A THROWAWAY REPO rather than here: `git archive HEAD` reads .gitattributes from
+    # the COMMIT, so staging one in this working tree changes nothing and the "mutation" passes.
+    # That is git behaving correctly and my first mutation being wrong -- a scratch repo with
+    # `test/ export-ignore` committed does drop test/x.txt from the archive while keeping it
+    # tracked, which is the divergence this assertion exists to catch.
+    ok("every tracked file is one a consumer actually RECEIVES -- the checks that reason about "
+       "consumers from `git ls-files` are sound only while tracked and delivered are one set, "
+       "and export-ignore silently separates them for `archive` but not for `clone`",
+       not (_in_head - _delivered), sorted(_in_head - _delivered)[:8])
+
     probe = os.path.join(ROOT, ".showrunner", "hooks", "waiting-probe.sh")
     ok("the waiting probe ships and is executable", os.path.isfile(probe) and
        os.access(probe, os.X_OK), probe)
