@@ -1734,6 +1734,49 @@ def test_work_since_block():
        got is False, (got, why))
 
 
+def test_worktree_dirty():
+    group("Uncommitted work is why a dead Crawler's tree is not garbage")
+    if not have("git"):
+        skip("the worktree-dirty group", "git is not installed")
+        return
+    # PAID FROM THE OWED QUEUE. Its exclusion read "SHOULD BE SWEPT, IS NOT YET — an always-empty
+    # answer would report every abandoned worktree as clean, which is a real loss-of-work path."
+    # Measured before writing anything: neutering it killed ONE assertion, so the note was
+    # accurate rather than stale — unlike locks.Lock.acquire, whose identical note turned out to
+    # be years behind its own coverage. Both were sitting in the same list, indistinguishable.
+    d = tmpdir("dirty-probe")
+    sh(["git", "init", "-q", "."], d)
+    sh(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty",
+        "-m", "base"], d)
+    with open(os.path.join(d, "never-staged.txt"), "w") as fh:
+        fh.write("the only copy of an hour's work\n")
+
+    out = worktree.dirty(d)
+    ok("dirty NAMES the file, rather than answering a bare truthy — a producer stuck replaying "
+       "its last answer satisfies a boolean and fails this",
+       any("never-staged.txt" in line for line in (out or [])), out)
+    ok("...and an UNTRACKED file counts by default, which is the whole reason this exists: a "
+       "dead Crawler's only copy of real work is very often one it never staged",
+       bool(out), out)
+    eq("...while tracked_only EXCLUDES it, because that answers the narrower question — would "
+       "`git reset --hard` destroy this — and for an untracked file the answer is no",
+       worktree.dirty(d, tracked_only=True), [])
+
+    sh(["git", "add", "-A"], d)
+    sh(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "saved"], d)
+    eq("...and it EMPTIES once the work is committed — the assertion a stuck producer cannot "
+       "pass, because a snapshot can be faked by a corpse and a CHANGE cannot",
+       worktree.dirty(d), [])
+
+    # NOT-A-REPO IS NOT CLEAN. [] means "nothing uncommitted here"; None means "I could not
+    # look". Collapsing them would tell `reap` a tree it cannot read is safe to surface, which
+    # is the loss-of-work path the exclusion note named.
+    ok("a path git cannot answer for returns None, not [] — 'could not look' and 'nothing to "
+       "lose' must not be the same answer to a verb that decides whether work is disposable",
+       worktree.dirty(tmpdir("dirty-not-a-repo")) is None,
+       worktree.dirty(tmpdir("dirty-not-a-repo")))
+
+
 def test_guards_anchor_off_cwd():
     group("A guard's precondition was the shell's cwd; its subject is what the command writes (#56)")
     # Reported with a reproduction: every Bash call made from a scratch directory produced
@@ -7372,7 +7415,8 @@ def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
     for fn in (test_locks, test_config_refusals, test_every_rule_can_fail, test_graph, test_lifecycle, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
-               test_harness_provisioning, test_guards_anchor_off_cwd,
+               test_harness_provisioning, test_worktree_dirty,
+               test_guards_anchor_off_cwd,
                test_waiting, test_work_since_block,
                test_unconfigured_checks,
                test_concurrency,

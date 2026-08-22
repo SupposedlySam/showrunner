@@ -82,6 +82,22 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # Its note said an always-empty answer reports every abandoned worktree as clean — a real
+    # loss-of-work path. Measured before acting: the note was ACCURATE, one assertion noticed.
+    # Now five, on content and on CHANGE (it empties once work is committed), which is the
+    # assertion a producer stuck replaying its last answer cannot pass.
+    ("uncommitted work in a tree", "worktree.dirty", "lib/showrunner/worktree.py",
+     r"(def dirty\(path, tracked_only=False\):\n)",
+     "    return []\ndef _neutered_dirty(path, tracked_only=False):\n"),
+    # NEUTERED TO TRUE, NOT FALSE, and the note is why: "always-False is loud (nothing
+    # acquires), but always-True would hand two callers the same resource." A mutant must take
+    # the SILENT direction or it measures how loudly the code fails rather than whether anything
+    # was watching. Its note claimed no coverage; measured, 35 assertions notice. The note was
+    # years behind its own subject and sat in the same list as one that was accurate.
+    ("mutual exclusion itself", "locks.Lock.acquire", "lib/showrunner/locks.py",
+     r"(    def acquire\(self, pid, who, session=None, wait=0, poll=1\.0, extra=None\):\n)",
+     "        return True\n    def _neutered_acquire(self, pid, who, session=None, wait=0, "
+     "poll=1.0, extra=None):\n"),
     # FIRST DEBT PAID FROM THE OWED QUEUE. Its exclusion read "SHOULD BE SWEPT, IS NOT YET --
     # doctor's harness lines would vanish and no assertion currently requires them", which is a
     # work item, not a decision. Three assertions now require those lines, so it can be swept
@@ -679,12 +695,8 @@ NOT_SWEPT = {
                            "asserts, but not through a stub.",
     "gates.attribution": "SHOULD BE SWEPT, IS NOT YET — returning None always would silently "
                          "drop the provenance command from integration output.",
-    "worktree.dirty": "SHOULD BE SWEPT, IS NOT YET — an always-empty answer would report every "
-                      "abandoned worktree as clean, which is a real loss-of-work path.",
     "worktree.harness_gap": "SHOULD BE SWEPT, IS NOT YET — an always-None would remove the "
                             "doctor warning about an untracked harness.",
-    "locks.Lock.acquire": "SHOULD BE SWEPT, IS NOT YET — always-False is loud (nothing acquires), "
-                     "but always-True would hand two callers the same resource.",
     "locks.Lock.release": "SHOULD BE SWEPT, IS NOT YET — always-False would leave locks held.",
 }
 
