@@ -1256,6 +1256,28 @@ def test_harness_provisioning():
         return
     from showrunner import harness as H
 
+    # PAYING OFF A NOTE THAT NAMED ITS OWN REMEDY. `harness.report` sat in NOT_SWEPT with the
+    # reason "SHOULD BE SWEPT, IS NOT YET — doctor's harness lines would vanish and no assertion
+    # currently requires them." That is a work item wearing an exclusion's clothes: because it
+    # was excused, the mutation accounting counted it as ACCOUNTED FOR and reported clean, so
+    # the debt was invisible to the tool that would otherwise have chased it. Found by another
+    # project's rule that a note naming a REMEDY has a done-state while a note naming a REASON
+    # does not — theirs sat in a sweep file, mine in an exclusion list.
+    _dr = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                         cwd=ROOT, capture_output=True, text=True).stdout
+    ok("`doctor` says what a Crawler's harness actually IS — the lines vanish silently when the "
+       "producer dies, which is why nothing required them until now",
+       "harness .game_loop" in _dr, _dr[:200])
+    ok("...and whether that harness declares its OWN owned set or falls back, because the "
+       "fallback is conservative and noisier and a reader must know which they are getting",
+       ("declares its own owned set" in _dr) or ("exposes no `owned` verb" in _dr), _dr[:200])
+    _off = make_repo(extra_config={"harness": {"provision": "off"}})
+    _dr_off = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                             cwd=_off.root, capture_output=True, text=True).stdout
+    ok("...and says OFF plainly when provisioning is off, rather than printing nothing — an "
+       "empty harness section reads as 'nothing to report' and means the opposite",
+       "provisioning is OFF" in _dr_off, _dr_off[:200])
+
     ok("showrunner keeps NO list of which harness files are rules (that list drifts silently; "
        "the harness owns it)",
        not hasattr(H, "DEFAULT_RULE_FILES"),

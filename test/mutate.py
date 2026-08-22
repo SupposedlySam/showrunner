@@ -82,6 +82,13 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # FIRST DEBT PAID FROM THE OWED QUEUE. Its exclusion read "SHOULD BE SWEPT, IS NOT YET --
+    # doctor's harness lines would vanish and no assertion currently requires them", which is a
+    # work item, not a decision. Three assertions now require those lines, so it can be swept
+    # rather than excused.
+    ("doctor's account of the harness", "harness.report", "lib/showrunner/harness.py",
+     r"(def report\(cfg\):\n)",
+     "    return []\ndef _neutered_report(cfg):\n"),
     # The placeholder-check detector (consumer report). Answering "nothing is unconfigured"
     # everywhere restores the exact bug: `baseline` accepts a command that cannot fail and
     # records it as clean, and every later no-new-failures verdict is measured against it. A
@@ -672,8 +679,6 @@ NOT_SWEPT = {
                            "asserts, but not through a stub.",
     "gates.attribution": "SHOULD BE SWEPT, IS NOT YET — returning None always would silently "
                          "drop the provenance command from integration output.",
-    "harness.report": "SHOULD BE SWEPT, IS NOT YET — doctor's harness lines would vanish and "
-                      "no assertion currently requires them.",
     "worktree.dirty": "SHOULD BE SWEPT, IS NOT YET — an always-empty answer would report every "
                       "abandoned worktree as clean, which is a real loss-of-work path.",
     "worktree.harness_gap": "SHOULD BE SWEPT, IS NOT YET — an always-None would remove the "
@@ -783,6 +788,21 @@ def accounting():
         for c in unaccounted:
             print("  %s" % c)
         problems += 1
+    # AN EXCLUSION THAT NAMES A REMEDY IS A DEBT, NOT A DECISION. Eight entries here read
+    # "SHOULD BE SWEPT, IS NOT YET" — each one a work item wearing an exclusion's clothes — and
+    # because they were excused the accounting counted them as ACCOUNTED FOR and printed
+    # "0 unaccounted". The tool that would have chased the debt was the tool hiding it.
+    #
+    # Printed as a QUEUE rather than made an error: they are genuinely accounted for, and
+    # failing on them would either stop the sweep or teach somebody to soften the wording, which
+    # would lose the only thing that makes them findable. A note that names a REMEDY has a
+    # done-state; one that names a REASON does not.
+    owed = sorted(k for k, v in NOT_SWEPT.items() if "SHOULD BE SWEPT" in v)
+    if owed:
+        print("OWED — excluded with a reason that names its own remedy (%d):" % len(owed))
+        for k in owed:
+            print("  %-28s %s" % (k, NOT_SWEPT[k].split("—", 1)[-1].strip()[:74]))
+        print("  These count as accounted, deliberately. They are not resolved.")
     if not problems:
         print("accounting ok: %d files, %d candidates, %d swept, %d excluded, 0 unaccounted, "
               "0 stale, 0 unscanned"
