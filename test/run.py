@@ -2795,6 +2795,23 @@ def test_worktree_lease():
     ok("`doctor` reports the waiting journal at all — the evidence a watchdog accumulates in, "
        "and the one record whose ABSENCE argues for adopting the thing it was meant to prove",
        "waiting journal" in _p_ok.stdout, _p_ok.stdout[-200:])
+    # REGISTERED AND FIRING ARE TWO CLAIMS, and every other doctor line reports the first.
+    # A fresh repo has answered nothing, and "registered and never fired" is indistinguishable
+    # from "registered and content" everywhere else in this tool.
+    ok("a repo whose journal is EMPTY is told so as a warning — nothing has answered yet, which "
+       "is the state that looks identical to a healthy quiet one",
+       "EMPTY" in _p_ok.stdout, _p_ok.stdout[-200:])
+    with open(os.path.join(_dj.root, ".showrunner", "waiting.jsonl"), "a") as _fh:
+        _fh.write(json.dumps({"ts": int(time.time()), "waiting": False}) + "\n")
+    _p_fired = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                              cwd=_dj.root, capture_output=True, text=True)
+    ok("...and once something HAS answered, doctor reports how many and how long ago — the only "
+       "evidence here that the wiring runs rather than merely being wired",
+       "entr(ies)" in _p_fired.stdout and "ago" in _p_fired.stdout, _p_fired.stdout[-220:])
+    ok("...and states the limit in the same breath: it cannot tell a Stop trigger firing from "
+       "somebody running the verb by hand, which is a weaker claim than 'the hook fired'",
+       "by hand" in _p_fired.stdout, _p_fired.stdout[-220:])
+
     _blocked_dir = os.path.join(_dj.root, ".showrunner", "waiting.jsonl")
     if os.path.exists(_blocked_dir):
         os.remove(_blocked_dir)

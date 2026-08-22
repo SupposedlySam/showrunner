@@ -300,8 +300,35 @@ def cmd_doctor(args):
         os.makedirs(cfg.state_dir, exist_ok=True)
         with open(_wj, "a"):
             pass
-        print("  %s the waiting journal is writable (%s) — the record a watchdog's evidence "
-              "accumulates in" % (GRN + "ok   " + OFF, rel(_wj, cfg.root)))
+        # AND WHEN IT LAST ANSWERED. Registration and FIRING are two claims, and everything
+        # above reports the first. The Stop trigger reaches `waiting --porcelain` on every
+        # turn-end it examines, and that appends a line here — so this file's newest timestamp
+        # is the only evidence in the repo that the wiring does anything, as opposed to being
+        # correctly wired to something that never runs.
+        _n, _last = 0, None
+        try:
+            with open(_wj) as _fh:
+                for _ln in _fh:
+                    if _ln.strip():
+                        _n += 1
+                        _last = _ln
+        except OSError:
+            _last = None
+        if _last:
+            try:
+                _age = int(now()) - int(json.loads(_last).get("ts") or 0)
+                _ago = ("%dm" % (_age // 60)) if _age < 7200 else ("%dh" % (_age // 3600))
+            except (ValueError, TypeError):
+                _ago = "?"
+            print("  %s the waiting journal has %d entr(ies), newest %s ago (%s) — evidence the "
+                  "wiring RUNS, not just that it is registered. It cannot tell a Stop trigger "
+                  "firing from somebody running `waiting` by hand."
+                  % (GRN + "ok   " + OFF, _n, _ago, rel(_wj, cfg.root)))
+        else:
+            print("  %s the waiting journal is writable but EMPTY (%s) — nothing has answered "
+                  "yet. Registered and never fired looks exactly like registered and content, "
+                  "and this is the only place the difference shows."
+                  % (YEL + "warn " + OFF, rel(_wj, cfg.root)))
     except OSError as _e:
         print("  %s the waiting journal CANNOT BE WRITTEN (%s): %s. `waiting` keeps answering; "
               "what stops is the record of what it answered, and an empty journal reads as a "
