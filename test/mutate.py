@@ -82,6 +82,23 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # MEASURED ZERO — the only genuinely unprotected producer the OWED queue held. Its note said
+    # an always-None "would silently drop the provenance command from integration", and nothing
+    # noticed: `integration-commit` still exits 0, still reports every staged file accounted
+    # for, and the block simply stops printing. Six assertions now; the mutant kills 4.
+    ("the provenance declaration", "gates.attribution", "lib/showrunner/gates.py",
+     r"(def attribution\(cfg, entries, harness_bin=None\):\n)",
+     "    return None\ndef _neutered_attribution(cfg, entries, harness_bin=None):\n"),
+    # Note claimed no coverage; measured 6. Stale, like locks.Lock.acquire's — registering it
+    # was the whole debt, and only running the mutant distinguished it from the one that was
+    # genuinely uncovered while both sat in the same list worded the same way.
+    ("the baseline a comparison rests on", "gates.load_baseline", "lib/showrunner/gates.py",
+     r"(def load_baseline\(cfg\):\n)",
+     "    return None\ndef _neutered_load_baseline(cfg):\n"),
+    # Note claimed no coverage; measured 26. Also stale.
+    ("releasing a held lock", "locks.Lock.release", "lib/showrunner/locks.py",
+     r"(    def release\(self, pid=None, force=False\):\n)",
+     "        return False\n    def _neutered_release(self, pid=None, force=False):\n"),
     # Its note said an always-empty answer reports every abandoned worktree as clean — a real
     # loss-of-work path. Measured before acting: the note was ACCURATE, one assertion noticed.
     # Now five, on content and on CHANGE (it empties once work is committed), which is the
@@ -690,14 +707,8 @@ NOT_SWEPT = {
                            "by this tool.",
     "harness.inject_conflicts": "REPORTING over the rule, not the rule. It is a loop that\n                                 calls harness.owns_path, which IS swept — sweeping the\n                                 wrapper would count the same predicate twice and read as\n                                 more coverage than exists.",
     "cli.cmd_overlap": "A COMMAND, not a producer — it formats what collide.overlap\n                       returns and chooses an exit code. collide.overlap carries the\n                       rule and is swept above; sweeping the printer too would count\n                       one finding twice.",
-    "gates.load_baseline": "SHOULD BE SWEPT, IS NOT YET — returning None always would make "
-                           "every comparison report 'no baseline', which the baseline group "
-                           "asserts, but not through a stub.",
-    "gates.attribution": "SHOULD BE SWEPT, IS NOT YET — returning None always would silently "
-                         "drop the provenance command from integration output.",
     "worktree.harness_gap": "SHOULD BE SWEPT, IS NOT YET — an always-None would remove the "
                             "doctor warning about an untracked harness.",
-    "locks.Lock.release": "SHOULD BE SWEPT, IS NOT YET — always-False would leave locks held.",
 }
 
 

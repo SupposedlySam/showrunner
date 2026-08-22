@@ -1734,6 +1734,41 @@ def test_work_since_block():
        got is False, (got, why))
 
 
+def test_attribution():
+    group("The provenance declaration an integration commit is told to make")
+    # PAID FROM THE OWED QUEUE, and this one measured ZERO. Its note said an always-None would
+    # "silently drop the provenance command from integration" — and nothing at all noticed,
+    # which makes it the only genuinely UNPROTECTED producer the queue held. The block simply
+    # stops printing: `integration-commit` still exits 0, still reports every staged file
+    # accounted for, and the commit goes bare.
+    cfg = make_repo()
+    entries = [{"branch": "showrunner/c-a", "crawler": "c-a"},
+               {"branch": "showrunner/c-b", "crawler": "c-b"}]
+    att = gates.attribution(cfg, entries, harness_bin="/bin/harness")
+    ok("attribution NAMES every merged ref, not just the first — a command that declares one of "
+       "two branches spends the declaration and leaves the other unattributed",
+       att and all("--merge %s" % e["branch"] in att["command"] for e in entries),
+       (att or {}).get("command"))
+    ok("...and names the Crawlers in the reason, because the provenance question is WHO produced "
+       "this and a ref answers where",
+       att and "c-a" in att["command"] and "c-b" in att["command"], (att or {}).get("command"))
+    # THE TWO RULES ARE THE PRODUCT. The docstring says both were found by running the verb, and
+    # a command handed over without them is spent on a commit that was never going to be
+    # checked — which is worse than no command, because it reads as done.
+    ok("...and carries WHEN it must not be run, since a clean `git merge` never invokes the gate "
+       "and a declaration spent there leaves the NEXT commit bare",
+       att and "clean" in att["when"] and "merge" in att["when"], (att or {}).get("when"))
+    ok("...and ORDER, because attribution is recomputed from the ref and declaring early "
+       "resolves to zero files — a correct answer and a useless one",
+       att and "AFTER" in att["order"], (att or {}).get("order"))
+    ok("no branches means NO declaration rather than an empty one — nothing was merged, so "
+       "there is no provenance to declare",
+       gates.attribution(cfg, [{"crawler": "c-a"}], harness_bin="/bin/harness") is None)
+    ok("...and no harness binary means none either, rather than a command naming nothing",
+       gates.attribution(cfg, entries, harness_bin=None) is None
+       or "/" in gates.attribution(cfg, entries)["command"])
+
+
 def test_worktree_dirty():
     group("Uncommitted work is why a dead Crawler's tree is not garbage")
     if not have("git"):
@@ -7415,7 +7450,7 @@ def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
     for fn in (test_locks, test_config_refusals, test_every_rule_can_fail, test_graph, test_lifecycle, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
-               test_harness_provisioning, test_worktree_dirty,
+               test_harness_provisioning, test_attribution, test_worktree_dirty,
                test_guards_anchor_off_cwd,
                test_waiting, test_work_since_block,
                test_unconfigured_checks,
