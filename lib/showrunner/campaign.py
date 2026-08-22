@@ -345,10 +345,16 @@ def finish(cfg, leaf_id, why="leaf closed"):
     for entry in load(cfg).get("crawlers", []):
         if entry.get("leaf") != leaf_id or entry.get("state") in ("finished", "retired"):
             continue
-        ok, detail = _dispatch.close_channel(cfg, entry)
+        state, detail = _dispatch.close_channel(cfg, entry)
+        # ONLY AN OBSERVED CLOSURE IS RECORDED. UNKNOWN leaves channel_closed False so the room
+        # is retried, rather than writing down a closure nobody watched happen — a rate-limited
+        # close that records success leaves a room open with the record saying otherwise, and
+        # nothing ever looks again.
         set_state(cfg, entry["crawler"], "finished", finished_at=now(), finished_why=why,
-                  channel_closed=bool(ok))
-        done.append({"crawler": entry["crawler"], "channel": detail, "channel_closed": ok})
+                  channel_closed=(state == _dispatch.CLOSE_DONE))
+        done.append({"crawler": entry["crawler"], "channel": detail,
+                     "channel_closed": state == _dispatch.CLOSE_DONE,
+                     "channel_state": state})
     return done
 
 
@@ -474,18 +480,33 @@ def reap(cfg, graph, base="HEAD", apply=False):
     #     covers the Crawler that died without ever closing its leaf.
     for entry in load(cfg).get("crawlers", []):
         if entry.get("channel") and not entry.get("channel_closed") and not live(entry):
-            actions.append({
+            # THE ACTION LINE IS WRITTEN AFTER THE ATTEMPT, not before it. It used to say
+            # "close <room>" unconditionally, printed BELOW the warning about the failure — so
+            # the confident-sounding line was the second one a reader saw, and a close that did
+            # not happen printed a line that reads exactly like one that did.
+            act = {
                 "kind": "room",
                 "crawler": entry.get("crawler"),
                 "why": "owner not alive and its room is still open",
-                "action": "close %s" % entry["channel"] if apply else "would close %s" % entry["channel"],
-            })
+                "action": "would close %s" % entry["channel"],
+            }
+            actions.append(act)
             if apply:
-                ok, detail = _dispatch.close_channel(cfg, entry)
+                state, detail = _dispatch.close_channel(cfg, entry)
                 set_state(cfg, entry["crawler"], entry.get("state") or "abandoned",
-                          channel_closed=bool(ok))
-                if not ok:
-                    warnings.append(detail)
+                          channel_closed=(state == _dispatch.CLOSE_DONE))
+                if state != _dispatch.CLOSE_DONE:
+                    # UNKNOWN and FAILED both warn, and the detail says which. They differ in
+                    # what a reader should DO — retry versus investigate — so they must not
+                    # arrive as the same sentence.
+                    warnings.append(("could not tell: " if state == _dispatch.CLOSE_UNKNOWN
+                                     else "") + detail)
+                act["action"] = {
+                    _dispatch.CLOSE_DONE: "closed %s" % entry["channel"],
+                    _dispatch.CLOSE_UNKNOWN: "COULD NOT TELL whether %s closed — it is still "
+                                             "recorded as open, and the next reap tries again"
+                                             % entry["channel"],
+                }.get(state, "FAILED to close %s — see the warning above" % entry["channel"])
 
     # 3. Worktrees and scratch dirs of dead Crawlers. Reported, never deleted: they may
     #    hold the only copy of real work.

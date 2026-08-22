@@ -348,6 +348,19 @@ LINGER_GRACE_SECONDS = 120
 ERROR_MARKERS = ("Execution error", "API Error", "Invalid API key", "rate limit")
 
 
+# Spin-down's three outcomes. A closure that was not OBSERVED must not be recorded as one, and
+# "I could not find out" is not a failure to be retried forever nor a success to be written down.
+CLOSE_DONE, CLOSE_UNKNOWN, CLOSE_FAILED = "closed", "unknown", "failed"
+
+# Signatures of a world that was unreachable, NOT of a refusal. Deliberately narrow: a false
+# UNKNOWN leaves a room open and retried, which is cheap, while a false FAILED is a permanent
+# error nobody clears. Consumer-measured: a `read` needed ~50s of backoff to clear a 429 the
+# CLI's own two short retries did not cover, so it does reach this code rather than being
+# absorbed below it.
+_TRANSIENT = re.compile(r"(429|rate limit|timed? ?out|timeout|connection (refused|reset)"
+                        r"|temporarily unavailable|no route to host|502|503|504)", re.I)
+
+
 def close_channel(cfg, entry):
     """Close the Crawler's room. Safe at any point, so it happens as soon as the leaf closes.
 
@@ -355,24 +368,47 @@ def close_channel(cfg, entry):
     under fan-out the rooms accumulate one per leaf forever, and a list of dead rooms is how
     a channel list stops being readable. Leaving as the only member closes it.
 
-    Idempotent by construction — a room already closed, or never opened, is success. Returns
-    (ok, detail) and never raises: spin-down must not be the thing that fails a close.
+    THREE OUTCOMES, not two. Returns (state, detail) where state is CLOSE_DONE, CLOSE_UNKNOWN
+    or CLOSE_FAILED, and never raises: spin-down must not be the thing that fails a close.
+
+    Two outcomes cannot express this, which a consumer measured rather than argued: a transient
+    `HTTP 429 Rate limit exceeded` and a permanent `<identity> has not joined <room>` are BOTH
+    exit 1. Treat 1 as success and a rate-limited close records a room closed that is still
+    open; treat it as failure and the never-joined case is a permanent error no retry clears.
+    UNKNOWN is the state that lets spin-down decline to record a closure it did not observe.
+
+    `close`, not `leave`. `leave` is a MEMBERSHIP action and refuses when you were never a
+    member, which is precisely the case spin-down hits when `spawn`'s `open` failed — so the
+    docstring's old promise that "a room already closed, or never opened, is success" was false
+    for exactly the case it named. `close` is an owner action, keeps the transcript, and
+    `reopen` makes it reversible, which is what makes it safe to run idempotently.
+
+    Prose is no longer the test. It was: `"closed" in out or "no such" in out or "not a member"
+    in out` — three phrasings of somebody else's CLI, and the consumer's real output matched
+    none of them.
     """
     channel = entry.get("channel")
     if not channel:
-        return True, "no channel"
+        return CLOSE_DONE, "no channel"
     cli = chat_path(cfg, "cli")
     if not cli or not os.path.exists(cli):
-        return False, "no chat CLI configured — room %s left open" % channel
+        return CLOSE_FAILED, "no chat CLI configured — room %s left open" % channel
     try:
-        p = subprocess.run([cli, "leave", channel, "--as", orchestrator_identity(cfg)],
+        p = subprocess.run([cli, "close", channel, "--as", orchestrator_identity(cfg),
+                            "--reason", "crawler finished"],
                            capture_output=True, text=True, timeout=60, cwd=cfg.root)
+    except subprocess.TimeoutExpired as exc:
+        # A timeout is the purest UNKNOWN there is: the request may well have landed.
+        return CLOSE_UNKNOWN, "%s did not answer within the timeout: %s" % (channel, exc)
     except (OSError, subprocess.SubprocessError) as exc:
-        return False, "could not close %s: %s" % (channel, exc)
-    out = (p.stdout + p.stderr).lower()
-    if p.returncode == 0 or "closed" in out or "no such" in out or "not a member" in out:
-        return True, "closed %s" % channel
-    return False, (p.stderr or p.stdout).strip()[:160]
+        return CLOSE_FAILED, "could not close %s: %s" % (channel, exc)
+    if p.returncode == 0:
+        return CLOSE_DONE, "closed %s" % channel
+    out = (p.stdout + p.stderr)
+    if _TRANSIENT.search(out):
+        return CLOSE_UNKNOWN, "could not tell whether %s closed: %s" % (
+            channel, out.strip().splitlines()[0][:120] if out.strip() else "no output")
+    return CLOSE_FAILED, (p.stderr or p.stdout).strip()[:160]
 
 
 def lingering(entry, grace=LINGER_GRACE_SECONDS):

@@ -255,6 +255,20 @@ The worktree root stays repo-wide, so two campaigns naming the same leaf collide
 refusal, not a clobber. The project name still defaults to the repo's own, so campaigns in one
 checkout share a chat prefix unless you set one.
 
+### Spin-down closes a room in THREE outcomes
+
+`close_channel` answers `closed`, `unknown` or `failed`, and only `closed` is recorded. Two
+outcomes could not express it: a transient `HTTP 429` and a permanent `has not joined` are BOTH
+exit 1 from the chat CLI, so treating 1 as success records rooms that are still open, and
+treating it as failure makes the never-joined case a permanent error no retry clears.
+
+It calls the chat tool's `close`, not `leave`. `leave` is a membership action that refuses when
+you were never a member — exactly the case spin-down hits when `spawn`'s `open` failed. `close`
+is an owner action, keeps the transcript, and is reversible with `reopen`.
+
+`reap` writes its action line AFTER the attempt, so a close that could not be confirmed says so
+rather than printing a line that reads like it happened.
+
 ### The identity spawn joins a room under
 
 `dispatch.chat.identity` if you set it; otherwise `<project>[-<campaign>]-orchestrator`. It is

@@ -5805,8 +5805,75 @@ def test_dispatch():
        "the feature", dispatch.lingering({"pid": mypid, "finished_at": old, "boot": _bt()}))
 
     # Closing a room must never be the thing that fails a close.
-    ok("a Crawler with no channel closes cleanly rather than erroring",
-       dispatch.close_channel(cfg, {"crawler": "x"})[0] is True)
+    eq("a Crawler with no channel closes cleanly rather than erroring",
+       dispatch.close_channel(cfg, {"crawler": "x"})[0], dispatch.CLOSE_DONE)
+
+    # #60: THREE OUTCOMES, because a consumer measured that two cannot express this. A transient
+    # `HTTP 429 Rate limit exceeded` and a permanent `<identity> has not joined <room>` are BOTH
+    # exit 1 from the chat CLI. Treat 1 as success and a rate-limited close records a room
+    # closed that is still open; treat it as failure and the never-joined case is a permanent
+    # error no retry clears.
+    def _fake_cli(script):
+        d = tmpdir("close-cli")
+        path = os.path.join(d, "llm_chat")
+        with open(path, "w") as fh:
+            fh.write(script)
+        os.chmod(path, 0o755)
+        c = make_repo(extra_config={"dispatch": {"chat": {"enabled": True, "cli": path}}})
+        return c
+
+    _rate = _fake_cli("#!/bin/sh\necho 'HTTP 429  Rate limit exceeded' >&2\nexit 1\n")
+    st, why = dispatch.close_channel(_rate, {"crawler": "c", "channel": "room-a"})
+    eq("a 429 is UNKNOWN, not failure — the room may or may not be closed and the answer is to "
+       "ask again, which neither of the other two states says", st, dispatch.CLOSE_UNKNOWN)
+    ok("...and the detail says it could not TELL, rather than asserting either outcome",
+       "could not tell" in why, why)
+
+    _refused = _fake_cli("#!/bin/sh\necho 'nope: you do not own this room' >&2\nexit 1\n")
+    eq("a real refusal is FAILED — same exit code as the 429, different state, which is the "
+       "whole reason the exit code alone could not fix this",
+       dispatch.close_channel(_refused, {"crawler": "c", "channel": "room-b"})[0],
+       dispatch.CLOSE_FAILED)
+
+    _ok = _fake_cli("#!/bin/sh\necho closed\nexit 0\n")
+    eq("and exit 0 is DONE, so the happy path is decided by the exit code rather than by "
+       "matching three phrasings of somebody else's CLI",
+       dispatch.close_channel(_ok, {"crawler": "c", "channel": "room-c"})[0],
+       dispatch.CLOSE_DONE)
+
+    # THE VERB CHANGED TOO. `leave` is a membership action and refuses when you were never a
+    # member — exactly the case spin-down hits when `spawn`'s open failed — so the old
+    # docstring's promise that a never-opened room is success was false for the case it named.
+    # AND THE LINE A READER SEES. `reap` used to write "close <room>" before attempting it, and
+    # printed it BELOW the warning about the failure — so the confident-sounding line was the
+    # second one, and a close that did not happen printed a line reading exactly like one that
+    # did. The action text is now written after the attempt.
+    _rl = _fake_cli("#!/bin/sh\necho 'HTTP 429  Rate limit exceeded' >&2\nexit 1\n")
+    _g = new_graph(_rl)
+    # NOT `rec` — that name is already live in this group, and shadowing it made a later
+    # `dispatch.launch(cfg, rec, ...)` read my synthetic entry instead of its own spawn record.
+    _rl_rec = campaign.load(_rl)
+    _rl_rec.setdefault("crawlers", []).append(
+        {"crawler": "c-gone", "leaf": "L1", "channel": "room-x", "worktree": ".worktrees/c-gone",
+         "state": "spawned", "pid": 999999, "boot": boot_token_for_test()})
+    campaign.save(_rl, _rl_rec)
+    _acts, _warns = campaign.reap(_rl, _g, apply=True)
+    _room = [a for a in _acts if a["kind"] == "room"]
+    ok("a close that could not be confirmed does NOT print a line that reads like it happened",
+       _room and "COULD NOT TELL" in _room[0]["action"], _room)
+    ok("...and says the room is still recorded as open and will be retried, which is the part a "
+       "reader can act on",
+       _room and "still" in _room[0]["action"] and "again" in _room[0]["action"], _room)
+    ok("...and the warning marks it as an inability to tell rather than a refusal, because the "
+       "two call for different responses",
+       any("could not tell" in w for w in _warns), _warns)
+
+    _seen = _fake_cli("#!/bin/sh\necho \"$1\" > \"$(dirname \"$0\")/verb\"\nexit 0\n")
+    dispatch.close_channel(_seen, {"crawler": "c", "channel": "room-d"})
+    _vp = os.path.join(os.path.dirname(dispatch.chat_path(_seen, "cli")), "verb")
+    eq("spin-down calls `close`, an OWNER action that keeps the transcript and is reversible by "
+       "`reopen`, not `leave`, which refuses when you were never a member",
+       open(_vp).read().strip() if os.path.exists(_vp) else "<not called>", "close")
 
     # Spin-down that stops happening is invisible — the leaf still closes, the report still
     # looks right, and the processes and rooms just accumulate. So assert the record actually
