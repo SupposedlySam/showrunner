@@ -5638,6 +5638,34 @@ def test_filed_issues_15_to_21():
     raises("...but not once it is claimed — that would rewrite the instructions under a Crawler "
            "already working from them", lambda: g.edit("L17", body="x"), "not open")
 
+    # LABELS BY THE SAME ARGUMENT, one field along. They were unreachable because `add` refuses
+    # an existing id and `edit` did not take them: two correct behaviours composing into "no way
+    # to relabel", so a consumer closed the leaf and re-created it, leaving a stub in the
+    # campaign's done count that did no work. Not cosmetic -- labels pick the LANE, and their
+    # unlabelled leaf fell to a default lane owning an exclusive device resource, so a pure
+    # software task queued against hardware the repo did not have.
+    g.add("mislabelled", leaf_id="L17b", labels=("tets",))
+    g.edit("L17b", labels=["test"])
+    eq("a label typo is corrected in place rather than by closing the leaf, which would spend "
+       "the proof-of-done gate on a decision nobody made",
+       g.show("L17b").labels_list, ["test"])
+    g.edit("L17b", add_labels=["fast"])
+    eq("...and one label can be ADDED without restating the set, for a leaf whose other labels "
+       "somebody else chose", g.show("L17b").labels_list, ["test", "fast"])
+    g.edit("L17b", remove_labels=["fast"])
+    eq("...and removed", g.show("L17b").labels_list, ["test"])
+    raises("removing a label the leaf does not carry REFUSES rather than succeeding quietly — "
+           "a no-op success reports the label gone while it is still there picking a lane",
+           lambda: g.edit("L17b", remove_labels=["nope"]), "no label")
+    try:
+        g.edit("L17b", remove_labels=["nope"])
+        _said = ""
+    except Exception as _e:                                     # noqa: BLE001
+        _said = str(_e)
+    ok("...and the refusal names what the leaf actually CARRIES, so the typo is visible without "
+       "a second command — a refusal that only says 'no' sends you to `show`",
+       "test" in _said, _said[:120])
+
     # #22 — an inject path inside the harness directory creates that directory as a side effect
     # (os.makedirs of the parent), and provisioning runs AFTER inject, sees it exists, and leaves
     # it alone. The harness then cannot answer its contract and the spawn aborts blaming the

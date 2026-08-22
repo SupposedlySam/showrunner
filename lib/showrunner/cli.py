@@ -473,6 +473,19 @@ def cmd_add(args):
         g.dep(leaf_id, parent)
     events.emit(cfg, "leaf.added", {"leaf": leaf_id, "title": args.title, "leaf_kind": args.kind,
                 "labels": args.label or [], "after": args.after or []})
+    # AT ADD TIME, not only at `plan`. `plan` already refuses to be neutral about an unmatched
+    # leaf, and that is the only reason a consumer caught a pure-software leaf queued against a
+    # device lane. But `plan` may never run before `spawn`, and `add` is where the human still
+    # has the context to fix it -- a label typo discovered at plan time is a leaf you have
+    # already reasoned about twice.
+    _d = lanes.route(cfg, g.show(leaf_id))
+    if not _d.get("matched"):
+        eprint("note: %s matches no lane rule, so it defaults to %s%s. An unmatched leaf is a "
+               "missing rule, not a neutral outcome. Fix it in place with "
+               "`showrunner edit %s --label <label>` — no need to close and re-create."
+               % (leaf_id, _d.get("lane"),
+                  (", which owns resource %r — this leaf will queue for it" % _d.get("resource"))
+                  if _d.get("resource") else "", leaf_id))
     print(leaf_id)
     return 0
 
@@ -1424,10 +1437,24 @@ def cmd_edit(args):
         with open(args.body_file) as fh:
             body = fh.read()
     leaf = g.edit(args.id, title=args.title, body=body,
-                  paths=(args.path.split(",") if args.path else None))
+                  paths=(args.path.split(",") if args.path else None),
+                  labels=(args.label.split(",") if args.label else None),
+                  add_labels=(args.add_label or []), remove_labels=(args.remove_label or []))
     print("edited %s" % leaf["id"])
     print("  title %s" % leaf.get("title"))
     print("  body  %d chars" % len(leaf.get("body") or ""))
+    print("  labels %s" % (", ".join(leaf.labels_list) or "(none)"))
+    # Labels pick the LANE, so say what this leaf now matches rather than leaving the caller to
+    # run `plan` to find out. An unmatched leaf falls to the default lane, which may own an
+    # exclusive resource it never needed.
+    _d = lanes.route(cfg, leaf)
+    print("  lane   %s — %s" % (_d.get("lane"), _d.get("why")))
+    if not _d.get("matched"):
+        eprint("note: no lane rule matches this leaf, so it defaults to %s%s. An unmatched leaf "
+               "is a missing rule, not a neutral outcome — and if that lane owns a resource, the "
+               "leaf now queues for it."
+               % (_d.get("lane"), (" (resource %s)" % _d.get("resource"))
+                  if _d.get("resource") else ""))
     return 0
 
 
@@ -1964,6 +1991,12 @@ def build_parser():
     s.add_argument("--body")
     s.add_argument("--body-file")
     s.add_argument("--path")
+    s.add_argument("--label", help="REPLACE the label set (comma-separated). Labels pick the "
+                                   "lane, so a typo queues the leaf against the default lane's "
+                                   "resource")
+    s.add_argument("--add-label", action="append", help="add one label, keeping the rest")
+    s.add_argument("--remove-label", action="append",
+                   help="remove one label; REFUSES if the leaf does not carry it")
     s.set_defaults(func=cmd_edit)
 
     s = sub.add_parser("show", help="show one leaf")

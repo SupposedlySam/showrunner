@@ -586,6 +586,7 @@ file in an integration commit that **no Crawler ever touched**.
 showrunner add "<title>" [--id X] [--body-file F] [--label L] [--after <blocking-leaf>]
 showrunner dep <child> <parent>      # child is blocked by parent
 showrunner edit <leaf> [--title T] [--body-file F] [--paths P]
+                       [--label L] [--add-label L] [--remove-label L]
 showrunner list|show|ready|claim|release|park|unpark
 ```
 
@@ -673,7 +674,7 @@ what is there now. Nothing hashes the contents.
 ## Verifying the tool itself
 
 ```
-python3 test/run.py        # 1011 assertions; needs only Python 3 + git
+python3 test/run.py        # 1016 assertions; needs only Python 3 + git
 bash prototype/demo.sh     # the original shell POC: 7 run anywhere, 5 skip loudly
 ```
 

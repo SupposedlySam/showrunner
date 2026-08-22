@@ -327,7 +327,8 @@ class SqliteGraph:
                 continue          # somebody else won it, or it stopped being ready
         return None
 
-    def edit(self, leaf_id, title=None, body=None, paths=None):
+    def edit(self, leaf_id, title=None, body=None, paths=None, labels=None,
+             add_labels=(), remove_labels=()):
         """Correct a leaf's title, body or paths. The BODY IS THE BRIEF a Crawler is dispatched
         with, so a typo in it is not cosmetic — it is the whole instruction set for an agent.
 
@@ -338,6 +339,18 @@ class SqliteGraph:
 
         Refuses on a leaf that is no longer open, because rewriting the brief under a Crawler
         that is already working from it is a different and worse thing than a typo.
+
+        LABELS FOR THE SAME REASON, one field along. They were unreachable by exactly the
+        argument above -- `add` correctly refuses an existing id and `edit` did not take them --
+        so two correct behaviours composed into "no way to relabel", and a consumer had to close
+        the leaf and re-create it, leaving a stub in the campaign's done count that did no work.
+        Labels pick the LANE, so a typo is not cosmetic: an unmatched leaf falls to the default
+        lane, and a default lane that owns an exclusive resource queues that leaf against
+        hardware it never needed.
+
+        `labels` REPLACES the set; `add_labels`/`remove_labels` amend it. Both exist because a
+        wholesale replace is what you want for a typo and the wrong thing for a leaf whose other
+        labels somebody else chose.
         """
         leaf = self.show(leaf_id)
         if leaf["status"] != OPEN:
@@ -352,8 +365,23 @@ class SqliteGraph:
         if paths is not None:
             sets.append("paths=?")
             args.append(",".join(paths))
+        if labels is not None or add_labels or remove_labels:
+            current = list(labels) if labels is not None else leaf.labels_list
+            for lb in add_labels:
+                if lb not in current:
+                    current.append(lb)
+            missing = [lb for lb in remove_labels if lb not in current]
+            if missing:
+                # A remove that matched nothing is a typo in the REMOVE, and silently succeeding
+                # tells you the label is gone when it is still there picking a lane.
+                die("%s has no label(s) %s — nothing was changed. Its labels are: %s"
+                    % (leaf_id, ", ".join(missing), ", ".join(current) or "(none)"), code=2)
+            current = [lb for lb in current if lb not in remove_labels]
+            sets.append("labels=?")
+            args.append(",".join(current))
         if not sets:
-            die("nothing to edit — pass --title, --body/--body-file or --path", code=64)
+            die("nothing to edit — pass --title, --body/--body-file, --path, --label, "
+                "--add-label or --remove-label", code=64)
         with self.db:
             self.db.execute("UPDATE leaves SET %s WHERE id=?" % ", ".join(sets),
                             args + [leaf_id])
