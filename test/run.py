@@ -2897,6 +2897,27 @@ def test_worktree_lease():
     clean_payload = json.dumps({"waiting": False, "live_crawlers": [], "parked_crawlers": [],
                                 "blocked_crawlers": []})
 
+    # BLINDNESS AND CONTENTMENT LEFT THROUGH THE SAME DOOR. Every early exit here is `exit 0`,
+    # which for a Stop hook means ALLOW — so "no Crawler is inert" and "I could not tell" were
+    # the same output: silence. Swept for after another project applied the tell per-BRANCH
+    # rather than per-tool: for each early exit in a check, ask what the summary prints if that
+    # branch is the only one taken; any early exit reaching a green summary is a channel
+    # collapse. This repo already refuses that shape elsewhere -- hook verbs under a missing
+    # central install say ALLOWED WITHOUT BEING CHECKED for exactly this reason -- and this gate
+    # did not.
+    #
+    # The JURISDICTION exits stay silent on purpose: not applying is not the same as not
+    # knowing, and narrating every non-event trains a reader to skim the one that matters.
+    _blind_root = tmpdir("gate-blind")
+    sh(["git", "init", "-q", "."], _blind_root)          # a REPO, or it exits on jurisdiction
+    blind = subprocess.run(["bash", trig], cwd=_blind_root, capture_output=True,
+                           text=True, input="{}")
+    eq("a gate that cannot find showrunner still ALLOWS -- a turn-end hook that hard-fails on "
+       "its own plumbing blocks the write that would repair it", blind.returncode, 0)
+    ok("...but SAYS it allowed without checking, because an allow nobody is told about is "
+       "indistinguishable from a guard that ran and was content",
+       "WITHOUT BEING CHECKED" in blind.stderr, blind.stderr[:160])
+
     refused = run_trigger(blocked_payload)
     eq("a BLOCKED Crawler REFUSES the orchestrator's turn-end — exit 2, which is the code that "
        "blocks a Stop", refused.returncode, 2)

@@ -55,20 +55,37 @@ for candidate in "$root/.showrunner_self/bin/showrunner" \
       [ -x "$candidate" ] && { SR="$candidate"; break; }
     done
   fi
-  [ -n "$SR" ] || exit 0
+  # ALLOWED WITHOUT BEING CHECKED, said out loud. Below this line every exit 0 means "no Crawler
+  # is inert"; above it, the ones that could not TELL. Those two produced identical output --
+  # silence and an allow -- which is the collapse this repo already refuses elsewhere: an allow
+  # nobody is told about is indistinguishable from a guard that ran and was content. The
+  # jurisdiction exits above stay silent deliberately: not applying is not the same as not
+  # knowing, and narrating every non-event trains a reader to skim the one that matters.
+  [ -n "$SR" ] || {
+    echo "inert-Crawler gate: ALLOWED WITHOUT BEING CHECKED — no showrunner binary under $root." >&2
+    exit 0
+  }
   # Exit code deliberately ignored: `waiting` returns 1 for "not waiting", which is the ordinary
   # state AND the state a blocked Crawler produces. The payload is the answer, not the code.
   payload="$("$SR" waiting --porcelain 2>/dev/null)" || true
 fi
 
-[ -n "$payload" ] || exit 0
+[ -n "$payload" ] || {
+  echo "inert-Crawler gate: ALLOWED WITHOUT BEING CHECKED — \`waiting --porcelain\` produced no" >&2
+  echo "payload, so nothing was compared. This is not 'no Crawler is blocked'." >&2
+  exit 0
+}
 
 blocked="$(printf '%s' "$payload" | python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
-    sys.exit(0)                      # unparseable is UNKNOWN, and unknown allows
+    # Unparseable is UNKNOWN, and unknown allows — but it says so, or "could not read the
+    # answer" and "the answer was no blocked Crawlers" leave through the same door.
+    print("inert-Crawler gate: ALLOWED WITHOUT BEING CHECKED — the waiting payload did not "
+          "parse", file=sys.stderr)
+    sys.exit(0)
 for c in d.get("blocked_crawlers") or []:
     print("  %s (%s) — %s" % (c.get("crawler"), c.get("leaf"), c.get("why")))
 ' 2>/dev/null)" || exit 0
