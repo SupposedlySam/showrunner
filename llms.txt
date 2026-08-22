@@ -255,6 +255,19 @@ The worktree root stays repo-wide, so two campaigns naming the same leaf collide
 refusal, not a clobber. The project name still defaults to the repo's own, so campaigns in one
 checkout share a chat prefix unless you set one.
 
+### The identity spawn joins a room under
+
+`dispatch.chat.identity` if you set it; otherwise `<project>[-<campaign>]-orchestrator`. It is
+namespaced deliberately: the bare word `orchestrator` is not reserved, and it is exactly the
+identity a real agent picks when it IS one. Hardcoding it pulled a second agent of that name
+into every Crawler room a campaign opened — receiving another campaign's messages, accruing
+`owed` debt for questions it never saw, and, because a chat identity resolves per room and the
+room's join wins, sending its own messages out under the wrong name.
+
+The campaign is in the name because the reported collision was two campaigns in ONE git root,
+where a project-only prefix separates nothing. Each Crawler room's topic names the identity to
+reply to, so a Crawler does not have to guess it.
+
 ## Roles: showrunner checks the shape, never the meaning
 
 Names and meaning are yours, the way lane rules already are. showrunner knows only two things: how

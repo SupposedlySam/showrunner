@@ -5395,6 +5395,40 @@ def test_dispatch():
                      "chat": {"enabled": True, "channel_prefix": "sr"}},
     })
 
+    # #59: `spawn` joined every Crawler room as the literal identity "orchestrator", which is
+    # not a reserved word -- it is exactly what a real agent picks when it IS one. Measured in a
+    # shared checkout: another agent received this campaign's Crawler messages, accrued `owed`
+    # debt for questions it never saw, and had its own `say` go out under the wrong name,
+    # because a chat identity resolves per room and the room's join wins.
+    ident = dispatch.orchestrator_identity(cfg)
+    ok("the identity spawn joins under is not the bare word — a common noun as a default is the "
+       "bug, because it is the name a real agent of that role has already taken",
+       ident != "orchestrator", ident)
+    ok("...and it is namespaced by PROJECT, so two repos on one machine do not share it",
+       "sr" in ident, ident)
+    ok("...and it is a legal llm_chat identity, or the failure is a room that never opened "
+       "rather than a name that was wrong",
+       re.fullmatch(r"[a-z0-9._-]{1,64}", ident) is not None, ident)
+    # THE REPORTED CASE WAS TWO CAMPAIGNS IN ONE GIT ROOT, so a project-only prefix separates
+    # nothing exactly where the collision happened. Driven through config.load with the env var
+    # set, because the campaign is captured at LOAD and reading it later was its own bug (#39).
+    _home = tmpdir("ident-campaign")
+    shutil.copytree(os.path.join(cfg.root, ".showrunner"), os.path.join(_home, ".showrunner"))
+    sh(["git", "init", "-q", "."], _home)
+    _prev = os.environ.get("SHOWRUNNER_CAMPAIGN")
+    os.environ["SHOWRUNNER_CAMPAIGN"] = "DROP-4130"
+    try:
+        _c2 = config.load(_home)
+        _id2 = dispatch.orchestrator_identity(_c2)
+    finally:
+        if _prev is None:
+            os.environ.pop("SHOWRUNNER_CAMPAIGN", None)
+        else:
+            os.environ["SHOWRUNNER_CAMPAIGN"] = _prev
+    ok("...and two CAMPAIGNS in one checkout get different identities, which is the collision "
+       "that was actually reported — project scoping alone would not have separated them",
+       "drop-4130" in _id2 and _id2 != ident, (ident, _id2))
+
     # The bug the exact-match rewrite fixed: two rules share the `headless` lane, and only one
     # of them declares a model. Resolving by lane picks whichever rule is listed first, so
     # docs-work would silently inherit pure-logic's sonnet. A wrong model is not an error

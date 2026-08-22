@@ -83,6 +83,34 @@ def channel_for(cfg, record):
     return "%s_%s" % (prefix, record["crawler"])
 
 
+def orchestrator_identity(cfg):
+    """The identity `spawn` joins a Crawler's room under. Never the bare word "orchestrator".
+
+    That word is not reserved: it is exactly the identity a real agent picks when it IS the
+    orchestrator. Hardcoding it meant a second agent of that name was silently pulled into
+    every Crawler room this campaign opened -- receiving another campaign's messages, accruing
+    `owed` debt for questions it never saw, and, because a chat identity resolves per room and
+    the room's join wins, having its own `say` go out under the wrong name. All three were
+    measured in one checkout running two campaigns.
+
+    Namespaced by PROJECT AND CAMPAIGN, because the reported collision was two campaigns in ONE
+    git root -- so a project-only prefix separates nothing in exactly the case that produced
+    this. `dispatch.chat.identity` overrides it, for a consumer whose agent already has a name.
+    """
+    explicit = (dispatch_config(cfg).get("chat") or {}).get("identity")
+    if explicit:
+        return str(explicit).strip()
+    parts = [(dispatch_config(cfg).get("chat") or {}).get("channel_prefix")
+             or cfg.data.get("project_name") or "showrunner"]
+    if cfg.campaign:
+        parts.append(cfg.campaign)
+    parts.append("orchestrator")
+    # llm_chat identities are 1-64 chars of [a-z0-9._-]; anything else is refused at the far
+    # end, where the failure is a room that did not open rather than a name that was wrong.
+    ident = re.sub(r"[^a-z0-9._-]+", "-", "-".join(parts).lower()).strip("-")
+    return ident[:64] or "showrunner-orchestrator"
+
+
 def chat_path(cfg, key):
     """Where the chat tool lives, from config — never a vendored path baked into the source.
 
@@ -130,9 +158,13 @@ def provision_chat(cfg, record, channel):
     cli = chat_path(cfg, "cli")
     if not cli or not os.path.exists(cli):
         return False, "no chat CLI configured — set dispatch.chat.cli"
-    topic = "Crawler %s — leaf %s. The orchestrator reads here." % (record["crawler"],
-                                                                   record.get("leaf", "?"))
-    p = subprocess.run([cli, "open", channel, "--as", "orchestrator", "--topic", topic],
+    # NAME THE IDENTITY, not the role. "The orchestrator reads here" tells a Crawler nothing it
+    # can address, and now that the identity is namespaced it is not guessable either. A room
+    # whose topic carries the name is one a Crawler can answer without asking who to answer.
+    topic = "Crawler %s — leaf %s. Reply --to %s." % (record["crawler"],
+                                                      record.get("leaf", "?"),
+                                                      orchestrator_identity(cfg))
+    p = subprocess.run([cli, "open", channel, "--as", orchestrator_identity(cfg), "--topic", topic],
                        capture_output=True, text=True, timeout=60, cwd=cfg.root)
     out = (p.stdout + p.stderr).lower()
     if p.returncode != 0 and "exists" not in out and "already" not in out:
@@ -333,7 +365,7 @@ def close_channel(cfg, entry):
     if not cli or not os.path.exists(cli):
         return False, "no chat CLI configured — room %s left open" % channel
     try:
-        p = subprocess.run([cli, "leave", channel, "--as", "orchestrator"],
+        p = subprocess.run([cli, "leave", channel, "--as", orchestrator_identity(cfg)],
                            capture_output=True, text=True, timeout=60, cwd=cfg.root)
     except (OSError, subprocess.SubprocessError) as exc:
         return False, "could not close %s: %s" % (channel, exc)
