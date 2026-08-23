@@ -255,6 +255,20 @@ The worktree root stays repo-wide, so two campaigns naming the same leaf collide
 refusal, not a clobber. The project name still defaults to the repo's own, so campaigns in one
 checkout share a chat prefix unless you set one.
 
+### A command that NAMES another session's tree
+
+The worktree guard reads the paths in a tool payload and the directory the session stands in.
+It now also reads the absolute paths a Bash command CONTAINS, and **reports** them when they
+fall inside a tree another live session holds — `cd /tmp && python3 -c "open('/repo/.worktrees/
+other/f','w')"` was previously invisible, because the guard's precondition was where the shell
+stood while its subject is what the command writes.
+
+**It never refuses on this.** A path can be named without being written — an echo, a grep
+pattern, a message — and a guard that denies `echo /other/tree` is one people learn to route
+around. Weaker evidence gets a weaker verdict. The notice says what it cannot see: a path built
+from a shell variable, a wrapper script, or a heredoc. The LEASE is still what protects a tree
+from whatever gets in anyway.
+
 ### Spin-down closes a room in THREE outcomes
 
 `close_channel` answers `closed`, `unknown` or `failed`, and only `closed` is recorded. Two

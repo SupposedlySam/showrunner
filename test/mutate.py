@@ -82,6 +82,12 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # #58. Answering [] everywhere is the SAFE direction — it restores the old behaviour of not
+    # reading the command string at all — which is exactly why it needs a mutant: a producer
+    # whose death returns the system to its previous, working state dies invisibly.
+    ("paths a shell command names", "lease.command_paths", "lib/showrunner/lease.py",
+     r"(def command_paths\(command\):\n)",
+     "    return []\ndef _neutered_command_paths(command):\n"),
     # It gates an ACCEPT: None means "this path is fine", so a neutered version lets every
     # unexpanded variable through silently. `$HOME/x` survives an isabs() check because abspath
     # makes anything absolute, and for a lock root that is a different directory per caller — a

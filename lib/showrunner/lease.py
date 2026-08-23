@@ -317,6 +317,30 @@ def own_command(command):
     return bool(_OWN_VERB.match(command))
 
 
+# Absolute-path-looking tokens in a shell command. NOT for denying on — see `guard` — only for
+# saying that a command NAMES somebody else's tree. Quoted or bare, and anything that is not an
+# absolute path is ignored: a relative path resolves against a cwd the guard already inspects.
+_ABS_TOKEN = re.compile(r"""(?:^|[\s"'=(])(/[^\s"'`;|&)]+)""")
+
+
+def command_paths(command):
+    """Absolute paths a shell command mentions. Best-effort by construction.
+
+    It cannot see a path built from a variable, a wrapper script, a heredoc, or anything
+    assembled at runtime — the same blindness the dispatch guard states about itself rather
+    than pretending to cover. Stated here so the caller's message can say what it did not look
+    at, because a notice that implies completeness is worse than none.
+    """
+    if not command:
+        return []
+    out = []
+    for m in _ABS_TOKEN.finditer(command):
+        tok = m.group(1).rstrip(".,:")
+        if tok not in out:
+            out.append(tok)
+    return out
+
+
 def guard(cfg, session, tool=None, tool_input=None, cwd=None, sr=None):
     """PreToolUse verdict: (allow, message, detail). The teeth `enter` deliberately lacks.
 
@@ -353,6 +377,39 @@ def guard(cfg, session, tool=None, tool_input=None, cwd=None, sr=None):
     if cwd:
         targets.append(cwd)
 
+    # A COMMAND THAT NAMES SOMEBODY ELSE'S TREE: reported, never refused (#58). Until now the
+    # command string was not read at all, so `cd /tmp && python3 -c "open('/repo/.worktrees/
+    # other/f','w')"` was invisible — the guard's precondition was where the shell stood while
+    # its subject is what the command writes.
+    #
+    # IT ONLY EVER NOTICES. A path can be MENTIONED without being written — an echo, a grep
+    # pattern, a message — and this repo has found the guard-that-matches-a-word defect five
+    # times in code where the stakes were a false PASS. Here the stakes are a false REFUSAL,
+    # which is worse: a guard that denies `echo /other/tree` is one people learn to route
+    # around, and this file already argues that a guard whose reward for holding is a
+    # workaround teaches every later session to bypass it. Weaker evidence gets a weaker
+    # verdict rather than the same one.
+    foreign = []
+    if command and session:
+        for tok in command_paths(command):
+            t = tree_for(cfg, tok)
+            if not t or t in foreign:
+                continue
+            hijacked, _h = Lease(cfg, t).held_by_other(session)
+            if hijacked:
+                foreign.append(t)
+
+    def _noticed(msg, detail):
+        if not foreign:
+            return True, msg, detail
+        d = dict(detail)
+        d["names_foreign_trees"] = foreign
+        return True, (msg + "\n  NOTE: this command NAMES %s, which another live session "
+                      "holds. Not refused — a path can be named without being written, and "
+                      "this cannot see one built from a variable, a wrapper or a heredoc. If "
+                      "you are writing there, stop: use `worktree fork` or ask its holder."
+                      % ", ".join(foreign)), d
+
     trees = []
     for target in targets:
         tree = tree_for(cfg, target)
@@ -364,7 +421,7 @@ def guard(cfg, session, tool=None, tool_input=None, cwd=None, sr=None):
         # LIMIT rather than left to look like coverage: `campaign.integrate` serialises the
         # main checkout with its own file lock, and a second answer here would be a rule in
         # two places. A lease covers trees this orchestrator PLACED and nothing else.
-        return True, "allow: not inside a managed worktree", {"trees": []}
+        return _noticed("allow: not inside a managed worktree", {"trees": []})
 
     if not session:
         return True, ("showrunner: THE WORKTREE GUARD DID NOT RUN — no session id reached it, "
@@ -389,7 +446,8 @@ def guard(cfg, session, tool=None, tool_input=None, cwd=None, sr=None):
             pid=h.get("pid"), since=stamp(h.get("ts")),
             basis=h.get("pid_basis") or "unrecorded"), {"tree": tree, "holder": h}
 
-    return True, "allow: %s held by nobody else" % ", ".join(trees), {"trees": trees}
+    return _noticed("allow: %s held by nobody else" % ", ".join(trees),
+                    {"trees": trees})
 
 
 GUARD_SHIM = os.path.join(".showrunner", "hooks", "worktree-guard.sh")

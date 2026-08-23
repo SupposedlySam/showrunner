@@ -2295,6 +2295,42 @@ def test_worktree_lease():
         hijack, who = lease.Lease(cfg, tree).held_by_other("session-B")
         ok("a DIFFERENT live session is", hijack, who)
 
+        # #58: A COMMAND THAT NAMES SOMEBODY ELSE'S TREE FROM OUTSIDE IT. The guard reads
+        # payload paths and the cwd; until now the Bash command STRING was not read at all, so
+        # a write into another session's tree from a scratch directory was invisible — the
+        # precondition was where the shell stood, the subject is what the command writes.
+        # THE ABSOLUTE PATH, because `tree` here is the NAME a lease is keyed by and the guard
+        # reads what a shell command actually contains. My first version interpolated the name,
+        # so the command held no absolute path at all and the extractor correctly found nothing
+        # — a test that would have reported the feature missing while it worked.
+        _abs_tree = os.path.join(cfg.worktree_root, tree)
+        _cmd = "cd /tmp && python3 -c \"open('%s/f','w')\"" % _abs_tree
+        _allow, _msg, _detail = lease.guard(cfg, "session-B", tool="Bash",
+                                            tool_input={"command": _cmd})
+        ok("a command NAMING a tree another live session holds is reported, even though the "
+           "shell is standing somewhere else entirely",
+           tree in (_detail.get("names_foreign_trees") or []), _detail)
+        ok("...and it is ALLOWED, not refused — a path can be named without being written, and "
+           "a guard that denies `echo /other/tree` is one people learn to route around",
+           _allow is True, (_allow, _msg[:90]))
+        ok("...and the notice says what it CANNOT see, because a warning that implies "
+           "completeness is worse than none",
+           "variable" in _msg and "heredoc" in _msg, _msg[-160:])
+        # THE SAME SESSION IS NOT NOTICED. Re-entry by the holder is the case this whole module
+        # exists to keep working, and a notice fired at the holder trains them to ignore it.
+        _, _msg_own, _detail_own = lease.guard(cfg, "session-A", tool="Bash",
+                                               tool_input={"command": _cmd})
+        ok("...while the HOLDER naming its own tree is not noticed at all — that noise would "
+           "land on exactly the session doing the right thing",
+           not (_detail_own.get("names_foreign_trees") or []), _detail_own)
+        # A COMMAND THAT MENTIONS NO PATH AT ALL must not acquire a notice, or the check is
+        # firing on something other than what it claims to read.
+        _, _, _d_plain = lease.guard(cfg, "session-B", tool="Bash",
+                                     tool_input={"command": "echo hello"})
+        ok("...and a command naming no absolute path is not noticed, so the notice is coming "
+           "from the paths rather than from the tool name",
+           not (_d_plain.get("names_foreign_trees") or []), _d_plain)
+
         # Paired with the case where it fires, because "returns False" and "never looked" are
         # the same observation from outside — the asymmetry worktree.unignored was rewritten
         # to solve, arriving in the module that refuses people.
