@@ -351,15 +351,34 @@ ERROR_MARKERS = ("Execution error", "API Error", "Invalid API key", "rate limit"
 # Spin-down's three outcomes. A closure that was not OBSERVED must not be recorded as one, and
 # "I could not find out" is not a failure to be retried forever nor a success to be written down.
 CLOSE_DONE, CLOSE_UNKNOWN, CLOSE_FAILED = "closed", "unknown", "failed"
+# A FOURTH, because "retry later" and "nobody can say what landed" call for opposite actions.
+# INDETERMINATE is not auto-retried: `open` is two writes, so a throttle between them leaves a
+# room half-created, and blindly retrying is how a topic and briefing get silently discarded.
+CLOSE_INDETERMINATE = "indeterminate"
 
-# Signatures of a world that was unreachable, NOT of a refusal. Deliberately narrow: a false
-# UNKNOWN leaves a room open and retried, which is cheap, while a false FAILED is a permanent
-# error nobody clears. Consumer-measured: a `read` needed ~50s of backoff to clear a 429 the
-# CLI's own two short retries did not cover, so it does reach this code rather than being
-# absorbed below it.
-_TRANSIENT = re.compile(r"(429|rate limit|timed? ?out|timeout|connection (refused|reset)"
-                        r"|temporarily unavailable|no route to host|502|503|504)", re.I)
+# THE CHAT TOOL'S OWN EXIT VOCABULARY, replacing a regex over its prose. The regex was right
+# when the text was the only distinguishable thing; it no longer is, and wording that has
+# already drifted once is not a contract. Measured by a consumer against the current build:
+# a 429 that used to arrive as exit 1 — indistinguishable from a permanent refusal — is now 3.
+#   0 worked · 1 REFUSED (permanent) · 2 usage error · 3 THROTTLED · 4 INDETERMINATE
+#   5 UNREACHABLE
+_CLOSE_BY_CODE = {
+    0: (CLOSE_DONE, "closed %s"),
+    3: (CLOSE_UNKNOWN, "throttled closing %s — the request was NOT applied; retry later"),
+    5: (CLOSE_UNKNOWN, "nothing is listening for %s — nothing was sent; start the server and "
+                       "retry"),
+    4: (CLOSE_INDETERMINATE, "cannot say what landed for %s — do NOT blindly retry; a throttle "
+                             "between two writes can leave a room half-created"),
+    2: (CLOSE_FAILED, "showrunner called the chat tool wrongly for %s — a usage error is this "
+                      "repo's bug, not the server's"),
+}
 
+# THE ONE TEXT CHECK LEFT, and it is a judgement rather than an oversight. `no such channel`
+# arrives as exit 1 alongside every other permanent refusal, and for SPIN-DOWN a room that does
+# not exist is SUCCESS — a close that had nothing to close is done. Until the server grows a
+# distinct code for it, separating that case needs the text. Narrow, named, and stated here
+# rather than left to look like the general prose parser it replaced.
+_NOTHING_TO_CLOSE = re.compile(r"no such channel", re.I)
 
 def close_channel(cfg, entry):
     """Close the Crawler's room. Safe at any point, so it happens as soon as the leaf closes.
@@ -402,12 +421,13 @@ def close_channel(cfg, entry):
         return CLOSE_UNKNOWN, "%s did not answer within the timeout: %s" % (channel, exc)
     except (OSError, subprocess.SubprocessError) as exc:
         return CLOSE_FAILED, "could not close %s: %s" % (channel, exc)
-    if p.returncode == 0:
-        return CLOSE_DONE, "closed %s" % channel
     out = (p.stdout + p.stderr)
-    if _TRANSIENT.search(out):
-        return CLOSE_UNKNOWN, "could not tell whether %s closed: %s" % (
-            channel, out.strip().splitlines()[0][:120] if out.strip() else "no output")
+    mapped = _CLOSE_BY_CODE.get(p.returncode)
+    if mapped:
+        state, shape = mapped
+        return state, shape % channel
+    if p.returncode == 1 and _NOTHING_TO_CLOSE.search(out):
+        return CLOSE_DONE, "nothing to close for %s — the room does not exist" % channel
     return CLOSE_FAILED, (p.stderr or p.stdout).strip()[:160]
 
 

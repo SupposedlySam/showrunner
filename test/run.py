@@ -5894,17 +5894,51 @@ def test_dispatch():
         c = make_repo(extra_config={"dispatch": {"chat": {"enabled": True, "cli": path}}})
         return c
 
-    _rate = _fake_cli("#!/bin/sh\necho 'HTTP 429  Rate limit exceeded' >&2\nexit 1\n")
+    # #61: THE EXIT CODES ARE THE CONTRACT NOW. The chat tool shipped a retry vocabulary, so
+    # transience stops being decided by regexing its prose — wording that had already drifted
+    # once, and which cannot express the case that matters most. Consumer-measured against the
+    # current build: the 429 that motivated #60 arrived as exit 1 then and arrives as 3 now.
+    _rate = _fake_cli("#!/bin/sh\necho 'HTTP 429  Rate limit exceeded' >&2\nexit 3\n")
     st, why = dispatch.close_channel(_rate, {"crawler": "c", "channel": "room-a"})
-    eq("a 429 is UNKNOWN, not failure — the room may or may not be closed and the answer is to "
-       "ask again, which neither of the other two states says", st, dispatch.CLOSE_UNKNOWN)
-    ok("...and the detail says it could not TELL, rather than asserting either outcome",
-       "could not tell" in why, why)
+    eq("THROTTLED (3) is UNKNOWN — the request was not applied, so the room is untouched and "
+       "the answer is to ask again later", st, dispatch.CLOSE_UNKNOWN)
+    ok("...and the detail says the request was NOT applied, which is what makes a retry safe "
+       "here and unsafe for code 4", "NOT applied" in why, why)
+
+    _down = _fake_cli("#!/bin/sh\necho 'connection refused' >&2\nexit 5\n")
+    st5, why5 = dispatch.close_channel(_down, {"crawler": "c", "channel": "room-e"})
+    eq("UNREACHABLE (5) is also UNKNOWN — nothing was sent", st5, dispatch.CLOSE_UNKNOWN)
+    ok("...but says so DIFFERENTLY from a throttle, because the operator action differs: start "
+       "the server versus wait", "listening" in why5 and why5 != why, why5)
+
+    # THE ONE THAT MATTERS MOST, and the one the regex could never have expressed.
+    _indet = _fake_cli("#!/bin/sh\necho 'indeterminate' >&2\nexit 4\n")
+    st4, why4 = dispatch.close_channel(_indet, {"crawler": "c", "channel": "room-i"})
+    eq("INDETERMINATE (4) is its OWN state, not UNKNOWN — 'retry later' and 'nobody can say "
+       "what landed' call for opposite actions", st4, dispatch.CLOSE_INDETERMINATE)
+    ok("...and says not to blindly retry, because `open` is two writes and a throttle between "
+       "them leaves a room half-created — retrying is how a topic and briefing get discarded",
+       "NOT blindly retry" in why4, why4)
 
     _refused = _fake_cli("#!/bin/sh\necho 'nope: you do not own this room' >&2\nexit 1\n")
-    eq("a real refusal is FAILED — same exit code as the 429, different state, which is the "
-       "whole reason the exit code alone could not fix this",
+    eq("REFUSED (1) is permanent — the answer will not change, so a retry is wasted",
        dispatch.close_channel(_refused, {"crawler": "c", "channel": "room-b"})[0],
+       dispatch.CLOSE_FAILED)
+
+    # THE RESIDUE, and it is a judgement rather than an oversight: `no such channel` arrives as
+    # exit 1 alongside every permanent refusal, and for SPIN-DOWN a room that does not exist is
+    # SUCCESS — a close that had nothing to close is done. One narrow text check, named.
+    _gone = _fake_cli("#!/bin/sh\necho 'no such channel: room-z' >&2\nexit 1\n")
+    stz, whyz = dispatch.close_channel(_gone, {"crawler": "c", "channel": "room-z"})
+    eq("a room that does not exist is DONE, not failed — spin-down wanted it gone and it is",
+       stz, dispatch.CLOSE_DONE)
+    ok("...and says nothing was there, rather than claiming a closure it did not perform",
+       "nothing to close" in whyz, whyz)
+
+    _usage = _fake_cli("#!/bin/sh\necho 'unrecognized arguments' >&2\nexit 2\n")
+    eq("a usage error is FAILED and named as THIS repo's bug — the server did nothing wrong and "
+       "no retry fixes a wrong command line",
+       dispatch.close_channel(_usage, {"crawler": "c", "channel": "room-u"})[0],
        dispatch.CLOSE_FAILED)
 
     _ok = _fake_cli("#!/bin/sh\necho closed\nexit 0\n")
@@ -5920,7 +5954,7 @@ def test_dispatch():
     # printed it BELOW the warning about the failure — so the confident-sounding line was the
     # second one, and a close that did not happen printed a line reading exactly like one that
     # did. The action text is now written after the attempt.
-    _rl = _fake_cli("#!/bin/sh\necho 'HTTP 429  Rate limit exceeded' >&2\nexit 1\n")
+    _rl = _fake_cli("#!/bin/sh\necho 'HTTP 429  Rate limit exceeded' >&2\nexit 3\n")
     _g = new_graph(_rl)
     # NOT `rec` — that name is already live in this group, and shadowing it made a later
     # `dispatch.launch(cfg, rec, ...)` read my synthetic entry instead of its own spawn record.
@@ -5939,6 +5973,30 @@ def test_dispatch():
     ok("...and the warning marks it as an inability to tell rather than a refusal, because the "
        "two call for different responses",
        any("could not tell" in w for w in _warns), _warns)
+
+    # AND REAP MUST NOT SILENTLY TRY AGAIN. UNKNOWN is retried because the request was not
+    # applied; INDETERMINATE is not, because what landed is unknown and `open` is two writes.
+    _ind = _fake_cli("#!/bin/sh\necho 'indeterminate' >&2\nexit 4\n")
+    _ig = new_graph(_ind)
+    _ind_rec = campaign.load(_ind)
+    _ind_rec.setdefault("crawlers", []).append(
+        {"crawler": "c-ind", "leaf": "L2", "channel": "room-ind",
+         "worktree": ".worktrees/c-ind", "state": "spawned", "pid": 999998,
+         "boot": boot_token_for_test()})
+    campaign.save(_ind, _ind_rec)
+    _a1, _w1 = campaign.reap(_ind, _ig, apply=True)
+    _r1 = [a for a in _a1 if a["kind"] == "room"]
+    ok("an INDETERMINATE close says so in the action line rather than reporting a closure",
+       _r1 and "INDETERMINATE" in _r1[0]["action"], _r1)
+    ok("...and the warning distinguishes it from a throttle, because one is retried and the "
+       "other must not be", any("not retried" in w for w in _w1), _w1)
+    # THE SECOND RUN IS THE ASSERTION. A state that is merely reported once, and then quietly
+    # retried on the next sweep, has not been handled — it has been announced.
+    _a2, _w2 = campaign.reap(_ind, _ig, apply=True)
+    _r2 = [a for a in _a2 if a["kind"] == "room"]
+    ok("...and the NEXT reap does not try again — it asks for a human, because a blind retry is "
+       "how a half-written room's topic and briefing get discarded",
+       _r2 and "NEEDS A HUMAN" in _r2[0]["action"], _r2)
 
     _seen = _fake_cli("#!/bin/sh\necho \"$1\" > \"$(dirname \"$0\")/verb\"\nexit 0\n")
     dispatch.close_channel(_seen, {"crawler": "c", "channel": "room-d"})

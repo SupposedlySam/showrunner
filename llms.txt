@@ -269,12 +269,25 @@ around. Weaker evidence gets a weaker verdict. The notice says what it cannot se
 from a shell variable, a wrapper script, or a heredoc. The LEASE is still what protects a tree
 from whatever gets in anyway.
 
-### Spin-down closes a room in THREE outcomes
+### Spin-down closes a room in FOUR outcomes
 
-`close_channel` answers `closed`, `unknown` or `failed`, and only `closed` is recorded. Two
-outcomes could not express it: a transient `HTTP 429` and a permanent `has not joined` are BOTH
-exit 1 from the chat CLI, so treating 1 as success records rooms that are still open, and
-treating it as failure makes the never-joined case a permanent error no retry clears.
+`close_channel` answers `closed`, `unknown`, `indeterminate` or `failed`, and only `closed` is
+recorded. The decision comes from the chat tool's EXIT CODE, not from its prose:
+
+```
+0 -> closed          3 THROTTLED    -> unknown, retry later (nothing was applied)
+1 REFUSED -> failed   4 INDETERMINATE-> indeterminate, do NOT retry
+2 usage   -> failed   5 UNREACHABLE  -> unknown, start the server and retry
+```
+
+`indeterminate` is its own state because "retry later" and "nobody can say what landed" call
+for opposite actions: `open` is two writes, so a throttle between them leaves a room
+half-created and a blind retry discards its topic and briefing. `reap` reports it every run and
+refuses to close it again without a human.
+
+ONE TEXT CHECK REMAINS, named rather than hidden: `no such channel` arrives as exit 1 alongside
+every permanent refusal, and for spin-down a room that does not exist is SUCCESS. Until the
+server grows a code for it, separating that case needs the text.
 
 It calls the chat tool's `close`, not `leave`. `leave` is a membership action that refuses when
 you were never a member — exactly the case spin-down hits when `spawn`'s `open` failed. `close`

@@ -479,6 +479,21 @@ def reap(cfg, graph, base="HEAD", apply=False):
     #     works and a leak once it stops; closing on `close` covers the normal path, and this
     #     covers the Crawler that died without ever closing its leaf.
     for entry in load(cfg).get("crawlers", []):
+        if entry.get("channel_indeterminate") and not entry.get("channel_closed"):
+            # NOT AUTO-RETRIED (#61). Code 4 means nobody can say what landed, and `open` is two
+            # writes — a throttle between them leaves a room half-created, so blindly closing
+            # again is how a topic and briefing get silently discarded. Reported every run so it
+            # cannot be forgotten, and left for a human, which is the difference between this
+            # and UNKNOWN.
+            actions.append({
+                "kind": "room",
+                "crawler": entry.get("crawler"),
+                "why": "a previous close came back INDETERMINATE — what landed is unknown",
+                "action": "NEEDS A HUMAN: inspect %s before closing it again. Retrying blind "
+                          "can discard a half-written room's topic and briefing."
+                          % entry["channel"],
+            })
+            continue
         if entry.get("channel") and not entry.get("channel_closed") and not live(entry):
             # THE ACTION LINE IS WRITTEN AFTER THE ATTEMPT, not before it. It used to say
             # "close <room>" unconditionally, printed BELOW the warning about the failure — so
@@ -494,18 +509,25 @@ def reap(cfg, graph, base="HEAD", apply=False):
             if apply:
                 state, detail = _dispatch.close_channel(cfg, entry)
                 set_state(cfg, entry["crawler"], entry.get("state") or "abandoned",
-                          channel_closed=(state == _dispatch.CLOSE_DONE))
+                          channel_closed=(state == _dispatch.CLOSE_DONE),
+                          channel_indeterminate=(state == _dispatch.CLOSE_INDETERMINATE))
                 if state != _dispatch.CLOSE_DONE:
                     # UNKNOWN and FAILED both warn, and the detail says which. They differ in
                     # what a reader should DO — retry versus investigate — so they must not
                     # arrive as the same sentence.
-                    warnings.append(("could not tell: " if state == _dispatch.CLOSE_UNKNOWN
-                                     else "") + detail)
+                    warnings.append({
+                        _dispatch.CLOSE_UNKNOWN: "could not tell: ",
+                        _dispatch.CLOSE_INDETERMINATE: "INDETERMINATE, not retried: ",
+                    }.get(state, "") + detail)
                 act["action"] = {
                     _dispatch.CLOSE_DONE: "closed %s" % entry["channel"],
                     _dispatch.CLOSE_UNKNOWN: "COULD NOT TELL whether %s closed — it is still "
                                              "recorded as open, and the next reap tries again"
                                              % entry["channel"],
+                    _dispatch.CLOSE_INDETERMINATE:
+                        "INDETERMINATE for %s — not retried automatically, because what landed "
+                        "is unknown and a blind retry can discard a half-written room"
+                        % entry["channel"],
                 }.get(state, "FAILED to close %s — see the warning above" % entry["channel"])
 
     # 3. Worktrees and scratch dirs of dead Crawlers. Reported, never deleted: they may
