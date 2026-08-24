@@ -63,6 +63,42 @@ def group(name):
     print("\n== %s ==" % name)
 
 
+# Signatures of a machine that could not run the test, NOT of a test that found something.
+# Deliberately narrow and about RESOURCES rather than about failure generally: a false VOID
+# hides a real defect behind "re-run it", which is the expensive direction here — the opposite
+# of `gates.VOID_PATTERNS`, where a false VOID merely costs a re-run.
+# TWO PARTS, because one was not enough. The first version matched the PHRASE alone and voided
+# a run on an assertion whose own prose said "too many open files" — a matcher satisfied by
+# prose about the thing, inside the screen written to tell a broken machine from broken code.
+#
+# So a phrase only counts alongside an ERROR SHAPE: an errno, an exception class, a signal. A
+# sentence can contain either; a failure detail from a starved machine contains both.
+_VOID_PHRASES = re.compile(
+    r"(Resource temporarily unavailable|Cannot allocate memory|Too many open files"
+    r"|No space left on device|fork: retry)", re.I)
+_VOID_SHAPE = re.compile(
+    r"(Errno \d+|OSError|BlockingIOError|MemoryError|Traceback|SIGKILL|Signals\.SIG"
+    r"|died with|non-zero exit status)")
+# Tokens unambiguous on their own — no English sentence contains them by accident.
+_VOID_ALONE = re.compile(r"(BlockingIOError|MemoryError|SIGKILL)")
+
+
+def void_signatures(failures):
+    """Resource signatures among these failures — the evidence a run measured nothing.
+
+    A function rather than an inline comprehension so it can be DRIVEN with fabricated
+    failures. A screen whose only exercise is the run it guards is one whose pass is silence,
+    and this file has spent a week finding those.
+    """
+    hits = set()
+    for _g, _l, d in failures:
+        text = str(d)
+        hits |= {m.group(0) for m in _VOID_ALONE.finditer(text)}
+        if _VOID_SHAPE.search(text):
+            hits |= {m.group(0) for m in _VOID_PHRASES.finditer(text)}
+    return sorted(hits)
+
+
 def ok(label, condition, detail=""):
     if condition:
         PASS.append(label)
@@ -7712,8 +7748,44 @@ def main():
        "figure that rots into the repo's own credibility line",
        not stale_counts, stale_counts)
 
+    # A RUN THE MACHINE COULD NOT SUPPORT MEASURED NOTHING ABOUT THE CODE. `check` has had this
+    # since #41 — a run that could not reach the world exits 3, VOID, distinct from "new
+    # failures", because a failure count from an unreachable world carries no information and is
+    # strictly worse than a degraded comparison. showrunner's own suite had no such screen: it
+    # printed "N failed" identically whether an assertion was wrong or a subprocess could not be
+    # spawned. The tool that argues this everywhere did not apply it to its own credibility
+    # artifact.
+    #
+    # Observed rather than imagined: a run here reported 8 failures and the very next command in
+    # the same shell was SIGKILLed (137), with five other sessions live in this checkout. I
+    # could not attribute those 8 — the output was lost to the kill, which is itself the point:
+    # nothing distinguished them from real defects at the moment they mattered.
+    void_hits = void_signatures(FAIL)
+    # THE SCREEN ITSELF, driven with fabricated failures — it cannot be exercised by the run it
+    # guards, because a run that triggers it has already failed.
+    ok("a failure carrying a resource signature makes the run VOID — the machine could not run "
+       "the test, which is not a fact about the code",
+       void_signatures([("g", "l", "OSError: [Errno 24] Too many open files")]),
+       void_signatures([("g", "l", "OSError: [Errno 24] Too many open files")]))
+    ok("...and a run KILLED mid-assertion counts, which is the shape actually observed here: 8 "
+       "failures and the next command SIGKILLed with five sessions live in this checkout",
+       void_signatures([("g", "l", "Command x died with <Signals.SIGKILL: 9>")]))
+    ok("...while an ordinary wrong answer does NOT — a false VOID hides a real defect behind "
+       "'re-run it', which is the expensive direction for this screen",
+       not void_signatures([("g", "l", "expected 3, got 4")]),
+       void_signatures([("g", "l", "expected 3, got 4")]))
+    ok("...and neither does prose merely mentioning the words, since the detail of a failure "
+       "about resource handling would otherwise void the run that found it",
+       not void_signatures([("g", "l", "the guard says 'too many open files' in its remedy")]),
+       void_signatures([("g", "l", "the guard says 'too many open files' in its remedy")]))
+
     print("\n" + "=" * 72)
     print("RESULT: %d passed, %d failed, %d skipped" % (len(PASS), len(FAIL), len(SKIP)))
+    if void_hits:
+        print("\nVOID — this run did not measure the code. %d failure(s) carry signatures of a "
+              "machine that could not run them: %s.\nA failure count from a run the environment "
+              "starved is not a fact about this repo. Re-run when the box is quiet; do not read "
+              "the number above as coverage." % (len(FAIL), ", ".join(void_hits)))
     if SKIP:
         print("\nskipped (missing external tooling — these are the ONLY assertions that need it):")
         for label, why in SKIP:
@@ -7725,6 +7797,10 @@ def main():
             if detail:
                 print("      %s" % str(detail).replace("\n", "\n      ")[:1500])
     cleanup()
+    if void_hits:
+        # 3, the same code `check` uses for VOID, so a caller treating non-zero as "the code is
+        # bad" gets a code it did not map rather than a wrong answer it will believe.
+        return 3
     return 1 if FAIL else 0
 
 
