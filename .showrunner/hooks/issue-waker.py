@@ -134,7 +134,13 @@ def chat_debts():
     # inverted the meaning exactly when there was something to report: three real debts came
     # back as "could not check". Same vocabulary showrunner already maps for `close` (#61):
     #   0 nothing owed · 1 debts, listed on stdout · 2 COULD NOT LOOK · 3/4/5 transient
-    if out.returncode in (0, 1):
+    # EXIT 0 MEANS NOTHING IS OWED, and its stdout is the sentence "nothing owed" — a non-empty
+    # line that read as a debt, so this woke a session to report that it had no debts. The
+    # identity element wearing the shape of a result, in the doorbell built to stop pointless
+    # wakes. Caught by the doorbell itself firing wrongly, which is at least the loud direction.
+    if out.returncode == 0:
+        return []
+    if out.returncode == 1:
         return [ln.rstrip() for ln in (out.stdout or "").splitlines() if ln.strip()]
     return None
 

@@ -2103,6 +2103,24 @@ def test_future_tense_gate():
        verdict('My hardening failed — I ended with *"Next I\'ll pay those debts"* and nothing '
                'fired.')[0], 0)
 
+    # A MEASUREMENT CAVEAT THAT COST A PUBLISHED NUMBER, recorded here because the number is
+    # quoted in this repo's own commits. Measuring which tool calls a guard can see, I reported
+    # 95.1% seen / 4.9% invisible with zero filesystem writes among the invisible. Arithmetically
+    # correct, and about the wrong population: SUBAGENT tool calls do not appear in the parent
+    # transcript at all (4 Agent calls, 0 records marked isSidechain, no nested tool_use), so
+    # every tool a subagent used is absent from both numerator and denominator.
+    #
+    # The residual I had named as "four calls, unknown coverage" is therefore an entire second
+    # population the instrument cannot see. What survives: of the calls the PARENT session makes,
+    # none the guard cannot see writes to the filesystem. What does not: that this characterises
+    # the repo's writes.
+    #
+    # The rule, which another project supplied the first half of: a documented limit is a caveat
+    # or an obituary according to whether the blind set INTERSECTS the population judged —
+    # measure the composition, never the size. And before measuring composition, establish that
+    # the instrument can see the whole population, or the composition is a confident number
+    # about something nobody asked.
+
     # COMPOSITION, which nobody had looked at. Another agent's framing: five Stop hooks run in
     # this house, each designed alone and each fail-open alone, and fail-open individually does
     # not compose into fail-open collectively — two gates that each refuse for a good reason can
