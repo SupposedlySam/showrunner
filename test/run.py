@@ -2063,6 +2063,31 @@ def test_future_tense_gate():
        "indistinguishable from a gate that ran and was content",
        "WITHOUT BEING CHECKED" in (_p.stdout + _p.stderr), (_p.stdout + _p.stderr)[:120])
 
+    # MEASURED ON REAL CLOSINGS, not on fixtures I wrote. Another agent reported a ~25%
+    # false-block rate on their own gate, found after shipping, on four fixtures that looked
+    # clean — so this one was run against 1,650 assistant messages from this project's own
+    # transcript. 16 matched: 11 real promises and FIVE FALSE BLOCKS, a 31% false-block rate
+    # among the turns it judges. That is the number that matters, not the 1% against all
+    # closings; a gate is judged on the population it acts on.
+    #
+    # FOUR OF THE FIVE WERE HANDBACKS — "Say which and I'll do it", "I'll take #35 unless the
+    # authorization matters more to you". The agent is CORRECTLY waiting on a decision that is
+    # the human's, and refusing those forces work to continue when it should be asking, which is
+    # the exact failure the sibling rule exists to prevent. A gate that turns a correct handback
+    # into forced motion is worse than the promise it catches.
+    eq("a handback with the condition BEFORE the verb is allowed — waiting on a decision that "
+       "is the human's is not promising to continue",
+       verdict("Either way it is unbuilt. Say which and I'll do it.")[0], 0)
+    eq("...and with the condition TRAILING it, which the first version missed and which refused "
+       "two real closings in the corpus",
+       verdict("I'll take #35 next unless the authorization matters more to you.")[0], 0)
+    eq("...while an unconditional promise still refuses, so the exemption did not swallow the "
+       "rule", verdict("Done. `owed` is down to two items, which I'll pick up next.")[0], 2)
+    eq("a phrase INSIDE quotes is reported rather than uttered — a retro quoting its own "
+       "violation reads exactly like committing it",
+       verdict('My hardening failed — I ended with *"Next I\'ll pay those debts"* and nothing '
+               'fired.')[0], 0)
+
     # REGISTERED, not merely present — the pair this repo keeps failing on.
     with open(os.path.join(ROOT, ".claude", "settings.json")) as fh:
         stop = (json.load(fh).get("hooks") or {}).get("Stop") or []

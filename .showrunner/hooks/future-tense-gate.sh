@@ -80,9 +80,40 @@ COMMIT = re.compile(
     r"|next\s+up"
     r")", re.I)
 
+# MEASURED ON 1,648 REAL CLOSINGS FROM THIS PROJECT'S OWN TRANSCRIPT, not on fixtures the
+# author wrote. 16 matched; 11 were real promises and FIVE WERE FALSE BLOCKS — a 31% false-block
+# rate among the turns this gate judges, which is the number that matters rather than the 1%
+# against all closings. Prompted by another agent reporting ~25% on their own gate, found only
+# after shipping, on four fixtures that looked clean.
+#
+# HANDBACKS ARE THE EXPENSIVE ONES and were four of the five. "Say which and I'll do it", "Say
+# the word on scope and I'll start" — the agent is CORRECTLY waiting on a decision that is the
+# human's to make. Refusing those forces work to continue when it should be asking, which is the
+# exact failure the sibling rule exists to prevent. A gate that turns a correct handback into
+# forced motion is worse than the promise it catches.
+HANDBACK = re.compile(
+    r"(say\s+(?:the\s+word|which)|tell\s+me|let\s+me\s+know|if\s+you|once\s+you"
+    r"|unless\s+you|your\s+call|which\s+would\s+you)[^.]{0,80}\bi['’]ll", re.I)
+
+# THE CONDITIONAL CAN TRAIL THE VERB TOO. "I'll work those, unless you'd rather I did X" is the
+# same handback with the clause on the other side, and the first version only looked in front —
+# so it refused two real closings in the corpus that were correctly waiting on a decision.
+HANDBACK_TRAILING = re.compile(r"\bi['’]ll\b[^.]{0,90}?\b(unless|if\s+you|say\s+which"
+                               r"|your\s+call|tell\s+me|let\s+me\s+know)\b", re.I)
+
+# A phrase INSIDE quotes is being reported, not made — a retro that quotes its own violation
+# reads exactly like committing it. Same class as the >-quoted lines stripped above, arriving
+# inline. The fifth false block was precisely this: a turn correcting itself for the sentence.
+QUOTED_INLINE = re.compile(r"[\"“'‘*_].{0,60}?(next\s+i['’]ll|then\s+i['’]ll"
+                           r"|i['’]ll\s+(?:take|pay|start|do|pick|work|fix|move))", re.I)
+
 m = COMMIT.search(closing)
 if not m:
     sys.exit(0)
+if HANDBACK.search(closing) or HANDBACK_TRAILING.search(closing):
+    sys.exit(0)                      # waiting on the human is not promising to continue
+if QUOTED_INLINE.search(closing):
+    sys.exit(0)                      # reporting the phrase is not uttering it
 
 print(
     "STOP REFUSED — your last paragraph PROMISES work instead of doing it.\n"
