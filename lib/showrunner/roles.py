@@ -51,7 +51,7 @@ import json
 import os
 
 from . import locks
-from .util import session_pid, slug
+from .util import session_pid, short_session, slug
 
 USER_PATH = os.path.join(
     os.path.expanduser(os.environ.get("XDG_CONFIG_HOME") or "~/.config"),
@@ -558,6 +558,33 @@ def _resolved(cfg, session, defs):
     if mapped:
         where, _why = seat(cfg)
         role = mapped.get(where)
+        # A SEAT SOMEBODY ELSE IS SITTING IN IS NOT YOURS TO BE MAPPED INTO (#64). The mapping
+        # answers "what does a session in this position do"; it cannot answer "is that position
+        # already occupied", and a role at capacity is occupied. Without this, a second session
+        # standing in the same main checkout was told it was the campaign-lead of a campaign
+        # another live process was leading, and told what it might dispatch there.
+        #
+        # That is the failure the docstring above already names — authority by LOCATION, which
+        # put a lead in every session that happened to be in the right directory. The mapping
+        # was meant to be the user's deliberate answer to it and instead reintroduced it,
+        # because nothing checked the holder.
+        #
+        # Capacity is respected rather than assumed to be 1: a role with room left can still be
+        # mapped into, since there is a seat for this session to take. Only a FULL role is
+        # refused, and the refusal names who holds it — "held by pid N, not you" is both true
+        # and more useful than a bare fallback.
+        held_elsewhere = [e for e in roster(cfg)
+                          if e.get("state") == locks.HELD
+                          and (e.get("role") or "").rsplit("#", 1)[0] == slug(role or "", 40)
+                          and (e.get("holder") or {}).get("session") != session]
+        cap = int(((defs.get(role) or {}).get("capacity") or 1)) if role in defs else 1
+        if role in defs and len(held_elsewhere) >= cap:
+            h = (held_elsewhere[0].get("holder") or {})
+            return FALLBACK, ("%s maps to this seat, but every %s seat is HELD by somebody else "
+                              "(pid %s, session %s) — so this session is the fallback, not the "
+                              "lead. `showrunner role roster` names the holders."
+                              % (where, role, h.get("pid") or "?",
+                                 short_session(h.get("session")) or "?"))
         if role in defs:
             if where != CRAWLER:
                 return role, "mapped from the %s seat" % where

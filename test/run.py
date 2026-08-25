@@ -3951,6 +3951,50 @@ def test_seat_and_whoami():
        os.path.isdir(_CFG_HOME) and not os.path.exists(
            os.path.join(_CFG_HOME, "showrunner", "roles.json")))
 
+    # #64: A SEAT SOMEBODY ELSE IS SITTING IN IS NOT YOURS TO BE MAPPED INTO. Two orchestrator
+    # sessions in one checkout: the second was told it was the campaign-lead of a campaign the
+    # first was leading, and told what it might dispatch there. The mapping answers "what does a
+    # session in this position do" and cannot answer "is that position occupied" — which is the
+    # authority-by-location failure roles.py already names in prose and then committed.
+    #
+    # It matters past a status line because that block is the SessionStart announcement: what a
+    # fresh session believes about itself before it does anything. `role roster` was correct
+    # throughout, and is not what an agent reads.
+    seat_cfg = make_repo()
+    _rec = campaign.load(seat_cfg)
+    _rec.setdefault("crawlers", []).append(
+        {"crawler": "c1", "leaf": "L1", "worktree": ".worktrees/c1", "state": "spawned"})
+    campaign.save(seat_cfg, _rec)
+    _rhome = tmpdir("seat-roles-home")
+    os.makedirs(os.path.join(_rhome, "showrunner"), exist_ok=True)
+    with open(os.path.join(_rhome, "showrunner", "roles.json"), "w") as fh:
+        json.dump({"roles": {
+            "campaign-lead": {"acquire": "claim", "capacity": 1, "may_create": ["worker"],
+                              "writes": {"allow": ["**"]}},
+            "worker": {"acquire": "assign", "reports_to": "campaign-lead"},
+            R.FALLBACK: {"acquire": "claim", "writes": {"deny": ["**"]}}},
+            "seat_roles": {"orchestrator": "campaign-lead"}}, fh)
+    _prev_path = R.USER_PATH
+    R.USER_PATH = os.path.join(_rhome, "showrunner", "roles.json")
+    try:
+        eq("with the seat free, the mapping still grants it — the fix must not break the case "
+           "the mapping exists for",
+           R.resolution(seat_cfg, "session-A").get("role"), "campaign-lead")
+        R.claim(seat_cfg, "campaign-lead", "session-B", pid=os.getpid(), who="agent-B")
+        _a = R.resolution(seat_cfg, "session-A")
+        eq("a session mapped into a role whose every seat is HELD BY SOMEBODY ELSE gets the "
+           "FALLBACK — the most permissive answer on the weakest evidence is the one thing this "
+           "must not do", _a.get("role"), R.FALLBACK)
+        ok("...and is TOLD who holds it, because 'held by pid N, not you' is both true and more "
+           "useful than a bare fallback",
+           "HELD by somebody else" in (_a.get("how") or "") and "pid" in (_a.get("how") or ""),
+           _a.get("how"))
+        eq("...while the ACTUAL holder still resolves to it, so the check discriminates between "
+           "two sessions rather than switching the mapping off",
+           R.resolution(seat_cfg, "session-B").get("role"), "campaign-lead")
+    finally:
+        R.USER_PATH = _prev_path
+
     # AND THE ANNOUNCEMENT CARRIES THEM, which is the integration the issue asks for: a session
     # is greeted with what it may not do, generated from the fields the guards read, at the seam
     # that survives compaction. Without this, `enforced_lines` is only proved in isolation and
