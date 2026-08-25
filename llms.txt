@@ -414,6 +414,23 @@ showrunner whoami                    # SessionStart AND PostCompact  (whoami.sh)
 showrunner dispatch guard            # PreToolUse on BASH            (dispatch-guard.sh)
 ```
 
+### A turn that promises work instead of doing it is refused
+
+`.showrunner/hooks/future-tense-gate.sh` runs on **Stop** and reads the closing paragraph of the
+turn. If it contains a first-person future commitment — "next I'll", "then I'll", "I'll take",
+"moving on to" — the turn-end is refused with exit 2 and the phrase is quoted back.
+
+It exists because the rule was hardened as PROSE first, in a file delivered into context, and
+broken the same day by the agent who wrote it with the rule in front of them. A concept-level
+rule is checked against INTENT, and the intent is always fine: an agent that has just finished a
+long correct piece of work does not experience a forward pointer as stopping, it experiences it
+as courtesy. So the gate fires on the TEXT, where the defect is.
+
+Deliberately narrow. The LAST paragraph only, quoted lines skipped, and a stated BLOCKER is
+allowed — that is present tense, and an agent that swallows "this is blocked on your
+authorisation" to satisfy a word-ban has traded a visible stall for an invisible one. No
+transcript means ALLOWED WITHOUT BEING CHECKED, like every other guard here.
+
 Both run from tracked shims under `.showrunner/hooks/`, beside `worktree-guard.sh`,
 `inert-crawler-gate.sh` and `waiting-probe.sh`. `worktree register` wires all of them; a guard
 nobody registers has never once run, which was true of one of these between building it and

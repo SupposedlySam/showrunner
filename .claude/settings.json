@@ -105,6 +105,14 @@
       {
         "hooks": [
           {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.showrunner/hooks/future-tense-gate.sh"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
             "command": "\"$CLAUDE_PROJECT_DIR\"/.game_loop/bin/game_loop stopgate",
             "statusMessage": "game_loop: is this turn-end earned?",
             "timeout": 10,

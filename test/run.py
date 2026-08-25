@@ -1963,6 +1963,67 @@ def test_attribution():
        or "/" in gates.attribution(cfg, entries)["command"])
 
 
+def test_future_tense_gate():
+    group("A turn that PROMISES work instead of doing it is refused")
+    # THE RULE WAS RUNG 6 AND THAT IS WHY IT COULD BE IGNORED. It lived in a memory file
+    # delivered into context, and was broken the same day by the agent who wrote it, with the
+    # rule in context. "Banned" was an overclaim: a reminder is not a gate, and a rule an agent
+    # has to REMEMBER is followed only some of the time.
+    #
+    # A concept-level rule is checked against INTENT, and the intent is always fine — an agent
+    # that has just finished a long correct piece of work does not experience "next I'll X" as
+    # stopping, it experiences it as courtesy. So this fires on the TEXT at the moment the turn
+    # ends, which is where the defect lives. The reasoning was never the broken part.
+    gate = os.path.join(ROOT, ".showrunner", "hooks", "future-tense-gate.sh")
+    ok("the gate ships and is executable", os.path.isfile(gate) and os.access(gate, os.X_OK))
+
+    def verdict(text):
+        d = tmpdir("ft-gate")
+        tp = os.path.join(d, "t.jsonl")
+        with open(tp, "w") as fh:
+            fh.write(json.dumps({"type": "assistant",
+                                 "message": {"content": [{"type": "text", "text": text}]}}) + "\n")
+        p = subprocess.run(["bash", gate], input=json.dumps({"transcript_path": tp}),
+                           capture_output=True, text=True)
+        return p.returncode, (p.stdout + p.stderr)
+
+    rc, said = verdict("Suite green.\n\nNext I'll pay those chat debts, then take #63.")
+    eq("a closing paragraph that promises the next action REFUSES the turn-end — exit 2, the "
+       "code that blocks a Stop", rc, 2)
+    ok("...and quotes the phrase it caught, so the fix is the sentence rather than a guess",
+       "Next I'll" in said, said[:160])
+
+    eq("a closing paragraph reporting only FINISHED work is allowed — the rule is about "
+       "promising, not about summarising",
+       verdict("Suite at 1112 passing, accounting clean. Open issues: 0.")[0], 0)
+
+    # THE RESTRAINT THAT MATTERS MOST. An agent that swallows a stated blocker to satisfy a
+    # word-ban has traded a visible stall for an invisible one — worse than what this prevents.
+    eq("a STATED BLOCKER is allowed, because it is present tense and saying it once is correct",
+       verdict("Fixed and pushed.\n\nThe verify.yaml rule is blocked on your authorisation — "
+               "it is a harness policy file and I do not have one for this change.")[0], 0)
+    eq("...and somebody else's words in a quote do not trip it, or reporting what another agent "
+       "said would refuse the turn that reports it",
+       verdict("They wrote:\n\n> Next I'll take the game_loop half over.")[0], 0)
+
+    # FAILS OPEN, and says so. A turn-end gate that hard-fails on its own plumbing blocks the
+    # write that would repair it.
+    _p = subprocess.run(["bash", gate], input=json.dumps({"transcript_path": "/nope/none.jsonl"}),
+                        capture_output=True, text=True)
+    eq("a missing transcript ALLOWS", _p.returncode, 0)
+    ok("...and says it was not checked, because an allow nobody is told about is "
+       "indistinguishable from a gate that ran and was content",
+       "WITHOUT BEING CHECKED" in (_p.stdout + _p.stderr), (_p.stdout + _p.stderr)[:120])
+
+    # REGISTERED, not merely present — the pair this repo keeps failing on.
+    with open(os.path.join(ROOT, ".claude", "settings.json")) as fh:
+        stop = (json.load(fh).get("hooks") or {}).get("Stop") or []
+    cmds = [str(hh.get("command", "")) for h in stop for hh in (h.get("hooks") or [])]
+    ok("the gate is REGISTERED on Stop — a gate nobody registers has never once run, which is "
+       "how the rule it enforces got ignored in the first place",
+       any("future-tense-gate.sh" in c for c in cmds), cmds)
+
+
 def test_worktree_dirty():
     group("Uncommitted work is why a dead Crawler's tree is not garbage")
     if not have("git"):
@@ -7898,6 +7959,7 @@ def main():
     for fn in (test_locks, test_config_refusals, test_every_rule_can_fail, test_graph, test_lifecycle, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
+               test_future_tense_gate,
                test_parked_beats_blocked,
                test_path_problem,
                test_worktree_dirty,
