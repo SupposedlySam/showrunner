@@ -125,6 +125,14 @@ def raises(label, fn, contains=None):
     return ok(label, False, "did not refuse")
 
 
+def attempt_message(fn):
+    """(result, message) — the text of a refusal, for assertions about what it SAYS."""
+    try:
+        return fn(), ""
+    except Exception as exc:                                    # noqa: BLE001
+        return None, str(exc)
+
+
 def attempt(fn, default=None):
     """Call `fn`, returning `default` if it REFUSES. Asserts nothing itself.
 
@@ -1961,6 +1969,46 @@ def test_attribution():
     ok("...and no harness binary means none either, rather than a command naming nothing",
        gates.attribution(cfg, entries, harness_bin=None) is None
        or "/" in gates.attribution(cfg, entries)["command"])
+
+
+def test_post_checkout_hook_failure():
+    group("A hook that failed after the tree was made is not 'git worktree add failed' (#63)")
+    if not have("git"):
+        skip("the post-checkout group", "git is not installed")
+        return
+    # Four consecutive spawns failed in one real run, all reporting "git worktree add failed".
+    # git had done its job; a post-checkout hook had not — git-lfs was installed and not on the
+    # restarted session's PATH. Nothing in the message pointed at a hook, a PATH, or LFS, so the
+    # operator debugged git. Present-but-unreachable reported as broken.
+    cfg = make_repo()
+    hookdir = os.path.join(cfg.root, ".git", "hooks")
+    os.makedirs(hookdir, exist_ok=True)
+    hook = os.path.join(hookdir, "post-checkout")
+    with open(hook, "w") as fh:
+        fh.write("#!/bin/sh\necho 'git-lfs: command not found' >&2\nexit 1\n")
+    os.chmod(hook, 0o755)
+
+    _, said = attempt_message(lambda: worktree.create(cfg, "wt-hook", "showrunner/wt-hook"))
+    ok("the failure says the tree WAS created, because git succeeded and something it ran "
+       "afterwards did not — the two have opposite remedies",
+       "WAS created" in said, said[:200])
+    ok("...and surfaces the HOOK's own words, which is where the actual cause is and which a "
+       "generic string swallowed", "git-lfs" in said, said[:300])
+    ok("...and names the PATH this process used, because two sessions on one machine disagree "
+       "and checking your own shell can exonerate a tool that is unreachable HERE",
+       "PATH as this process sees it" in said, said[-400:])
+    ok("...and says the tree is probably usable, because four retries followed a message that "
+       "implied nothing had been made", "probably usable" in said, said[-300:])
+
+    # THE OTHER ARM MUST STILL EXIST. If every failure now claims a tree was created, the
+    # distinction is gone in the other direction and a genuine git failure reads as an
+    # environment problem.
+    cfg2 = make_repo()
+    _, said2 = attempt_message(
+        lambda: worktree.create(cfg2, "wt-bad", "showrunner/wt-bad", base="no-such-ref"))
+    ok("a genuine git failure with NO tree created still says so, so the fix did not collapse "
+       "the distinction from the other side",
+       "no tree was created" in said2, said2[:200])
 
 
 def test_future_tense_gate():
@@ -7959,7 +8007,7 @@ def main():
     for fn in (test_locks, test_config_refusals, test_every_rule_can_fail, test_graph, test_lifecycle, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
-               test_future_tense_gate,
+               test_future_tense_gate, test_post_checkout_hook_failure,
                test_parked_beats_blocked,
                test_path_problem,
                test_worktree_dirty,

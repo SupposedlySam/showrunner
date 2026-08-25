@@ -73,6 +73,10 @@ def worktree_path(cfg, name):
     return os.path.join(cfg.worktree_root, name)
 
 
+def _indent(text, pad="    "):
+    return "\n".join(pad + line for line in (text or "").splitlines()) or (pad + "(nothing)")
+
+
 def create(cfg, name, branch, base="HEAD"):
     """Create the worktree. Refuses rather than degrading if placement is unsafe."""
     cfg.require_valid()
@@ -84,7 +88,35 @@ def create(cfg, name, branch, base="HEAD"):
             "(`showrunner reap` reports abandoned trees)." % path, code=2)
     rc, _, err = git(["worktree", "add", "-b", branch, path, base], cwd=cfg.root)
     if rc != 0:
-        die("git worktree add failed: %s" % err.strip(), code=2)
+        # PRESENT-BUT-UNREACHABLE IS NOT BROKEN, and this path used to report it as broken.
+        # `git worktree add` runs the repo's post-checkout hooks, and a hook that fails makes
+        # git exit non-zero AFTER the tree exists. Reported as "git worktree add failed", so an
+        # operator debugs git while the fault is a tool that is installed and not on this
+        # session's PATH — four consecutive spawns in one real run, because nothing in the
+        # message pointed at a hook, a PATH, or the dependency that was missing.
+        #
+        # THE TREE'S EXISTENCE IS THE DISCRIMINATOR and it is free. The two cases have opposite
+        # remedies: repair git, versus fix an environment. This repo already refuses to collapse
+        # that distinction elsewhere — `check` exits 3 for VOID so a run that could not reach
+        # the world is not scored as one that measured a failure.
+        if os.path.isdir(os.path.join(path, ".git")) or os.path.exists(path):
+            die("the worktree WAS created at %s, and a post-checkout hook then failed.\n"
+                "  git did its job; something it ran afterwards did not — most often a tool "
+                "that is installed but not on THIS session's PATH.\n"
+                "\n"
+                "  the hook said:\n%s\n"
+                "\n"
+                "  PATH as this process sees it:\n    %s\n"
+                "\n"
+                "  Two sessions on one machine can disagree about PATH, so checking your own "
+                "shell can exonerate a tool that is genuinely unreachable HERE — compare "
+                "against the list above rather than against `command -v`.\n"
+                "  The tree exists and is probably usable; inspect it before removing it, and "
+                "`showrunner reap` reports it if it is abandoned."
+                % (path, _indent(err.strip() or "(the hook printed nothing)"),
+                   os.environ.get("PATH", "(unset)")), code=2)
+        die("git worktree add failed and no tree was created at %s: %s" % (path, err.strip()),
+            code=2)
     return path
 
 
