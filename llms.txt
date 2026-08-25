@@ -662,6 +662,24 @@ Crawlers wrote the files, `git merge` brought them in. The useful question is di
 staged set match the union of what the merged Crawlers edited?* — and it catches the real failure: a
 file in an integration commit that **no Crawler ever touched**.
 
+### Prose that outlives the command: `--<name>-file`
+
+Every prose option — `--reason`, `--title`, `--who`, `--stale-proof-reason`, `--body` — has a
+`--<name>-file` twin, and prose over 400 characters on the command line is REFUSED in favour of
+it. A close reason is a decision's only human explanation and is read back off the record much
+later; it must not be edited in transit.
+
+The hazard is specific and quiet: **a backtick or `$(...)` inside a double-quoted shell argument
+is executed and removed before the program sees it.** The command then reports success and
+neither side can see what was lost. That happened to a sibling tool's release note, and the
+damaged text is permanent — published state should not be rewritten to repair a word.
+
+**The twins are DERIVED by walking the parser, not written out**, so an option added later gets
+one without anybody remembering. Which means grepping the source for `--reason-file` finds
+nothing: it is named in `--help` and here, and nowhere else. That is the cost of derivation and
+it is worth paying, but a reader who greps and concludes the twin does not exist is making the
+mistake this paragraph exists to prevent.
+
 ## The work graph
 
 ```
