@@ -82,6 +82,13 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # Answering [] everywhere is the SAFE-looking direction — every prose option simply loses its
+    # file twin and the CLI still works — which is exactly why it needs a mutant: the failure is
+    # that a caller with backticked prose has nowhere safe to put it, and nothing about the run
+    # says so. A producer whose death restores the previous, working-looking state dies invisibly.
+    ("prose file twins", "cli._add_prose_twins", "lib/showrunner/cli.py",
+     r"(def _add_prose_twins\(parser\):\n)",
+     "    return []\ndef _neutered_add_prose_twins(parser):\n"),
     # #58. Answering [] everywhere is the SAFE direction — it restores the old behaviour of not
     # reading the command string at all — which is exactly why it needs a mutant: a producer
     # whose death returns the system to its previous, working state dies invisibly.

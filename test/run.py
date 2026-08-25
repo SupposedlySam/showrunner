@@ -2011,6 +2011,75 @@ def test_post_checkout_hook_failure():
        "no tree was created" in said2, said2[:200])
 
 
+def test_prose_options():
+    group("Prose that outlives the command needs a way in the shell cannot edit")
+    # A backticked word in a double-quoted argument is EXECUTED and removed before the program
+    # sees it; the command reports success and the loss is invisible on both sides. It happened
+    # to a release note in a sibling tool an hour ago and the damaged text is permanent, because
+    # published state should not be rewritten to repair a word.
+    #
+    # Another agent's survey found the guard present in two of the three tools here and absent
+    # from the one that bit me — so this asks the same question of showrunner, whose `--reason`
+    # is a decision's only human explanation and is read back off the record much later.
+    from showrunner import cli as C
+    ok("the prose set is not empty, or the twins below are generated for nothing",
+       C.PROSE_OPTS, C.PROSE_OPTS)
+
+    parser = C.build_parser()
+    added = C._add_prose_twins(parser)
+    ok("every prose option gets a --<name>-file twin, DERIVED by walking the parser rather than "
+       "enumerated — an option added later gets one without anybody remembering, which is why a "
+       "reader grepping for a specific twin name finds nothing and concludes wrongly",
+       any("close --reason" in a for a in added), added[:6])
+    # Idempotent: main() builds and augments once, but a second pass must not double-add.
+    ok("...and adding them twice is a no-op, so the walk cannot corrupt a parser it already fixed",
+       C._add_prose_twins(parser) == [], C._add_prose_twins(parser))
+
+    d = tmpdir("prose-file")
+    rf = os.path.join(d, "reason.txt")
+    with open(rf, "w") as fh:
+        fh.write("a reason with a backticked `owed` in it\n")
+    # FAIL RATHER THAN RAISE, which is the remedy mutate.py prints for exactly this. Driving the
+    # parser with a flag the mutant removed makes argparse SystemExit — and until that was
+    # contained it ended the whole suite, turning this producer's score into a floor from a
+    # truncated run. Guarded so a missing twin is a failed assertion with a number, not a crash.
+    _close_opts = set()
+    for _a in parser._subparsers._group_actions:
+        for _n, _sub in getattr(_a, "choices", {}).items():
+            if _n == "close":
+                _close_opts = {o for _act in _sub._actions for o in _act.option_strings}
+    if "--reason-file" not in _close_opts:
+        ok("a --reason-file is folded into --reason with its backticks INTACT", False,
+           "the twin does not exist, so there is nothing to fold")
+        return
+    args = parser.parse_args(["close", "L1", "--proof", "p.txt", "--reason-file", rf,
+                              "--premise", "holds", "--premise-read", "r.md"])
+    C._resolve_prose(parser, args)
+    ok("a --reason-file is folded into --reason with its backticks INTACT, which is the whole "
+       "point: the shell never touches a file's contents",
+       "`owed`" in (args.reason or ""), args.reason)
+
+    # THE BOUND. Long prose on a command line is the shape that invites a heredoc, and a heredoc
+    # is where backticks live — so the refusal arrives before the damage rather than after it.
+    long_args = parser.parse_args(["close", "L1", "--proof", "p.txt", "--reason", "x" * 450,
+                                   "--premise", "holds", "--premise-read", "r.md"])
+    raised = []
+    parser.error = lambda msg: raised.append(msg)          # noqa: E731 — capture, do not exit
+    C._resolve_prose(parser, long_args)
+    ok("prose over the limit on a command line is REFUSED, naming the file twin and saying why "
+       "the limit exists rather than only that one exists",
+       raised and "backticks" in raised[0] and "--reason-file" in raised[0], raised[:1])
+
+    # TWO ANSWERS TO ONE QUESTION is a refusal too, or the file silently wins and the argument
+    # the caller typed disappears — the same invisible-loss shape one layer up.
+    both = parser.parse_args(["close", "L1", "--proof", "p.txt", "--reason", "typed",
+                              "--reason-file", rf, "--premise", "holds", "--premise-read", "r.md"])
+    raised.clear()
+    C._resolve_prose(parser, both)
+    ok("...and passing BOTH is refused rather than one silently winning",
+       raised and "one question" in raised[0], raised[:1])
+
+
 def test_future_tense_gate():
     group("A turn that PROMISES work instead of doing it is refused")
     # THE RULE WAS RUNG 6 AND THAT IS WHY IT COULD BE IGNORED. It lived in a memory file
@@ -8122,6 +8191,7 @@ def main():
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,
+               test_prose_options,
                test_parked_beats_blocked,
                test_path_problem,
                test_worktree_dirty,
@@ -8147,7 +8217,16 @@ def main():
                test_cli, test_optional):
         try:
             fn()
-        except Exception as exc:  # noqa: BLE001
+        except (Exception, SystemExit) as exc:  # noqa: BLE001
+            # SYSTEMEXIT IS NOT AN EXCEPTION, and that is not pedantry here. `argparse.error`
+            # raises it, so any group that drives the parser wrongly killed the WHOLE SUITE mid
+            # run — no RESULT line, every later group unrun, exit 2. A mutation sweep then reads
+            # the surviving FAIL count as coverage when it is a floor from a truncated run, and
+            # `mutate.py` could not see it because the group-crash marker never printed.
+            #
+            # Measured, not reasoned: neutering cli._add_prose_twins scored "1 kill" and had in
+            # fact ended the suite at that assertion. KeyboardInterrupt is deliberately NOT
+            # caught — Ctrl-C must still stop a run.
             import traceback
             FAIL.append((fn.__name__, "group crashed", traceback.format_exc()))
             print("  FAIL  %s crashed: %s" % (fn.__name__, exc))
