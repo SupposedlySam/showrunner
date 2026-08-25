@@ -252,10 +252,35 @@ def stop_gate(cfg, graph, leaf_id=None, tree=None):
     claimed = [x for x in open_leaves if not x.get("parked")]
 
     if leaf_id:
-        mine = [x for x in claimed if x["id"] == leaf_id]
-        theirs = [x for x in claimed if x["id"] != leaf_id]
+        # THE TREE IS CHECKED ON THIS PATH TOO. It was not, so `--tree` was inert whenever
+        # `--leaf` was passed and a wholly fictitious tree still made a leaf "yours" — reported
+        # by a consumer whose Crawler had been REAPED and its leaf reassigned to a live sibling.
+        #
+        # `spawn` bakes the leaf name into the Crawler's trigger permanently, so a superseded
+        # agent goes on being told it owns a leaf somebody else now holds — and the remedy text
+        # offers "finish it through the close gate, or release it". Both clobber the holder:
+        # close marks another agent's in-flight work done on the wrong agent's evidence, and
+        # release drops a live claim back to ready and invites a third dispatch onto it.
+        #
+        # So the gate applied its pressure toward the destructive action, at the one agent least
+        # entitled to take it. Their Crawler declined both and let the gate stand down; an agent
+        # under a mandate to finish is exactly who would have accepted.
+        named = [x for x in claimed if x["id"] == leaf_id]
+        if tree:
+            mine = [x for x in named if same_tree(x.get("claim_tree"), tree)]
+            reassigned = [x for x in named if x not in mine]
+        else:
+            # No tree to compare against: the id is all there is, which is the pre-existing
+            # behaviour and stays. A caller that supplies nothing cannot be told its tree is
+            # wrong, and refusing here would break every trigger that omits --tree.
+            mine, reassigned = named, []
+        theirs = [x for x in claimed if x["id"] != leaf_id] + reassigned
         unattributable = []
         basis = "leaf %s, named by the trigger this caller runs" % leaf_id
+        if reassigned:
+            basis += (" — but it is claimed from %s, not from your tree, so it has been "
+                      "REASSIGNED and is NOT yours to close or release"
+                      % (reassigned[0].get("claim_tree") or "an unrecorded tree"))
     else:
         mine = [x for x in claimed if same_tree(x.get("claim_tree"), tree)]
         unattributable = [x for x in claimed if not x.get("claim_tree")]

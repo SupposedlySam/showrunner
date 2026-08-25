@@ -7621,14 +7621,42 @@ def test_cli():
     # #27 — the gate asked "is ANY leaf open in this campaign" and spawn writes it into EVERY
     # Crawler's triggers, so each was gated on its siblings: with N dispatched, N-1 refused at
     # least once, and a headless Crawler has no next turn in which to act on a refusal.
+    # A REAL worktree, not a mkdir. `same_tree` resolves both sides through
+    # `git rev-parse --show-toplevel`, so a bare directory inside the repo collapses to the repo
+    # itself and every tree compares equal — a fixture that cannot tell the cases apart, which
+    # is how the assertion below used to pass while reading from the wrong checkout.
+    sib_tree = os.path.join(cfg.root, ".worktrees", "sibling")
+    sh(["git", "worktree", "add", "-q", sib_tree, "-b", "showrunner/sibling"], cfg.root)
     g.add("a sibling's work", leaf_id="cli2")
-    g.claim("cli2", "sibling", tree=os.path.join(cfg.root, ".worktrees", "sibling"))
+    g.claim("cli2", "sibling", tree=sib_tree)
     p = subprocess.run([sys.executable, exe, "stop-gate", "--leaf", "cli1"], cwd=cfg.root,
                        capture_output=True, text=True, env=env)
     eq("...still 2 for the caller that HOLDS the open leaf", p.returncode, 2)
+    p = subprocess.run([sys.executable, exe, "stop-gate", "--leaf", "cli2"], cwd=sib_tree,
+                       capture_output=True, text=True, env=env)
+    eq("...and 2 for the sibling about ITS own leaf, asked FROM that leaf's tree — which is the "
+       "only place a Crawler ever runs its own trigger", p.returncode, 2)
+
+    # #REASSIGNED: `--tree` was inert whenever `--leaf` was passed, so a wholly fictitious tree
+    # still made a leaf "yours". Reported by a consumer whose Crawler had been reaped and its
+    # leaf handed to a live sibling: `spawn` bakes the leaf name into the trigger permanently,
+    # so the superseded agent went on being told it owned a leaf somebody else held — and the
+    # remedy offered "finish it through the close gate, or release it". BOTH clobber the holder.
+    # The gate applied its pressure toward the destructive action, at the agent least entitled
+    # to take it.
+    p = subprocess.run([sys.executable, exe, "stop-gate", "--leaf", "cli2",
+                        "--tree", "/nonexistent/completely/unrelated"], cwd=cfg.root,
+                       capture_output=True, text=True, env=env)
+    eq("a leaf claimed from ANOTHER tree does not block this caller's turn-end — it is not "
+       "theirs to finish, and the reporter's exact repro used a tree that does not exist",
+       p.returncode, 0)
+    ok("...and says REASSIGNED rather than 'yours', so the remedy offered is not close-or-release "
+       "over somebody else's in-flight work",
+       "REASSIGNED" in (p.stdout + p.stderr), (p.stdout + p.stderr)[:220])
     p = subprocess.run([sys.executable, exe, "stop-gate", "--leaf", "cli2"], cwd=cfg.root,
                        capture_output=True, text=True, env=env)
-    eq("...and 2 for the sibling about ITS own leaf", p.returncode, 2)
+    eq("...and the same holds for an INFERRED tree, which is what a superseded Crawler actually "
+       "has — its trigger names --leaf and never --tree", p.returncode, 0)
     g.close("cli2", "closed", "README.md", "the sibling finished")
     p = subprocess.run([sys.executable, exe, "stop-gate", "--leaf", "cli2"], cwd=cfg.root,
                        capture_output=True, text=True, env=env)
