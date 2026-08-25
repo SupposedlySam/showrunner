@@ -148,6 +148,7 @@ integration-commit.json
 # Reported by a consumer who had to use .git/info/exclude instead, and who was right that an
 # exclusion living outside the payload vanishes on the next upgrade.
 config.local.json
+seen-issues.json
 EOF
   echo "  wrote   .showrunner/.gitignore (runtime state ignored; config.json is source)"
 fi
@@ -182,7 +183,7 @@ sr_added=0
 # discard entries they added. `grep -qxF` makes it idempotent, so re-running adds nothing.
 for entry in "bin/" "lib/" "graph.db" "graph.db-*" "locks/" "scratch/" "campaign.json" \
              "routing.jsonl" "waiting.jsonl" "events.jsonl" "*.lock" "baseline.json" \
-             "integration-commit.json" "config.local.json"; do
+             "integration-commit.json" "config.local.json" "seen-issues.json"; do
   if ! grep -qxF "$entry" "$sr_ignore" 2>/dev/null; then
     if [ "$sr_added" = 0 ]; then
       printf '\n# showrunner runtime state and the tool itself, added by install.sh. Present on a\n# fresh install and topped up on every upgrade, because a rule that only lands when the\n# file is first created never reaches anybody who already had the tool.\n' >>"$sr_ignore"

@@ -12,3 +12,4 @@ campaign.json.lock
 events.jsonl
 waiting.jsonl
 *.lock
+seen-issues.json
