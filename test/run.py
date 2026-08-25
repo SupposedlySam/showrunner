@@ -2088,6 +2088,34 @@ def test_future_tense_gate():
        verdict('My hardening failed — I ended with *"Next I\'ll pay those debts"* and nothing '
                'fired.')[0], 0)
 
+    # COMPOSITION, which nobody had looked at. Another agent's framing: five Stop hooks run in
+    # this house, each designed alone and each fail-open alone, and fail-open individually does
+    # not compose into fail-open collectively — two gates that each refuse for a good reason can
+    # refuse a turn with no legal exit. They named a concrete collision: a gate whose remedy is
+    # "go and check" invites a reply that is itself a forward-looking sentence.
+    #
+    # Measured rather than reasoned. The collision region is REAL but bounded, and the reason is
+    # structural: every other Stop gate here refuses with an ACTION as its remedy, and this gate
+    # demands actions be DONE rather than announced. They point the same way, so the past-tense
+    # report of having followed any remedy is a legal exit from both.
+    for remedy in ("A Crawler is inert and not mine — parked it and told its owner.",
+                   "Messaged it; it woke and is committing.",
+                   "Answered all three; `owed` reads clean.",
+                   "Checked it — the claim held, and here is the measurement.",
+                   "Fair — that was asserted, not measured. Checking now."):
+        eq("a turn REPORTING a remedy already carried out passes the promise gate, so every "
+           "other Stop gate's refusal has a legal exit: %r" % remedy[:44],
+           verdict(remedy)[0], 0)
+
+    # AND THE COLLISION ITSELF, so the bound is on the record rather than assumed away. A VAGUE
+    # future remedy is refused — which is correct, and is the case where the two gates disagree.
+    eq("...while promising to carry one out rather than carrying it out IS refused — that is the "
+       "collision region, and it is non-empty",
+       verdict("A Crawler is inert. I'll handle it.")[0], 2)
+    eq("...though the specific sentence another agent predicted would collide does NOT, because "
+       "'check' is not a verb this gate claims — their gate's remedy and mine are compatible",
+       verdict("Fair. I'll check that before claiming it.")[0], 0)
+
     # REGISTERED, not merely present — the pair this repo keeps failing on.
     with open(os.path.join(ROOT, ".claude", "settings.json")) as fh:
         stop = (json.load(fh).get("hooks") or {}).get("Stop") or []
