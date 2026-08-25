@@ -108,12 +108,23 @@ for c in d.get("blocked_crawlers") or []:
   echo "  MESSAGE IT — it was refused at its own turn-end and is waiting to be told what next."
   echo "  Its channel and identity are in the campaign record (\`showrunner status\`)."
   echo
+  echo "  OR PARK IT — the non-destructive exit, and the right one if the Crawler is not yours."
+  echo "  A parked leaf is accounted for: it keeps its claim, keeps its tree, and stops blocking"
+  echo "  this gate. Use it when you cannot fix the stall yourself:"
+  echo "      showrunner park <leaf> --reason \"not mine to restart — <owner> must\""
+  echo
   echo "  OR REAP IT — a block can mean GONE rather than waiting, and an agent that cannot tell"
   echo "  the difference will sit re-messaging a corpse:"
   echo "      showrunner reap            # what it would do"
   echo "      showrunner reap --apply    # release the leaf and surface the tree"
   echo
-  echo "Commit anything outstanding before either — a Crawler's work is uncommitted more often"
+  echo "REAP IS THE DESTRUCTIVE ONE, and it is the wrong reach for a Crawler you do not own: it"
+  echo "surfaces a tree that may hold somebody else's only copy of an hour's work. If this gate"
+  echo "fired in a checkout running more than one campaign, the inert Crawler may not be yours"
+  echo "at all — hooks read the DEFAULT campaign regardless of which one your session works."
+  echo "Park it and tell its owner. Do not reap another agent's tree to end your turn."
+  echo
+  echo "Commit anything outstanding before reaping — a Crawler's work is uncommitted more often"
   echo "than not at the moment it blocks."
 } >&2
 exit 2

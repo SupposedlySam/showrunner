@@ -635,7 +635,25 @@ def waiting(cfg, graph, base="HEAD"):
         if f["blocked"]:
             worked, why_worked = work_since_block(cfg, f["crawler"], f.get("branch"),
                                                   f.get("worktree") or "")
-        if f["blocked"] and not worked:
+        if f["parked"]:
+            # PARKED IS CHECKED FIRST, and that ordering is the whole bug (#62). It used to sit
+            # after `blocked`, so a Crawler that was parked AND refused at a turn-end never
+            # reached this branch — it was reported as blocked, and the inert-Crawler gate
+            # refused turn-ends over work somebody had already accounted for. llms.txt claimed
+            # "a parked leaf ... does not block `stop-gate`", which was true of that gate and
+            # read as a general property of parking. It was not one.
+            #
+            # An accounted-for Crawler is not an abandoned one; that distinction is the entire
+            # reason `park` exists. But it is still REPORTED, and says when it is also inert, so
+            # the owner learns their run is stalled — the gate's purpose was never the refusal,
+            # it was the noticing.
+            parked.append({"crawler": f["crawler"], "leaf": f["leaf"],
+                           "why": ("parked, AND refused at a turn-end — accounted for, so it "
+                                   "blocks nobody, but it is doing nothing and only its owner "
+                                   "can restart it")
+                           if f["blocked"] else
+                           "parked at a usage limit — not dead, and its claim survives"})
+        elif f["blocked"] and not worked:
             # NOT WAITING. This orchestrator is not waiting on work it cannot hurry — it is
             # sitting next to a session that stopped and can only be restarted from outside.
             # Counting it as legitimate waiting is a false "waiting", which silences the
@@ -651,9 +669,7 @@ def waiting(cfg, graph, base="HEAD"):
                          "was_blocked": True, "evidence": why_worked})
         elif f["alive"]:
             live.append({"crawler": f["crawler"], "leaf": f["leaf"], "branch": f["branch"]})
-        elif f["parked"]:
-            parked.append({"crawler": f["crawler"], "leaf": f["leaf"],
-                           "why": "parked at a usage limit — not dead, and its claim survives"})
+
     detail = {
         "waiting": bool(live or parked),
         "live_crawlers": live,

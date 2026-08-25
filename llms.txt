@@ -582,7 +582,16 @@ showrunner park <leaf> --reason "usage limit — window resets at <time>"
 showrunner unpark <leaf>
 ```
 
-A parked leaf is excluded from `reap` and does not block `stop-gate`, but it is still reported.
+A parked leaf is excluded from `reap`, does not block `stop-gate`, and does not block the
+inert-Crawler gate either — but it is still reported, and the report says when a parked Crawler
+is ALSO inert so its owner learns the run is stalled.
+
+That last part was not true until #62. The sentence used to name `stop-gate` alone and read as a
+general property of parking; the inert-Crawler gate is a different gate and did not consult the
+flag. In a checkout running two campaigns that left a non-owner with `reap --apply` on somebody
+else's uncommitted tree as the only working way to end a turn — hooks read the DEFAULT campaign
+regardless of which one your session works, so the Crawler blocking you may not be yours.
+**Park it and tell its owner.**
 
 ## The gates, as hooks
 

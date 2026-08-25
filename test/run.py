@@ -1719,6 +1719,50 @@ def test_harness_provisioning():
     ok("...but doctor still says so out loud", any("OFF" in l for l in H.report(off)), H.report(off))
 
 
+def test_parked_beats_blocked():
+    group("A parked Crawler is accounted for, even when it is also inert (#62)")
+    # THE CLASSIFICATION IS THE BUG, and the gate test above cannot reach it — that one feeds a
+    # fabricated payload, so it proves the gate honours `parked_crawlers` and says nothing about
+    # whether `waiting` ever puts anybody there. `blocked` was tested before `parked`, so a leaf
+    # that was both never reached the parked branch.
+    cfg = make_repo()
+    g = new_graph(cfg)
+
+    both = [{"crawler": "c-both", "leaf": "P1", "branch": "showrunner/c-both",
+             "worktree": ".worktrees/c-both", "blocked": True,
+             "blocked_detail": "refused at turn-end", "alive": True, "parked": True,
+             "uncommitted": []}]
+    real_reconcile = campaign.reconcile
+    campaign.reconcile = lambda *a, **k: both
+    try:
+        _waiting, detail = campaign.waiting(cfg, g)
+    finally:
+        campaign.reconcile = real_reconcile
+
+    eq("a leaf that is PARKED and blocked is reported as parked, not blocked — parking is the "
+       "record that somebody accounted for it, and the inert gate refuses on `blocked`",
+       [c["crawler"] for c in detail["blocked_crawlers"]], [])
+    eq("...and it IS reported, in the parked list, because the stall must not become invisible "
+       "— the gate's purpose was the noticing, not the refusing",
+       [c["crawler"] for c in detail["parked_crawlers"]], ["c-both"])
+    ok("...and the reason says it is BOTH, so its owner learns the run is stalled rather than "
+       "reading an ordinary usage-limit park",
+       "refused at a turn-end" in detail["parked_crawlers"][0]["why"],
+       detail["parked_crawlers"][0]["why"])
+
+    # THE RESTRAINT CASE. Parking must not swallow a Crawler that is genuinely inert and NOT
+    # parked, or the fix hands every stall an exit and the gate stops working.
+    only_blocked = [dict(both[0], parked=False)]
+    campaign.reconcile = lambda *a, **k: only_blocked
+    try:
+        _w2, d2 = campaign.waiting(cfg, g)
+    finally:
+        campaign.reconcile = real_reconcile
+    eq("an inert Crawler that is NOT parked is still blocked — the fix is about accounting for "
+       "a stall, not about excusing one",
+       [c["crawler"] for c in d2["blocked_crawlers"]], ["c-both"])
+
+
 def test_work_since_block():
     group("A blocked report is a fact about the PAST; the tree can disagree with it (#54)")
     cfg = make_repo()
@@ -3265,6 +3309,9 @@ def test_worktree_lease():
        os.path.isfile(tmpl_trig) and filecmp.cmp(trig, tmpl_trig, shallow=False),
        tmpl_trig)
 
+    def refused_text_probe(p):
+        return (p.stdout or "") + (p.stderr or "")
+
     def run_trigger(payload, cwd=ROOT):
         fx = os.path.join(tmpdir("trigger-fixture"), "waiting.json")
         with open(fx, "w") as fh:
@@ -3299,6 +3346,35 @@ def test_worktree_lease():
     ok("...but SAYS it allowed without checking, because an allow nobody is told about is "
        "indistinguishable from a guard that ran and was content",
        "WITHOUT BEING CHECKED" in blind.stderr, blind.stderr[:160])
+
+    # #62: A PARKED CRAWLER MUST NOT BLOCK THIS GATE. Reported from a two-campaign checkout: the
+    # other agent's Crawler went inert, the gate fired in a session whose own campaign was idle
+    # (hooks read the DEFAULT campaign regardless of which one the session works), and BOTH
+    # offered remedies were unavailable to a non-owner — messaging an agent that stays inert
+    # changes nothing, and reaping surfaces somebody else's uncommitted work. `park` is the
+    # documented non-destructive lever and it did not release this gate: `waiting` classified a
+    # parked-AND-blocked leaf as blocked, because `blocked` was tested before `parked`.
+    parked_and_blocked = json.dumps({
+        "waiting": False, "live_crawlers": [],
+        "parked_crawlers": [{"crawler": "c-parked", "leaf": "P1", "why": "parked, AND refused"}],
+        "blocked_crawlers": []})
+    _p = run_trigger(parked_and_blocked)
+    eq("a PARKED Crawler does not refuse a turn-end, even when it is also inert — parking is "
+       "what records that somebody has accounted for it, and it was the only non-destructive "
+       "lever the blocked party had", _p.returncode, 0)
+
+    # AND THE REMEDY SET. The reporter's sharpest point: an agent under pressure to end a turn,
+    # facing a gate whose only WORKING remedy is `reap --apply`, is being pushed toward
+    # destroying a colleague's uncommitted work — the opposite of the gate's intent.
+    ok("the refusal offers PARK as well as message and reap, so a non-owner has an exit that "
+       "does not destroy somebody else's tree",
+       "showrunner park" in refused_text_probe(run_trigger(blocked_payload)),
+       refused_text_probe(run_trigger(blocked_payload))[:200])
+    ok("...and says outright that reap is the destructive one and wrong for a Crawler you do "
+       "not own, naming the two-campaign case that produced this",
+       "do not own" in refused_text_probe(run_trigger(blocked_payload))
+       and "campaign" in refused_text_probe(run_trigger(blocked_payload)),
+       refused_text_probe(run_trigger(blocked_payload))[-260:])
 
     refused = run_trigger(blocked_payload)
     eq("a BLOCKED Crawler REFUSES the orchestrator's turn-end — exit 2, which is the code that "
@@ -7725,6 +7801,7 @@ def main():
     for fn in (test_locks, test_config_refusals, test_every_rule_can_fail, test_graph, test_lifecycle, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
+               test_parked_beats_blocked,
                test_path_problem,
                test_worktree_dirty,
                test_guards_anchor_off_cwd,
