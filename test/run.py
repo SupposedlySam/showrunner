@@ -2063,12 +2063,27 @@ def test_future_tense_gate():
        "indistinguishable from a gate that ran and was content",
        "WITHOUT BEING CHECKED" in (_p.stdout + _p.stderr), (_p.stdout + _p.stderr)[:120])
 
-    # MEASURED ON REAL CLOSINGS, not on fixtures I wrote. Another agent reported a ~25%
-    # false-block rate on their own gate, found after shipping, on four fixtures that looked
-    # clean — so this one was run against 1,650 assistant messages from this project's own
-    # transcript. 16 matched: 11 real promises and FIVE FALSE BLOCKS, a 31% false-block rate
-    # among the turns it judges. That is the number that matters, not the 1% against all
-    # closings; a gate is judged on the population it acts on.
+    # MEASURED ON REAL CLOSINGS, not on fixtures I wrote — and then measured AGAIN, because the
+    # first measurement used the wrong population and I published a rate from it.
+    #
+    #   first pass   1,650 assistant messages, 16 matched, 5 false blocks -> "31% false-block"
+    #   corrected      222 TURN-FINAL messages, 1 refused, and it is a true positive
+    #
+    # The gate only ever runs at a turn END. A message followed by tool calls is mid-turn and
+    # can never reach it, so 1,428 of that denominator were unjudgeable — it was 7x too large,
+    # and the rate computed from it made the gate look far worse than it is.
+    #
+    # The disagreement surfaced the way another agent's did: two extractors that share no code,
+    # compared. Mine reported 1,655 turn-finals out of 1,650 messages — impossible, and the
+    # impossibility was the finding. A text-only assistant record can be followed by ANOTHER
+    # assistant record carrying the tool call, which my first filter did not treat as mid-turn.
+    #
+    # Both of us measured our own gate wrongly and in opposite directions: their rate moved
+    # 25% -> 50% against them, mine 31% -> 0% in my favour. Neither error was detectable from
+    # inside the instrument that made it.
+    #
+    # The five false blocks below are still real and still fixed — they were among the matches,
+    # they were simply drawn from a population that included turns the gate cannot judge.
     #
     # FOUR OF THE FIVE WERE HANDBACKS — "Say which and I'll do it", "I'll take #35 unless the
     # authorization matters more to you". The agent is CORRECTLY waiting on a decision that is
