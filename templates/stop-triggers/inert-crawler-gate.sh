@@ -87,7 +87,15 @@ except Exception:
           "parse", file=sys.stderr)
     sys.exit(0)
 for c in d.get("blocked_crawlers") or []:
+    # NAME WHOSE LEAF IT IS. This gate fires in whichever session is nearest, which in a
+    # checkout running more than one campaign is routinely not the owner — hooks read the
+    # DEFAULT campaign regardless of which one your session works. Telling a stranger to
+    # message a Crawler they never briefed, and offering them a reap over work they have no
+    # context on, is handing the controls to the one party who cannot use them safely.
+    owner = c.get("actor") or "?"
+    sess = c.get("claim_session") or "?"
     print("  %s (%s) — %s" % (c.get("crawler"), c.get("leaf"), c.get("why")))
+    print("      claimed by %s, session %s" % (owner, sess))
 ' 2>/dev/null)" || exit 0
 
 [ -n "$blocked" ] || exit 0
@@ -105,8 +113,13 @@ for c in d.get("blocked_crawlers") or []:
   echo "report on, and this gate releases for it. The ones named here showed neither, so the"
   echo "block report and the tree agree."
   echo
-  echo "  MESSAGE IT — it was refused at its own turn-end and is waiting to be told what next."
-  echo "  Its channel and identity are in the campaign record (\`showrunner status\`)."
+  echo "IF THE ACTOR NAMED ABOVE IS NOT YOU, THIS IS NOT YOURS TO FIX. Tell them. You were not"
+  echo "the one who briefed it, and you do not have the context its work needs — this gate fires"
+  echo "in whichever session is nearest, not in the one that owns the leaf."
+  echo
+  echo "  MESSAGE IT — if it IS yours: it was refused at its own turn-end and is waiting to be"
+  echo "  told what next. Its channel and identity are in the campaign record"
+  echo "  (\`showrunner status\`), and \`showrunner show <leaf>\` names its actor and session."
   echo
   echo "  OR PARK IT — the non-destructive exit, and the right one if the Crawler is not yours."
   echo "  A parked leaf is accounted for: it keeps its claim, keeps its tree, and stops blocking"

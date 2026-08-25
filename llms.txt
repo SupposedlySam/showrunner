@@ -591,7 +591,9 @@ general property of parking; the inert-Crawler gate is a different gate and did 
 flag. In a checkout running two campaigns that left a non-owner with `reap --apply` on somebody
 else's uncommitted tree as the only working way to end a turn — hooks read the DEFAULT campaign
 regardless of which one your session works, so the Crawler blocking you may not be yours.
-**Park it and tell its owner.**
+**Park it and tell its owner.** The refusal NAMES the actor who claimed the leaf and the session
+that holds it, because the blocked session's first question is whether it is theirs at all — and
+if it is not, it does not need the controls, it needs to know who to tell.
 
 ## The gates, as hooks
 

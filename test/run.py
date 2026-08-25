@@ -1750,6 +1750,43 @@ def test_parked_beats_blocked():
        "refused at a turn-end" in detail["parked_crawlers"][0]["why"],
        detail["parked_crawlers"][0]["why"])
 
+    # WHOSE LEAF IT IS, carried in the report. The gate fires in whichever session is nearest,
+    # which in a multi-campaign checkout is routinely not the owner — so it told a stranger to
+    # message a Crawler they never briefed and offered a reap over work they had no context on.
+    # The owner's framing, and it is better than campaign-scoping: the blocked session does not
+    # need the CONTROLS, it needs to know whose leaf this is and who to tell.
+    g.add("owned elsewhere", leaf_id="P9")
+    g.claim("P9", "crawler-txt-paint", session="sess-owner-1")
+    attributed = [{"crawler": "c-attr", "leaf": "P9", "branch": "b", "worktree": "w",
+                   "blocked": True, "blocked_detail": "refused at turn-end", "alive": True,
+                   "parked": False, "uncommitted": []}]
+    campaign.reconcile = lambda *a, **k: attributed
+    try:
+        _w3, d3 = campaign.waiting(cfg, g)
+    finally:
+        campaign.reconcile = real_reconcile
+    b3 = d3["blocked_crawlers"][0]
+    eq("a blocked report NAMES the actor who claimed the leaf, so the session it fires in can "
+       "tell whether it is theirs at all", b3.get("actor"), "crawler-txt-paint")
+    ok("...and the claiming SESSION, because two agents can share an actor name and the session "
+       "is what identifies who to go and tell",
+       b3.get("claim_session"), b3)
+
+    # A CLOSED LEAF MUST NOT STAY PARKED. Observed: one agent parked another's inert leaf, the
+    # owner closed it, and it read `closed` with `parked: 1` — a pair that cannot mean anything,
+    # since park records that a CLAIM is paused and a closed leaf has no claim to pause.
+    g.add("parked then closed", leaf_id="P8")
+    g.claim("P8", "someone", pid=os.getpid())
+    g.park("P8", "waiting on its owner")
+    ok("a leaf can be parked while claimed", g.show("P8").get("parked"))
+    with open(os.path.join(cfg.root, "proof-p8.txt"), "w") as fh:
+        fh.write("done\n")
+    gates.close_gate(cfg, g, "P8", "proof-p8.txt", "finished", premise="holds",
+                     premise_read="README.md")
+    ok("...and closing it CLEARS the park, because `closed` and `parked` together is a state "
+       "that cannot mean anything and later reads as evidence of something",
+       not g.show("P8").get("parked"), g.show("P8").get("parked"))
+
     # THE RESTRAINT CASE. Parking must not swallow a Crawler that is genuinely inert and NOT
     # parked, or the fix hands every stall an exit and the gate stops working.
     only_blocked = [dict(both[0], parked=False)]
@@ -3375,6 +3412,22 @@ def test_worktree_lease():
        "do not own" in refused_text_probe(run_trigger(blocked_payload))
        and "campaign" in refused_text_probe(run_trigger(blocked_payload)),
        refused_text_probe(run_trigger(blocked_payload))[-260:])
+
+    # AND THE GATE PRINTS IT. Carrying the actor in the payload is half the fix; the other half
+    # is the refusal naming it, because the blocked session's first question is whether this is
+    # even theirs.
+    attributed_payload = json.dumps({
+        "waiting": False, "live_crawlers": [], "parked_crawlers": [],
+        "blocked_crawlers": [{"crawler": "txt-paint", "leaf": "TXT-PAINT",
+                              "why": "refused at turn-end", "actor": "crawler-txt-paint",
+                              "claim_session": "a1b2c3d4"}]})
+    _at = refused_text_probe(run_trigger(attributed_payload))
+    ok("the refusal NAMES who claimed the leaf and in which session, so the reader can tell in "
+       "one line whether it is theirs to fix",
+       "crawler-txt-paint" in _at and "a1b2c3d4" in _at, _at[:220])
+    ok("...and says outright that a leaf claimed by somebody else is not theirs to fix, rather "
+       "than handing the nearest session the controls",
+       "NOT YOURS TO FIX" in _at, _at[:300])
 
     refused = run_trigger(blocked_payload)
     eq("a BLOCKED Crawler REFUSES the orchestrator's turn-end — exit 2, which is the code that "

@@ -41,7 +41,7 @@ import os
 import time
 
 from .util import (atomic_write_json, boot_token, die, eprint, file_lock, git, now,
-                   pid_alive, rel, run, try_file_lock)
+                   pid_alive, rel, run, short_session, try_file_lock)
 from . import events, gates, locks, worktree
 
 RECORD = "campaign.json"
@@ -660,8 +660,22 @@ def waiting(cfg, graph, base="HEAD"):
             # watchdog on the one run that needs it, and this verb exists to prevent exactly
             # that. Reported separately rather than dropped: the Crawler is real, it is alive,
             # and somebody has to go and prompt it.
-            blocked.append({"crawler": f["crawler"], "leaf": f["leaf"],
-                            "why": f["blocked_detail"]})
+            # WHOSE LEAF IT IS, carried in the report. The gate that consumes this fires in
+            # whichever session is nearest, which in a multi-campaign checkout is routinely not
+            # the owner — so it told a stranger to message a Crawler they never briefed and
+            # offered them a reap that would have destroyed work they had no context on. The
+            # blocked session does not need the controls; it needs to know whose leaf this is
+            # and who to tell. `show` already holds both, so nothing new is computed.
+            _who = {}
+            try:
+                _leaf = graph.show(f["leaf"]) if f.get("leaf") else None
+                if _leaf:
+                    _who = {"actor": _leaf.get("actor"),
+                            "claim_session": short_session(_leaf.get("claim_session"))}
+            except Exception:                                   # noqa: BLE001
+                _who = {}
+            blocked.append(dict({"crawler": f["crawler"], "leaf": f["leaf"],
+                                 "why": f["blocked_detail"]}, **_who))
         elif f["blocked"] and worked:
             # Blocked report, and the TREE disagrees. It is working without a phone line --
             # which is legitimate waiting, and the case that produced this issue.

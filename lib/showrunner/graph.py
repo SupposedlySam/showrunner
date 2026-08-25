@@ -438,8 +438,15 @@ class SqliteGraph:
     def close(self, leaf_id, outcome, proof, reason):
         if outcome not in (CLOSED, REFUTED, UNREACHABLE):
             die("outcome must be one of 'closed', 'refuted', 'unreachable'", code=2)
+        # CLOSING CLEARS THE PARK. A leaf that is closed AND parked is a state combination that
+        # cannot mean anything: park records that a CLAIM is paused and accounted for, and a
+        # closed leaf has no claim to pause. Observed in the wild — one agent parked another's
+        # inert leaf, the owner then closed it, and it read `closed` with `parked: 1` forever.
+        # Harmless on its own, and exactly the kind of impossible pair that later reads as
+        # evidence of something.
         self.db.execute(
-            "UPDATE leaves SET status=?, outcome=?, proof=?, close_reason=?, closed_ts=? WHERE id=?",
+            "UPDATE leaves SET status=?, outcome=?, proof=?, close_reason=?, closed_ts=?, "
+            "parked=0, park_reason=NULL WHERE id=?",
             (outcome, outcome, proof, reason, now(), leaf_id))
         self._event(leaf_id, outcome, "%s [proof: %s]" % (reason, proof))
         self.db.commit()
