@@ -27,6 +27,12 @@ are printed by default and suppressing them takes a flag.
     python3 test/corpus.py --quiet                  # rates only, no items
 """
 import argparse
+
+# BORROWED CLAIMS IN THIS FILE ARE REPORTED, NOT VERIFIED HERE. Findings attributed to another
+# project were measured in that project, on machines and corpora this repo cannot reach. They
+# are hypotheses that happen to have come from a careful source, and at least one has already
+# been retracted by its author.
+
 import glob
 import hashlib
 import json

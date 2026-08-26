@@ -22,6 +22,12 @@
 # write that would repair it.
 set -u
 
+# BORROWED CLAIMS IN THIS FILE ARE REPORTED, NOT VERIFIED HERE. Findings attributed to another
+# project were measured in that project, on machines and corpora this repo cannot reach. They
+# are hypotheses that happen to have come from a careful source, and at least one has already
+# been retracted by its author.
+
+
 # HEARTBEAT FIRST, BEFORE ANYTHING CAN RETURN. Registration, a clean `bash -n`, and "has fired"
 # are all facts about a FILE or about the PAST; none of them is a fact about this turn, which is
 # the only thing a gate is for. game_loop's auditor measured their Stop gate as unrun for eight

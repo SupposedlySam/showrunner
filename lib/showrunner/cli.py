@@ -392,9 +392,11 @@ def cmd_doctor(args):
     # a file, a clean parse is a fact about source, and "has fired" is a fact about the past.
     # None of them is a fact about the last turn, which is the only thing a Stop gate is for.
     #
-    # Measured next door: a sibling project found its Stop gate unrun for eight hours behind
-    # four green health checks — parses, registered, can write, doctor says fired. Only a
-    # timestamp dissented. A boolean "has it ever fired" answered yes, correctly, and uselessly.
+    # Prompted next door by a report of a Stop gate unrun for eight hours behind four green
+    # checks — parses, registered, can write, doctor says fired. THE REPORT WAS RETRACTED: the
+    # session had been idle, zero completed turn-ends in the window, so the old stamp was what
+    # a healthy gate produces. What survives is the part that was never in dispute — those four
+    # checks are facts about a FILE and about the PAST, and none is a fact about this turn.
     #
     # THE RELATION IS BETWEEN THE HOOKS, not against a tolerance somebody invents. The NEWEST
     # stamp across all of them is a proxy for the last turn-end that reached anything; a hook

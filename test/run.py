@@ -19,6 +19,12 @@ Run:  python3 test/run.py [-v]
 """
 
 import argparse
+
+# BORROWED CLAIMS IN THIS FILE ARE REPORTED, NOT VERIFIED HERE. Findings attributed to another
+# project were measured in that project, on machines and corpora this repo cannot reach. They
+# are hypotheses that happen to have come from a careful source, and at least one has already
+# been retracted by its author.
+
 import ast
 import filecmp
 import hashlib
@@ -5238,6 +5244,74 @@ def _unsourced_rates(text, tools, source=None):
     return bad
 
 
+def _borrowed_unmarked(paths, read):
+    """Tracked files citing another project's MEASUREMENT without saying it is unverified here.
+
+    lamp's owner named the cost, and it is not symmetric: a borrowed claim is only correctable
+    if the agent you borrowed it from goes and looks — so repeating another agent's finding
+    without checking spends THEIR credibility, not yours, and you never find out.
+
+    This repo already carries one that was RETRACTED by its author: a Stop gate reported unrun
+    for eight hours, withdrawn because the session had been idle and no turn had ended. It sat
+    in three tracked files as the justification for a feature. The feature was right anyway,
+    which is exactly what makes the false reason survivable and therefore durable.
+
+    PER FILE, NOT PER CLAIM, and that limit is stated rather than hidden: a file can gain a new
+    unmarked claim under an existing marker. Twelve claims across four files made per-claim
+    marking heavier than the defect, and a check nobody reads is worse than a coarse one.
+    """
+    import re as _re
+    AGENT = (r"(auditor|llm_chat's owner|llm-chat-owner|lamp-owner|lamp's owner"
+             r"|game_loop's auditor)")
+    MEASURE = r"\b(measured|found|reported|hit|ran)\b"
+    bad = []
+    for path in paths:
+        txt = _re.sub(r"\s+", " ", read(path))
+        if _re.search(AGENT + r"[^.]{0,90}?" + MEASURE, txt) and \
+           "REPORTED, NOT VERIFIED HERE" not in txt:
+            bad.append(path)
+    return sorted(bad)
+
+
+def test_borrowed_claims_are_marked():
+    group("A finding borrowed from another project is a hypothesis, and must say so")
+
+    tracked = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
+                             text=True).stdout.split()
+    candidates = [p for p in tracked
+                  if p.startswith(("lib/", "test/", ".showrunner/")) or p == "llms.txt"]
+
+    def read(rel_path):
+        try:
+            with open(os.path.join(ROOT, rel_path), errors="ignore") as fh:
+                return fh.read()
+        except OSError:
+            return ""
+
+    unmarked = _borrowed_unmarked(candidates, read)
+    ok("every tracked file citing another project's measurement says it is REPORTED and not "
+       "verified here — this repo cannot reach their machines or their corpora",
+       not unmarked, unmarked)
+
+    # THE CHECK MUST BE ABLE TO FAIL, on text this repo does not contain.
+    fake = {"a.py": "the auditor measured a 4% rate and it is fine",
+            "b.py": "the auditor measured a 4% rate. BORROWED CLAIMS IN THIS FILE ARE "
+                    "REPORTED, NOT VERIFIED HERE.",
+            "c.py": "nothing borrowed here at all"}
+    got = _borrowed_unmarked(sorted(fake), lambda k: fake[k])
+    eq("an unmarked borrowed measurement is NAMED, so the net can actually fail", got, ["a.py"])
+    ok("...while a marked one is not, and a file with no borrowed claim is not",
+       "b.py" not in got and "c.py" not in got)
+
+    # AND THE ONE THAT WAS ACTUALLY RETRACTED IS RECORDED AS RETRACTED, not quietly deleted —
+    # the withdrawal is more instructive than the claim was.
+    joined = " ".join(re.sub(r"\s+", " ", read(p)) for p in
+                      (".showrunner/hooks/issue-waker.py", "lib/showrunner/cli.py"))
+    ok("the borrowed claim that its own author withdrew is marked RETRACTED where it is cited, "
+       "because a false reason attached to a correct feature is durable",
+       "RETRACTED" in joined and "idle" in joined)
+
+
 def test_zero_inventory_matches_reality():
     group("The list of trustworthy zeros names controls that still exist")
 
@@ -5317,7 +5391,14 @@ def test_negative_text_assertions_flatten():
     # the mostly-noise failure this repo has removed twice.
     with open(os.path.join(HERE, "run.py")) as fh:
         own = fh.read()
-    risky = re.findall(r'"([^"]{6,60})"\s+not\s+in\s+(doc|txt|text)\b', own)
+    # THE VARIABLE NAME IS A PROXY, AND IT OVER-FLAGGED IMMEDIATELY. A name-based scan cannot
+    # see that the text was flattened before being searched — it caught a check of mine whose
+    # variable IS flattened one line above, which is a false positive of exactly the kind that
+    # teaches a reader to skim. So a variable this file demonstrably flattens is not risky.
+    flattened = set(re.findall(r'(\w+)\s*=\s*(?:_?re)\.sub\(r"\\s\+"', own))
+    risky = [(ph, var) for ph, var
+             in re.findall(r'"([^"]{6,60})"\s+not\s+in\s+(doc|txt|text)\b', own)
+             if var not in flattened]
     # A PHRASE CONTAINING AN EXPLICIT NEWLINE IS ASSERTING A POSITIONAL FACT — "no bare
     # `showrunner close` at the start of an indented line" — and flattening would destroy the
     # very thing it checks. Exempted by SHAPE rather than by name, so a second one is covered
@@ -5741,9 +5822,10 @@ def test_stop_hook_heartbeat():
 
     # WHY A TIMESTAMP AND NOT A BOOLEAN. game_loop's auditor measured their Stop gate as unrun
     # for eight hours behind four green checks — it parses, the registered command matches, it
-    # can write, doctor says the hooks have fired. Every one of those was TRUE and none was
-    # about the last turn. A boolean "has it ever fired" answered yes, correctly, and was
-    # useless; only a time dissented.
+    # can write, doctor says the hooks have fired. THAT REPORT WAS LATER RETRACTED: the session
+    # had been idle and no turn had ended, so the stale stamp was correct behaviour. The part
+    # that survives the retraction is the only part this test depends on — those four checks
+    # are facts about a FILE and about the PAST, and none of them is a fact about this turn.
     #
     # THE RELATION IS BETWEEN HOOKS, not against an invented tolerance. showrunner does not
     # schedule turn-ends and cannot know when one happened — but the NEWEST stamp across all
@@ -9343,6 +9425,7 @@ def main():
                test_role_seat_verbs,
                test_close_resolves_paths_against_the_callers_tree,
                test_campaign_scoping,
+               test_borrowed_claims_are_marked,
                test_zero_inventory_matches_reality,
                test_negative_text_assertions_flatten,
                test_a_rate_names_its_instrument,

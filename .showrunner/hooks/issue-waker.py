@@ -227,8 +227,12 @@ def _heartbeat():
     Registration, a clean parse and "has fired at some point" are facts about a file or about
     the past. A Stop hook that is never REACHED is indistinguishable from one with nothing to
     say — both produce silence — and every other health signal stays green throughout.
-    Measured elsewhere: a sibling project's Stop gate went eight hours unrun with four green
-    checks, caught only by a timestamp.
+    BORROWED AND THEN RETRACTED, kept because the retraction teaches more than the claim.
+    A sibling project reported their Stop gate unrun for eight hours behind four green checks.
+    They withdrew it: the session had been IDLE, with zero completed turn-ends in the window,
+    so a 484-minute-old stamp was exactly what a healthy gate produces overnight. The finding
+    evaporated; the heartbeat did not, because the heartbeat was never about the finding.
+    A claim from another agent's report is a hypothesis, and this one is why.
     """
     # Redirectable, so the suite cannot forge the repo's own record — see the shell gates.
     path = (os.environ.get("SHOWRUNNER_HEARTBEAT")
