@@ -2197,6 +2197,54 @@ def test_future_tense_gate():
        "present tense and only a forward anchor makes it a promise",
        verdict("I'm reporting it here so the trail is complete.")[0], 0)
 
+    # A NEGATED COMMITMENT IS THE GATE FIRING ON A REFUSAL TO ACT. "neither of which I'll fix
+    # unilaterally" is an agent STOPPING ON PURPOSE and saying so, and the future form is what
+    # carries the saying. Reported by game_loop's auditor off a 25-concession corpus.
+    #
+    # WORTH THE COMMENT: my first check said my gate already handled it. It did not — their
+    # example verb ("act on") simply was not in the list, so the sentence passed for a reason
+    # that generalised to nothing. Substituting a verb the list DOES carry refuses it. I had
+    # refuted my own probe and recorded it as refuting their finding.
+    eq("declining to act is not promising to act, even though it takes the same future form",
+       verdict("Two open questions, neither of which I'll fix unilaterally.")[0], 0)
+    eq("...and the plain form is still refused, so the exemption is the NEGATION and not the verb",
+       verdict("Two open questions. I'll fix them.")[0], 2)
+
+    # THE GERUND ARM WAS BOUNDED BY SENTENCE, WHICH IS NOT THE CLAUSE. `[^.]{0,40}` reached
+    # across a comma and joined "I'm publishing" to an unrelated "#64 is next" — two true
+    # statements, refused as one promise. Forty characters is ample room for that, so anchoring
+    # per SENTENCE would not have caught it; the boundary that matters is clause punctuation
+    # and the coordinators.
+    for closing in ("I'm publishing the fix now, and #64 is next.",
+                    "I'm attaching the log; the audit lands next."):
+        eq("a present-tense clause and a separate fact about what comes next are not a promise "
+           "just because one sentence holds both (%r)" % closing[:34],
+           verdict(closing)[0], 0)
+    eq("...while the two INSIDE one clause still refuse, which is the arm's whole purpose",
+       verdict("Published through #73. One chat debt outstanding, which I'm answering next.")[0],
+       2)
+
+    # THE CONCESSION CLASS, which the 227-closing corpus contained ZERO of — so the measured
+    # 1.3% said nothing about it, and an absence in a corpus reads exactly like a pass. Checked
+    # because game_loop's own gate was measured blocking the turn where it CONCEDED an error,
+    # which is the worst place a gate can fire: it punishes the retraction.
+    #
+    # The distinction that makes this safe is that the gate keys on the PROMISE, not on the
+    # admission. A retraction that also defers the fix is not an exception to the rule, it is
+    # the rule's worst case — the work is named, unblocked, and being put off anyway.
+    eq("conceding an error and then DEFERRING the fix is still refused — the concession does "
+       "not buy the deferral",
+       verdict("I got that wrong — the denominator was 7x too large. "
+               "I am going to recount it properly.")[0], 2)
+    for closing, why in (
+            ("I got that wrong. Recounted: 1 refusal, a true positive. Corrected in the commit.",
+             "a concession that carries the correction with it"),
+            ("That claim was mine and it was unsupported. I've withdrawn it from BOUNDARY.md.",
+             "a withdrawal already performed"),
+            ("I conceded too fast there — rechecked, and the original number holds.",
+             "conceding the concession, which is still a finished result")):
+        eq("...while %s ends a turn freely" % why, verdict(closing)[0], 0)
+
     eq("a closing paragraph reporting only FINISHED work is allowed — the rule is about "
        "promising, not about summarising",
        verdict("Suite at 1112 passing, accounting clean. Open issues: 0.")[0], 0)

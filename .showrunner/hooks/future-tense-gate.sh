@@ -87,8 +87,14 @@ COMMIT = re.compile(
     # `next` is required for the gerund arm, deliberately: "I'm reporting it here" is present
     # tense and true, while "I'm reporting it next" is a promise. Without that anchor the arm
     # would refuse every sentence describing what the turn just did.
-    r"|i(?:'|’)?m\s+\w+ing\b[^.]{0,40}\bnext\b"
-    r"|i\s+am\s+\w+ing\b[^.]{0,40}\bnext\b"
+    #
+    # BOUNDED TO ONE CLAUSE, not just one sentence. `[^.]{0,40}` let the gerund reach across a
+    # comma into an unrelated clause: "I'm publishing the fix now, and #64 is next" was refused,
+    # and it is two true statements — present-tense work, plus a fact about the queue. Forty
+    # characters is plenty of room for that, so sentence-splitting would not have caught it.
+    # Clause punctuation and the coordinators are the actual boundary.
+    r"|i(?:'|’)?m\s+\w+ing\b(?:(?!\band\b|\bbut\b)[^.,;:—])" + r"{0,40}\bnext\b"
+    r"|i\s+am\s+\w+ing\b(?:(?!\band\b|\bbut\b)[^.,;:—])" + r"{0,40}\bnext\b"
     r"|i(?:'|’)?m\s+going\s+to\b"
     r"|i\s+am\s+going\s+to\b"
     r")", re.I)
@@ -120,11 +126,25 @@ HANDBACK_TRAILING = re.compile(r"\bi['’]ll\b[^.]{0,90}?\b(unless|if\s+you|say\
 QUOTED_INLINE = re.compile(r"[\"“'‘*_].{0,60}?(next\s+i['’]ll|then\s+i['’]ll"
                            r"|i['’]ll\s+(?:take|pay|start|do|pick|work|fix|move))", re.I)
 
+# A NEGATED COMMITMENT IS A HANDBACK BY GRAMMAR RATHER THAN BY VERB. "Two open questions,
+# neither of which I'll act on unilaterally" is the agent saying it is STOPPING ON PURPOSE —
+# the exact behaviour this gate exists to protect — and the future form is what carries it.
+# No verb list reaches it, because the verb is the same one a real promise uses. `I'll not`
+# and `I won't` never matched COMMIT at all, so only the neither/nor form leaked, and it
+# leaked as a refusal to act being punished for saying so.
+#
+# Reported by game_loop's auditor from a 25-concession corpus. My first check said my gate was
+# already safe; it was safe only because the example verb was missing from the list. Swap in
+# `fix` or `take` and it refuses. The refutation was of my probe, not of their finding.
+NEGATED = re.compile(r"\b(neither|nor|none)\b[^.]{0,40}?\bi['’]ll\b", re.I)
+
 m = COMMIT.search(closing)
 if not m:
     sys.exit(0)
 if HANDBACK.search(closing) or HANDBACK_TRAILING.search(closing):
     sys.exit(0)                      # waiting on the human is not promising to continue
+if NEGATED.search(closing):
+    sys.exit(0)                      # declining to act is the opposite of promising to
 if QUOTED_INLINE.search(closing):
     sys.exit(0)                      # reporting the phrase is not uttering it
 
