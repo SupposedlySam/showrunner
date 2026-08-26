@@ -135,6 +135,66 @@ def running():
     return info
 
 
+def staleness(source_repo=None):
+    """Is this copy behind the ref it came from? (level, message) or None if not applicable.
+
+    THE GAP THIS CLOSES, reported by a consumer who hit a bug that had been FIXED UPSTREAM three
+    commits earlier and spent the evening rediscovering it. `doctor` already warned that a
+    copied install is unattributable — but that is a claim about PROVENANCE, and it fires
+    identically whether the copy is current or twenty commits behind. It carries no signal about
+    whether a known fix is present, so a closed issue and a live one look the same from the
+    consumer's side.
+
+    Answers honestly in three ways rather than two, which is the distinction the warning above
+    could not make:
+      * pinned, ref resolvable  -> how many commits the ref has that this copy does not
+      * pinned, ref unreachable -> CANNOT TELL, and says which ref it could not reach
+      * not pinned              -> CANNOT TELL, because nothing records what to compare against
+
+    "Cannot tell" is not "up to date". A copy with no pin has no answer available, and printing
+    silence there is what made the original bug cost an evening.
+    """
+    d = running()
+    if d["source"] == "checkout":
+        # A CHECKOUT IS ITS OWN SOURCE, and git can answer exactly — telling a developer
+        # "cannot tell" here would be the check inventing an unknown it does not have. Compared
+        # against the tracking ref, which is the only thing that can be ahead of them.
+        repo = d.get("root")
+        rc, out, _ = git(["rev-list", "--count", "HEAD..@{upstream}"], cwd=repo)
+        if rc != 0 or not (out or "").strip().isdigit():
+            return ("ok", "this IS a showrunner checkout, so it is its own source — nothing to "
+                          "re-vendor. No upstream branch is tracked, so 'behind' has no meaning "
+                          "here.")
+        behind = int(out.strip())
+        if behind:
+            return ("warn", "this checkout is %d commit(s) behind its upstream branch — a fix "
+                            "you are about to write may already be there." % behind)
+        return ("ok", "this IS a showrunner checkout and it is level with its upstream branch.")
+    if d["source"] != "pinned" or d.get("unreadable"):
+        return ("warn", "whether this copy is BEHIND cannot be told: no readable pin records "
+                        "what it came from, so nothing can be compared. A fix landing upstream "
+                        "reaches this copy only when somebody re-vendors it, and nothing here "
+                        "will say so. `self --pin <ref>` makes it answerable.")
+    ref, sha = d.get("ref"), d.get("sha")
+    repo = source_repo or d.get("root")
+    if not ref or not sha or not repo:
+        return ("warn", "pinned, but the stamp does not name both a ref and a commit, so "
+                        "staleness cannot be computed.")
+    rc, out, _ = git(["rev-list", "--count", "%s..%s" % (sha, ref)], cwd=repo)
+    if rc != 0 or not (out or "").strip().isdigit():
+        return ("warn", "pinned at %s (%s), and that ref could not be resolved here — CANNOT "
+                        "TELL whether it is behind, which is different from being current."
+                        % (sha[:12], ref))
+    behind = int(out.strip())
+    if behind == 0:
+        return ("ok", "pinned at %s and level with %s — nothing upstream is missing here."
+                      % (sha[:12], ref))
+    return ("warn", "this copy is BEHIND: %s carries %d commit(s) it does not have. A bug you "
+                    "hit may already be fixed there, and a closed issue upstream is still live "
+                    "here until you re-vendor. `self --pin %s` to move."
+                    % (ref, behind, ref))
+
+
 def describe():
     """One line for `--version`. Says which of the three it is, and never invents a commit."""
     d = running()

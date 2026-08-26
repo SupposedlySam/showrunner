@@ -2034,6 +2034,54 @@ def test_post_checkout_hook_failure():
        "no tree was created" in said2, said2[:200])
 
 
+def test_vendor_staleness():
+    group("A vendored copy that is behind must say so, and say when it cannot tell (#65)")
+    from showrunner import pin as P
+    # Reported by a consumer who hit a bug FIXED UPSTREAM three commits earlier and spent an
+    # evening rediscovering it. `doctor` warned that a copied install is unattributable — a
+    # claim about PROVENANCE, which fires identically whether the copy is current or twenty
+    # commits stale. So a closed issue and a live one look the same from inside a vendored tree.
+    # FAIL RATHER THAN RAISE: unpacking a None here crashes the group, and a crashed group
+    # scores as a floor rather than a measurement — the remedy mutate.py prints for this shape.
+    _st = P.staleness()
+    lvl, msg = _st if isinstance(_st, tuple) else ("", "")
+    ok("doctor can answer 'is this copy behind' at all, rather than only 'where did it come "
+       "from' — the two are different questions and only one of them finds a missing fix",
+       lvl in ("ok", "warn") and msg, (lvl, msg))
+
+    # THE THREE PROVENANCES ANSWER DIFFERENTLY, and conflating them is how the check would lie.
+    # A CHECKOUT is its own source and git can answer exactly; saying "cannot tell" there would
+    # be the check inventing an unknown it does not have. My first version did exactly that.
+    ok("a checkout says it IS the source rather than reporting an unknown, because git can "
+       "answer precisely for it",
+       "checkout" in msg.lower(), msg)
+
+    # AND THE UNKNOWN IS SAID OUT LOUD where it is real. "Cannot tell" is not "up to date", and
+    # printing silence there is what made the reported bug cost an evening.
+    real_running = P.running
+    try:
+        P.running = lambda: {"source": "copy", "version": "0.1.0", "root": "/nowhere"}
+        _s2 = P.staleness()
+        lvl2, msg2 = _s2 if isinstance(_s2, tuple) else ("", "")
+        eq("an unpinned COPY warns rather than passing quietly", lvl2, "warn")
+        ok("...and says staleness CANNOT BE TOLD rather than implying it is current — a fix "
+           "landing upstream reaches it only when somebody re-vendors, and nothing else says so",
+           "cannot be told" in msg2, msg2)
+        ok("...and names the remedy that would make it answerable, since the check and `self "
+           "--pin` complete each other", "self --pin" in msg2, msg2)
+
+        P.running = lambda: {"source": "pinned", "version": "0.1.0", "root": "/nowhere",
+                             "ref": "refs/heads/nope", "sha": "0" * 40}
+        _s3 = P.staleness()
+        lvl3, msg3 = _s3 if isinstance(_s3, tuple) else ("", "")
+        eq("a pin whose ref cannot be resolved warns", lvl3, "warn")
+        ok("...saying CANNOT TELL, which is a different claim from being current — the "
+           "distinction the whole issue turns on",
+           "CANNOT" in msg3 and "current" in msg3, msg3)
+    finally:
+        P.running = real_running
+
+
 def test_prose_options():
     group("Prose that outlives the command needs a way in the shell cannot edit")
     # A backticked word in a double-quoted argument is EXECUTED and removed before the program
@@ -8214,7 +8262,7 @@ def main():
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,
-               test_prose_options,
+               test_prose_options, test_vendor_staleness,
                test_parked_beats_blocked,
                test_path_problem,
                test_worktree_dirty,

@@ -82,6 +82,14 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # Answering None everywhere restores the exact defect: doctor goes back to reporting only
+    # PROVENANCE, which fires identically whether a copy is current or twenty commits behind. A
+    # producer whose death returns the tool to its previous, working-looking state dies
+    # invisibly, and this one cost a consumer an evening rediscovering a fix that already
+    # existed.
+    ("is this copy behind its source", "pin.staleness", "lib/showrunner/pin.py",
+     r"(def staleness\(source_repo=None\):\n)",
+     "    return None\ndef _neutered_staleness(source_repo=None):\n"),
     # Answering [] everywhere is the SAFE-looking direction — every prose option simply loses its
     # file twin and the CLI still works — which is exactly why it needs a mutant: the failure is
     # that a caller with backticked prose has nowhere safe to put it, and nothing about the run

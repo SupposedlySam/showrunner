@@ -83,9 +83,24 @@ def create(cfg, name, branch, base="HEAD"):
     ensure_root(cfg)
     path = worktree_path(cfg, name)
     if os.path.exists(path):
+        # NAME THE WAY OUT. A launch whose post-checkout hook failed leaves the tree behind, so
+        # the retry hits this refusal — and the operator then needs the tree AND the branch gone
+        # before they can try again. Reported after hitting it twice in one night: the refusal
+        # was correct and cost three commands to act on, none of them printed.
+        #
+        # NOT cleaned up automatically. This is the one path where the tree may hold the only
+        # copy of an hour's work, and a retry that silently deletes it is the loss this whole
+        # file is built to prevent. The commands are shown; the decision stays with a human.
         die("worktree path already exists: %s\n"
             "  It may hold uncommitted work — inspect it rather than reusing it blindly "
-            "(`showrunner reap` reports abandoned trees)." % path, code=2)
+            "(`showrunner reap` reports abandoned trees).\n"
+            "\n"
+            "  If a previous launch left it behind — a post-checkout hook can fail AFTER the\n"
+            "  tree is created — this is the way out, in order:\n"
+            "      git -C %s status --porcelain     # empty means nothing is lost\n"
+            "      git worktree remove %s\n"
+            "      git branch -D %s"
+            % (path, path, path, branch), code=2)
     rc, _, err = git(["worktree", "add", "-b", branch, path, base], cwd=cfg.root)
     if rc != 0:
         # PRESENT-BUT-UNREACHABLE IS NOT BROKEN, and this path used to report it as broken.

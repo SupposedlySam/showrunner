@@ -287,6 +287,16 @@ def cmd_doctor(args):
                   "HEAD's copy, so every spawn will refuse until this is committed — commit "
                   "first, then fan out." % (YEL + "warn " + OFF, ", ".join(pending[:3])))
 
+    # IS THIS COPY BEHIND WHAT IT CAME FROM? `doctor` already warned that a copied install is
+    # unattributable — a claim about PROVENANCE, which fires identically whether the copy is
+    # current or twenty commits stale. A consumer hit a bug that had been fixed upstream three
+    # commits earlier and spent an evening rediscovering it, because a closed issue and a live
+    # one look the same from inside a vendored tree.
+    _st = pin.staleness()
+    if _st:
+        _lvl, _msg = _st
+        print("  %s %s" % ({"ok": GRN + "ok   " + OFF, "warn": YEL + "warn " + OFF}[_lvl], _msg))
+
     # THE LOCK ROOT'S READABILITY. `on_disk` answers [] for a root it cannot list, which is the
     # same answer as a machine holding no locks — and `reap` reads it to find what a dead
     # Crawler left behind, so an unreadable root turns every stale lock into "nothing to do".
