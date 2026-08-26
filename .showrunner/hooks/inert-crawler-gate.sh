@@ -30,10 +30,19 @@ set -u
 # HEARTBEAT FIRST — see future-tense-gate.sh for why. Registration and a clean parse are facts
 # about a file; only a stamped invocation is a fact about this turn. Written before the fixture
 # branch so a test run and a real run both leave the same evidence.
-_hb_root="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)}"
-if [ -n "${_hb_root:-}" ] && [ -d "$_hb_root/.showrunner" ]; then
-  printf '{"hook":"inert-crawler-gate","ts":%s}\n' "$(date +%s)" \
-    >> "$_hb_root/.showrunner/hook-heartbeat.jsonl" 2>/dev/null || true
+# THE SUITE MUST NOT WRITE THE REPO'S OWN RECORD. The first reading of this heartbeat showed
+# 28 stamps per burst for this gate and 13 for its sibling — those were test invocations, not
+# turn-ends, because the tests run the hook with no CLAUDE_PROJECT_DIR and it fell back to the
+# real checkout. A freshly-run suite then makes every hook look freshly REACHED, which is the
+# one thing this file exists to answer. An instrument its own tests can forge measures nothing.
+_hb="${SHOWRUNNER_HEARTBEAT:-}"
+if [ -z "$_hb" ]; then
+  _hb_root="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)}"
+  [ -n "${_hb_root:-}" ] && [ -d "$_hb_root/.showrunner" ] \
+    && _hb="$_hb_root/.showrunner/hook-heartbeat.jsonl"
+fi
+if [ -n "$_hb" ]; then
+  printf '{"hook":"inert-crawler-gate","ts":%s}\n' "$(date +%s)" >> "$_hb" 2>/dev/null || true
 fi
 
 FIXTURE="${INERT_CRAWLER_GATE_FIXTURE:-}"      # a recorded --porcelain payload, for testing

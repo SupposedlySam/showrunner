@@ -34,10 +34,19 @@ set -u
 #
 # WHAT IT CANNOT SHOW: that a stale stamp means a specific earlier Stop hook blocked this one.
 # It proves the gate did not run. Why is a separate question this file does not answer.
-_hb_root="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)}"
-if [ -n "${_hb_root:-}" ] && [ -d "$_hb_root/.showrunner" ]; then
-  printf '{"hook":"future-tense-gate","ts":%s}\n' "$(date +%s)" \
-    >> "$_hb_root/.showrunner/hook-heartbeat.jsonl" 2>/dev/null || true
+# THE SUITE MUST NOT WRITE THE REPO'S OWN RECORD. The first reading of this heartbeat showed
+# 28 stamps per burst for this gate and 13 for its sibling — those were test invocations, not
+# turn-ends, because the tests run the hook with no CLAUDE_PROJECT_DIR and it fell back to the
+# real checkout. A freshly-run suite then makes every hook look freshly REACHED, which is the
+# one thing this file exists to answer. An instrument its own tests can forge measures nothing.
+_hb="${SHOWRUNNER_HEARTBEAT:-}"
+if [ -z "$_hb" ]; then
+  _hb_root="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)}"
+  [ -n "${_hb_root:-}" ] && [ -d "$_hb_root/.showrunner" ] \
+    && _hb="$_hb_root/.showrunner/hook-heartbeat.jsonl"
+fi
+if [ -n "$_hb" ]; then
+  printf '{"hook":"future-tense-gate","ts":%s}\n' "$(date +%s)" >> "$_hb" 2>/dev/null || true
 fi
 
 payload="$(cat 2>/dev/null || true)"

@@ -34,6 +34,14 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+
+# THE SUITE MUST NOT WRITE THE REPO'S OWN HOOK HEARTBEAT. The heartbeat answers "did this Stop
+# hook RUN on the last turn", and its first reading was 28 stamps per burst for one gate — every
+# one of them this suite invoking the hook, not a turn-end. A freshly-run suite made every hook
+# look freshly reached, which is the single thing the file exists to answer. An instrument its
+# own tests can forge measures nothing, so every hook a test runs stamps somewhere else.
+os.environ["SHOWRUNNER_HEARTBEAT"] = os.path.join(
+    tempfile.mkdtemp(prefix="sr-heartbeat-"), "hook-heartbeat.jsonl")
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
 # ── the suite must not read the machine it runs on (#46) ─────────────────────────────────────────
@@ -5212,6 +5220,26 @@ def test_stop_hook_heartbeat():
     ok("...and does NOT assert a cause, because a stamp cannot establish one — it offers the "
        "blocking-earlier-hook reading as a candidate",
        "does not establish WHY" in out and "candidate" in out, out[-400:])
+
+    # AND THE SUITE MUST NOT BE ABLE TO FORGE THE REPO'S OWN READING. This is the positive
+    # control for the redirect above: run the real gate the way the other tests do, then prove
+    # the checkout's own heartbeat did not grow. Without it, the redirect is a line of setup
+    # nothing checks — and the failure it prevents is invisible, because a forged stamp and a
+    # real one are the same line of JSON.
+    live = os.path.join(ROOT, ".showrunner", "hook-heartbeat.jsonl")
+    before = os.path.getsize(live) if os.path.exists(live) else 0
+    gate = os.path.join(ROOT, ".showrunner", "hooks", "future-tense-gate.sh")
+    if os.access(gate, os.X_OK):
+        subprocess.run(["bash", gate], input=json.dumps({"transcript_path": "/nonexistent"}),
+                       capture_output=True, text=True)
+        after = os.path.getsize(live) if os.path.exists(live) else 0
+        eq("running a Stop hook from the SUITE leaves the checkout's own heartbeat untouched — "
+           "the record of what the harness reached cannot be written by the tests",
+           after, before)
+        redirected = os.environ["SHOWRUNNER_HEARTBEAT"]
+        ok("...because it stamped the redirected file instead, which proves the hook still "
+           "recorded the invocation rather than simply skipping it",
+           os.path.exists(redirected) and os.path.getsize(redirected) > 0)
 
 
 def test_every_shipped_hook_parses():

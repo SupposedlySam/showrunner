@@ -414,6 +414,36 @@ showrunner whoami                    # SessionStart AND PostCompact  (whoami.sh)
 showrunner dispatch guard            # PreToolUse on BASH            (dispatch-guard.sh)
 ```
 
+### Did a Stop hook actually RUN on the last turn
+
+Registration is a fact about a file. A clean parse is a fact about source. "Has fired" is a fact
+about the past. **None of them is a fact about the last turn**, which is the only thing a Stop
+gate is for — and a Stop hook that is never REACHED is indistinguishable from one with nothing
+to say, because both produce silence.
+
+So each Stop hook showrunner owns appends `{"hook": ..., "ts": ...}` to
+`.showrunner/hook-heartbeat.jsonl` **before it reads its payload** — a mark written after the
+first early return leaves the cheapest paths unprovable, and those are the weak ones.
+
+`showrunner doctor` reports it as a **relation between the hooks**, never against a tolerance:
+
+```
+ok    Stop hook `future-tense-gate` stamped an invocation 3m ago, in step with the others
+warn  Stop hook `alpha-gate` last ran 8h ago, 480m BEHIND the newest Stop hook invocation
+warn  Stop hook `beta-gate` has NEVER stamped an invocation  (cannot tell which)
+```
+
+showrunner does not schedule turn-ends and cannot know when one happened, so any age threshold
+would be invented. The newest stamp across all Stop hooks is a proxy for the last turn-end that
+reached anything; a hook far behind that was registered and not reached. **It does not assert a
+cause** — a stamp proves a gate did not run, not why. An earlier blocking hook in the Stop array
+is offered as a candidate, not a diagnosis.
+
+`SHOWRUNNER_HEARTBEAT` overrides the file path. The test suite sets it, because the first
+reading of this heartbeat was 28 stamps per burst for one gate — all of them the suite invoking
+the hook, not turn-ends. A freshly-run suite made every hook look freshly reached, which is the
+one thing the file exists to answer. **An instrument its own tests can forge measures nothing.**
+
 ### `$?` after a pipe is the truncator's status, not the command's
 
 `.showrunner/hooks/pipeline-status-gate.sh` runs on **PreToolUse(Bash)** and notices when a

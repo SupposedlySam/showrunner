@@ -230,8 +230,11 @@ def _heartbeat():
     Measured elsewhere: a sibling project's Stop gate went eight hours unrun with four green
     checks, caught only by a timestamp.
     """
+    # Redirectable, so the suite cannot forge the repo's own record — see the shell gates.
+    path = (os.environ.get("SHOWRUNNER_HEARTBEAT")
+            or os.path.join(os.path.dirname(STATE), "hook-heartbeat.jsonl"))
     try:
-        with open(os.path.join(os.path.dirname(STATE), "hook-heartbeat.jsonl"), "a") as fh:
+        with open(path, "a") as fh:
             fh.write(json.dumps({"hook": "issue-waker", "ts": int(time.time())}) + "\n")
     except OSError:
         pass                   # a bell that cannot write its own stamp still has to ring
