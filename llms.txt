@@ -431,10 +431,21 @@ cmd > /tmp/out 2>&1; rc=$?        # the real status
 grep -E 'FAIL|RESULT' /tmp/out    # the pipe belongs to a different command
 ```
 
-Measured on 3,553 real Bash commands from one session: it fires on 23 (0.6%), with no false
-positives. Of the still-reproducible instances, re-run with and without the pipe, **4 of 7
-reported a wrong status** — and one of those false readings became a bug report filed against
-another project for a defect that did not exist.
+Measured on 3,586 real Bash commands from one session, running THE HOOK ITSELF with no
+exclusions: it fires on 24 (0.7%). Of those, **2 are false positives** — a pipeline quoted
+inside a Python string literal, and a chat message quoting the defect in order to describe it.
+Both are text ABOUT the pattern rather than a command, which is the artifact class this kind of
+detector always has; the hook skips a line that begins with `#`, `>` or `*`, and that does not
+reach a quoted fragment mid-line.
+
+An earlier version of this paragraph claimed **no false positives**, measured at 0.6%. That
+number came from a standalone classifier that hand-excluded artifacts the hook does not exclude
+— two different predicates, and the flattering one was not the shipped one. Corrected here
+rather than quietly dropped, because the gate exists to stop exactly that kind of substitution.
+
+Of the still-reproducible instances, re-run with and without the pipe, **4 of 7 reported a
+wrong status** — and one of those false readings became a bug report filed against another
+project for a defect that did not exist.
 
 The sharpest instance is this project's own. `showrunner check` exits **3** on VOID, and its
 output argues for that exact code: *"distinct from 2 (new failures) so a caller that treats

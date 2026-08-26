@@ -36,9 +36,42 @@ sys.stdout.write((d.get("tool_input") or {}).get("command") or "")
 ' 2>/dev/null) || exit 0
 [ -n "$cmd" ] || exit 0
 
-verdict=$(printf '%s' "$cmd" | python3 -c '
-import re, sys
+verdict=$(printf '%s' "$cmd" | CLAUDE_PROJECT_DIR="${CLAUDE_PROJECT_DIR:-.}" python3 -c '
+import os, re, sys
 cmd = sys.stdin.read()
+
+# WHAT IS BEING THROWN AWAY, not merely THAT something is. Asked by the game_loop auditor:
+# should this scale with the exit vocabulary of the SUBJECT? A tool answering 0/1 loses one
+# bit; `showrunner check` answering 0/1/2/3 loses the distinction it was built for.
+#
+# NO APOSTROPHE MAY APPEAR ANYWHERE IN THIS BLOCK, in code or in prose. It is the body of a
+# single-quoted shell string, so ONE of them ends the string and bash then hits EOF looking
+# for the close. This happened twice while writing these comments — the second time in the
+# comment warning about it, which contained three. A PreToolUse gate that fails to parse
+# blocks every Bash call, so the breakage announced itself loudly; the same mistake in a Stop
+# hook would simply stop guarding and say nothing.
+#
+# MEASURED BEFORE BUILDING. Exactly TWO showrunner verbs document a graded vocabulary — but
+# those two were HALF the wrong readings in the corpus (`check` 3 read as 0, `waiting` 1 read
+# as 0). Too few to justify a severity ladder; over-represented enough in the damage to be
+# worth naming. So the notice gets sharper for them and the gate stays one severity.
+#
+# DERIVED FROM THE DOC, never enumerated here. If a third verb becomes graded, this finds it
+# with no edit; a list in this file would silently go stale, which is the enumeration defect
+# this repo keeps hitting. A consumer without llms.txt simply gets the generic notice.
+def graded():
+    root = os.environ.get("CLAUDE_PROJECT_DIR") or "."
+    try:
+        with open(os.path.join(root, "llms.txt")) as fh:
+            txt = fh.read()
+    except OSError:
+        return {}
+    out = {}
+    for m in re.finditer(r"^showrunner\s+([a-z-]+)[^#\n]*#(.*exit.*)$", txt, re.I | re.M):
+        note = m.group(2).strip()
+        if len(set(re.findall(r"\b([0-9])\b", note))) >= 2:
+            out.setdefault(m.group(1), note)
+    return out
 # pipefail / PIPESTATUS mean the author has already handled it.
 if re.search(r"pipefail|PIPESTATUS", cmd):
     sys.exit(0)
@@ -64,13 +97,23 @@ for line in cmd.split("\n"):
             hits.append(subject.strip()[:110])
 if hits:
     print("\n".join(dict.fromkeys(hits)))
+    g = graded()
+    for verb, note in g.items():
+        if re.search(r"showrunner\s+" + re.escape(verb) + r"\b", cmd):
+            # A PRINTABLE SENTINEL, not \x00. Command substitution STRIPS null bytes, so the
+            # marker vanished between the two python blocks and the stakes silently never
+            # rendered — the enrichment looked wired and produced nothing.
+            print("@@STAKES@@%s answers %s" % (verb, note))
 ' 2>/dev/null) || exit 0
 
 [ -n "$verdict" ] || exit 0
 
 printf '%s\n' "$verdict" | python3 -c '
 import json, sys
-lines = [l for l in sys.stdin.read().split("\n") if l.strip()]
+raw = [l for l in sys.stdin.read().split("\n") if l.strip()]
+MARK = "@@STAKES@@"
+lines = [l for l in raw if not l.startswith(MARK)]
+stakes = [l[len(MARK):] for l in raw if l.startswith(MARK)]
 msg = ("⚠ `$?` HERE IS THE TRUNCATOR'"'"'S STATUS, NOT THE COMMAND'"'"'S. A pipeline exits with its "
        "LAST command, and head/tail/grep essentially always succeed — so this reports 0 whatever "
        "the real command did, and the output still looks correct.\n\n  "
@@ -79,6 +122,10 @@ msg = ("⚠ `$?` HERE IS THE TRUNCATOR'"'"'S STATUS, NOT THE COMMAND'"'"'S. A pi
          "`${PIPESTATUS[0]}`. Measured on this repo: 4 of 7 reproducible instances reported a "
          "wrong status, and `showrunner check`'"'"'s deliberate exit 3 (VOID — nothing was "
          "compared) read as 0.")
+if stakes:
+    msg += ("\n\nWHAT THIS PARTICULAR COMMAND THROWS AWAY:\n  "
+            + "\n  ".join(stakes)
+            + "\n\nEvery one of those collapses to 0 through the pipe.")
 print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
                                          "additionalContext": msg}}))
 '

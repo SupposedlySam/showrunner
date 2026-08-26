@@ -5144,6 +5144,57 @@ def test_campaign_scoping():
         del os.environ["SHOWRUNNER_CAMPAIGN"]
 
 
+def test_every_shipped_hook_parses():
+    group("Every hook install.sh ships is SYNTACTICALLY VALID — a broken one is not caught by "
+          "anything else in this suite")
+    if not have("bash"):
+        skip("the hook parse group", "bash is not installed")
+        return
+
+    # THIS SUITE WAS GREEN WHILE A SHIPPED HOOK COULD NOT PARSE. A comment added to
+    # pipeline-status-gate.sh contained an apostrophe, inside the body of a `python3 -c '...'`
+    # single-quoted string; bash then hit EOF looking for the close. 1,190 assertions passed
+    # over a hook that was dead. Nothing here executes the hooks as FILES — the gate tests feed
+    # them payloads, and a hook that cannot parse returns no output, which is the same thing a
+    # hook that correctly declines to fire returns.
+    #
+    # That is the non-event shape again: "produced nothing" is both the healthy quiet case and
+    # total failure. The parse check is the positive control those tests lacked.
+    #
+    # It caught itself twice. The apostrophe broke it; the COMMENT WARNING ABOUT THE APOSTROPHE
+    # then broke it again, because that comment contained three. Being a PreToolUse hook is the
+    # only reason either was noticed within a minute — a failed parse there blocks every Bash
+    # call. The same mistake in a Stop hook stops guarding and says nothing at all.
+
+    # DERIVED FROM install.sh, never listed here. Two accountings of what ships is how one goes
+    # stale, and a hook added to the installer without a line in this test would be exactly the
+    # gap this test exists to close.
+    with open(os.path.join(ROOT, "install.sh")) as fh:
+        src = fh.read()
+    m = re.search(r"for hook_name in ([^;]+); do", src)
+    ok("install.sh still declares its shipped hooks as ONE list this test can read", bool(m))
+    if not m:
+        return
+    shipped = [h for h in m.group(1).replace("\\\n", " ").split() if h.strip()]
+    ok("...naming at least the five the registration writes", len(shipped) >= 5,
+       "found %r" % (shipped,))
+
+    for hook in shipped:
+        path = os.path.join(ROOT, ".showrunner", "hooks", hook)
+        ok("%s exists in the payload it is copied from — registered-and-absent is worse than "
+           "unregistered, because the registration is what makes it look present" % hook,
+           os.path.isfile(path))
+        if not os.path.isfile(path):
+            continue
+        if hook.endswith(".py"):
+            p = subprocess.run([sys.executable, "-m", "py_compile", path],
+                               capture_output=True, text=True)
+        else:
+            p = subprocess.run(["bash", "-n", path], capture_output=True, text=True)
+        ok("...and PARSES, so it can actually run when the harness invokes it" % (),
+           p.returncode == 0, (p.stderr or "")[:220])
+
+
 def test_pipeline_status_gate():
     group("`$?` after a pipe: the status of the truncator, not of the command being judged")
     hook = os.path.join(ROOT, ".showrunner", "hooks", "pipeline-status-gate.sh")
@@ -5199,6 +5250,44 @@ def test_pipeline_status_gate():
     eq("the gate ALLOWS and annotates rather than refusing — naming the hazard at the moment "
        "of use is the job, and a blocked legitimate shape teaches the author to route around "
        "it", p.returncode, 0)
+
+    # WHAT IS THROWN AWAY, not merely THAT something is. The auditor asked whether severity
+    # should scale with the SUBJECT's exit vocabulary — a tool answering 0/1 loses one bit,
+    # `showrunner check` answering 0/1/2/3 loses the distinction it was built for.
+    #
+    # MEASURED BEFORE BUILDING, and the measurement argued against a severity ladder while
+    # arguing FOR this: exactly TWO showrunner verbs document a graded vocabulary, and those
+    # two were HALF the wrong readings in the corpus (`check` 3 read as 0, `waiting` 1 as 0).
+    # Too few to justify a second severity; over-represented enough in the damage to name.
+    env = dict(os.environ, CLAUDE_PROJECT_DIR=ROOT)
+
+    def context(command):
+        p = subprocess.run(["bash", hook], input=json.dumps(
+            {"tool_name": "Bash", "tool_input": {"command": command}}),
+            capture_output=True, text=True, env=env)
+        if not p.stdout.strip():
+            return ""
+        return json.loads(p.stdout)["hookSpecificOutput"]["additionalContext"]
+
+    graded = context('./bin/showrunner check 2>&1 | tail -5; echo "exit=$?"')
+    ok("a subject with a GRADED exit vocabulary is told which codes it is about to lose, not "
+       "merely that a status is being dropped", "THROWS AWAY" in graded, graded[-160:])
+    ok("...naming the actual codes, read out of llms.txt rather than listed in the hook — a "
+       "list in the hook goes stale the day a third verb becomes graded",
+       "3 VOID" in graded and "2 new failures" in graded, graded[-200:])
+
+    plain = context('llm_chat owed 2>&1 | head -3; echo "exit=$?"')
+    ok("...while a subject whose vocabulary is not documented gets the generic notice and no "
+       "invented stakes", plain and "THROWS AWAY" not in plain, plain[-120:])
+    ok("...and the internal sentinel never reaches the reader", "@@STAKES@@" not in plain
+       and "@@STAKES@@" not in graded)
+
+    # THE SENTINEL WAS \x00 AND SILENTLY VANISHED. Command substitution strips null bytes, so
+    # the marker died between the two python blocks and the stakes never rendered — wired,
+    # green, and producing nothing. A printable sentinel is not a style choice here.
+    ok("the stakes survive the shell boundary between the two stages at all — the first "
+       "sentinel was a null byte, which command substitution deletes",
+       "check answers" in graded, graded[-160:])
 
     # A NON-BASH CALL IS NOT ITS BUSINESS.
     p2 = subprocess.run(["bash", hook], input=json.dumps(
@@ -7170,6 +7259,14 @@ def test_claims_about_the_layer_below():
         "test/run.py": "showrunner's own blast-radius predictor, and this check itself",
         "install.sh": "the close gate's no-NEW-failures rule — showrunner's, not game_loop's",
         "llms.txt": "`lock guard`, `stop-gate` and the close gate — all showrunner's own",
+        # Names game_loop exactly once, to CREDIT where a design question came from — should
+        # severity scale with the subject's exit vocabulary. It states nothing about how
+        # game_loop behaves, so there is no claim here that can rot. Attribution deliberately
+        # kept rather than reworded to dodge the net: the net is supposed to catch mentions and
+        # make somebody decide, and deciding is what this line is.
+        ".showrunner/hooks/pipeline-status-gate.sh":
+            "credits the game_loop auditor for a design question; asserts nothing about "
+            "game_loop's behaviour",
     }
 
     for rel_path in claim_files:
@@ -8500,6 +8597,7 @@ def main():
                test_role_seat_verbs,
                test_close_resolves_paths_against_the_callers_tree,
                test_campaign_scoping,
+               test_every_shipped_hook_parses,
                test_pipeline_status_gate,
                test_issue_waker,
                test_central_install,
@@ -8559,11 +8657,15 @@ def main():
             probed.add(_node.args[0].value)
     ok("the suite probes for external binaries at all, so the comparison below is not vacuous",
        probed, sorted(probed))
-    unexpected = sorted(probed - {"git", "br", "tmux"})
+    # `bash` joined when a test began parsing the shipped hooks with `bash -n`. It is OPTIONAL
+    # in exactly the sense this rule means: the group SKIPS LOUDLY without it rather than
+    # failing. showrunner's shell hooks do need bash to RUN — that dependency is real, is
+    # older than this probe, and is a fact about the hooks rather than about the suite.
+    unexpected = sorted(probed - {"git", "br", "tmux", "bash"})
     ok("CORE needs nothing beyond Python 3 and git — every other binary the suite probes for "
        "(%s) is OPTIONAL and skips loudly. A new hard dependency arrives here as a new probe, "
        "which is the regression a stale COUNT never caught"
-       % ", ".join(sorted(probed & {"br", "tmux"})), not unexpected, unexpected)
+       % ", ".join(sorted(probed & {"br", "tmux", "bash"})), not unexpected, unexpected)
     stale_counts = {}
     for rel_path in ("README.md", "llms.txt", "docs/DESIGN.md"):
         full = os.path.join(ROOT, rel_path)
