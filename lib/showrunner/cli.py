@@ -388,6 +388,78 @@ def cmd_doctor(args):
               "watchdog that never fired." % (RED + "ERROR" + OFF, rel(_wj, cfg.root), _e))
         bad += 1
 
+    # WHICH STOP HOOKS ACTUALLY RAN, compared against EACH OTHER. Registration is a fact about
+    # a file, a clean parse is a fact about source, and "has fired" is a fact about the past.
+    # None of them is a fact about the last turn, which is the only thing a Stop gate is for.
+    #
+    # Measured next door: a sibling project found its Stop gate unrun for eight hours behind
+    # four green health checks — parses, registered, can write, doctor says fired. Only a
+    # timestamp dissented. A boolean "has it ever fired" answered yes, correctly, and uselessly.
+    #
+    # THE RELATION IS BETWEEN THE HOOKS, not against a tolerance somebody invents. The NEWEST
+    # stamp across all of them is a proxy for the last turn-end that reached anything; a hook
+    # whose own newest stamp sits far behind that was registered and not reached. That question
+    # is answerable without knowing when turns happen, which showrunner does not schedule.
+    _hb = os.path.join(cfg.root, ".showrunner", "hook-heartbeat.jsonl")
+    _stamps = {}
+    try:
+        with open(_hb) as _fh:
+            for _l in _fh:
+                try:
+                    _r = json.loads(_l)
+                except ValueError:
+                    continue
+                _k, _t = _r.get("hook"), int(_r.get("ts") or 0)
+                if _k and _t > _stamps.get(_k, 0):
+                    _stamps[_k] = _t
+    except OSError:
+        pass
+
+    # DERIVED FROM THE REGISTRATION, never listed here — a list in this file goes stale the day
+    # a hook is added, which is the failure it would be pretending to catch.
+    _expected = set()
+    for _sf in ("settings.json", "settings.local.json"):
+        try:
+            with open(os.path.join(cfg.root, ".claude", _sf)) as _fh:
+                _sd = json.load(_fh)
+        except (OSError, ValueError):
+            continue
+        for _grp in (_sd.get("hooks") or {}).get("Stop", []):
+            for _h in _grp.get("hooks", []):
+                _c = _h.get("command") or ""
+                if ".showrunner/hooks/" in _c:
+                    _expected.add(os.path.splitext(os.path.basename(_c.strip('"')))[0])
+
+    if not _expected:
+        print("  %s no Stop hook of showrunner's own is registered, so there is nothing here to "
+              "have run or not run." % (GRN + "ok   " + OFF))
+    else:
+        _newest = max(_stamps.values()) if _stamps else 0
+        for _name in sorted(_expected):
+            _t = _stamps.get(_name, 0)
+            if not _t:
+                # CANNOT TELL, said out loud. A hook that records no stamp and a hook never
+                # reached both produce no line, and this is not able to separate them.
+                print("  %s Stop hook `%s` has NEVER stamped an invocation. That is either a "
+                      "hook that does not record one or a hook nothing has reached — this "
+                      "cannot tell which, and both look like a healthy quiet gate everywhere "
+                      "else." % (YEL + "warn " + OFF, _name))
+                continue
+            _behind = _newest - _t
+            _age = int(now()) - _t
+            _ago = ("%dm" % (_age // 60)) if _age < 7200 else ("%dh" % (_age // 3600))
+            if _behind >= 900:
+                print("  %s Stop hook `%s` last ran %s ago, %dm BEHIND the newest Stop hook "
+                      "invocation. Turn-ends have reached other hooks and not this one — a "
+                      "gate that is not reached is indistinguishable from a gate with nothing "
+                      "to say. This does not establish WHY; an earlier blocking hook in the "
+                      "Stop array is one candidate."
+                      % (YEL + "warn " + OFF, _name, _ago, _behind // 60))
+            else:
+                print("  %s Stop hook `%s` stamped an invocation %s ago, in step with the "
+                      "others — evidence it RAN, not that it is registered."
+                      % (GRN + "ok   " + OFF, _name, _ago))
+
     # THE WORKTREE GUARD'S WIRING. Not "does the verb work" — the suite answers that — but
     # "would it ever run". The guard fails OPEN by design, so nothing at runtime can be loud
     # about its own absence without blocking the repair it needs; this is where that loudness

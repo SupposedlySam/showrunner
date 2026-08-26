@@ -27,6 +27,15 @@
 # halves fail toward silence. The JSON is a contract; the prose is for a person.
 set -u
 
+# HEARTBEAT FIRST — see future-tense-gate.sh for why. Registration and a clean parse are facts
+# about a file; only a stamped invocation is a fact about this turn. Written before the fixture
+# branch so a test run and a real run both leave the same evidence.
+_hb_root="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)}"
+if [ -n "${_hb_root:-}" ] && [ -d "$_hb_root/.showrunner" ]; then
+  printf '{"hook":"inert-crawler-gate","ts":%s}\n' "$(date +%s)" \
+    >> "$_hb_root/.showrunner/hook-heartbeat.jsonl" 2>/dev/null || true
+fi
+
 FIXTURE="${INERT_CRAWLER_GATE_FIXTURE:-}"      # a recorded --porcelain payload, for testing
 SR="${SHOWRUNNER_BIN:-}"
 

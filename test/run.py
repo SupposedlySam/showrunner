@@ -5144,6 +5144,76 @@ def test_campaign_scoping():
         del os.environ["SHOWRUNNER_CAMPAIGN"]
 
 
+def test_stop_hook_heartbeat():
+    group("Did the Stop hook RUN — the one question registration, parsing and 'has fired' "
+          "cannot answer")
+    if not have("git"):
+        skip("the heartbeat group", "git is not installed")
+        return
+    cfg = make_repo()
+
+    # WHY A TIMESTAMP AND NOT A BOOLEAN. game_loop's auditor measured their Stop gate as unrun
+    # for eight hours behind four green checks — it parses, the registered command matches, it
+    # can write, doctor says the hooks have fired. Every one of those was TRUE and none was
+    # about the last turn. A boolean "has it ever fired" answered yes, correctly, and was
+    # useless; only a time dissented.
+    #
+    # THE RELATION IS BETWEEN HOOKS, not against an invented tolerance. showrunner does not
+    # schedule turn-ends and cannot know when one happened — but the NEWEST stamp across all
+    # Stop hooks is a proxy for the last turn-end that reached anything, and a hook far behind
+    # that was registered and not reached.
+    hb = os.path.join(cfg.root, ".showrunner", "hook-heartbeat.jsonl")
+    settings = os.path.join(cfg.root, ".claude", "settings.json")
+    os.makedirs(os.path.dirname(settings), exist_ok=True)
+    with open(settings, "w") as fh:
+        json.dump({"hooks": {"Stop": [{"hooks": [
+            {"command": '"$CLAUDE_PROJECT_DIR"/.showrunner/hooks/alpha-gate.sh'},
+            {"command": '"$CLAUDE_PROJECT_DIR"/.showrunner/hooks/beta-gate.sh'}]}]}}, fh)
+
+    def doctor():
+        p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                           cwd=cfg.root, capture_output=True, text=True)
+        return p.stdout
+
+    out = doctor()
+    ok("a registered Stop hook that has NEVER stamped is reported, not passed over — silence "
+       "from a gate is what both health and total failure look like",
+       out.count("NEVER stamped") == 2, out[-300:])
+    ok("...and it says it CANNOT TELL a hook that records no stamp from one nothing reached, "
+       "rather than picking the flattering reading", "cannot tell which" in out)
+
+    # BOTH IN STEP: the healthy case must be quiet, or the warning stops being read.
+    t = int(time.time())
+    with open(hb, "w") as fh:
+        fh.write(json.dumps({"hook": "alpha-gate", "ts": t - 30}) + "\n")
+        fh.write(json.dumps({"hook": "beta-gate", "ts": t - 20}) + "\n")
+    out = doctor()
+    ok("two Stop hooks stamping together are both reported as having RUN", 
+       out.count("in step with the others") == 2, out[-300:])
+    ok("...and neither is warned about", "BEHIND the newest" not in out)
+
+    # ONE STARVED. This is the shape the auditor actually hit: hook B keeps running, hook A is
+    # never reached, and every other signal about A stays true the whole time.
+    with open(hb, "w") as fh:
+        fh.write(json.dumps({"hook": "alpha-gate", "ts": t - 8 * 3600}) + "\n")
+        fh.write(json.dumps({"hook": "beta-gate", "ts": t - 20}) + "\n")
+    out = doctor()
+    ok("a Stop hook far behind its siblings is named as NOT REACHED — turn-ends got to the "
+       "others and not to it", "BEHIND the newest" in out and "alpha-gate" in out, out[-400:])
+    ok("...reported in hours rather than as a bare 'stale', so the size of the gap is visible",
+       "8h ago" in out, out[-400:])
+    ok("...while the sibling that did run is still reported ok, so the warning points at one "
+       "hook rather than at the wiring in general",
+       "`beta-gate` stamped an invocation" in out, out[-400:])
+    # WHAT IT MUST NOT CLAIM. The auditor named a blocking earlier hook as the likely cause and
+    # was careful to call it an inference. A stamp proves the gate did not run; it says nothing
+    # about why, and a doctor line that named a cause would be the same measured-a-behaviour-
+    # named-a-cause defect this repo has hit four times.
+    ok("...and does NOT assert a cause, because a stamp cannot establish one — it offers the "
+       "blocking-earlier-hook reading as a candidate",
+       "does not establish WHY" in out and "candidate" in out, out[-400:])
+
+
 def test_every_shipped_hook_parses():
     group("Every hook install.sh ships is SYNTACTICALLY VALID — a broken one is not caught by "
           "anything else in this suite")
@@ -8597,6 +8667,7 @@ def main():
                test_role_seat_verbs,
                test_close_resolves_paths_against_the_callers_tree,
                test_campaign_scoping,
+               test_stop_hook_heartbeat,
                test_every_shipped_hook_parses,
                test_pipeline_status_gate,
                test_issue_waker,

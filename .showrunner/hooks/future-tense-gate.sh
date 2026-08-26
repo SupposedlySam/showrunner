@@ -22,6 +22,24 @@
 # write that would repair it.
 set -u
 
+# HEARTBEAT FIRST, BEFORE ANYTHING CAN RETURN. Registration, a clean `bash -n`, and "has fired"
+# are all facts about a FILE or about the PAST; none of them is a fact about this turn, which is
+# the only thing a gate is for. game_loop's auditor measured their Stop gate as unrun for eight
+# hours with four green health checks and one honest timestamp — the timestamp being the only
+# artifact that records AN INVOCATION, with a time attached.
+#
+# A boolean "has it ever fired" would have answered yes, correctly, and been useless. So this
+# records a time, and it records it before the payload is read: a mark written after the first
+# early return leaves the cheapest paths unprovable, and those are the weak ones.
+#
+# WHAT IT CANNOT SHOW: that a stale stamp means a specific earlier Stop hook blocked this one.
+# It proves the gate did not run. Why is a separate question this file does not answer.
+_hb_root="${CLAUDE_PROJECT_DIR:-$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)}"
+if [ -n "${_hb_root:-}" ] && [ -d "$_hb_root/.showrunner" ]; then
+  printf '{"hook":"future-tense-gate","ts":%s}\n' "$(date +%s)" \
+    >> "$_hb_root/.showrunner/hook-heartbeat.jsonl" 2>/dev/null || true
+fi
+
 payload="$(cat 2>/dev/null || true)"
 [ -n "$payload" ] || exit 0
 

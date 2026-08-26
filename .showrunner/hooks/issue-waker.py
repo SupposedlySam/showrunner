@@ -221,7 +221,24 @@ def _save(numbers, debts=None):
         return False
 
 
+def _heartbeat():
+    """Record THAT THIS RAN, with a time. Not whether it found anything.
+
+    Registration, a clean parse and "has fired at some point" are facts about a file or about
+    the past. A Stop hook that is never REACHED is indistinguishable from one with nothing to
+    say — both produce silence — and every other health signal stays green throughout.
+    Measured elsewhere: a sibling project's Stop gate went eight hours unrun with four green
+    checks, caught only by a timestamp.
+    """
+    try:
+        with open(os.path.join(os.path.dirname(STATE), "hook-heartbeat.jsonl"), "a") as fh:
+            fh.write(json.dumps({"hook": "issue-waker", "ts": int(time.time())}) + "\n")
+    except OSError:
+        pass                   # a bell that cannot write its own stamp still has to ring
+
+
 def main():
+    _heartbeat()
     seen = baseline()
     if seen is None:
         # BOOTSTRAP, or this never runs at all. The state file was written ONLY when fresh
