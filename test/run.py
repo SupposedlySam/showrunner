@@ -5152,6 +5152,76 @@ def test_campaign_scoping():
         del os.environ["SHOWRUNNER_CAMPAIGN"]
 
 
+def test_corpus_tool():
+    group("Corpus measurements are reproducible, and made with the SHIPPED gate")
+    if not have("bash"):
+        skip("the corpus group", "bash is not installed")
+        return
+    tool = os.path.join(ROOT, "test", "corpus.py")
+
+    # WHY THIS TOOL EXISTS. Every corpus number this project published — the promise gate's
+    # 3-of-227, the pipeline gate's rate over 3,586 commands — came from a throwaway script
+    # written for the occasion and deleted. The numbers reached commit messages and llms.txt;
+    # the instrument lasted four minutes. Nobody could re-run one, including me.
+    #
+    # It is the same defect as publishing a rate from a standalone classifier while shipping a
+    # different predicate, which this project did and had to correct. An ad-hoc grep IS a
+    # standalone classifier. So the tool's one rule is that it implements no predicate: it
+    # extracts a population and feeds it to the hook FILES.
+    scratch = tmpdir("corpus")
+    tp = os.path.join(scratch, "t.jsonl")
+
+    def rec(kind, blocks):
+        return json.dumps({"type": kind, "message": {"content": blocks}})
+
+    with open(tp, "w") as fh:
+        # A turn-final closing that PROMISES — the gate must refuse it.
+        fh.write(rec("assistant", [{"type": "text", "text": "Done. Next I'll pay those debts."}])
+                 + "\n")
+        fh.write(json.dumps({"type": "user", "message": {"content": "ok"}}) + "\n")
+        # An assistant message followed by a TOOL RESULT is mid-turn, not a closing. Counting
+        # these is how a false-block rate ends up seven times too large: 1,650 messages stood in
+        # for 222 turn-finals, and the published 31% was arithmetic on the wrong denominator.
+        fh.write(rec("assistant", [{"type": "text", "text": "Next I'll check that."}]) + "\n")
+        fh.write(json.dumps({"type": "user", "message": {"content": [
+            {"type": "tool_result", "content": "x"}]}}) + "\n")
+        fh.write(rec("assistant", [{"type": "text", "text": "All finished and verified."}])
+                 + "\n")
+
+    p = subprocess.run([sys.executable, tool, "--transcript", tp, "--gate", "promise",
+                        "--json"], capture_output=True, text=True)
+    ok("the corpus tool runs clean over a hand-built transcript", p.returncode == 0,
+       (p.stderr or "")[:250])
+    data = json.loads(p.stdout or "{}")
+    eq("...counting only messages that ENDED a turn — one mid-turn message here is followed by "
+       "a tool result and is not a closing", data["promise"]["population"], 2)
+    eq("...and refusing the one closing that promises", data["promise"]["fired"], 1)
+    ok("...reporting the ITEM, not only the rate — a rate without its items is a summary over "
+       "data that knows more than the summary does",
+       "Next I'll pay those debts" in (data["promise"]["items"] or [""])[0])
+
+    # THE INSTRUMENT CHECK IS THE POINT. A gate that cannot run answers exactly like a gate with
+    # nothing to say, so a sweep over a broken hook reports ZERO fires and zero reads as good
+    # news. This repo shipped an unparseable hook under 1,190 green assertions for that reason.
+    broken_hooks = os.path.join(scratch, "hooks")
+    shutil.copytree(os.path.join(ROOT, ".showrunner", "hooks"), broken_hooks)
+    fake_root = os.path.join(scratch, "fakerepo")
+    os.makedirs(os.path.join(fake_root, ".showrunner"), exist_ok=True)
+    shutil.copytree(broken_hooks, os.path.join(fake_root, ".showrunner", "hooks"))
+    shutil.copytree(os.path.join(ROOT, "test"), os.path.join(fake_root, "test"))
+    with open(os.path.join(fake_root, ".showrunner", "hooks",
+                           "future-tense-gate.sh"), "a") as fh:
+        fh.write('\necho "unterminated\n')
+    p = subprocess.run([sys.executable, os.path.join(fake_root, "test", "corpus.py"),
+                        "--transcript", tp, "--quiet"], capture_output=True, text=True)
+    ok("a gate that cannot PARSE makes the tool refuse to report a rate at all",
+       p.returncode == 3, (p.stdout or "")[:200] + (p.stderr or "")[:200])
+    ok("...saying so as an INSTRUMENT problem rather than as a finding about the corpus",
+       "INSTRUMENT" in p.stderr, (p.stderr or "")[:200])
+    ok("...and exiting 3 rather than 1, so a caller reading non-zero as 'there were fires' "
+       "cannot read a broken sweep exactly backwards", p.returncode == 3)
+
+
 def test_stop_hook_heartbeat():
     group("Did the Stop hook RUN — the one question registration, parsing and 'has fired' "
           "cannot answer")
@@ -8695,6 +8765,7 @@ def main():
                test_role_seat_verbs,
                test_close_resolves_paths_against_the_callers_tree,
                test_campaign_scoping,
+               test_corpus_tool,
                test_stop_hook_heartbeat,
                test_every_shipped_hook_parses,
                test_pipeline_status_gate,

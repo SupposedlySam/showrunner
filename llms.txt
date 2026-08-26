@@ -414,6 +414,31 @@ showrunner whoami                    # SessionStart AND PostCompact  (whoami.sh)
 showrunner dispatch guard            # PreToolUse on BASH            (dispatch-guard.sh)
 ```
 
+### Re-running a published corpus number
+
+```
+python3 test/corpus.py                  # this project's newest transcript
+python3 test/corpus.py --transcript PATH --gate promise --json
+```
+
+Every corpus number this project has published — the promise gate's rate over turn-final
+closings, the pipeline gate's rate over Bash commands — used to come from a script written for
+the occasion and then deleted. The numbers reached commit messages and this file; the instrument
+lasted four minutes and nobody could re-run one.
+
+That is the same defect as quoting a rate from a standalone classifier while shipping a
+different predicate, which happened here and had to be corrected. **An ad-hoc grep is a
+standalone classifier under another name.** So this tool implements NO predicate: it extracts a
+population and feeds it to the hook FILES. Change a hook, the number changes.
+
+It **refuses to report a rate from a gate it cannot verify**, and exits **3** — not 1, so a
+caller treating non-zero as "there were fires" cannot read a broken sweep exactly backwards. It
+checks that each gate parses AND that each still fires on a known-positive, because parsing is
+not firing and a sweep over a dead gate returns zero, which reads as good news.
+
+It prints the matching items by default. Whether any fire is CORRECT is not measured — that is a
+reader's judgement, and a rate without its items is a summary over data that knows more.
+
 ### Did a Stop hook actually RUN on the last turn
 
 Registration is a fact about a file. A clean parse is a fact about source. "Has fired" is a fact
