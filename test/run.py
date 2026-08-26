@@ -5185,6 +5185,54 @@ def test_issue_waker():
         json.dump({"seen": [1, 2]}, fh)
     eq("...while a readable baseline is used", w.baseline(), {1, 2})
 
+    # A RATE-LIMITED CHAT SERVER REPORTED A CLEAN INBOX. Measured live, not imagined: with all
+    # five rooms returning HTTP 429, `llm_chat owed` exited 0 and printed "nothing owed", while
+    # its own --json body listed every one of those rooms under `unreachable` and its own --help
+    # states that exit 2 means COULD NOT LOOK. The summary said clean, the body said blind, and
+    # a real debt was sitting unseen behind the rate limit at that moment.
+    #
+    # The exit code is llm_chat's contract to keep and is reported upstream rather than papered
+    # over here. What is showrunner's is whether this bell tells the truth about its own reach,
+    # so it reads the reachability the body already publishes instead of trusting the summary.
+    class _FakeRun(object):
+        def __init__(self, code, out):
+            self.returncode, self.stdout, self.stderr = code, out, ""
+
+    real_sub = w.subprocess
+    w._chat_cli = lambda: "/nonexistent/llm_chat"
+
+    class _Sub(object):
+        payload = None
+        code = 0
+        @staticmethod
+        def run(*a, **k):
+            return _FakeRun(_Sub.code, _Sub.payload)
+    _Sub.SubprocessError, _Sub.TimeoutExpired = real_sub.SubprocessError, real_sub.TimeoutExpired
+    w.subprocess = _Sub
+
+    _Sub.payload = json.dumps({"owed": [], "unreachable": []})
+    eq("a genuinely quiet inbox reports no debts", w.chat_debts(), [])
+
+    _Sub.payload = json.dumps({"owed": [], "unreachable": [
+        {"room": "game_loop_owner", "why": "HTTP 429  Rate limit exceeded"},
+        {"room": "lamp_owner", "why": "HTTP 429  Rate limit exceeded"}]})
+    eq("...but no debts found across rooms it could not REACH is a failed look, not a clean "
+       "inbox — exit 0 and the words 'nothing owed' say otherwise and are wrong",
+       w.chat_debts(), None)
+
+    _Sub.payload = json.dumps({"owed": [{"room": "game_loop_owner", "from": "auditor",
+                                         "seq": 200}], "unreachable": []})
+    eq("...and a real debt is reported with the room, asker and seq that identify it",
+       w.chat_debts(), ["#game_loop_owner: auditor asked at seq 200"])
+
+    # The seq is what makes a LATER question from the same room ring again, so it is part of
+    # the identity and not decoration.
+    _Sub.payload = "nothing owed"
+    eq("...while an answer we asked for as JSON and cannot parse is a failed look too, whatever "
+       "the exit code claims — we asked a specific question and got an unknown shape",
+       w.chat_debts(), None)
+    w.subprocess = real_sub
+
     # THE DEBT HALF MUST RING FROM INSIDE THE POLL LOOP, not after the budget drains. It used to
     # be checked once, at the very end — so this loop woke every 60s for half an hour to ask
     # GitHub about issues and never once asked chat, and a person waiting on an answer waited

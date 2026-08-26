@@ -131,9 +131,30 @@ def chat_debts():
     if not cli:
         return None
     try:
-        out = subprocess.run([cli, "owed"], capture_output=True, text=True, timeout=30)
+        out = subprocess.run([cli, "owed", "--json"], capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.SubprocessError):
         return None
+
+    # THE EXIT CODE IS NOT ENOUGH, MEASURED. With every room rate-limited, `owed` returned
+    # exit 0 and the words "nothing owed" — while its own --json body listed all five rooms
+    # under `unreachable` and its own --help says exit 2 means COULD NOT LOOK. So the summary
+    # said clean, the body said blind, and the doorbell built to stop a debt going unnoticed
+    # would have reported a clean inbox for a server it could not reach.
+    #
+    # Reported upstream, because the exit code is llm_chat's contract to keep and silencing it
+    # here would hide the defect from everyone else. What is MINE is whether this bell tells
+    # the truth about its own reach, so it reads the reachability the body already publishes
+    # rather than trusting the summary over it. Consuming their data, not duplicating a check.
+    try:
+        body = json.loads(out.stdout or "")
+        debts, blind = body.get("owed") or [], body.get("unreachable") or []
+    except (ValueError, AttributeError):
+        body = None
+    else:
+        if debts:
+            return ["#%s: %s asked at seq %s" % (d.get("room"), d.get("from"), d.get("seq"))
+                    for d in debts]
+        return None if blind else []
     # THE EXIT CODES ARE THE CONTRACT, and non-zero is not "it broke". `owed` exits 1 WHEN YOU
     # OWE SOMEBODY — the listing is the point of the run. Reading non-zero as a failed look
     # inverted the meaning exactly when there was something to report: three real debts came
@@ -143,8 +164,10 @@ def chat_debts():
     # line that read as a debt, so this woke a session to report that it had no debts. The
     # identity element wearing the shape of a result, in the doorbell built to stop pointless
     # wakes. Caught by the doorbell itself firing wrongly, which is at least the loud direction.
-    if out.returncode == 0:
-        return []
+    # ONLY REACHED WHEN --json GAVE US SOMETHING WE COULD NOT PARSE, which is itself a failed
+    # look: we asked a specific question and got an answer in an unknown shape. Exit 0 here
+    # cannot mean "nothing owed" — it means the reader broke. The one form still honoured is a
+    # CLI old enough to ignore --json and answer in prose, which exits 1 and lists the debts.
     if out.returncode == 1:
         return [ln.rstrip() for ln in (out.stdout or "").splitlines() if ln.strip()]
     return None
