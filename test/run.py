@@ -5474,6 +5474,26 @@ def test_corpus_tool():
        "data that knows more than the summary does",
        "Next I'll pay those debts" in (data["promise"]["items"] or [""])[0])
 
+    # EVERY READING IS A SNAPSHOT AND MUST SAY SO. This corpus is the project's own transcript
+    # and it grows while the work happens: re-running the same afternoon moved the promise
+    # gate's denominator from 237 to 243 with the numerator unchanged. game_loop's auditor had
+    # been quoting theirs as a constant for two days while it went 73 -> 81 the same way.
+    #
+    # And the self-reference has no fix: writing about a gate adds to the corpus that gate is
+    # measured on. Neither widening nor an exemption touches that, so the reading gets dated.
+    p_asof = subprocess.run([sys.executable, tool, "--transcript", tp, "--gate", "promise"],
+                            capture_output=True, text=True)
+    ok("the reading is DATED, because a rate from a growing corpus quoted without one is being "
+       "presented as a constant", "AS OF" in p_asof.stdout, p_asof.stdout[:200])
+    ok("...and says the denominator moves, so the date is not decoration a reader skips",
+       "GROWS" in p_asof.stdout and "denominator moves" in p_asof.stdout, p_asof.stdout[:260])
+    data_asof = json.loads(subprocess.run(
+        [sys.executable, tool, "--transcript", tp, "--gate", "promise", "--json"],
+        capture_output=True, text=True).stdout or "{}")
+    ok("...and the machine-readable form carries it too, so a caller quoting the number gets "
+       "the as-of with it rather than having to parse prose",
+       bool(data_asof.get("as_of")) and "transcript_bytes" in data_asof, list(data_asof))
+
     # THE INSTRUMENT CHECK IS THE POINT. A gate that cannot run answers exactly like a gate with
     # nothing to say, so a sweep over a broken hook reports ZERO fires and zero reads as good
     # news. This repo shipped an unparseable hook under 1,190 green assertions for that reason.

@@ -486,6 +486,13 @@ cmd > /tmp/out 2>&1; rc=$?        # the real status
 grep -E 'FAIL|RESULT' /tmp/out    # the pipe belongs to a different command
 ```
 
+**EVERY RATE BELOW IS A SNAPSHOT WITH A MOVING DENOMINATOR.** This project's corpus is its own
+transcript, and it grows while the work happens — re-running the tool the same afternoon gives a
+different denominator with, usually, the same numerator. Worse and unfixable: writing about a
+gate ADDS TO THE CORPUS THAT GATE IS MEASURED ON, so this paragraph will be in a later reading.
+The tool prints an `AS OF` line for that reason; a rate quoted from it without one is being
+presented as a constant when it is not. Figures here are as of 2026-08-26.
+
 **`${PIPESTATUS[0]}` IS NOT A SHELL-NEUTRAL REMEDY, and this file used to print it as one.**
 zsh spells the array `pipestatus` and indexes it **from 1**, so the bash form expands to the
 empty string there:

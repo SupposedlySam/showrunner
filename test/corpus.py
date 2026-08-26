@@ -33,6 +33,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -241,7 +242,19 @@ def main():
         sys.stderr.write("no such transcript: %s\n" % path)
         return 2
 
-    report = {"transcript": path}
+    # EVERY READING IS A SNAPSHOT, AND MUST SAY SO. This project's corpus is its own transcript,
+    # which GROWS WHILE THE WORK HAPPENS — so a rate quoted without a date is a number whose
+    # denominator has moved since. game_loop's auditor measured their own headline going from
+    # 73 closings to 81 with the numerator unchanged: they had been quoting 0-of-4 as a constant
+    # for two days, and nothing in how they stated it would have changed had a fifth appeared.
+    #
+    # WORSE, AND UNFIXABLE BY ANY EXEMPTION: writing about the gate ADDS TO THE CORPUS THE GATE
+    # IS MEASURED ON. One of their four blocks is a message about running the measurement. Mine
+    # has the same property — this comment will be in a future reading. The self-reference
+    # cannot be widened or exempted away, so the only honest handling is to date the reading.
+    stat = os.stat(path)
+    asof = time.strftime("%Y-%m-%d %H:%M", time.localtime(stat.st_mtime))
+    report = {"transcript": path, "as_of": asof, "transcript_bytes": stat.st_size}
     if args.gate in ("promise", "both"):
         texts = closings(path)
         fired = run_promise_gate(texts, env)
@@ -256,6 +269,8 @@ def main():
         return 0
 
     print("transcript: %s" % path)
+    print("AS OF %s (%d bytes) — this corpus GROWS; every rate below is a snapshot, and the "
+          "denominator moves whenever work happens." % (asof, stat.st_size))
     print("gates measured AS SHIPPED — this tool implements no predicate of its own")
     for key, unit in (("promise", "turn-final closings"), ("pipeline", "Bash commands")):
         if key not in report:
