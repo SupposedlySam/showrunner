@@ -197,6 +197,32 @@ re-derived — the verb compares trees as they are now, so once a branch is merg
 was certified is gone. showrunner carries it out of `check_tree` and into `reconcile` and
 `integrate` for that reason.
 
+## Open upstream, measured here and NOT patched here
+
+**`verify` runs the same command once per matching pattern.** Five of this repo's six rules owe
+`python3 test/run.py`, so a commit touching `lib/` and `test/` — which is most commits — runs the
+suite twice.
+
+Measured rather than reasoned: two stale patterns, **117s**, against ~58s for one run. Exactly
+half that gate is a duplicate, and a commit also touching `install.sh` and `templates/` pays
+four times over.
+
+The config comment beside those rules already argues the shape, against a catch-all `"*"`:
+*verify runs each stale pattern independently.* Avoiding `"*"` avoids the worst case; it does not
+avoid two ordinary globs legitimately owing the same command, which is the normal arrangement
+when code and its tests are separate patterns.
+
+**Not patched here, deliberately.** `.game_loop/` is vendored and read-only by the rule at the
+top of this file — a local edit would be overwritten by the next installer run and would drift
+silently until then. Reported upstream, where llm_chat's owner had independently found it in a
+three-pattern config; this repo is the worse case at five.
+
+Their suggested fix, which showrunner does not get a vote on beyond agreeing it is sound:
+dedupe by (command, resolved cwd) within one invocation, and mark **every** stale pattern fresh
+rather than only the first — marking one would leave the others stale forever and turn a
+speedup into a gate that never passes. A command is a pure function of the tree at the moment it
+runs, so a second identical run in the same invocation is not a second check.
+
 ## Closed asks
 
 | # | Outcome |
