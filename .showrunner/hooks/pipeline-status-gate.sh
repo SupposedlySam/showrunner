@@ -72,8 +72,39 @@ def graded():
         if len(set(re.findall(r"\b([0-9])\b", note))) >= 2:
             out.setdefault(m.group(1), note)
     return out
-# pipefail / PIPESTATUS mean the author has already handled it.
-if re.search(r"pipefail|PIPESTATUS", cmd):
+# THE REMEDY HAS THE DEFECT, ON THIS HOST. `pipefail` works in bash and zsh. `PIPESTATUS`
+# does NOT: zsh spells it `pipestatus` and indexes from 1, so `${PIPESTATUS[0]}` in zsh is
+# THE EMPTY STRING. Measured here:
+#
+#     zsh:   true | false ; PIPESTATUS[0]=[]   pipestatus[1]=[0]  pipestatus[2]=[1]
+#     bash:  true | false ; PIPESTATUS[0]=[0]  PIPESTATUS[1]=[1]
+#
+# And it fails WORSE than the defect it fixes. `$?` after a pipeline gives a real number about
+# the wrong command; the bash idiom under zsh gives nothing at all, which renders as `exit=`
+# and reads as neither pass nor fail. The identity element, inside the cure.
+#
+# This gate used to silence on the mere presence of the word, so an author following its own
+# printed advice on a zsh host got an empty status AND no warning. Reported by the game_loop
+# auditor, reproduced here before acting.
+_shell = os.path.basename(os.environ.get("SHELL") or "")
+if re.search(r"pipefail", cmd):
+    sys.exit(0)
+if re.search(r"\bpipestatus\b", cmd):
+    sys.exit(0)                       # the zsh spelling; correct wherever it appears
+# AN EXPANSION, NOT A MENTION. The first version fired on `grep -n "PIPESTATUS" test/run.py`,
+# because the bare word appears in it. That is text ABOUT the construct, not a use of it — the
+# same artifact class this file already documents for its other arm. Requiring the `$` means a
+# grep pattern, a comment and a doc string all pass, while every real use is caught.
+_EXPANSION = r"\$\{?PIPESTATUS\b"
+_bad_remedy = bool(re.search(_EXPANSION, cmd)) and "zsh" in _shell
+if re.search(_EXPANSION, cmd) and not _bad_remedy:
+    sys.exit(0)                       # bash spelling on a non-zsh host is a real remedy
+# A command using ${PIPESTATUS[0]} contains no `$?` at all, so the arm below never reaches it.
+# This is its own finding with its own text, because the cause differs: that one is about whose
+# exit code you are believing, this one is about a remedy that yields nothing on this host.
+if _bad_remedy:
+    print("@@ZSH@@" + next((l.strip()[:110] for l in cmd.split("\n")
+                            if re.search(_EXPANSION, l)), cmd.strip()[:110]))
     sys.exit(0)
 TRUNCATORS = r"\b(head|tail|grep|wc|cat|sed|cut|uniq|sort)\b"
 hits = []
@@ -109,17 +140,41 @@ if hits:
 [ -n "$verdict" ] || exit 0
 
 printf '%s\n' "$verdict" | python3 -c '
-import json, sys
+# `os` IS IMPORTED HERE BECAUSE THE MESSAGE READS $SHELL. The first version of this patch used
+# os.path.basename without importing os: NameError, no stdout, gate silently answers nothing —
+# inside the change that fixes a remedy which silently yields nothing. Caught by running it.
+import json, os, sys
 raw = [l for l in sys.stdin.read().split("\n") if l.strip()]
-MARK = "@@STAKES@@"
-lines = [l for l in raw if not l.startswith(MARK)]
+MARK, ZSH = "@@STAKES@@", "@@ZSH@@"
+zsh_hits = [l[len(ZSH):] for l in raw if l.startswith(ZSH)]
+lines = [l for l in raw if not l.startswith(MARK) and not l.startswith(ZSH)]
 stakes = [l[len(MARK):] for l in raw if l.startswith(MARK)]
+if zsh_hits:
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+        "additionalContext":
+            "⚠ `${PIPESTATUS[...]}` IS EMPTY IN ZSH, AND THIS HOST RUNS ZSH.\n\n  "
+            + "\n  ".join(zsh_hits)
+            + "\n\nzsh spells the array `pipestatus` and indexes it FROM 1, so the bash form "
+              "expands to the empty string. Measured here: after `true | false`, "
+              "`${PIPESTATUS[0]}` is `` and `${pipestatus[1]}` is `0`.\n\n"
+              "This fails WORSE than the bug it fixes. Reading `$?` after a pipeline gives a "
+              "real number about the wrong command; this gives nothing at all, which renders "
+              "as `exit=` and reads as neither pass nor fail.\n\n"
+              "Use `${pipestatus[1]}`, or `set -o pipefail`, or capture with no pipe at all: "
+              "`cmd > /tmp/o 2>&1; rc=$?`."}}))
+    sys.exit(0)
 msg = ("⚠ `$?` HERE IS THE TRUNCATOR'"'"'S STATUS, NOT THE COMMAND'"'"'S. A pipeline exits with its "
        "LAST command, and head/tail/grep essentially always succeed — so this reports 0 whatever "
        "the real command did, and the output still looks correct.\n\n  "
        + "\n  ".join(lines)
-       + "\n\nCapture it without a pipe (`cmd > /tmp/o 2>&1; rc=$?`), or use `set -o pipefail` / "
-         "`${PIPESTATUS[0]}`. Measured on this repo: 4 of 7 reproducible instances reported a "
+       + "\n\nCapture it without a pipe (`cmd > /tmp/o 2>&1; rc=$?`), or `set -o pipefail`, or "
+       + ("`${pipestatus[1]}` — this host runs zsh, where `${PIPESTATUS[0]}` is THE EMPTY "
+          "STRING: zsh spells the array `pipestatus` and indexes it from 1, so the bash idiom "
+          "here fails worse than the bug, giving you nothing instead of the wrong number."
+          if "zsh" in os.path.basename(os.environ.get("SHELL") or "")
+          else "`${PIPESTATUS[0]}` (bash) / `${pipestatus[1]}` (zsh — different name, indexed "
+               "from 1).")
+       + " Measured on this repo: 4 of 7 reproducible instances reported a "
          "wrong status, and `showrunner check`'"'"'s deliberate exit 3 (VOID — nothing was "
          "compared) read as 0.")
 if stakes:

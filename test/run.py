@@ -5536,7 +5536,11 @@ def test_pipeline_status_gate():
             ('python3 test/run.py > /tmp/o 2>&1; echo "exit=$?"; grep RESULT /tmp/o | head -4',
              "redirect first, pipe in a LATER command"),
             ('set -o pipefail; cmd | head -3; echo "$?"', "pipefail handles it"),
-            ('cmd | head -3; echo "${PIPESTATUS[0]}"', "PIPESTATUS reads the right element"),
+            # NOT SHELL-NEUTRAL, and this assertion used to claim it was. `${PIPESTATUS[0]}`
+            # is a real remedy in bash and THE EMPTY STRING in zsh, so the honest silent case
+            # is the zsh spelling. The bash form has its own assertions below, one per host.
+            ('cmd | head -3; echo "${pipestatus[1]}"', "the zsh pipestatus array, indexed from 1"),
+            ('grep -n "PIPESTATUS" test/run.py', "a MENTION of the construct, not a use of it"),
             ('echo payload | python3 gate.py; echo "rc=$?"',
              "the SUBJECT is last in the pipeline, which is the status `$?` gives"),
             ('git status --porcelain | head -3', "no `$?` read at all")):
@@ -5588,6 +5592,54 @@ def test_pipeline_status_gate():
     ok("the stakes survive the shell boundary between the two stages at all — the first "
        "sentinel was a null byte, which command substitution deletes",
        "check answers" in graded, graded[-160:])
+
+    # THE REMEDY HAS THE DEFECT, ON THIS HOST. `pipefail` works in bash and zsh. `PIPESTATUS`
+    # does not: zsh spells the array `pipestatus` and indexes it FROM 1, so `${PIPESTATUS[0]}`
+    # under zsh is THE EMPTY STRING. Measured, not assumed:
+    #
+    #     zsh    true | false ;  PIPESTATUS[0]=[]   pipestatus[1]=[0]  pipestatus[2]=[1]
+    #     bash   true | false ;  PIPESTATUS[0]=[0]  PIPESTATUS[1]=[1]
+    #
+    # It fails WORSE than the bug it fixes. `$?` after a pipeline yields a real number about the
+    # wrong command; the bash idiom under zsh yields nothing, which renders as `exit=` and reads
+    # as neither pass nor fail — the identity element, inside the cure.
+    #
+    # This gate SILENCED on the mere presence of the word, so an author following its own
+    # printed advice on a zsh host got an empty status AND no warning from the guard that
+    # exists to prevent exactly that. Reported by the game_loop auditor; reproduced here first.
+    def ctx(command, shell):
+        p = subprocess.run(["bash", hook], input=json.dumps(
+            {"tool_name": "Bash", "tool_input": {"command": command}}),
+            capture_output=True, text=True,
+            env=dict(os.environ, CLAUDE_PROJECT_DIR=ROOT, SHELL=shell))
+        if not p.stdout.strip():
+            return ""
+        return json.loads(p.stdout)["hookSpecificOutput"]["additionalContext"]
+
+    BASH_FORM = 'cmd | head -3; echo "rc=${PIPESTATUS[0]}"'
+    ZSH_FORM = 'cmd | head -3; echo "rc=${pipestatus[1]}"'
+
+    warned = ctx(BASH_FORM, "/bin/zsh")
+    ok("the bash-only PIPESTATUS form is flagged on a ZSH host, where it expands to nothing",
+       "EMPTY IN ZSH" in warned, warned[:160])
+    ok("...as its own finding with its own text, because the cause differs — that one is about "
+       "whose exit code you believe, this one about a remedy that yields nothing here",
+       "TRUNCATOR" not in warned, warned[:160])
+    ok("...naming the form that actually works on this host",
+       "${pipestatus[1]}" in warned, warned[-200:])
+    ok("...and the same command on a BASH host stays silent, because there it is a real remedy",
+       ctx(BASH_FORM, "/bin/bash") == "")
+    ok("the zsh spelling is silent on a zsh host — it is correct, and a guard that warns about "
+       "the right answer trains its own bypass", ctx(ZSH_FORM, "/bin/zsh") == "")
+    ok("...and `pipefail` stays silent everywhere, because it works in both shells",
+       ctx('set -o pipefail; cmd | head -3; echo $?', "/bin/zsh") == "")
+    ok("the ordinary defect still fires on a zsh host — the new arm did not swallow the old one",
+       "TRUNCATOR" in ctx('cmd 2>&1 | head -3; echo "rc=$?"', "/bin/zsh"))
+
+    # A command using ${PIPESTATUS[0]} contains no `$?` AT ALL, so the truncator arm could never
+    # have reached it. The two findings are genuinely disjoint rather than one being a subset.
+    ok("...and a PIPESTATUS command carries no `$?`, which is why this needed a separate arm "
+       "rather than a wider pattern on the existing one", "$?" not in BASH_FORM)
 
     # A NON-BASH CALL IS NOT ITS BUSINESS.
     p2 = subprocess.run(["bash", hook], input=json.dumps(

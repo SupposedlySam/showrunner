@@ -478,13 +478,33 @@ and those essentially always succeed — so `cmd 2>&1 | head -3; echo "exit=$?"`
 whatever `cmd` did, and the surviving output still looks correct.
 
 It NOTICES, it never denies: sometimes the truncator genuinely is the subject, and a gate that
-blocks a legitimate shape trains its own bypass. `set -o pipefail` and `${PIPESTATUS[0]}` are
-recognised and silence it, as does the common correct form — redirect first, pipe later:
+blocks a legitimate shape trains its own bypass. `set -o pipefail` silences it, as does the
+common correct form — redirect first, pipe later:
 
 ```
 cmd > /tmp/out 2>&1; rc=$?        # the real status
 grep -E 'FAIL|RESULT' /tmp/out    # the pipe belongs to a different command
 ```
+
+**`${PIPESTATUS[0]}` IS NOT A SHELL-NEUTRAL REMEDY, and this file used to print it as one.**
+zsh spells the array `pipestatus` and indexes it **from 1**, so the bash form expands to the
+empty string there:
+
+```
+zsh    true | false ;  ${PIPESTATUS[0]}=[]   ${pipestatus[1]}=[0]  ${pipestatus[2]}=[1]
+bash   true | false ;  ${PIPESTATUS[0]}=[0]  ${PIPESTATUS[1]}=[1]
+```
+
+That fails **worse** than the defect it fixes. Reading `$?` after a pipeline gives a real number
+about the wrong command; the bash idiom under zsh gives nothing at all, which renders as `exit=`
+and reads as neither pass nor fail — the identity element, inside the cure. The gate used to
+silence on the mere presence of the word, so an author following this page's own advice on a zsh
+host got an empty status *and* no warning.
+
+It now checks `$SHELL`: the bash form on a zsh host is its own finding with its own text,
+because the cause differs — the other arm is about whose exit code you are believing, this one
+about a remedy that yields nothing here. It requires an actual `$` expansion, so `grep
+"PIPESTATUS"` is a mention rather than a use.
 
 Measured on 3,586 real Bash commands from one session, running THE HOOK ITSELF with no
 exclusions: it fires on 24 (0.7%). Of those, **2 are false positives** — a pipeline quoted
