@@ -5752,6 +5752,54 @@ def test_corpus_tool():
        "shrinking it, not by trusting the lookup",
        len(shrunk["inspected"]) == len(man["inspected"]) - 1)
 
+    # TWO-SIDED CONTROLS. A detector that flags NOTHING and one that flags EVERYTHING both pass
+    # a one-sided test, and every control the tool had asked only "does it fire on a known
+    # positive". game_loop's auditor built the pair after finding their floor caught `scanned 0`
+    # but not a predicate mutated into never matching — which prints a healthy denominator
+    # beside a zero conclusion count.
+    #
+    # Exercised by MUTATING each gate to answer unconditionally, because a control nobody has
+    # seen fail is a control with an unknown direction.
+    import corpus as _c
+    env_c = _c._env()
+    always = os.path.join(scratch, "always.sh")
+    with open(always, "w") as fh:
+        fh.write("#!/usr/bin/env bash\nexit 2\n")
+    os.chmod(always, 0o755)
+    real_promise = _c.PROMISE_GATE
+    try:
+        _c.PROMISE_GATE = always
+        probs = _c.self_check(env_c)
+        ok("a promise gate that REFUSES EVERYTHING is caught — a gate that always fires passes "
+           "every positive control there is",
+           any("REFUSED a closing that only reports finished work" in x for x in probs), probs)
+    finally:
+        _c.PROMISE_GATE = real_promise
+    ok("...and the real gates pass both directions", _c.self_check(_c._env()) == [])
+
+    # THE PREMISE IS AN IDENTITY, NOT A THRESHOLD. The extraction assumes Bash calls arrive as
+    # tool_use blocks carrying input.command — a fact about the harness, not this repo. The old
+    # check asked whether the raw count was large while the walk found NOTHING, which catches a
+    # total move and is blind to a partial one.
+    #
+    # wcs made the case for the identity: a form the walk cannot match is invisible to every
+    # list the walk keeps, because the walk's vocabulary defines what it can fail to explain.
+    # Measured before adopting: 3,804 raw markers against 3,804 extracted commands.
+    shaped = os.path.join(scratch, "shaped.jsonl")
+    with open(shaped, "w") as fh:
+        for i in range(3):
+            fh.write(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Bash",
+                 "input": {"command": "echo %d" % i}}]}}) + "\n")
+    ok("the shape check is SILENT when the raw marker count equals the extracted commands",
+       _c.shape_ok(shaped, _c.bash_commands(shaped)) is None)
+    eq("...and the fixture really does carry markers, so the silence above is a finding rather "
+       "than a file with nothing in it", len(_c.bash_commands(shaped)), 3)
+    ok("...while it REPORTS when they disagree — what a PARTIAL rename of the record shape "
+       "looks like, and the case a large-raw-and-zero-found threshold cannot see",
+       "raw Bash tool markers" in (_c.shape_ok(shaped, _c.bash_commands(shaped)[:1]) or ""),
+       _c.shape_ok(shaped, _c.bash_commands(shaped)[:1]))
+
     # AN EMPTY POPULATION IS NOT A CLEAN RESULT. Found by PERTURBING the corpus rather than by
     # reading the code: hand a transcript with no records and the tool printed its caveat and
     # returned 0, so a caller reading the status got "fine" over a run that measured nothing.

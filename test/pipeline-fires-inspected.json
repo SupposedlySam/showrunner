@@ -120,6 +120,10 @@
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
+  "e4ecfba1924d": {
+   "verdict": "genuine",
+   "why": "a shell command whose $? reads a truncator"
+  },
   "e53e3455f5b2": {
    "verdict": "artifact",
    "why": "the defect quoted verbatim inside a chat message"

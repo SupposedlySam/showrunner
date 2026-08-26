@@ -37,6 +37,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -100,6 +101,39 @@ def closings(path):
             continue
         out.append(text)
     return out
+
+
+def shape_ok(path, found):
+    """Does the STRUCTURED walk agree with a raw count that Bash calls exist at all?
+
+    The extraction assumes tool calls arrive as `tool_use` blocks carrying `input.command`.
+    That is a premise about the harness, not about this repo, and it can move without warning.
+    The empty-population floor catches a TOTAL move; this catches the case where the raw text
+    is full of Bash and the structured walk finds none — which is news about the harness rather
+    than a quiet zero.
+
+    Borrowed from game_loop's auditor, who discharged the same premise gap by renaming
+    `input.command` and watching their tool report the shape change instead of a clean run.
+    """
+    # AN IDENTITY, NOT A THRESHOLD. The first version asked whether the raw count was large
+    # while the structured walk found NOTHING — which catches a TOTAL move and is blind to a
+    # partial one, where some records are renamed and the population silently shrinks.
+    #
+    # wcs made the case for the identity form: a form the walk cannot match is invisible to
+    # every list the walk keeps, because the walk's own vocabulary defines what it can fail to
+    # explain. The only thing that sees it is a count taken in a vocabulary it does not share.
+    # Measured here before adopting it: 3,804 raw markers against 3,804 structured commands.
+    try:
+        with open(path, errors="ignore") as fh:
+            raw = len(re.findall(r'"name"\s*:\s*"Bash"', fh.read()))
+    except OSError:
+        return None
+    if raw != len(found):
+        return ("%d raw Bash tool markers against %d command(s) the structured walk extracted. "
+                "Those must be equal; a gap means a record shape the walk cannot match, which "
+                "is invisible to every list it keeps. News about the harness, not a rate."
+                % (raw, len(found)))
+    return None
 
 
 def bash_commands(path):
@@ -193,6 +227,32 @@ def self_check(env):
         problems.append("pipeline gate did not fire on a KNOWN truncated status — every zero it "
                         "reports below would be meaningless")
 
+    # TWO-SIDED, because a detector that flags NOTHING and one that flags EVERYTHING both pass
+    # a one-sided test. Every control above asks "does it fire on a known positive". None asked
+    # "does it stay quiet on a known negative", so a gate mutated to refuse unconditionally
+    # would have sailed through and every rate below would have been reported from it.
+    #
+    # game_loop's auditor built exactly this pair after finding their own floor caught only
+    # `scanned 0` and not a predicate mutated into never matching — which prints a healthy
+    # denominator beside a zero conclusion count.
+    with open(tp, "w") as fh:
+        fh.write(json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text",
+             "text": "Suite green. Published as #12; nothing outstanding."}]}}) + "\n")
+    p = subprocess.run(["bash", PROMISE_GATE], input=json.dumps({"transcript_path": tp}),
+                       capture_output=True, text=True, env=env)
+    if p.returncode != 0:
+        problems.append("promise gate REFUSED a closing that only reports finished work "
+                        "(exit %d) — a gate that refuses everything passes every positive "
+                        "control there is" % p.returncode)
+    p = subprocess.run(["bash", PIPELINE_GATE], input=json.dumps(
+        {"tool_name": "Bash", "tool_input": {
+            "command": 'cmd > /tmp/o 2>&1; rc=$?; grep RESULT /tmp/o | head -4'}}),
+        capture_output=True, text=True, env=env)
+    if p.stdout.strip():
+        problems.append("pipeline gate FIRED on the redirect-first form it recommends — a gate "
+                        "that fires on everything reports a rate about itself, not the corpus")
+
     # THE REDIRECT IS CHECKED, NOT ASSERTED. This tool's docstring says it never writes the
     # checkout's own hook heartbeat. game_loop's auditor wrote the same sentence in the same
     # kind of tool, on a false mechanism — they redirected HOME while the path derived from
@@ -268,6 +328,10 @@ def main():
         report["promise"] = {"population": len(texts), "fired": len(fired), "items": fired}
     if args.gate in ("pipeline", "both"):
         cmds = bash_commands(path)
+        moved = shape_ok(path, cmds)
+        if moved:
+            sys.stderr.write("CANNOT REPORT: %s\n" % moved)
+            return 3
         fired = run_pipeline_gate(cmds, env)
         report["pipeline"] = {"population": len(cmds), "fired": len(fired), "items": fired}
 
