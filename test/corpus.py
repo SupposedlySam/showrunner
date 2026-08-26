@@ -268,6 +268,31 @@ def main():
         print(json.dumps(report, indent=2))
         return 0
 
+    # AN EMPTY POPULATION IS NOT A CLEAN RESULT, AND THE EXIT CODE MUST SAY SO. This printed
+    # the caveat and returned 0 — so a caller reading the status got "fine" over a corpus in
+    # which nothing was measured, which is the identity element this whole tool exists to
+    # refuse, in the tool that refuses it.
+    #
+    # game_loop's auditor hit the same thing an hour ago by PERTURBING their corpus: a truncated
+    # transcript gave 0 closings, 0 blocks, and the line "all 0 blocks covered by the inspected
+    # set" — full coverage reported over nothing. Their measurement tool already had the floor;
+    # the file they wrote afterwards did not inherit it. Mine had the prose and not the floor.
+    #
+    # Exit 3, the same code as a gate that cannot answer, because it is the same finding: this
+    # run measured nothing about the subject.
+    empty = [k for k in ("promise", "pipeline")
+             if k in report and report[k]["population"] == 0]
+    if empty:
+        for k in empty:
+            sys.stderr.write("POPULATION IS EMPTY for the %s gate — nothing was measured, so "
+                             "the 0.0%% below is a fact about the extraction and not about the "
+                             "gate.\n" % k)
+        sys.stderr.write("Refusing to report a rate over an empty population. A sweep that "
+                         "examined nothing returns zero, and zero reads as good news.\n")
+        if args.json:
+            print(json.dumps(report, indent=2))
+        return 3
+
     print("transcript: %s" % path)
     print("AS OF %s (%d bytes) — this corpus GROWS; every rate below is a snapshot, and the "
           "denominator moves whenever work happens." % (asof, stat.st_size))

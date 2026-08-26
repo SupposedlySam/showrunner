@@ -5609,6 +5609,30 @@ def test_corpus_tool():
        "data that knows more than the summary does",
        "Next I'll pay those debts" in (data["promise"]["items"] or [""])[0])
 
+    # AN EMPTY POPULATION IS NOT A CLEAN RESULT. Found by PERTURBING the corpus rather than by
+    # reading the code: hand a transcript with no records and the tool printed its caveat and
+    # returned 0, so a caller reading the status got "fine" over a run that measured nothing.
+    #
+    # game_loop's auditor hit the identical thing by truncating theirs — 0 closings, 0 blocks,
+    # and the line "all 0 blocks covered by the inspected set". Full coverage reported over
+    # nothing. Their measurement tool already had the floor and the file they wrote afterwards
+    # did not inherit it; mine had the prose and not the floor.
+    empty_t = os.path.join(scratch, "empty.jsonl")
+    with open(empty_t, "w") as fh:
+        fh.write("")
+    p_empty = subprocess.run([sys.executable, tool, "--transcript", empty_t, "--quiet"],
+                             capture_output=True, text=True)
+    eq("a corpus with NO records refuses rather than reporting 0.0%% — a sweep that examined "
+       "nothing returns zero, and zero reads as good news", p_empty.returncode, 3)
+    ok("...naming which gate had the empty population, so the refusal is actionable rather "
+       "than a bare exit code", "POPULATION IS EMPTY" in p_empty.stderr, p_empty.stderr[:160])
+    # THE CONTROL FOR THE CONTROL: the same tool on a NON-empty corpus must still report, or
+    # this floor is just a tool that always refuses.
+    ok("...while a corpus with records still reports normally, so the floor is a discriminator "
+       "and not a blanket refusal",
+       subprocess.run([sys.executable, tool, "--transcript", tp, "--gate", "promise",
+                       "--quiet"], capture_output=True, text=True).returncode == 0)
+
     # EVERY READING IS A SNAPSHOT AND MUST SAY SO. This corpus is the project's own transcript
     # and it grows while the work happens: re-running the same afternoon moved the promise
     # gate's denominator from 237 to 243 with the numerator unchanged. game_loop's auditor had
