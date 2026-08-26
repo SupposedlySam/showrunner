@@ -414,6 +414,35 @@ showrunner whoami                    # SessionStart AND PostCompact  (whoami.sh)
 showrunner dispatch guard            # PreToolUse on BASH            (dispatch-guard.sh)
 ```
 
+### `$?` after a pipe is the truncator's status, not the command's
+
+`.showrunner/hooks/pipeline-status-gate.sh` runs on **PreToolUse(Bash)** and notices when a
+command is about to read `$?` from a pipeline whose last element is `head`, `tail`, `grep`,
+`wc`, `cat`, `sed`, `cut`, `uniq` or `sort`. A pipeline exits with its LAST command's status,
+and those essentially always succeed — so `cmd 2>&1 | head -3; echo "exit=$?"` reports 0
+whatever `cmd` did, and the surviving output still looks correct.
+
+It NOTICES, it never denies: sometimes the truncator genuinely is the subject, and a gate that
+blocks a legitimate shape trains its own bypass. `set -o pipefail` and `${PIPESTATUS[0]}` are
+recognised and silence it, as does the common correct form — redirect first, pipe later:
+
+```
+cmd > /tmp/out 2>&1; rc=$?        # the real status
+grep -E 'FAIL|RESULT' /tmp/out    # the pipe belongs to a different command
+```
+
+Measured on 3,553 real Bash commands from one session: it fires on 23 (0.6%), with no false
+positives. Of the still-reproducible instances, re-run with and without the pipe, **4 of 7
+reported a wrong status** — and one of those false readings became a bug report filed against
+another project for a defect that did not exist.
+
+The sharpest instance is this project's own. `showrunner check` exits **3** on VOID, and its
+output argues for that exact code: *"distinct from 2 (new failures) so a caller that treats
+non-zero as 'the code is bad' gets a code it did not map rather than a wrong answer it will
+believe."* Reasoned for, implemented, documented — and then read as 0 through a pipe by the
+author of it. A truncation is lossless exactly where there is nothing to lose, which is the
+case that builds your confidence in it, and destructive on the case it was meant to summarise.
+
 ### A turn that promises work instead of doing it is refused
 
 `.showrunner/hooks/future-tense-gate.sh` runs on **Stop** and reads the closing paragraph of the

@@ -5144,6 +5144,70 @@ def test_campaign_scoping():
         del os.environ["SHOWRUNNER_CAMPAIGN"]
 
 
+def test_pipeline_status_gate():
+    group("`$?` after a pipe: the status of the truncator, not of the command being judged")
+    hook = os.path.join(ROOT, ".showrunner", "hooks", "pipeline-status-gate.sh")
+    if not os.access(hook, os.X_OK):
+        skip("the pipeline-status gate", "hook not present or not executable")
+        return
+
+    def fired(command):
+        p = subprocess.run(["bash", hook], input=json.dumps(
+            {"tool_name": "Bash", "tool_input": {"command": command}}),
+            capture_output=True, text=True)
+        return bool(p.stdout.strip()), p.stdout
+
+    # THE DEFECT, MEASURED IN THIS REPO RATHER THAN IMAGINED. A pipeline exits with its LAST
+    # command's status, and head/tail/grep essentially always succeed. Re-running the still
+    # reproducible instances from one session with and without the pipe, 4 of 7 reported a
+    # WRONG status: `showrunner check` 3 read as 0, `campaign` 2 as 0, `waiting` 1 as 0,
+    # `llm_chat owed` 2 as 0. One of those became a bug report filed against another team's
+    # tool for a defect that did not exist.
+    #
+    # The sharpest instance is this project's own: `check` exits 3 on VOID, and its output
+    # argues for that code — "distinct from 2 (new failures) so a caller that treats non-zero
+    # as 'the code is bad' gets a code it did not map rather than a wrong answer it will
+    # believe". Reasoned for, implemented, documented, then read as 0 through a pipe by the
+    # author of it. A signal designed to stop a caller believing a wrong answer.
+    hit, out = fired('llm_chat owed --json 2>&1 | head -3; echo "exit=$?"')
+    ok("`$?` after a pipe ending in `head` is named as the truncator's status", hit, out[:200])
+    ok("...and the notice quotes the offending pipeline back, so the warning is locatable "
+       "rather than a general lecture", "| head -3" in out, out[:200])
+    for shape in ('cmd 2>&1 | tail -5; echo "rc=$?"',
+                  'x | grep -E "R" | head -4; echo "exit=$?"',
+                  'a | wc -l; rc=$?'):
+        ok("...as is %r" % shape[:34], fired(shape)[0])
+
+    # THE SAFE SHAPES MUST STAY SILENT, or this becomes a warning nobody reads. The common
+    # correct form redirects first and pipes LATER — the `$?` there is the real status and the
+    # pipe belongs to a different command entirely.
+    for shape, why in (
+            ('python3 test/run.py > /tmp/o 2>&1; echo "exit=$?"; grep RESULT /tmp/o | head -4',
+             "redirect first, pipe in a LATER command"),
+            ('set -o pipefail; cmd | head -3; echo "$?"', "pipefail handles it"),
+            ('cmd | head -3; echo "${PIPESTATUS[0]}"', "PIPESTATUS reads the right element"),
+            ('echo payload | python3 gate.py; echo "rc=$?"',
+             "the SUBJECT is last in the pipeline, which is the status `$?` gives"),
+            ('git status --porcelain | head -3', "no `$?` read at all")):
+        ok("...while %s stays silent (%s)" % (repr(shape[:30]), why), not fired(shape)[0])
+
+    # IT NOTICES, IT NEVER DENIES. Sometimes the truncator IS the subject, and a gate that
+    # blocks a legitimate shape trains its own bypass.
+    p = subprocess.run(["bash", hook], input=json.dumps(
+        {"tool_name": "Bash", "tool_input": {"command": 'cmd | head -1; echo "$?"'}}),
+        capture_output=True, text=True)
+    eq("the gate ALLOWS and annotates rather than refusing — naming the hazard at the moment "
+       "of use is the job, and a blocked legitimate shape teaches the author to route around "
+       "it", p.returncode, 0)
+
+    # A NON-BASH CALL IS NOT ITS BUSINESS.
+    p2 = subprocess.run(["bash", hook], input=json.dumps(
+        {"tool_name": "Write", "tool_input": {"file_path": 'x | head; echo "$?"'}}),
+        capture_output=True, text=True)
+    ok("...and a non-Bash tool call is passed through untouched, even when its payload "
+       "happens to contain the pattern", not p2.stdout.strip())
+
+
 def test_issue_waker():
     group("The issue waker: who may be acted on, and who is only read")
     import importlib.util
@@ -8436,6 +8500,7 @@ def main():
                test_role_seat_verbs,
                test_close_resolves_paths_against_the_callers_tree,
                test_campaign_scoping,
+               test_pipeline_status_gate,
                test_issue_waker,
                test_central_install,
                test_installer_leaves_no_vendored_copy,
