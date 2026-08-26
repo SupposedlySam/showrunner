@@ -5192,7 +5192,7 @@ def _hook_wiring(hook_dir, settings_files, excused):
     return sorted(files - registered - set(excused))
 
 
-def _unsourced_rates(text, tools):
+def _unsourced_rates(text, tools, source=None):
     """Lines stating a measured RATE with no committed instrument named on them.
 
     THE FAMILY ENTRY BOTH SIDES CALLED UNGUARDABLE. Every other member compares two artifacts
@@ -5209,6 +5209,18 @@ def _unsourced_rates(text, tools):
     enforcement is on the decision having been recorded, never on the decision being correct.
     """
     import re as _re
+    # A FILE THAT IS ONE OF THE TOOLS IS ITS OWN REPRODUCER, and a checker for unsourced claims
+    # is blind to that by construction. game_loop's auditor ran this over their own files and
+    # three of the flags were the checker being wrong: the file citing the number WAS the thing
+    # that produces it. Naming a reproducer beside it would have been circular at best.
+    #
+    # This also removes a false positive that had nothing to do with rates: `0.0%%` inside a
+    # format string in the corpus tool. A checker that reads code as prose will find numbers in
+    # it, and the self-reference exemption is the honest reason to skip that whole file rather
+    # than special-casing percent signs.
+    if source and source in tools:
+        return []
+
     # PARAGRAPH, NOT LINE. The first version asked per line and immediately reported two false
     # positives of its own making: prose wraps, so a rate and the command that reproduces it
     # land on adjacent lines constantly. A reader does not read a line, they read the block —
@@ -5249,12 +5261,23 @@ def test_a_rate_names_its_instrument():
        "an issue number is not a rate, and a check that flags them becomes noise and gets skimmed",
        _unsourced_rates("showrunner 0.1.0 · pinned cd1b7bff · closes #65", TOOLS), [])
 
-    # THE REAL SURFACE. llms.txt is the front door: a rate there is what a reader takes away.
-    with open(os.path.join(ROOT, "llms.txt")) as fh:
-        doc = fh.read()
-    offenders = _unsourced_rates(doc, TOOLS)
-    ok("every rate in llms.txt names a committed instrument, so a reader can reproduce it "
-       "instead of taking it on trust", not offenders, offenders[:4])
+    # A FILE THAT IS THE TOOL IS ITS OWN REPRODUCER. Exercised on a name in the tool list, so
+    # the exemption is asserted rather than assumed.
+    eq("a rate inside one of the tools themselves is not unsourced — the file citing it IS what "
+       "produces it, and demanding a citation there is circular",
+       _unsourced_rates("it fires on 24 of 3,586 commands", TOOLS, source="test/corpus.py"), [])
+    ok("...while the same text in a doc still flags, so the exemption is about WHERE the claim "
+       "lives and not about the wording",
+       len(_unsourced_rates("it fires on 24 of 3,586 commands", TOOLS, source="llms.txt")) == 1)
+
+    # THE REAL SURFACES. Both front doors: a rate in either is what a reader takes away, and
+    # README carried one — `6 of 12 concurrent claims won the same leaf` — with no way to
+    # reproduce it, which is the exact defect this check exists for.
+    for doc_name in ("llms.txt", "README.md"):
+        with open(os.path.join(ROOT, doc_name)) as fh:
+            offenders = _unsourced_rates(fh.read(), TOOLS, source=doc_name)
+        ok("every rate in %s names a committed instrument, so a reader can reproduce it "
+           "instead of taking it on trust" % doc_name, not offenders, offenders[:4])
 
 
 def test_stale_copy_cannot_warn_about_itself():

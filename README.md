@@ -458,7 +458,7 @@ between them is protected, and it was measured before it was fixed:
 
 | Shared state | The race | Now |
 |---|---|---|
-| a leaf claim | check-then-write: **6 of 12** concurrent claims won the same leaf | one conditional `UPDATE`; measured 1 of 12 |
+| a leaf claim | check-then-write: **6 of 12** concurrent claims won the same leaf | one conditional `UPDATE`; measured 1 of 12 (`python3 test/run.py`, group *Single-consumer resource locks*) |
 | the campaign record | read-modify-write: **3 of 10** spawns survived | `flock` + write-then-rename; 10 of 10 |
 | the main checkout | two `integrate` runs rewinding each other | exclusive, and it **refuses** rather than queueing |
 
