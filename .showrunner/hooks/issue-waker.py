@@ -135,16 +135,24 @@ def chat_debts():
     except (OSError, subprocess.SubprocessError):
         return None
 
-    # THE EXIT CODE IS NOT ENOUGH, MEASURED. With every room rate-limited, `owed` returned
-    # exit 0 and the words "nothing owed" — while its own --json body listed all five rooms
-    # under `unreachable` and its own --help says exit 2 means COULD NOT LOOK. So the summary
-    # said clean, the body said blind, and the doorbell built to stop a debt going unnoticed
-    # would have reported a clean inbox for a server it could not reach.
+    # READ THE BODY, NOT THE STATUS. `owed --json` publishes `unreachable` — the rooms it could
+    # not reach — and that is the population any "nothing owed" claim is made over. An empty
+    # `owed` beside a non-empty `unreachable` is a failed look wearing the shape of a clean
+    # inbox, and this doorbell exists precisely to not report that as good news.
     #
-    # Reported upstream, because the exit code is llm_chat's contract to keep and silencing it
-    # here would hide the defect from everyone else. What is MINE is whether this bell tells
-    # the truth about its own reach, so it reads the reachability the body already publishes
-    # rather than trusting the summary over it. Consuming their data, not duplicating a check.
+    # CORRECTION, LEFT IN PLACE BECAUSE THE ERROR IS MORE USEFUL THAN THE FIX: an earlier
+    # version of this comment claimed llm_chat exits 0 when rooms are unreachable, in
+    # violation of its own documented contract, and said so as a MEASURED fact. It does not.
+    # Its source returns 2 whenever `unreachable` is non-empty. My "measurement" was
+    #     llm_chat owed --json 2>&1 | head -3; echo "exit=$?"
+    # where `$?` is HEAD's status, not llm_chat's — and I had additionally taken the exit code
+    # from one run and the body from a later one and reported them as a single observation.
+    # I filed a bug upstream on a number I never read. Retracted there.
+    #
+    # The change itself still stands on its own merits, which is why it survived the
+    # retraction: an exit code is a summary, the body is the data, and a status can be eaten
+    # by a pipe while a parsed field cannot. Reading `unreachable` is better than reading a
+    # status even when the status is entirely correct — as this one was all along.
     try:
         body = json.loads(out.stdout or "")
         debts, blind = body.get("owed") or [], body.get("unreachable") or []

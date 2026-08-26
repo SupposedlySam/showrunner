@@ -5185,15 +5185,20 @@ def test_issue_waker():
         json.dump({"seen": [1, 2]}, fh)
     eq("...while a readable baseline is used", w.baseline(), {1, 2})
 
-    # A RATE-LIMITED CHAT SERVER REPORTED A CLEAN INBOX. Measured live, not imagined: with all
-    # five rooms returning HTTP 429, `llm_chat owed` exited 0 and printed "nothing owed", while
-    # its own --json body listed every one of those rooms under `unreachable` and its own --help
-    # states that exit 2 means COULD NOT LOOK. The summary said clean, the body said blind, and
-    # a real debt was sitting unseen behind the rate limit at that moment.
+    # NO DEBTS FOUND ACROSS ROOMS WE COULD NOT REACH IS A FAILED LOOK, not a clean inbox. The
+    # doorbell reads `unreachable` from the JSON body rather than the exit status, because the
+    # body is the data and a status is a summary over it.
     #
-    # The exit code is llm_chat's contract to keep and is reported upstream rather than papered
-    # over here. What is showrunner's is whether this bell tells the truth about its own reach,
-    # so it reads the reachability the body already publishes instead of trusting the summary.
+    # THE COMMENT THAT WAS HERE CLAIMED A MEASURED UPSTREAM DEFECT AND WAS FALSE. It said
+    # llm_chat exits 0 with rooms unreachable, contradicting its own contract. Its source
+    # returns 2 whenever `unreachable` is non-empty, and always has. My measurement was
+    # `llm_chat owed --json 2>&1 | head -3; echo "exit=$?"`, where `$?` is HEAD's status — and
+    # I had spliced an exit code from one run onto a body from a later one and called the pair
+    # a single observation. I filed that upstream as a bug and retracted it.
+    #
+    # These assertions were always about THIS parser's behaviour given a payload, so they were
+    # never testing the false claim — which is exactly why the false claim survived in a
+    # comment above four passing tests. A green suite does not audit its own prose.
     class _FakeRun(object):
         def __init__(self, code, out):
             self.returncode, self.stdout, self.stderr = code, out, ""
