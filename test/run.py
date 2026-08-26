@@ -5234,6 +5234,24 @@ def test_hook_registration():
     ok("...and an excused one is not, because the excuse is the classification", 
        "excused.sh" not in (got or []))
 
+    # A DIRECTORY IS NOT AN UNWIRED HOOK, and this survived by ACCIDENT until it was pinned.
+    # The listing filters `os.path.isfile`, and a directory happens not to be a file — nothing
+    # decided that. A later glob, or a dropped filter, starts reporting a build artifact as an
+    # unregistered guard, and the failure reads as a WIRING problem rather than a listing one,
+    # which is the expensive direction.
+    #
+    # llm_chat's owner found the same accident in their trigger net after I reported mine, and
+    # made the argument that applies to both: the point is not that the behaviour is
+    # load-bearing, it is that THE ACCIDENT IS. Mine had already bitten — a py_compile in the
+    # parse check left a __pycache__ here that this net reported as a hook nobody registered.
+    os.makedirs(os.path.join(fake_hooks, "__pycache__"), exist_ok=True)
+    with open(os.path.join(fake_hooks, "__pycache__", "x.pyc"), "w") as fh:
+        fh.write("")
+    got_dir = _hook_wiring(fake_hooks, [fake_settings], {"excused.sh": "a stated reason"})
+    eq("a build-artifact DIRECTORY beside the hooks is not reported as an unregistered hook — "
+       "one check must not manufacture the condition another check flags",
+       got_dir, ["orphan.sh"])
+
     # CANNOT LOOK IS NOT NOTHING UNWIRED. An unreadable directory returning [] would report a
     # clean wiring for a repo it never opened.
     eq("a hook directory that cannot be read answers CANNOT TELL rather than 'all wired'",
