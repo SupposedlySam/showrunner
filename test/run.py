@@ -5137,6 +5137,42 @@ def test_issue_waker():
         json.dump({"seen": [1, 2]}, fh)
     eq("...while a readable baseline is used", w.baseline(), {1, 2})
 
+    # THE DEBT HALF MUST RING FROM INSIDE THE POLL LOOP, not after the budget drains. It used to
+    # be checked once, at the very end — so this loop woke every 60s for half an hour to ask
+    # GitHub about issues and never once asked chat, and a person waiting on an answer waited
+    # out the entire budget. A debt ALREADY outstanding when the loop started waited just as
+    # long. Asserted on ELAPSED TIME against a deliberately long budget, because that is the
+    # actual claim: "it rang early" and "it rang at the end" are the same return value.
+    w.POLL_SEC, w.DEBT_EVERY, w.BUDGET_SEC = 0, 1, 60
+    w.look = lambda: {1: {}, 2: {}}                      # nothing fresh; issues are quiet
+    w.chat_debts = lambda: ["#game_loop_owner: owner asked at seq 193"]
+    started = time.time()
+    rang = w.main()
+    elapsed = time.time() - started
+    eq("an outstanding chat debt wakes the session", rang, 2)
+    ok("...within seconds rather than after the 60s budget drains — the debt half no longer "
+       "rides on the issue poll finishing (%.1fs)" % elapsed, elapsed < 10)
+
+    # AND IT MUST NOT RING TWICE FOR THE SAME DEBT, or the bell is a loop: wake, turn ends
+    # without the debt paid, Stop hook starts a fresh poll, first tick sees the same debt.
+    # Bounded only by the agent eventually paying, which is the one thing a wake cannot make
+    # happen. A NEW question from the same room carries a new seq, so it still rings.
+    w.BUDGET_SEC = 1
+    eq("...and the same unpaid debt does not ring again — the wake is recorded, not repeated",
+       w.main(), 0)
+    ok("...with the debt recorded as already rung", 
+       "#game_loop_owner: owner asked at seq 193" in w.rung())
+    w.chat_debts = lambda: ["#game_loop_owner: owner asked at seq 199"]
+    w.BUDGET_SEC = 60
+    eq("...while a LATER question from the same room rings, because the seq differs and it is a "
+       "different person waiting on a different answer", w.main(), 2)
+
+    # A FAILED LOOK IS NOT A CLEAN INBOX, on this half too.
+    w.chat_debts = lambda: None
+    w.BUDGET_SEC = 1
+    eq("...and a chat check that could not run wakes nobody rather than reporting no debts",
+       w.main(), 0)
+
 
 def test_self_vendored_pin():
     group("Self-vendoring: editing the tool must not disarm the tool (game_loop's .game_loop_self)")

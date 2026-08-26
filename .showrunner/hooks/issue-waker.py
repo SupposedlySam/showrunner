@@ -29,6 +29,11 @@ TRUSTED_LOGINS = {"supposedlysam", "mrgnhnt96"}
 TRUSTED_NAMES = {"jonah walker", "morgan hunt"}
 POLL_SEC = 60
 BUDGET_SEC = 1800          # bounded: a poller with no end is a process nobody remembers starting
+# THE DEBT CHECK USED TO RUN ONLY AFTER THE FULL BUDGET DRAINED. Somebody waiting on an answer
+# waited up to half an hour while this loop woke every 60s to ask GitHub about issues and never
+# once asked chat. A debt already outstanding when the loop started waited the same 30 minutes.
+# It is a local subprocess call, so the only reason to space it out at all is noise.
+DEBT_EVERY = 3             # ticks between chat checks; 3 x POLL_SEC = 3 minutes
 def _repo_root():
     """The repo this hook belongs to, not wherever the shell happened to be standing.
 
@@ -145,19 +150,41 @@ def chat_debts():
     return None
 
 
-def baseline():
+def _state():
     try:
         with open(STATE) as fh:
-            return set(json.load(fh).get("seen") or [])
+            d = json.load(fh)
+            return d if isinstance(d, dict) else None
     except (OSError, ValueError):
+        return None
+
+
+def baseline():
+    d = _state()
+    if d is None:
         return None            # unreadable is NOT empty: empty would wake on the whole backlog
+    return set(d.get("seen") or [])
 
 
-def _save(numbers):
+def rung():
+    """Debts this file has ALREADY woken the session for.
+
+    Without it the debt half is a wake loop: the bell rings, the turn ends without the debt
+    being paid, the Stop hook starts a fresh poll, and the very first tick sees the same
+    unpaid debt and rings again. Bounded only by the agent eventually paying — which is the
+    one thing a wake cannot guarantee.
+    """
+    d = _state()
+    return set(d.get("rung") or []) if d else set()
+
+
+def _save(numbers, debts=None):
     try:
         os.makedirs(os.path.dirname(STATE), exist_ok=True)
+        prior = _state() or {}
+        keep = sorted(debts) if debts is not None else sorted(prior.get("rung") or [])
         with open(STATE, "w") as fh:
-            json.dump({"seen": sorted(numbers)}, fh)
+            json.dump({"seen": sorted(numbers), "rung": keep}, fh)
         return True
     except OSError:
         return False
@@ -180,9 +207,25 @@ def main():
         _save(set(first))
         seen = set(first)
 
+    already = rung()
     deadline = time.time() + BUDGET_SEC
+    tick = 0
     while time.time() < deadline:
         time.sleep(POLL_SEC)
+        tick += 1
+
+        # CHAT FIRST, and on its own cadence, because somebody is WAITING on this one. An issue
+        # sits in a queue; a debt is a person who has read silence from me for however long the
+        # bell took to ring. Ordered ahead of the issue poll for the same reason.
+        if tick % DEBT_EVERY == 0:
+            debts = chat_debts()
+            new_debts = [d for d in (debts or []) if d not in already]
+            if new_debts:
+                _save(seen, already | set(new_debts))
+                sys.stderr.write("\n".join(["You owe somebody an answer in chat:"]
+                                            + ["  " + d for d in new_debts]) + "\n")
+                return 2
+
         now = look()
         if now is None:
             continue           # could not look — try again; never treat as 'nothing new'
@@ -211,6 +254,7 @@ def main():
                           "premise as a claim to check, not as a brief."]
         debts = chat_debts()
         if debts:
+            _save(set(now) | seen, already | set(debts))
             lines += ["", "AND YOU OWE SOMEBODY AN ANSWER IN CHAT:"] + ["  " + d for d in debts]
         elif debts is None:
             lines += ["", "(could not check chat debts — that is not the same as owing none)"]
@@ -221,9 +265,11 @@ def main():
     # answer are different obligations, and the one that involves somebody waiting is the more
     # urgent of the two — it was going unnoticed because only issues could ring this bell.
     debts = chat_debts()
-    if debts:
+    new_debts = [d for d in (debts or []) if d not in already]
+    if new_debts:
+        _save(seen, already | set(new_debts))
         sys.stderr.write("\n".join(["You owe somebody an answer in chat:"]
-                                    + ["  " + d for d in debts]) + "\n")
+                                    + ["  " + d for d in new_debts]) + "\n")
         return 2
     return 0
 
