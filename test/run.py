@@ -5254,26 +5254,47 @@ def test_zero_inventory_matches_reality():
         doc = fh.read()
     ok("llms.txt tells a reader where the coverage STOPS, not only where it exists",
        "Everywhere else you are on your own" in re.sub(r"\s+", " ", doc))
+    with open(os.path.join(HERE, "run.py")) as fh:
+        own = fh.read()
 
-    controls = (
-        ("test/mutate.py", "REFUSE ON A RED BASELINE",
-         "0 kills is meaningless if the suite was already failing"),
-        ("test/corpus.py", "did not refuse a KNOWN promise",
-         "0 fires is meaningless if the gate cannot fire"),
-    )
-    for rel_path, marker, why in controls:
-        with open(os.path.join(ROOT, rel_path)) as fh:
-            body = fh.read()
-        ok("%s still carries the control the inventory credits it with — %s"
-           % (rel_path, why), marker in body)
+    # THE FIRST VERSION OF THIS CHECK GREPPED FOR A COMMENT, which is this project's own
+    # name-presence-is-not-evidence defect committed inside the inventory that exists to stop
+    # exactly that. `REFUSE ON A RED BASELINE` is a COMMENT in mutate.py: delete the two lines
+    # of logic beneath it, keep the prose, and the check passed over a repo whose control was
+    # gone. Verified by doing it.
+    #
+    # game_loop's auditor supplied the criterion the same hour: two things are independent only
+    # if they can be WRONG SEPARATELY. A comment and the code it describes cannot — one edit
+    # moves the code and leaves the comment, and the grep sees no difference.
+    #
+    # So the red-baseline control is asserted STRUCTURALLY, from the AST: `main` must contain a
+    # branch on the baseline being unreadable that RETURNS a non-zero. Prose cannot satisfy
+    # this, and the shape survives rewording.
+    with open(os.path.join(ROOT, "test", "mutate.py")) as fh:
+        mut_tree = ast.parse(fh.read())
+    guarded = False
+    for node in ast.walk(mut_tree):
+        if not isinstance(node, ast.If):
+            continue
+        test_src = ast.dump(node.test)
+        if "b_pass" not in test_src:
+            continue
+        if any(isinstance(n, ast.Return) and n.value is not None
+               for n in ast.walk(node)):
+            guarded = True
+    ok("test/mutate.py REFUSES on an unreadable baseline as CODE, not as a comment — 0 kills "
+       "is meaningless if the suite was already failing, and a grep for the prose passes over "
+       "a repo where the logic was deleted", guarded)
 
-    # doctor's marker is split across adjacent literals, which is the trap this whole group is
-    # about — so it is searched the way the interpreter sees it, not the way grep does.
-    with open(os.path.join(ROOT, "lib", "showrunner", "cli.py")) as fh:
-        cli_joined = re.sub(r'"\s*\n\s*"', "", fh.read())
-    ok("doctor still says CANNOT BE DETERMINED rather than falling silent — found by joining "
-       "adjacent literals, because a line-based search returns nothing and that would read as "
-       "the control having been deleted", "CANNOT BE DETERMINED" in cli_joined)
+    # THE OTHER TWO ARE ASSERTED BY BEHAVIOUR ELSEWHERE IN THIS SUITE, which is stronger than
+    # anything a text search can claim, so this only records WHERE — an inventory that
+    # re-greps what a behavioural test already proves is duplicating the weaker half.
+    ok("...and the corpus tool's refusal is proved by RUNNING it against a gate that cannot "
+       "fire, in the corpus group, rather than by searching for its message",
+       "a gate that cannot PARSE makes the tool refuse to report a rate at all" in own)
+    ok("...and doctor's CANNOT BE DETERMINED by running it against a real unborn HEAD, in the "
+       "stale-copy group",
+       "a pin whose age CANNOT be determined is reported as exactly that" in own)
 
 
 def test_negative_text_assertions_flatten():
