@@ -575,6 +575,21 @@ def cmd_doctor(args):
                       "you are editing — deliberate while you work, stale if you forget. Refresh: "
                       "`%s self --pin HEAD --dest .showrunner_self`"
                       % (YEL + "warn " + OFF, sha[:12], n, repin))
+            else:
+                # WHEN THE ANSWER IS UNDEFINED, MAKE IT THE LOUD ONE. Every branch above needs
+                # HEAD; without it none fired and THE LINE VANISHED ENTIRELY — a pin of unknown
+                # age reported as nothing at all, which reads exactly like a healthy one.
+                #
+                # llm_chat measured the opposite failure in their own equivalent: theirs always
+                # cried STALE when run from an old copy, which is annoying and safe. Mine went
+                # quiet, which is the direction that costs a week. A check that degrades badly
+                # is still worth having if it degrades toward alarm, and that is a choice
+                # available at the moment it is written.
+                print("  %s   ...from the self-vendored pin at %s, and this checkout WOULD NOT "
+                      "SAY WHAT HEAD IS, so whether your guards are current CANNOT BE "
+                      "DETERMINED. That is not the same as up to date. Refresh blind, or fix "
+                      "git here: `%s self --pin HEAD --dest .showrunner_self`"
+                      % (YEL + "warn " + OFF, sha[:12], repin))
     else:
         print("  %s %s does not exist or is not executable, and every Crawler brief tells its "
               "agent to run it. Run install.sh, or work from a checkout that carries "

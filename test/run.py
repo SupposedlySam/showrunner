@@ -5192,6 +5192,71 @@ def _hook_wiring(hook_dir, settings_files, excused):
     return sorted(files - registered - set(excused))
 
 
+def _unsourced_rates(text, tools):
+    """Lines stating a measured RATE with no committed instrument named on them.
+
+    THE FAMILY ENTRY BOTH SIDES CALLED UNGUARDABLE. Every other member compares two artifacts
+    that both exist — a list and a directory, a doc and a registry, a predicate and a hook. This
+    one has to notice an artifact ABSENT AT THE MOMENT A CLAIM WAS MADE, and by the time anyone
+    reads the claim the only evidence of the missing script is the claim itself.
+
+    llm_chat's owner supplied the move that makes it checkable, and it is the same shape as the
+    recorded sha: do not try to detect the absence later — require the instrument to be IN THE
+    REPO when the number goes out, so a number without one is visibly a number without one.
+
+    WHAT THIS CANNOT DO: check the number is right, or that the named tool produces it. It
+    checks that a reader is told what to run. That is the same split as the wiring net — the
+    enforcement is on the decision having been recorded, never on the decision being correct.
+    """
+    import re as _re
+    # PARAGRAPH, NOT LINE. The first version asked per line and immediately reported two false
+    # positives of its own making: prose wraps, so a rate and the command that reproduces it
+    # land on adjacent lines constantly. A reader does not read a line, they read the block —
+    # so the block is the right unit, and asking per line means every rewrap is a new failure.
+    bad, line_no = [], 1
+    for para in text.split("\n\n"):
+        lines = para.split("\n")
+        if not any(l.lstrip().startswith(("#", "//")) for l in lines) and \
+           _re.search(r"\b\d[\d,]* of [\d,]+\b|\b\d+\.\d+%|\b\d+% of\b", para) and \
+           not any(t in para for t in tools):
+            hit = next((l for l in lines if _re.search(
+                r"\b\d[\d,]* of [\d,]+\b|\b\d+\.\d+%|\b\d+% of\b", l)), para)
+            bad.append((line_no, hit.strip()[:100]))
+        line_no += len(lines) + 1
+    return bad
+
+
+def test_a_rate_names_its_instrument():
+    group("A published rate names the committed tool that reproduces it")
+
+    # THE INSTRUMENT MUST EXIST BEFORE THE NUMBER GOES OUT. Every corpus figure this project
+    # published came from a script written for the occasion and deleted; the numbers reached
+    # commit messages and llms.txt while the instrument lasted four minutes. Nobody could
+    # re-run one — including me, and including the people I sent them to.
+    TOOLS = ("test/corpus.py", "test/mutate.py", "test/run.py", "test/docs_surface.py")
+
+    # THE CHECK MUST BE ABLE TO FAIL, which is llm_chat's warning about a default-deny net over
+    # an already-clean set: theirs passed whether or not it worked, because it only ever asked
+    # about a directory where everything was classified. So it is a function, exercised here on
+    # text this repo does not contain.
+    sourced = "promise gate: 3 of 237 closings — `python3 test/corpus.py --gate promise`"
+    unsourced = "The gate fires on 24 of 3,586 commands with 2 false positives."
+    eq("a rate carrying the command that reproduces it passes",
+       _unsourced_rates(sourced, TOOLS), [])
+    ok("...while a bare rate is NAMED, so the net can actually fail",
+       len(_unsourced_rates(unsourced, TOOLS)) == 1, _unsourced_rates(unsourced, TOOLS))
+    eq("...and an ordinary number that is not a measurement is left alone — a version, a sha or "
+       "an issue number is not a rate, and a check that flags them becomes noise and gets skimmed",
+       _unsourced_rates("showrunner 0.1.0 · pinned cd1b7bff · closes #65", TOOLS), [])
+
+    # THE REAL SURFACE. llms.txt is the front door: a rate there is what a reader takes away.
+    with open(os.path.join(ROOT, "llms.txt")) as fh:
+        doc = fh.read()
+    offenders = _unsourced_rates(doc, TOOLS)
+    ok("every rate in llms.txt names a committed instrument, so a reader can reproduce it "
+       "instead of taking it on trust", not offenders, offenders[:4])
+
+
 def test_stale_copy_cannot_warn_about_itself():
     group("A copy cut before a check existed cannot run that check — and silence reads as fine")
     if not have("git"):
@@ -5220,6 +5285,34 @@ def test_stale_copy_cannot_warn_about_itself():
        "so it fires from any version of the code including one cut before it existed",
        "self-vendored pin at" in cli)
 
+    # WHEN THE ANSWER IS UNDEFINED, MAKE IT THE LOUD ONE. Every branch of the pin report needed
+    # HEAD, and without it none fired — the line VANISHED, so a pin of unknown age rendered as
+    # nothing at all, which reads exactly like a healthy one.
+    #
+    # llm_chat measured the opposite degradation in their equivalent check: theirs always cried
+    # STALE from an old copy, which is annoying and safe. Mine went quiet, which is the
+    # direction that costs a week. The direction is a choice available when the check is written.
+    unborn = tmpdir("unborn-head")
+    subprocess.run(["git", "init", "-q"], cwd=unborn, capture_output=True)
+    rc_h = subprocess.run(["git", "rev-parse", "HEAD"], cwd=unborn, capture_output=True)
+    ok("a freshly-initialised repo genuinely has no HEAD, so this exercises the real branch "
+       "rather than a mocked one", rc_h.returncode != 0)
+    subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "init",
+                    "--root", unborn], capture_output=True)
+    selfdir = os.path.join(unborn, ".showrunner_self")
+    os.makedirs(os.path.join(selfdir, "bin"), exist_ok=True)
+    with open(os.path.join(selfdir, "PINNED"), "w") as fh:
+        json.dump({"sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "ref": "HEAD"}, fh)
+    shutil.copy(os.path.join(ROOT, "bin", "showrunner"), os.path.join(selfdir, "bin"))
+    shutil.copytree(os.path.join(ROOT, "lib"), os.path.join(selfdir, "lib"), dirs_exist_ok=True)
+    out = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                         cwd=unborn, capture_output=True, text=True).stdout
+    ok("a pin whose age CANNOT be determined is reported as exactly that, rather than the line "
+       "disappearing — silence there reads identically to a current pin",
+       "CANNOT BE DETERMINED" in out, out[-300:])
+    ok("...and says so in the words that block the flattering reading",
+       "not the same as up to date" in out, out[-300:])
+
     # AND THE DOC CARRIES THE COMMAND, because a doc does not have to be executing to be read.
     # That is the only remedy that reaches a stale copy at all.
     with open(os.path.join(ROOT, "llms.txt")) as fh:
@@ -5229,6 +5322,9 @@ def test_stale_copy_cannot_warn_about_itself():
     ok("...and gives the command that reads the recorded commit from OUTSIDE the copy, rather "
        "than describing the idea and leaving the reader to invent it",
        "cat PINNED" in doc and "log --oneline" in doc)
+    ok("...and states the SUFFICIENT rule, not the one llm_chat refuted: durable evidence is "
+       "not enough unless the comparison happens outside the build",
+       "comparison performed OUTSIDE the build" in doc)
 
 
 def test_hook_registration():
@@ -9015,6 +9111,7 @@ def main():
                test_role_seat_verbs,
                test_close_resolves_paths_against_the_callers_tree,
                test_campaign_scoping,
+               test_a_rate_names_its_instrument,
                test_stale_copy_cannot_warn_about_itself,
                test_hook_registration,
                test_corpus_tool,
