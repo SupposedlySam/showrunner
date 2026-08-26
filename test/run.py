@@ -5238,6 +5238,49 @@ def _unsourced_rates(text, tools, source=None):
     return bad
 
 
+def test_negative_text_assertions_flatten():
+    group("An assertion that a phrase is ABSENT must not pass just because the phrase wrapped")
+
+    # THE CLASS, demonstrated rather than argued. An assertion whose evidence is a NON-OCCURRENCE
+    # in text passes the moment the text rewraps, because a search for "a b c" finds nothing in
+    # "a b\nc". Prose rewraps constantly, so the guarded claim can walk straight back in under a
+    # green suite — and the assertion is perfectly effective at asserting the wrong thing, which
+    # is where mutation testing cannot reach.
+    wrapped = "the verb wires all of\nthem, as documented"
+    ok("a naive absence check PASSES on wrapped text, which is the false clear",
+       "wires all of them" not in wrapped)
+    ok("...while the flattened one correctly still finds it",
+       "wires all of them" in re.sub(r"\s+", " ", wrapped))
+
+    # MEASURED IN THIS SUITE, not asserted about it. Only assertions searching DOCUMENT TEXT are
+    # at risk: process stdout is compared as produced, and a single token cannot wrap. So the
+    # check is scoped to the doc variables rather than flagging every `not in`, which would be
+    # the mostly-noise failure this repo has removed twice.
+    with open(os.path.join(HERE, "run.py")) as fh:
+        own = fh.read()
+    risky = re.findall(r'"([^"]{6,60})"\s+not\s+in\s+(doc|txt|text)\b', own)
+    # A PHRASE CONTAINING AN EXPLICIT NEWLINE IS ASSERTING A POSITIONAL FACT — "no bare
+    # `showrunner close` at the start of an indented line" — and flattening would destroy the
+    # very thing it checks. Exempted by SHAPE rather than by name, so a second one is covered
+    # without an edit, and a phrase that merely happens to be multi-word is not.
+    multiword = [(ph, var) for ph, var in risky
+                 if " " in ph.strip() and "\\n" not in ph]
+    ok("every multi-word ABSENCE claim against document text in this suite is made against "
+       "flattened text — the ones that are not are listed here rather than assumed harmless",
+       not multiword, multiword)
+
+    # AND THE REASON THIS GOT WRITTEN. A grep for `CANNOT BE DETERMINED` in cli.py returned
+    # nothing today while the string was plainly there, split across two adjacent literals. The
+    # honest reading of that empty result was CANNOT TELL; I nearly read it as ABSENT, an hour
+    # after game_loop's auditor made the same error on a two-line subprocess call.
+    with open(os.path.join(ROOT, "lib", "showrunner", "cli.py")) as fh:
+        cli_src = fh.read()
+    joined = re.sub(r'"\s*\n\s*"', "", cli_src)
+    ok("a string split across adjacent literals IS present once they are joined, even though a "
+       "line-based search finds nothing — the empty result meant CANNOT TELL, never ABSENT",
+       "CANNOT BE DETERMINED" in joined and "CANNOT BE DETERMINED" not in cli_src)
+
+
 def test_a_rate_names_its_instrument():
     group("A published rate names the committed tool that reproduces it")
 
@@ -5419,9 +5462,18 @@ def test_hook_registration():
     # AND THE DOC MUST NOT CLAIM A WIRING THAT DOES NOT HAPPEN. The specific false sentence.
     with open(os.path.join(ROOT, "llms.txt")) as fh:
         doc = fh.read()
-    ok("llms.txt no longer claims `worktree register` wires every hook beside it — it wires "
-       "four, and the probe is wired by nobody on purpose",
-       "wires all of them" not in doc)
+    # FLATTENED BEFORE A NEGATIVE SEARCH. An assertion whose evidence is a phrase being ABSENT
+    # passes for the wrong reason the moment that phrase merely WRAPS — prose rewraps constantly,
+    # so re-introducing "wires all of\nthem" would restore the false claim under a green suite.
+    #
+    # Not hypothetical: my own grep for `CANNOT BE DETERMINED` in cli.py returned nothing today
+    # while the string was plainly there, split across two adjacent literals. The honest reading
+    # of that empty result was CANNOT TELL, and I nearly read it as ABSENT — which is the same
+    # error game_loop's auditor made on a two-line subprocess call an hour earlier.
+    flat_doc = re.sub(r"\s+", " ", doc)
+    ok("llms.txt no longer claims `worktree register` wires every hook beside it — the probe is "
+       "wired by nobody on purpose, and the claim stays gone even if the prose rewraps",
+       "wires all of them" not in flat_doc)
     ok("...and names the deliberately-unwired one as such, so a reader following the doc cannot "
        "conclude the watchdog is armed", "waiting-probe.sh" in doc and "NOBODY" in doc)
 
@@ -9154,6 +9206,7 @@ def main():
                test_role_seat_verbs,
                test_close_resolves_paths_against_the_callers_tree,
                test_campaign_scoping,
+               test_negative_text_assertions_flatten,
                test_a_rate_names_its_instrument,
                test_stale_copy_cannot_warn_about_itself,
                test_hook_registration,
