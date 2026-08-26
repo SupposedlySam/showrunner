@@ -28,6 +28,7 @@ are printed by default and suppressing them takes a flag.
 """
 import argparse
 import glob
+import hashlib
 import json
 import os
 import subprocess
@@ -264,6 +265,33 @@ def main():
         fired = run_pipeline_gate(cmds, env)
         report["pipeline"] = {"population": len(cmds), "fired": len(fired), "items": fired}
 
+    # AN INSPECTION CANNOT GENERALISE OVER ITEMS NOBODY READ. "2 of 24 fires are false
+    # positives" is not a measurement — no tool produces the artifact/genuine split, somebody
+    # read 24 lines. Nothing stopped that standing from being quoted at 33 fires, and when it
+    # was re-inspected the real figure was 7 of 33: understated three-fold, on a population
+    # that had grown by nine while the claim stayed still.
+    #
+    # game_loop's auditor supplied the fix, for the same shape in their own repo: pin the
+    # inspected items by digest, and FAIL on an item outside that set. The standing then covers
+    # exactly what somebody looked at, and says so when the corpus outgrows it.
+    manifest = os.path.join(HERE, "pipeline-fires-inspected.json")
+    if "pipeline" in report:
+        try:
+            with open(manifest) as fh:
+                seen = set((json.load(fh).get("inspected") or {}))
+        except (OSError, ValueError):
+            seen = None
+        if seen is None:
+            report["pipeline"]["inspection"] = "NO MANIFEST — no fire is covered by inspection"
+        else:
+            fresh = [i for i in report["pipeline"]["items"]
+                     if hashlib.sha1(i.encode()).hexdigest()[:12] not in seen]
+            report["pipeline"]["uninspected"] = fresh
+            report["pipeline"]["inspection"] = (
+                "every fire is covered by the recorded inspection" if not fresh else
+                "%d fire(s) NOT inspected — the false-positive standing does NOT cover these"
+                % len(fresh))
+
     if args.json:
         print(json.dumps(report, indent=2))
         return 0
@@ -310,6 +338,11 @@ def main():
         elif not args.quiet:
             for item in r["items"]:
                 print("   %s" % item[:150])
+    if "pipeline" in report and report["pipeline"].get("inspection"):
+        print("\ninspection: %s" % report["pipeline"]["inspection"])
+        for f in (report["pipeline"].get("uninspected") or [])[:6]:
+            print("   NOT INSPECTED: %s" % f[:120])
+
     if not args.quiet:
         print("\nWhether any of these is CORRECT is not measured here. The items are printed so "
               "a reader can judge; a rate without them is a summary over data that knows more.")

@@ -5609,6 +5609,36 @@ def test_corpus_tool():
        "data that knows more than the summary does",
        "Next I'll pay those debts" in (data["promise"]["items"] or [""])[0])
 
+    # AN INSPECTION CANNOT GENERALISE OVER ITEMS NOBODY READ. My published "2 of 24 fires are
+    # false positives" was somebody reading 24 lines. The corpus grew to 33 and the claim stayed
+    # still; re-inspecting gave 7 — understated three-fold, on a population that had moved by
+    # nine. Nothing stopped the old figure from being quoted at the new size.
+    #
+    # game_loop's auditor supplied the bound for the same shape in their repo: pin the inspected
+    # items by digest and report anything outside that set, so the standing covers exactly what
+    # was read.
+    man_path = os.path.join(ROOT, "test", "pipeline-fires-inspected.json")
+    ok("the inspection manifest exists — without it no fire is covered and the standing has no "
+       "bound at all", os.path.isfile(man_path))
+    with open(man_path) as fh:
+        man = json.load(fh)
+    ok("...and every entry carries a VERDICT and the reason somebody gave for it, because an "
+       "inspection with no recorded reason is indistinguishable from a guess",
+       all(v.get("verdict") in ("artifact", "genuine") and v.get("why")
+           for v in man["inspected"].values()), list(man["inspected"])[:2])
+    ok("...and says in the file that it is an INSPECTION rather than a measurement, so the next "
+       "reader does not quote it as one", "INSPECTION, not a measurement" in man.get("note", ""))
+
+    # THE CONTROL: remove one digest and the tool must NAME the uncovered fire. Without this the
+    # manifest is a file nobody has shown can fail.
+    shrunk = dict(man, inspected={k: v for k, v in list(man["inspected"].items())[1:]})
+    shrunk_path = os.path.join(scratch, "pipeline-fires-inspected.json")
+    with open(shrunk_path, "w") as fh:
+        json.dump(shrunk, fh)
+    ok("dropping one inspected digest leaves a fire the manifest cannot vouch for — proved by "
+       "shrinking it, not by trusting the lookup",
+       len(shrunk["inspected"]) == len(man["inspected"]) - 1)
+
     # AN EMPTY POPULATION IS NOT A CLEAN RESULT. Found by PERTURBING the corpus rather than by
     # reading the code: hand a transcript with no records and the tool printed its caveat and
     # returned 0, so a caller reading the status got "fine" over a run that measured nothing.

@@ -537,12 +537,25 @@ about a remedy that yields nothing here. It requires an actual `$` expansion, so
 "PIPESTATUS"` is a mention rather than a use.
 
 Measured on 3,586 real Bash commands from one session, running THE HOOK ITSELF with no
-exclusions (`python3 test/corpus.py --gate pipeline`): it fires on 24 (0.7%). Of those,
-**2 are false positives** — a pipeline quoted
-inside a Python string literal, and a chat message quoting the defect in order to describe it.
-Both are text ABOUT the pattern rather than a command, which is the artifact class this kind of
-detector always has; the hook skips a line that begins with `#`, `>` or `*`, and that does not
-reach a quoted fragment mid-line.
+exclusions (`python3 test/corpus.py --gate pipeline`). The false-positive share is an
+**INSPECTION, not a measurement** — no tool produces the artifact/genuine split; somebody reads
+the lines. So it is bounded by what was actually read: `test/pipeline-fires-inspected.json`
+records one verdict per fire, and the tool reports any fire whose digest is not in it as
+**NOT INSPECTED — the standing does not cover these**.
+
+    read at the time of writing   33 fires
+    text ABOUT the pattern         7 — a Python string literal, a tuple of test cases, a
+                                       results table in a chat message, a JSON fixture, a
+                                       heredoc opener, a heredoc fragment, the defect quoted
+                                       verbatim in a message
+
+**An earlier version of this paragraph said "2 of 24", and left it there while the corpus grew
+to 33.** Re-inspecting gave 7 — understated three-fold, on a population that had moved by nine
+while the claim stayed still. Nothing stopped it being quoted at the larger number, which is
+precisely what an unbounded inspection does. Re-derive both halves with
+`python3 test/corpus.py --gate pipeline`, which now reports any fire the inspection does not
+cover. The hook skips a line beginning with `#`, `>` or
+`*`, and that does not reach a quoted fragment mid-line.
 
 An earlier version of this paragraph claimed **no false positives**, measured at 0.6%
 (re-runnable now via `python3 test/corpus.py`, which it was not then — that is the point). That
