@@ -5299,6 +5299,37 @@ def test_mutation_anchor_refusal():
     eq("...and returns the text UNCHANGED, so the sweep would have measured the original and "
        "called the result coverage", stale, src)
 
+    # AMBIGUOUS IS NOT APPLIED, and this one was live. `count=1` neuters the FIRST match and
+    # leaves the rest running, so a name implemented twice scores as covered on the strength of
+    # mutating one of them. `graph.stale_claims` is a method on TWO backends here: the sweep
+    # had one anchor, matched both, mutated SqliteGraph, and BrGraph was never touched.
+    #
+    # Named by game_loop's auditor as one of three refusal modes a sweep owes — absent anchor,
+    # ambiguous anchor, edit that changed nothing. This file had only the first.
+    twice = "def f(self):\n    pass\ndef f(self):\n    pass\n"
+    _, n_amb = _m.apply_anchor(twice, r"(def f\(self\):\n)", "    return None\n")
+    ok("an anchor matching TWICE is refused rather than silently neutering the first — the "
+       "other implementation would never be mutated and the score would not move", n_amb < 0)
+    eq("...and the refusal carries HOW MANY it matched, so the reader can find them", n_amb, -2)
+
+    # APPLIED AND CHANGED NOTHING is the third mode gameloop names, and it matters because a
+    # no-op mutant produces SURVIVED, SURVIVED reads as a coverage gap, and the gap sends
+    # somebody hunting for an assertion that already exists — wasted work downstream of a
+    # wasted control, indistinguishable from real work.
+    #
+    # HERE IT HAS EXACTLY ONE CAUSE. The replacement is an INSERTION, so the text always grows
+    # unless the stub is EMPTY. I wrote a `new == src` branch for this and then measured it
+    # unreachable across 69 targets, shortest stub 40 characters — a defensive check that
+    # cannot fire, which is the `or` shape. Removed, and the invariant that makes it
+    # unreachable is enforced instead, because that CAN be violated by a future edit.
+    _, n_noop = _m.apply_anchor("def g(self):\n", r"(def g\(self\):\n)", "")
+    eq("an EMPTY stub is refused — it is the only way an insertion can change nothing, and a "
+       "no-op mutant is scored as a survivor, which reads as a hole that is not there",
+       n_noop, 0)
+    ok("...while every stub the sweep ships is non-empty, so the refusal above guards a real "
+       "invariant rather than a case that cannot arise",
+       all(t[4] for t in _m.TARGETS), [t[0] for t in _m.TARGETS if not t[4]][:3])
+
     # AND THE SWEEP MUST SAY SO RATHER THAN SCORING IT. The distinction is UNSCOREABLE versus
     # UNPROTECTED: no measurement was taken, which is not the same as nothing noticing.
     with open(os.path.join(ROOT, "test", "mutate.py")) as fh:
@@ -5323,6 +5354,8 @@ def test_mutation_anchor_refusal():
             missing.append((name, relpath, "anchor matched nothing"))
     ok("every anchor the sweep ships still matches its target exactly once, re-derived from "
        "the files rather than read from the accounting summary", not missing, missing[:4])
+    ok("...and there is more than a handful of them, so the clean result above is a finding "
+       "rather than an empty list", len(_m.TARGETS) >= 60, len(_m.TARGETS))
 
 
 def test_borrowed_claims_are_marked():

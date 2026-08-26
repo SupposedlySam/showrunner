@@ -352,9 +352,19 @@ TARGETS = [
     ("config validate", "config.Config.validate", "lib/showrunner/config.py",
      r"(    def validate\(self\):\n)",
      "        return []\n    def _neutered_validate(self):\n"),
-    ("stale_claims (reap's evidence)", "graph.SqliteGraph.stale_claims", "lib/showrunner/graph.py",
-     r"(    def stale_claims\(self\):\n)",
-     "        return []\n    def _neutered_stale(self):\n"),
+    # TWO BACKENDS, TWO TARGETS. One anchor matched BOTH and `count=1` neutered only the
+    # first, so this producer scored as covered on the strength of mutating SqliteGraph while
+    # BrGraph was never touched. The sweep now refuses an ambiguous anchor outright, which is
+    # what surfaced this; the repair is to anchor each implementation separately so both are
+    # actually measured rather than one standing in for the pair.
+    ("stale_claims (reap's evidence, SqliteGraph)", "graph.SqliteGraph.stale_claims",
+     "lib/showrunner/graph.py",
+     r"(class SqliteGraph:(?:.|\n)*?    def stale_claims\(self\):\n)",
+     "        return []\n    def _neutered_stale_sqlite(self):\n"),
+    ("stale_claims (reap's evidence, BrGraph)", "graph.BrGraph.stale_claims",
+     "lib/showrunner/graph.py",
+     r"(class BrGraph:(?:.|\n)*?    def stale_claims\(self\):\n)",
+     "        return []\n    def _neutered_stale_br(self):\n"),
     ("stop gate", "gates.stop_gate", "lib/showrunner/gates.py",
      r"(def stop_gate\(cfg, graph, leaf_id=None, tree=None\):\n)",
      "    return True, 'stop OK'\n"
@@ -872,6 +882,27 @@ def apply_anchor(src, pattern, stub):
     it sat because the script exited before it, so they moved it out to be fed a state
     directly. A refusal nobody can invoke is a refusal nobody has seen work.
     """
+    hits = len(re.findall(pattern, src))
+    if hits > 1:
+        # AMBIGUOUS IS NOT APPLIED. `count=1` silently neuters the FIRST match and leaves the
+        # rest running, so a name implemented twice — `graph.stale_claims` is a method on TWO
+        # backends here — scores as covered on the strength of mutating one of them. The other
+        # can be entirely unprotected and the number never moves.
+        #
+        # Named by game_loop's auditor as one of three refusal modes a sweep owes; this file
+        # had only the first.
+        return src, -hits
+    if not stub:
+        # APPLIED AND CHANGED NOTHING is the third refusal a sweep owes, and here it can only
+        # arise ONE way. The replacement is `group(1) + stub`, an INSERTION, so the text always
+        # grows unless the stub is empty — I added a `new == src` branch for this and then
+        # measured it unreachable: 69 targets, shortest stub 40 characters.
+        #
+        # A defensive branch that cannot fire is gameloop's `or` — belt-and-braces that does
+        # nothing, or worse. So the unreachable check is gone and the INVARIANT that makes it
+        # unreachable is enforced instead, which is a thing that can actually be violated by a
+        # future edit.
+        return src, 0
     return re.subn(pattern, lambda m: m.group(1) + stub, src, count=1)
 
 
@@ -992,6 +1023,14 @@ def main():
         with open(target) as fh:
             src = fh.read()
         new, n = apply_anchor(src, pattern, stub)
+        if n < 0:
+            print("%-34s %8s   AMBIGUOUS — the anchor matched %d times; count=1 would have "
+                  "neutered only the first and left the rest running"
+                  % (name, "-", -n))
+            unscoreable.append((name, 0, "the anchor matched %d times, so a mutation would "
+                                         "have covered only one of them" % -n))
+            shutil.rmtree(work, ignore_errors=True)
+            continue
         if n != 1:
             # A named producer that no longer exists is UNPROTECTED, not a skip. A sweep that
             # shrugs at a rename is a check that cannot fail — which is precisely the defect
