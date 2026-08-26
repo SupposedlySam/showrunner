@@ -1,170 +1,137 @@
 {
  "inspected": {
   "06cd74a51ad7": {
-   "line": "cd /Users/supposedlysam/dev/showrunner; grep -n 'add_argument(\"--since\"' lib/showrunner/cli.py; echo \"=== cross-instance",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "09436a0cafb7": {
-   "line": "\"$@\" 2>&1 | head -3 > /dev/null; local piped_rc=$?",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "0b8592ba15dc": {
-   "line": "{\"tool_name\": \"Bash\", \"tool_input\": {\"command\": 'cmd 2>&1 | head -3; echo \"rc=$?\"'}}),",
    "verdict": "artifact",
    "why": "a JSON fixture built in Python, not a command"
   },
   "1aac369f31d2": {
-   "line": "graded = context('./bin/showrunner check 2>&1 | tail -5; echo \"exit=$?\"')",
    "verdict": "artifact",
    "why": "a Python string literal inside a test fixture"
   },
   "2dc24e0f10a9": {
-   "line": "T=$(mktemp -d); git clone -q /Users/supposedlysam/dev/showrunner \"$T/s\" 2>/dev/null; cd \"$T/s\"\ngit config user.email t@e",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "2ede3a6ee5fd": {
-   "line": "echo \"=== the gate can actually run here ===\"; ./.game_loop/bin/verify --check 2>&1 | head -3; echo \"rc=$?\"",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "326d3c2033a0": {
-   "line": "cd /Users/supposedlysam/dev/showrunner\npython3 - <<'PY'\n# My own findings this session, classified. Population: every co",
    "verdict": "artifact",
    "why": "the opening line of a python heredoc, matched on its comment"
   },
   "337e437c3af8": {
-   "line": "cd /Users/supposedlysam/dev/showrunner; ./.showrunner/bin/showrunner waiting 2>&1 | head -5; echo \"exit=$?\"; echo \"=== s",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "41c5f3771d60": {
-   "line": "python3 bin/showrunner waiting --porcelain 2>&1 | head -20; echo \"rc=$?\"",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "42eec51e10d9": {
-   "line": "cat .gitignore; echo \"=== check ===\"; ./bin/showrunner check 2>&1 | tail -5; echo \"exit=$?\"",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "48942d1818ec": {
-   "line": "python3 bin/showrunner campaign 2>&1 | tail -2; echo \"exit=$?\"",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "4cbea917c861": {
-   "line": "python3 test/run.py > /tmp/sr.out 2>&1; echo \"suite rc=$?\"; grep -E \"reading is DATED|denominator moves|machine-readable",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "4fd6f7e69599": {
-   "line": "python3 test/run.py 2>&1 | grep -E \"^  FAIL|RESULT:|VOID\" | head -4; echo \"exit=$?\"",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "5a85178835df": {
-   "line": "echo '{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"claude -p hi\"}}' | $SR dispatch guard 2>&1 | head -2; echo \"exit=$?\"",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "60ef70b9e95f": {
-   "line": "/Users/supposedlysam/dev/showrunner/.lamp/llm_chat/bin/llm_chat owed --json 2>&1 | head -3; echo \"exit=$?\"",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "6a5084ecc286": {
-   "line": "echo \"=== worktree ===\"; ./.game_loop/bin/game_loop worktree --porcelain 2>&1 | head -10; echo \"exit=$?\"",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "7316c724a630": {
-   "line": "python3 bin/showrunner dispatch guard --command 'nohup claude -p --model sonnet \"brief\" &' 2>&1 | head -3; echo \"rc=$?\"",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "7fc2371d280a": {
-   "line": "python3 bin/showrunner dispatch guard --command 'nohup claude -p --model sonnet \"brief\" &' 2>&1 | head -3 > /dev/null; e",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "97f04ccac03c": {
-   "line": "python3 test/mutate.py 2>&1 | tail -22; echo \"EXIT=$?\"",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "9f91251392ef": {
-   "line": "\"$CLI\" owed 2>&1 | head -6; echo \"exit=$?\"",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "9fc7077bd77f": {
-   "line": "$CLI owed --json 2>&1 | head -20; echo \"exit=$?\"",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "a252a0dd6437": {
-   "line": "cd /Users/supposedlysam/dev/showrunner; git pull --rebase -q origin main 2>&1 | tail -5; echo \"rebase exit=$?\"; git log ",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "b2005bbb9899": {
-   "line": "python3 test/docs_surface.py 2>&1 | head -4; echo \"exit=$?\"",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "b755d1de0d4b": {
-   "line": "llm_chat owed --json 2>&1 | head -3; echo \"exit=$?\"    fires",
    "verdict": "artifact",
    "why": "a row of a results TABLE inside a chat message heredoc"
   },
   "b7e2a1b591c8": {
-   "line": "cd /Users/supposedlysam/dev/showrunner/.worktrees/prober-gateprobe\necho \"=== does this tree's verify actually refuse? ==",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "bc18ca1fdcf0": {
-   "line": "echo '{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"echo hi\"}}' | CLAUDE_PROJECT_DIR=/Users/supposedlysam/dev/showrunner ",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "c4adb0ff581f": {
-   "line": "\" 2>&1 | tail -20; echo \"rc=$?\"",
    "verdict": "artifact",
    "why": "a fragment of a python heredoc, not a shell pipeline"
   },
   "cea0283a2b14": {
-   "line": "pkill -f \"showrunner dispatch guard\" 2>/dev/null; cd /Users/supposedlysam/dev/showrunner\npython3 - <<'PY'\np=\"lib/showrun",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "d4c11d0f8e8c": {
-   "line": "python3 .showrunner/bin/showrunner lock run device --holder crawler-a -- echo hello 2>&1 | head -5; echo \"exit=$?\"",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "dd05365a530e": {
-   "line": "cd /tmp/claude-501/-Users-supposedlysam-dev-showrunner/c62fcad9-5044-41a8-afac-f4d274244952/scratchpad/wtest2 && python3",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "e53e3455f5b2": {
-   "line": "llm_chat owed --json 2>&1 | head -3; echo \"exit=$?\"",
    "verdict": "artifact",
    "why": "the defect quoted verbatim inside a chat message"
   },
   "eca272069ef9": {
-   "line": "(cd $WT && ./.game_loop/bin/verify --check 2>&1 | head -4; echo \"verify rc=$?\")",
    "verdict": "genuine",
    "why": "a shell command whose $? reads a truncator"
   },
   "f0d73519c6e7": {
-   "line": "(True,  'llm_chat owed --json 2>&1 | head -3; echo \"exit=$?\"'),",
    "verdict": "artifact",
    "why": "a Python tuple literal listing test cases"
   }
  },
- "note": "Each entry is a line SOMEBODY READ. This is an INSPECTION, not a measurement: no tool produces the artifact/genuine split, so the standing cannot generalise to a fire nobody has looked at."
+ "note": "Each entry is a line SOMEBODY READ. This is an INSPECTION, not a measurement: no tool produces the artifact/genuine split, so the standing cannot generalise to a fire nobody has looked at. Entries carry a DIGEST, a verdict and a reason \u2014 never the raw command line, which held absolute paths and internal tool names."
 }
