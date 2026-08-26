@@ -383,8 +383,14 @@ gone, and nothing but running it finds them.
 
 ```bash
 python3 test/run.py            # CORE assertions — Python 3 + git, nothing else
-bash prototype/demo.sh         # the original shell POC: 7 run anywhere, 5 skip loudly
+python3 test/mutate.py         # which producers anything would NOTICE if they broke
+python3 test/corpus.py         # the turn-end gates, measured against a real transcript
+bash prototype/demo.sh         # the original shell POC; it prints its own pass/skip counts
 ```
+
+`test/run.py` exits **3** — not 1 — when it did not run every group it defines. A suite that
+skipped groups silently prints the same green line as one that ran them all, so "nothing ran"
+and "something failed" are deliberately different codes.
 
 The CORE half runs green on a clean clone with **zero setup**. Assertions that genuinely need external
 tooling (`br`, `tmux`) **skip loudly, naming the missing dependency**, rather than failing obscurely —
@@ -458,7 +464,7 @@ between them is protected, and it was measured before it was fixed:
 
 | Shared state | The race | Now |
 |---|---|---|
-| a leaf claim | check-then-write: **6 of 12** concurrent claims won the same leaf | one conditional `UPDATE`; measured 1 of 12 (`python3 test/run.py`, group *Single-consumer resource locks*) |
+| a leaf claim | check-then-write: **6 of 12** concurrent claims won the same leaf | one conditional `UPDATE`; measured 1 of 12 (`python3 test/run.py`, group *More than one orchestrator may share this state*) |
 | the campaign record | read-modify-write: **3 of 10** spawns survived | `flock` + write-then-rename; 10 of 10 |
 | the main checkout | two `integrate` runs rewinding each other | exclusive, and it **refuses** rather than queueing |
 
@@ -545,10 +551,17 @@ undetermined aborts the spawn; "could not tell" and "matched" are never the same
   below (with the line numbers it was verified against).
 - [`llms.txt`](llms.txt) — the operational brief, if you are an agent.
 
-Planned, not built — open for comment:
+Design records for things that are **built**, each stating which steps are not:
 
 - [`docs/plans/worktree-lease.md`](docs/plans/worktree-lease.md) — one session per worktree,
-  enforced by a lease and a PreToolUse guard rather than described by the campaign record.
+  enforced by a lease and a PreToolUse guard rather than described by the campaign record. The
+  guard denies, from a tracked shim, registered, with `doctor` checking all three. `worktree
+  takeover` is the step that is not built.
 - [`docs/plans/central-install.md`](docs/plans/central-install.md) — opt-in `install.sh --central`:
-  one machine-wide copy of the code, every project keeping its own config. Answers this repo's own
-  recorded rejection of `--central` (`8a51bf1`) point by point.
+  one machine-wide copy of the code, every project keeping its own config. Works end to end and
+  is reversible; `doctor`'s central checks and the campaign record's central SHA are not built,
+  so a mid-campaign `self --pin` is invisible to a running campaign.
+
+> This section said **"Planned, not built"** for both while both were shipping. A reader deciding
+> whether to use central mode would have concluded it did not exist. Each plan doc carries its own
+> status line — the README pointed at them and then restated their status from memory.

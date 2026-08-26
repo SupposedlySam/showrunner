@@ -536,38 +536,33 @@ because the cause differs — the other arm is about whose exit code you are bel
 about a remedy that yields nothing here. It requires an actual `$` expansion, so `grep
 "PIPESTATUS"` is a mention rather than a use.
 
-Measured on 3,586 real Bash commands from one session, running THE HOOK ITSELF with no
-exclusions (`python3 test/corpus.py --gate pipeline`). The false-positive share is an
-**INSPECTION, not a measurement** — no tool produces the artifact/genuine split; somebody reads
-the lines. So it is bounded by what was actually read: `test/pipeline-fires-inspected.json`
-records one verdict per fire, and the tool reports any fire whose digest is not in it as
-**NOT INSPECTED — the standing does not cover these**.
+**No rate is written down here — run the tool.** `python3 test/corpus.py --gate pipeline` feeds a
+real transcript to THE HOOK ITSELF and prints its own denominator, an `AS OF` line, and every
+matching command. A figure copied onto this page would be a snapshot of a corpus that grows while
+the work does.
 
-    read at the time of writing   33 fires
-    text ABOUT the pattern         7 — a Python string literal, a tuple of test cases, a
-                                       results table in a chat message, a JSON fixture, a
-                                       heredoc opener, a heredoc fragment, the defect quoted
-                                       verbatim in a message
+The false-positive share is an **INSPECTION, not a measurement**: no tool produces the
+artifact-versus-genuine split, somebody reads the lines. So it is bounded by what was actually
+read. `test/pipeline-fires-inspected.json` records one verdict per fire with its reason, and the
+tool reports any fire whose digest is not in it as **NOT INSPECTED — the standing does not cover
+these**. Every artifact so far is text ABOUT the pattern rather than a command: a string literal,
+a results table inside a message, a JSON fixture, the defect quoted verbatim. The hook skips a
+line beginning with `#`, `>` or `*`, which does not reach a quoted fragment mid-line.
 
-**An earlier version of this paragraph said "2 of 24", and left it there while the corpus grew
-to 33.** Re-inspecting gave 7 — understated three-fold, on a population that had moved by nine
-while the claim stayed still. Nothing stopped it being quoted at the larger number, which is
-precisely what an unbounded inspection does. Re-derive both halves with
-`python3 test/corpus.py --gate pipeline`, which now reports any fire the inspection does not
-cover. The hook skips a line beginning with `#`, `>` or
-`*`, and that does not reach a quoted fragment mid-line.
+Two corrections this page keeps rather than quietly dropping, because each is the defect the gate
+exists to stop:
 
-An earlier version of this paragraph claimed **no false positives**, measured at 0.6%
-(re-runnable now via `python3 test/corpus.py`, which it was not then — that is the point). That
-number came from a standalone classifier that hand-excluded artifacts the hook does not exclude
-— two different predicates, and the flattering one was not the shipped one. Corrected here
-rather than quietly dropped, because the gate exists to stop exactly that kind of substitution.
+* It stated a false-positive share as a plain figure and left it there while the corpus grew.
+  Re-inspecting understated it threefold — **the number never moved, the population did**, which
+  no amount of re-reading the figure would have caught.
+* It claimed **no false positives**, from a standalone classifier that hand-excluded artifacts
+  the hook does not exclude. Two different predicates, and the flattering one was not the shipped
+  one.
 
-Of the still-reproducible instances, re-run with and without the pipe — a comparison
-`python3 test/corpus.py` does NOT perform, since it measures the gate rather than the subjects —
-**4 of 7 reported a
-wrong status** — and one of those false readings became a bug report filed against another
-project for a defect that did not exist.
+Re-running the still-reproducible commands with and without the pipe — a comparison the corpus
+tool does NOT perform, since it measures the gate rather than the subjects — found a majority
+reporting a wrong status, and one of those false readings became a bug report filed against
+another project for a defect that did not exist.
 
 The sharpest instance is this project's own. `showrunner check` exits **3** on VOID, and its
 output argues for that exact code: *"distinct from 2 (new failures) so a caller that treats
@@ -968,8 +963,8 @@ showrunner self --dest <path>                # what is pinned there; exit 2 if i
 ./install.sh /path/to/project                # revert: restore the local copy, drop the dependency
 ```
 
-Under `--central`, `.showrunner/bin/showrunner` stops being the tool and becomes ~20 lines of
-bash that exec a shared copy at `$SHOWRUNNER_CENTRAL` (default `~/.claude/showrunner-central`).
+Under `--central`, `.showrunner/bin/showrunner` stops being the tool and becomes a small
+bash shim that execs a shared copy at `$SHOWRUNNER_CENTRAL` (default `~/.claude/showrunner-central`).
 The shim is machine-agnostic and byte-identical in every project, so a consumer who commits it
 anyway is not committing anything about their machine.
 
@@ -1005,7 +1000,7 @@ what is there now. Nothing hashes the contents.
 
 ```
 python3 test/run.py        # needs only Python 3 + git
-bash prototype/demo.sh     # the original shell POC: 7 run anywhere, 5 skip loudly
+bash prototype/demo.sh     # the original shell POC; it prints its own pass/skip counts
 ```
 
 Assertions needing `br` or `tmux` skip loudly, naming the dependency. Nothing here asks you to take a

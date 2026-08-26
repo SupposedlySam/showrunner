@@ -41,6 +41,24 @@ One line per reading, newest last:
   argument for this file in one line: the defect was duplicated across the front door, and the
   half-read that found it in one file left it standing in the other.
 
+- README.md — read whole at 2f3623a on 2026-08-26 — found two claims a reader would have ACTED on.
+  The "Planned, not built" section listed the worktree lease and `install.sh --central`; both
+  ship, and each plan doc carries its own status line saying which of its steps are outstanding.
+  The README pointed at those docs and then restated their status from memory. Also a
+  reproducer that named the WRONG test group for the concurrency table — worse than no citation,
+  because a reader who runs it finds the claim absent and cannot tell whether the claim or the
+  pointer is wrong.
+- llms.txt — read whole at 2f3623a on 2026-08-26 — nothing stale, but the pipeline-gate section had
+  been damaged by successive in-place corrections: a sentence about the hook's skip rule appended
+  to an unrelated instruction, and one finding split mid-phrase across a line break. Each patch
+  was correct on its own and the accumulation was not readable, which only a whole read shows.
+  Rewritten as one block.
+- both — read whole at 2f3623a on 2026-08-26 — stripped the counts that drift and carry nothing a
+  reader acts on: the prototype demo's pass/skip split (it prints its own), the central shim's
+  line count, and the pipeline gate's rates, which are now re-derived by `test/corpus.py` rather
+  than copied onto a page where the population moves underneath them. Contract numbers were
+  VERIFIED instead of removed — `PROSE_MAX = 400` and the Python 3.7 floor both hold.
+
 ## What a reading is
 
 Lines read end to end, in order, in one pass — not a search, not a section, not "I wrote most of
