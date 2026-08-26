@@ -527,9 +527,25 @@ authorisation" to satisfy a word-ban has traded a visible stall for an invisible
 transcript means ALLOWED WITHOUT BEING CHECKED, like every other guard here.
 
 Both run from tracked shims under `.showrunner/hooks/`, beside `worktree-guard.sh`,
-`inert-crawler-gate.sh` and `waiting-probe.sh`. `worktree register` wires all of them; a guard
-nobody registers has never once run, which was true of one of these between building it and
-noticing.
+`inert-crawler-gate.sh` and `waiting-probe.sh`.
+
+**`worktree register` wires FOUR of them, and this sentence used to claim it wired all of
+them.** It writes the worktree guard, the inert-Crawler stop trigger, the seat announcement and
+the dispatch guard. It does not touch:
+
+| hook | wired by | why not `register` |
+|---|---|---|
+| `future-tense-gate.sh` | by hand | added after the verb; registering it is a one-line settings edit |
+| `pipeline-status-gate.sh` | by hand | same |
+| `waiting-probe.sh` | **NOBODY — deliberately** | arming an idle watchdog is a human decision, stated forty lines above this one: *a probe an agent can set is a watchdog an agent can switch off* |
+
+The old sentence contradicted that earlier warning while sitting six hundred lines away from it,
+which is how it survived — a doc inconsistent with itself in a way that reads as detail. It even
+carried the moral: *a guard nobody registers has never once run, which was true of one of these
+between building it and noticing.* True, and still wrong about which ones were wired.
+
+Enforced by a default-deny check: every hook file present is registered in a settings file or
+excused in writing with a reason, and a new one cannot join silently.
 
 `whoami` announces what this session IS. The seat is **derived** — a linked worktree is a CRAWLER
 and the campaign record names its leaf; the main checkout of a repo carrying a campaign is the

@@ -35,6 +35,12 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
+# NO BYTECODE DROPPINGS. Loading a .py hook as a module — which the waker tests do — makes the
+# import machinery write a __pycache__ INTO .showrunner/hooks/, and the wiring net then reports
+# that directory as a hook nobody registered. One check manufacturing the condition another
+# check flags is worse than either of them failing on its own.
+sys.dont_write_bytecode = True
+
 # THE SUITE MUST NOT WRITE THE REPO'S OWN HOOK HEARTBEAT. The heartbeat answers "did this Stop
 # hook RUN on the last turn", and its first reading was 28 stamps per burst for one gate — every
 # one of them this suite invoking the hook, not a turn-end. A freshly-run suite made every hook
@@ -5152,6 +5158,97 @@ def test_campaign_scoping():
         del os.environ["SHOWRUNNER_CAMPAIGN"]
 
 
+def _hook_wiring(hook_dir, settings_files, excused):
+    """Which hook files are registered nowhere, minus those excused in writing.
+
+    A FUNCTION, not an inline sweep over the real directory, and that is the whole point.
+    llm_chat's owner adopted this net and reported that their first version COULD NOT FAIL: it
+    asked only about the real directory, where everything was already classified, so it passed
+    whether or not the check worked. A default-deny net over a currently-clean set is exactly
+    where a broken guard looks healthiest. Taking arguments means the decision can be exercised
+    against a hook this repo does not have.
+    """
+    try:
+        # FILES ONLY. A `__pycache__` directory — left by the parse check compiling a .py hook —
+        # is not a hook nobody registered, and reporting it teaches a reader to skim this list.
+        files = {f for f in os.listdir(hook_dir)
+                 if not f.startswith(".") and os.path.isfile(os.path.join(hook_dir, f))}
+    except OSError:
+        return None                    # cannot look is not "nothing unwired"
+    registered = set()
+    for sf in settings_files:
+        try:
+            with open(sf) as fh:
+                d = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        for _ev, groups in (d.get("hooks") or {}).items():
+            for g in groups:
+                for h in g.get("hooks", []):
+                    c = (h.get("command") or "").strip('"')
+                    if ".showrunner/hooks/" in c:
+                        registered.add(os.path.basename(c))
+    return sorted(files - registered - set(excused))
+
+
+def test_hook_registration():
+    group("A hook file that nothing registers has never once run")
+
+    # THE DEFECT, FOUND NEXT DOOR AND THEN HERE. llm_chat's owner found a trigger their README
+    # listed as live under a `Stop` column, registered in none of four registries. It had never
+    # fired. Tests, full line coverage and a mutation all begin by assuming a thing RUNS.
+    #
+    # Mine was the doc half of the same thing: llms.txt said `worktree register` wires all the
+    # hooks beside it, naming waiting-probe.sh. It wires four, and waiting-probe.sh is wired by
+    # NOBODY on purpose — arming an idle watchdog is a human decision, stated forty lines earlier
+    # in the same file. The contradiction survived because six hundred lines separated the two
+    # claims and the wrong one read as detail.
+    excused = {
+        # DELIBERATELY UNWIRED, and the reason is a security property rather than an oversight:
+        # a probe an agent can set is a watchdog an agent can switch off.
+        "waiting-probe.sh": "arming the idle watchdog is a human decision; showrunner must not "
+                            "wire the thing that would silence its own supervision",
+    }
+    hooks = os.path.join(ROOT, ".showrunner", "hooks")
+    settings = [os.path.join(ROOT, ".claude", n)
+                for n in ("settings.json", "settings.local.json")]
+    unwired = _hook_wiring(hooks, settings, excused)
+    ok("every hook file here is registered somewhere, or excused in writing with a reason",
+       unwired == [], unwired)
+
+    # THE NET MUST BE ABLE TO FAIL. Asked about a hook this repo does not have, so the answer
+    # cannot come from the real directory happening to be clean.
+    scratch = tmpdir("hookwire")
+    fake_hooks = os.path.join(scratch, "hooks")
+    os.makedirs(fake_hooks)
+    for name in ("wired.sh", "orphan.sh", "excused.sh"):
+        with open(os.path.join(fake_hooks, name), "w") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+    fake_settings = os.path.join(scratch, "settings.json")
+    with open(fake_settings, "w") as fh:
+        json.dump({"hooks": {"Stop": [{"hooks": [
+            {"command": '"$CLAUDE_PROJECT_DIR"/.showrunner/hooks/wired.sh'}]}]}}, fh)
+    got = _hook_wiring(fake_hooks, [fake_settings], {"excused.sh": "a stated reason"})
+    eq("a hook nothing registers is NAMED, so the net can actually fail", got, ["orphan.sh"])
+    ok("...while a registered one is not", "wired.sh" not in (got or []))
+    ok("...and an excused one is not, because the excuse is the classification", 
+       "excused.sh" not in (got or []))
+
+    # CANNOT LOOK IS NOT NOTHING UNWIRED. An unreadable directory returning [] would report a
+    # clean wiring for a repo it never opened.
+    eq("a hook directory that cannot be read answers CANNOT TELL rather than 'all wired'",
+       _hook_wiring(os.path.join(scratch, "nope"), [fake_settings], {}), None)
+
+    # AND THE DOC MUST NOT CLAIM A WIRING THAT DOES NOT HAPPEN. The specific false sentence.
+    with open(os.path.join(ROOT, "llms.txt")) as fh:
+        doc = fh.read()
+    ok("llms.txt no longer claims `worktree register` wires every hook beside it — it wires "
+       "four, and the probe is wired by nobody on purpose",
+       "wires all of them" not in doc)
+    ok("...and names the deliberately-unwired one as such, so a reader following the doc cannot "
+       "conclude the watchdog is armed", "waiting-probe.sh" in doc and "NOBODY" in doc)
+
+
 def test_corpus_tool():
     group("Corpus measurements are reproducible, and made with the SHIPPED gate")
     if not have("bash"):
@@ -5220,6 +5317,32 @@ def test_corpus_tool():
        "INSTRUMENT" in p.stderr, (p.stderr or "")[:200])
     ok("...and exiting 3 rather than 1, so a caller reading non-zero as 'there were fires' "
        "cannot read a broken sweep exactly backwards", p.returncode == 3)
+
+    # THE REDIRECT IS VERIFIED, NOT ASSERTED, and this is the control for that control.
+    # game_loop's auditor wrote "it never touches the gate's heartbeat" in the docstring of the
+    # same kind of tool, on a false mechanism — they redirected HOME while the path derived from
+    # __file__ — and it stamped on its first run. A true conclusion resting on an unchecked
+    # mechanism, inside the instrument built to stop unchecked claims.
+    #
+    # BOTH HALVES OR NEITHER: "the real record did not grow" is also exactly what "the gate
+    # silently stopped stamping" produces, so the tool refuses unless the redirected file GREW.
+    sys.path.insert(0, os.path.join(ROOT, "test"))
+    import corpus as _corpus
+    unwritable = tmpdir("corpus-nowrite")
+    os.chmod(unwritable, 0o500)
+    try:
+        problems = _corpus.self_check(dict(os.environ,
+                                           SHOWRUNNER_HEARTBEAT=os.path.join(unwritable, "hb"),
+                                           CLAUDE_PROJECT_DIR=ROOT))
+        ok("a gate that stamps NOTHING is caught — otherwise an unwritten real heartbeat and a "
+           "gate that stopped stamping are the same observation, and the redirect is unproven",
+           any("stamped NOTHING" in x for x in problems), problems)
+    finally:
+        os.chmod(unwritable, 0o700)
+
+    good = _corpus.self_check(_corpus._env())
+    eq("...while the shipped redirect passes both halves: the checkout's own record untouched "
+       "AND the redirected one written", good, [])
 
 
 def test_stop_hook_heartbeat():
@@ -5355,8 +5478,17 @@ def test_every_shipped_hook_parses():
         if not os.path.isfile(path):
             continue
         if hook.endswith(".py"):
-            p = subprocess.run([sys.executable, "-m", "py_compile", path],
-                               capture_output=True, text=True)
+            # PARSED IN PROCESS, not via py_compile: writing bytecode is py_compile's JOB, so
+            # -B and PYTHONDONTWRITEBYTECODE do not stop it, and it left a __pycache__ beside
+            # the hooks that the wiring net then reported as an unregistered hook. A check that
+            # creates the condition another check flags is worse than either failing.
+            try:
+                with open(path) as _hf:
+                    ast.parse(_hf.read())
+                rc, err = 0, ""
+            except (SyntaxError, OSError, ValueError) as _pe:
+                rc, err = 1, str(_pe)
+            p = type("R", (), {"returncode": rc, "stderr": err})()
         else:
             p = subprocess.run(["bash", "-n", path], capture_output=True, text=True)
         ok("...and PARSES, so it can actually run when the harness invokes it" % (),
@@ -7435,6 +7567,13 @@ def test_claims_about_the_layer_below():
         ".showrunner/hooks/pipeline-status-gate.sh":
             "credits the game_loop auditor for a design question; asserts nothing about "
             "game_loop's behaviour",
+        # Cites an INCIDENT in game_loop's own tooling — their measurement tool stamped a
+        # heartbeat its docstring said it could not touch — as the reason this one VERIFIES its
+        # redirect rather than asserting it. A fact about something that happened, not a claim
+        # about how game_loop behaves, so there is no behaviour here that can rot.
+        "test/corpus.py":
+            "cites an incident in game_loop's tooling as the reason for a control; asserts "
+            "nothing about game_loop's behaviour",
     }
 
     for rel_path in claim_files:
@@ -8765,6 +8904,7 @@ def main():
                test_role_seat_verbs,
                test_close_resolves_paths_against_the_callers_tree,
                test_campaign_scoping,
+               test_hook_registration,
                test_corpus_tool,
                test_stop_hook_heartbeat,
                test_every_shipped_hook_parses,

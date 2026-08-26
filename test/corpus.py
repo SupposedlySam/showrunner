@@ -184,6 +184,30 @@ def self_check(env):
     if not p.stdout.strip():
         problems.append("pipeline gate did not fire on a KNOWN truncated status — every zero it "
                         "reports below would be meaningless")
+
+    # THE REDIRECT IS CHECKED, NOT ASSERTED. This tool's docstring says it never writes the
+    # checkout's own hook heartbeat. game_loop's auditor wrote the same sentence in the same
+    # kind of tool, on a false mechanism — they redirected HOME while the path derived from
+    # __file__ — and it stamped on its first run. A true conclusion resting on an unverified
+    # mechanism, in the instrument built to stop unverified claims.
+    #
+    # BOTH HALVES OR NEITHER. "The real record did not grow" is also what "the gate silently
+    # stopped stamping" looks like, so the redirected file must have GROWN. The promise gate is
+    # a Stop hook and stamps on every invocation; the pipeline gate is PreToolUse and does not,
+    # which is why only the first is evidence here.
+    redirect = env.get("SHOWRUNNER_HEARTBEAT") or ""
+    live = os.path.join(ROOT, ".showrunner", "hook-heartbeat.jsonl")
+    live_before = os.path.getsize(live) if os.path.exists(live) else 0
+    subprocess.run(["bash", PROMISE_GATE], input=json.dumps({"transcript_path": tp}),
+                   capture_output=True, text=True, env=env)
+    if os.path.exists(live) and os.path.getsize(live) != live_before:
+        problems.append("running the promise gate GREW the checkout's own hook heartbeat (%s). "
+                        "A sweep invoking it thousands of times would make every Stop hook look "
+                        "freshly reached, which is the one thing that file answers." % live)
+    if not (redirect and os.path.exists(redirect) and os.path.getsize(redirect) > 0):
+        problems.append("the promise gate stamped NOTHING, not even the redirected heartbeat "
+                        "(%s). An unwritten real record and a gate that stopped stamping are "
+                        "the same observation, so the redirect is unproven." % (redirect or "-"))
     return problems
 
 
