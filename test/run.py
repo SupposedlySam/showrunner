@@ -5238,6 +5238,44 @@ def _unsourced_rates(text, tools, source=None):
     return bad
 
 
+def test_zero_inventory_matches_reality():
+    group("The list of trustworthy zeros names controls that still exist")
+
+    # WHY AN INVENTORY AT ALL. game_loop's auditor put it best: files with controls in them
+    # imply coverage they do not have, and the honest thing is to say where the coverage stops
+    # rather than to ask a reader to feel suspicious. "Be suspicious" is not actionable; "these
+    # three zeros have positive controls and nothing else does" is.
+    #
+    # THE RISK IS THAT THE LIST OUTLIVES THE CONTROLS. A doc claiming a guard exists, where the
+    # guard does not, is the defect llm_chat found in their README — a trigger listed under a
+    # `Stop` column and registered in none of four registries. So each named control is checked
+    # to still be present, by a marker distinctive enough that deleting the control breaks this.
+    with open(os.path.join(ROOT, "llms.txt")) as fh:
+        doc = fh.read()
+    ok("llms.txt tells a reader where the coverage STOPS, not only where it exists",
+       "Everywhere else you are on your own" in re.sub(r"\s+", " ", doc))
+
+    controls = (
+        ("test/mutate.py", "REFUSE ON A RED BASELINE",
+         "0 kills is meaningless if the suite was already failing"),
+        ("test/corpus.py", "did not refuse a KNOWN promise",
+         "0 fires is meaningless if the gate cannot fire"),
+    )
+    for rel_path, marker, why in controls:
+        with open(os.path.join(ROOT, rel_path)) as fh:
+            body = fh.read()
+        ok("%s still carries the control the inventory credits it with — %s"
+           % (rel_path, why), marker in body)
+
+    # doctor's marker is split across adjacent literals, which is the trap this whole group is
+    # about — so it is searched the way the interpreter sees it, not the way grep does.
+    with open(os.path.join(ROOT, "lib", "showrunner", "cli.py")) as fh:
+        cli_joined = re.sub(r'"\s*\n\s*"', "", fh.read())
+    ok("doctor still says CANNOT BE DETERMINED rather than falling silent — found by joining "
+       "adjacent literals, because a line-based search returns nothing and that would read as "
+       "the control having been deleted", "CANNOT BE DETERMINED" in cli_joined)
+
+
 def test_negative_text_assertions_flatten():
     group("An assertion that a phrase is ABSENT must not pass just because the phrase wrapped")
 
@@ -5265,6 +5303,30 @@ def test_negative_text_assertions_flatten():
     # without an edit, and a phrase that merely happens to be multi-word is not.
     multiword = [(ph, var) for ph, var in risky
                  if " " in ph.strip() and "\\n" not in ph]
+    # POSITIVE CONTROL ON THE SCAN ITSELF, which is the whole rule applied to this assertion.
+    # `multiword` being empty is an identity element: it means "none unflattened" only if the
+    # scan can return anything at all. Break the regex and it goes quiet and this passes.
+    #
+    # game_loop's auditor hit exactly this an hour ago — scanned their files for the wrapping
+    # class, got zero, and only then built a file WITH the shape to prove the scan could say
+    # otherwise. Without that second run they would have reported clean from an instrument they
+    # had no evidence could ever disagree.
+    ok("the scan finds absence-assertions AT ALL, so an empty result below means none are "
+       "unflattened rather than that the search stopped working", len(risky) >= 1, len(risky))
+    # ASSEMBLED, NOT WRITTEN. A literal probe here is INSIDE the file the scan reads, so it
+    # becomes test data the scan reports as a real finding — which is exactly what happened:
+    # this control flagged its own fixture on its first run. Building the line from pieces
+    # keeps the pattern out of the source while still exercising the regex.
+    #
+    # The first version also asserted `len(risky) >= 5`, a threshold I invented. The real count
+    # is 4. A number nobody derived is the thing this repo keeps deleting from its own docs, and
+    # I put one in a control an hour after widening the check that forbids them.
+    probe = 'ok("x", "wires all of " + "them" ' + 'not in doc)'
+    probe = probe.replace('" + "', "")
+    ok("...and it fires on a KNOWN-BAD line, proving the empty result is a finding and not a "
+       "silent regex",
+       bool(re.findall(r'"([^"]{6,60})"\s+not\s+in\s+(doc|txt|text)\b', probe)), probe)
+
     ok("every multi-word ABSENCE claim against document text in this suite is made against "
        "flattened text — the ones that are not are listed here rather than assumed harmless",
        not multiword, multiword)
@@ -9206,6 +9268,7 @@ def main():
                test_role_seat_verbs,
                test_close_resolves_paths_against_the_callers_tree,
                test_campaign_scoping,
+               test_zero_inventory_matches_reality,
                test_negative_text_assertions_flatten,
                test_a_rate_names_its_instrument,
                test_stale_copy_cannot_warn_about_itself,

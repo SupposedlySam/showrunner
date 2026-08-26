@@ -415,6 +415,28 @@ showrunner whoami                    # SessionStart AND PostCompact  (whoami.sh)
 showrunner dispatch guard            # PreToolUse on BASH            (dispatch-guard.sh)
 ```
 
+### Where a ZERO is trustworthy here, and where you are on your own
+
+An identity element — zero, empty, absent, silent — is what a working check returns AND what a
+broken one returns. The question is never whether the zero is plausible; it is **whether the
+instrument could have produced anything else on this run.** Where that is checkable it is
+checked. This is the complete list, so a reader knows where the coverage stops:
+
+| a zero from | is backed by |
+|---|---|
+| `test/mutate.py` (0 kills) | it REFUSES on a red baseline, and computes kills as a set difference over assertion NAMES — a test that was already failing can never count as coverage |
+| `test/corpus.py` (0 fires) | it refuses to report from a gate that cannot refuse a known positive, and exits **3** so a caller reading non-zero as "there were fires" cannot read a broken sweep backwards |
+| `showrunner doctor` (no finding) | says CANNOT TELL rather than guessing when the comparand is missing — an unreadable baseline, a pin with no HEAD to compare against, a hook that has never stamped |
+
+**Everywhere else you are on your own.** A quiet guard, an empty grep, a check that printed
+nothing — none of those has a control behind it, and the honest reading of each is *could not
+tell*, not *nothing there*. Two of the three above were added after an incident, not by
+foresight; assume the same about anything not listed.
+
+Worked example, from this repo: a search for `CANNOT BE DETERMINED` in `lib/showrunner/cli.py`
+returns nothing while the string is plainly there, split across two adjacent string literals. The
+empty result meant *could not tell*. It was nearly read as *absent*.
+
 ### Re-running a published corpus number
 
 ```
