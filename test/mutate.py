@@ -860,6 +860,21 @@ def accounting():
     return 1 if problems else 0
 
 
+def apply_anchor(src, pattern, stub):
+    """Splice a neutering stub in after the anchor. Returns (new_text, times_applied).
+
+    EXTRACTED SO THE REFUSAL CAN BE TESTED. The `n != 1` branch is what stops a renamed
+    producer from reading as a clean sweep — and it lived inline in `main()`, which runs the
+    entire sweep, so nothing could reach it. It was described in three comments and exercised
+    by nothing.
+
+    That is the shape wcs hit and fixed the same way: their lock reader was unreachable where
+    it sat because the script exited before it, so they moved it out to be fed a state
+    directly. A refusal nobody can invoke is a refusal nobody has seen work.
+    """
+    return re.subn(pattern, lambda m: m.group(1) + stub, src, count=1)
+
+
 def main():
     if "--accounting" in sys.argv:
         return accounting()
@@ -976,7 +991,7 @@ def main():
         target = os.path.join(tree, relpath)
         with open(target) as fh:
             src = fh.read()
-        new, n = re.subn(pattern, lambda m: m.group(1) + stub, src, count=1)
+        new, n = apply_anchor(src, pattern, stub)
         if n != 1:
             # A named producer that no longer exists is UNPROTECTED, not a skip. A sweep that
             # shrugs at a rename is a check that cannot fail — which is precisely the defect

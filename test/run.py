@@ -5273,6 +5273,58 @@ def _borrowed_unmarked(paths, read):
     return sorted(bad)
 
 
+def test_mutation_anchor_refusal():
+    group("A mutation that does not apply must not read as a mutation that was tolerated")
+
+    # THE REFUSAL EXISTED AND HAD NEVER BEEN INVOKED. `mutate.py` splices a neutering stub in
+    # after an anchor, and refuses when the anchor matches nothing — because a renamed producer
+    # that silently is not mutated produces a passing suite, which reads as coverage. That
+    # branch was described in three comments and exercised by no test, and it lived inline in
+    # `main()`, which runs the whole sweep, so nothing could reach it.
+    #
+    # Extracted the way wcs extracted their lock reader for the same reason: a refusal nobody
+    # can invoke is a refusal nobody has seen work.
+    sys.path.insert(0, os.path.join(ROOT, "test"))
+    import mutate as _m
+
+    src = "def produce(cfg):\n    return real_value\n"
+    good, n = _m.apply_anchor(src, r"(def produce\(cfg\):\n)", "    return None\n")
+    eq("an anchor that matches applies exactly once", n, 1)
+    ok("...and the stub really lands in the text, so the count is not the only evidence",
+       "return None" in good, good)
+
+    # THE CASE THAT MATTERS: the producer was renamed, so the anchor is stale.
+    stale, n0 = _m.apply_anchor(src, r"(def renamed_away\(cfg\):\n)", "    return None\n")
+    eq("a stale anchor applies ZERO times — which is what a rename looks like", n0, 0)
+    eq("...and returns the text UNCHANGED, so the sweep would have measured the original and "
+       "called the result coverage", stale, src)
+
+    # AND THE SWEEP MUST SAY SO RATHER THAN SCORING IT. The distinction is UNSCOREABLE versus
+    # UNPROTECTED: no measurement was taken, which is not the same as nothing noticing.
+    with open(os.path.join(ROOT, "test", "mutate.py")) as fh:
+        body = fh.read()
+    ok("the sweep files a zero-match anchor as UNSCOREABLE, never as a thin producer — a hole "
+       "stated about code that was never mutated is a hole the instrument invented",
+       "unscoreable.append" in body and "the anchor matched nothing" in body)
+
+    # EVERY SHIPPED ANCHOR STILL MATCHES ITS TARGET. This is the live version of the same
+    # question — an anchor can go stale between now and any future edit, and the accounting
+    # already reports `0 stale`, but nothing here re-derives it from the source files.
+    missing = []
+    for name, _key, relpath, pattern, stub in _m.TARGETS:
+        full = os.path.join(ROOT, relpath)
+        try:
+            with open(full) as fh:
+                text = fh.read()
+        except OSError:
+            missing.append((name, relpath, "file missing"))
+            continue
+        if _m.apply_anchor(text, pattern, stub)[1] != 1:
+            missing.append((name, relpath, "anchor matched nothing"))
+    ok("every anchor the sweep ships still matches its target exactly once, re-derived from "
+       "the files rather than read from the accounting summary", not missing, missing[:4])
+
+
 def test_borrowed_claims_are_marked():
     group("A finding borrowed from another project is a hypothesis, and must say so")
 
@@ -9505,6 +9557,7 @@ def main():
                test_role_seat_verbs,
                test_close_resolves_paths_against_the_callers_tree,
                test_campaign_scoping,
+               test_mutation_anchor_refusal,
                test_borrowed_claims_are_marked,
                test_zero_inventory_matches_reality,
                test_negative_text_assertions_flatten,
