@@ -2219,7 +2219,8 @@ def test_future_tense_gate():
     # example verb ("act on") simply was not in the list, so the sentence passed for a reason
     # that generalised to nothing. Substituting a verb the list DOES carry refuses it. I had
     # refuted my own probe and recorded it as refuting their finding.
-    eq("declining to act is not promising to act, even though it takes the same future form",
+    eq("[CORPUS: this exemption has never changed the refusal count on real closings] "
+       "declining to act is not promising to act, even though it takes the same future form",
        verdict("Two open questions, neither of which I'll fix unilaterally.")[0], 0)
     eq("...and the plain form is still refused, so the exemption is the NEGATION and not the verb",
        verdict("Two open questions. I'll fix them.")[0], 2)
@@ -2259,7 +2260,7 @@ def test_future_tense_gate():
              "conceding the concession, which is still a finished result")):
         eq("...while %s ends a turn freely" % why, verdict(closing)[0], 0)
 
-    eq("a closing paragraph reporting only FINISHED work is allowed — the rule is about "
+    eq("[CORPUS: every refusal on this project's closings has been a real promise — `python3 test/corpus.py --gate promise`] a closing paragraph reporting only FINISHED work is allowed — the rule is about "
        "promising, not about summarising",
        verdict("Suite at 1112 passing, accounting clean. Open issues: 0.")[0], 0)
 
@@ -5539,7 +5540,8 @@ def test_pipeline_status_gate():
     # believe". Reasoned for, implemented, documented, then read as 0 through a pipe by the
     # author of it. A signal designed to stop a caller believing a wrong answer.
     hit, out = fired('llm_chat owed --json 2>&1 | head -3; echo "exit=$?"')
-    ok("`$?` after a pipe ending in `head` is named as the truncator's status", hit, out[:200])
+    ok("[CORPUS: under 1% of Bash commands, a minority of them text ABOUT the pattern — `python3 test/corpus.py --gate pipeline`] "
+       "`$?` after a pipe ending in `head` is named as the truncator's status", hit, out[:200])
     ok("...and the notice quotes the offending pipeline back, so the warning is locatable "
        "rather than a general lecture", "| head -3" in out, out[:200])
     for shape in ('cmd 2>&1 | tail -5; echo "rc=$?"',
