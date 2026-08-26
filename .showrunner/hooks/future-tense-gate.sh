@@ -78,6 +78,19 @@ COMMIT = re.compile(
     r"|i\s+will\s+(?:take|pay|start|do|tackle|pick|fix|work|handle|move|continue)"
     r"|moving\s+on\s+to"
     r"|next\s+up"
+    # PRESENT CONTINUOUS USED AS FUTURE, and periphrastic future. The list started at `I'll`
+    # and missed the whole class: "which I'm answering next", "I'm taking #63 next", "I am
+    # going to pay those debts". Caught by the chat-debt waker instead of by this gate, on a
+    # turn I ended with exactly that sentence — the gate that exists to catch the shape, blind
+    # to three of its forms.
+    #
+    # `next` is required for the gerund arm, deliberately: "I'm reporting it here" is present
+    # tense and true, while "I'm reporting it next" is a promise. Without that anchor the arm
+    # would refuse every sentence describing what the turn just did.
+    r"|i(?:'|’)?m\s+\w+ing\b[^.]{0,40}\bnext\b"
+    r"|i\s+am\s+\w+ing\b[^.]{0,40}\bnext\b"
+    r"|i(?:'|’)?m\s+going\s+to\b"
+    r"|i\s+am\s+going\s+to\b"
     r")", re.I)
 
 # MEASURED ON 1,648 REAL CLOSINGS FROM THIS PROJECT'S OWN TRANSCRIPT, not on fixtures the

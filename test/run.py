@@ -2181,6 +2181,22 @@ def test_future_tense_gate():
     ok("...and quotes the phrase it caught, so the fix is the sentence rather than a guess",
        "Next I'll" in said, said[:160])
 
+    # PRESENT CONTINUOUS AS FUTURE, and periphrastic future. The list began at `I'll` and missed
+    # the whole class — caught by the chat-debt waker instead of by this gate, on a turn that
+    # ended "which I'm answering next". The gate built to catch the shape was blind to three of
+    # its forms, and a measurement on 227 real turn-finals found two more violations of mine
+    # that had gone through.
+    eq("'which I'm answering next' is refused — present continuous doing the work of a promise",
+       verdict("Published through #73. One chat debt outstanding, which I'm answering next.")[0],
+       2)
+    eq("...and 'I am going to', which commits without naming a tense at all",
+       verdict("Suite green. I am going to pay those debts.")[0], 2)
+    # `next` is REQUIRED for the gerund arm. Without it the arm refuses every sentence describing
+    # what the turn just did, which is most correct closings.
+    eq("...while 'I'm reporting it here' is allowed, because present continuous is usually just "
+       "present tense and only a forward anchor makes it a promise",
+       verdict("I'm reporting it here so the trail is complete.")[0], 0)
+
     eq("a closing paragraph reporting only FINISHED work is allowed — the rule is about "
        "promising, not about summarising",
        verdict("Suite at 1112 passing, accounting clean. Open issues: 0.")[0], 0)
@@ -6931,6 +6947,12 @@ def test_claims_about_the_layer_below():
         # it undocumented — silently, since the excuse is what suppresses the finding.
         "test/docs_surface.py": "which verbs are harness-facing, and therefore which ones a "
                                 "human never has to be told about",
+        # Cites game_loop's RUNG LADDER as the reason it exists at all — that a rule an agent
+        # has to remember is followed only some of the time, so a rung-6 note is not a gate.
+        # If that ladder changed meaning, this file's whole justification would be quoting a
+        # standard that no longer says it.
+        ".showrunner/hooks/future-tense-gate.sh": "game_loop's rung ladder, quoted as the reason "
+                                                  "a remembered rule is not an enforced one",
         ".gitignore": "tracking .game_loop/ is JUSTIFIED by the per-tree gate holding",
         # A PLAN, and it still states the layer below as fact — the fail-open posture of
         # game_loop's central shim, quoted as the model showrunner's would copy. Planned
