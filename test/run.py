@@ -5299,6 +5299,26 @@ def test_mutation_anchor_refusal():
     eq("...and returns the text UNCHANGED, so the sweep would have measured the original and "
        "called the result coverage", stale, src)
 
+    # A SKIPPED GROUP'S ZERO IS NOT AN UNCOVERED PRODUCER'S ZERO. Splitting the ambiguous
+    # anchor immediately produced one: BrGraph.stale_claims scored 0 kills and read as
+    # UNPROTECTED, but `br` is not on PATH here, so the group covering it SKIPS and NO
+    # MEASUREMENT WAS TAKEN. Nothing noticed, and nothing ran, are the same number.
+    #
+    # The pair had been scoring 7 on the SqliteGraph half, so this zero had never been visible
+    # at all — the ambiguous anchor was hiding an unmeasured implementation behind its sibling.
+    ok("a producer whose only coverage lives behind an optional binary is DECLARED, so its "
+       "zero can be read as unmeasured rather than uncovered",
+       "stale_claims (reap's evidence, BrGraph)" in _m.NEEDS_BINARY, list(_m.NEEDS_BINARY))
+    for _n, _b in _m.NEEDS_BINARY.items():
+        ok("...and every declared producer is a real target of the sweep, so the map cannot "
+           "quietly describe something that no longer exists (%s)" % _n[:34],
+           any(t[0] == _n for t in _m.TARGETS))
+    with open(os.path.join(ROOT, "test", "mutate.py")) as fh:
+        _mb = fh.read()
+    ok("...and the sweep says UNMEASURABLE HERE rather than UNPROTECTED for that case, because "
+       "a coverage hole and an absent dependency call for opposite responses",
+       "UNMEASURABLE HERE" in _mb and "this is not a coverage hole" in _mb)
+
     # AMBIGUOUS IS NOT APPLIED, and this one was live. `count=1` neuters the FIRST match and
     # leaves the rest running, so a name implemented twice scores as covered on the strength of
     # mutating one of them. `graph.stale_claims` is a method on TWO backends here: the sweep

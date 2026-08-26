@@ -870,6 +870,14 @@ def accounting():
     return 1 if problems else 0
 
 
+# A PRODUCER WHOSE ONLY COVERAGE LIVES BEHIND AN OPTIONAL BINARY. Stated per producer rather
+# than guessed, because the sweep cannot see WHY a group skipped — and a wrong guess here would
+# convert a real hole into a reassurance, which is the direction that costs.
+NEEDS_BINARY = {
+    "stale_claims (reap's evidence, BrGraph)": "br",
+}
+
+
 def apply_anchor(src, pattern, stub):
     """Splice a neutering stub in after the anchor. Returns (new_text, times_applied).
 
@@ -1074,6 +1082,21 @@ def main():
         # 3+ is comfortable; 1-2 is thin and worth naming rather than rounding up to "ok";
         # 0 is the real defect. Reporting thin as ok would be the same rounding-up this whole
         # exercise exists to refuse.
+        # A SKIPPED GROUP'S ZERO IS NOT AN UNCOVERED PRODUCER'S ZERO, and the sweep could not
+        # tell them apart. `BrGraph.stale_claims` scored 0 kills here and read as UNPROTECTED —
+        # but `br` is not on PATH, so the group that covers it SKIPS, and no measurement was
+        # taken at all. Same identity element as everything else: nothing noticed, and nothing
+        # ran, produce the same number.
+        #
+        # Surfaced only because an ambiguous anchor was split: the pair had been scoring 7 on
+        # the strength of the SqliteGraph half, so this producer's zero had never been visible.
+        need = NEEDS_BINARY.get(name)
+        if f == 0 and need and not shutil.which(need):
+            print("%-34s %8d   UNMEASURABLE HERE — `%s` is not installed, so the group that "
+                  "covers this SKIPS. Nothing was measured; this is not a coverage hole."
+                  % (name, f, need))
+            unscoreable.append((name, 0, "`%s` absent, so the covering group skipped" % need))
+            continue
         if f == 0:
             verdict = "UNPROTECTED — nothing notices"
         elif f <= 2:
@@ -1087,10 +1110,18 @@ def main():
     print()
     if unscoreable:
         print("UNSCOREABLE producers (no measurement was taken — not a coverage result):")
+        # THE TEMPLATE ASSUMED ONE CAUSE. "N killed before it died" describes a crashed group
+        # and reads as nonsense for an anchor that never matched or a group that skipped — and
+        # a summary line that does not fit its case is one a reader stops trusting. Each
+        # unscoreable now states its own reason as the sentence rather than as a parenthetical
+        # after a fixed phrase.
         for name, f, why in unscoreable:
-            print("  %-32s %d killed before it died   (%s)" % (name, f, why))
-        print("  Fix these FIRST: until the group survives its mutant, the number beside it")
-        print("  is a floor from a truncated run and says nothing about what is covered.")
+            print("  %-32s %s" % (name, why))
+            if f:
+                print("  %-32s   (%d assertion(s) had flipped before the measurement stopped)"
+                      % ("", f))
+        print("  These are NOT coverage results. Until each is scoreable, the number beside it")
+        print("  is a floor from a run that stopped early, or no run at all.")
         print()
     unprotected = [w for w in weak if w[1] == 0]
     if weak:
