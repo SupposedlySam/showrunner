@@ -853,6 +853,34 @@ them can name a commit:
 `__version__` alone was `0.1.0` for the project's whole life and never bumped, so it could not
 distinguish a checkout from this morning from an install three weeks stale.
 
+### An old copy cannot warn you about itself
+
+The staleness report (`pin.staleness`, #65) lives **in the code being reported on**. A copy
+vendored before that feature existed does not carry the check, so it says nothing about being
+behind — and silence there reads exactly like "up to date". Improving the warning cannot reach
+that case, because the improvement ships in the build you are not running.
+
+Verified, not reasoned about: a copy pinned at the commit before #65 has no `staleness` in its
+`pin.py` at all, and its `doctor` never mentions it.
+
+So the answer is a command that does not require the stale thing to be running. **Read the
+recorded commit off the copy and compare it yourself:**
+
+```bash
+cd <copy> && cat PINNED                  # the commit that copy was cut from
+cd <showrunner-checkout>
+git log --oneline <that-sha>..HEAD | wc -l    # how far behind it is
+```
+
+**What is NOT affected, and the difference is instructive.** The self-vendor warning — *"...from
+the self-vendored pin at `<sha>`, which is N commit(s) BEHIND HEAD"* — works from ANY version of
+the code, including copies cut long before it was written. It compares a **recorded sha against
+live git**, so it needs no new logic in the running build. A check that reads durable state
+survives its own staleness; a check that must be *present* to fire does not.
+
+Same shape llm_chat hit: their `doctor` correctly detects that it is a different build from the
+one the hooks run, and that warning is useless to anyone whose problem is running the old copy.
+
 ## One copy of the code, every project's own config
 
 Per-project install is the **default** and stays the documented path. Central is opt-in, one

@@ -5192,6 +5192,45 @@ def _hook_wiring(hook_dir, settings_files, excused):
     return sorted(files - registered - set(excused))
 
 
+def test_stale_copy_cannot_warn_about_itself():
+    group("A copy cut before a check existed cannot run that check — and silence reads as fine")
+    if not have("git"):
+        skip("the stale-copy group", "git is not installed")
+        return
+
+    # THE CLASS, named by llm_chat's owner about their own doctor: it correctly detects that it
+    # is a different build from the one the hooks run, and that warning is useless to anyone
+    # whose problem is that they are running the OLD copy. An improvement cannot reach the case
+    # it is about, because the improvement ships in the build you are not running.
+    #
+    # Measured here rather than reasoned about: a copy pinned at the commit BEFORE `staleness`
+    # landed carries no `staleness` in its pin.py at all, and its doctor never mentions it.
+    with open(os.path.join(ROOT, "lib", "showrunner", "pin.py")) as fh:
+        ok("the staleness check lives in the code being reported on, which is what makes a copy "
+           "cut before it structurally unable to run it", "def staleness" in fh.read())
+
+    # THE PART THAT IS IMMUNE, and the difference is the whole lesson. The self-vendor warning
+    # compares a RECORDED SHA against live git, so it needs no new logic in the running build —
+    # a copy cut long before it was written still fires it, which was confirmed by running one.
+    # A check that reads durable state survives its own staleness; a check that must be PRESENT
+    # to fire does not.
+    with open(os.path.join(ROOT, "lib", "showrunner", "cli.py")) as fh:
+        cli = fh.read()
+    ok("...while the self-vendor BEHIND-HEAD warning compares a recorded sha against live git, "
+       "so it fires from any version of the code including one cut before it existed",
+       "self-vendored pin at" in cli)
+
+    # AND THE DOC CARRIES THE COMMAND, because a doc does not have to be executing to be read.
+    # That is the only remedy that reaches a stale copy at all.
+    with open(os.path.join(ROOT, "llms.txt")) as fh:
+        doc = fh.read()
+    ok("llms.txt names the class, so a reader on an old copy is not depending on that copy to "
+       "tell them about it", "An old copy cannot warn you about itself" in doc)
+    ok("...and gives the command that reads the recorded commit from OUTSIDE the copy, rather "
+       "than describing the idea and leaving the reader to invent it",
+       "cat PINNED" in doc and "log --oneline" in doc)
+
+
 def test_hook_registration():
     group("A hook file that nothing registers has never once run")
 
@@ -8976,6 +9015,7 @@ def main():
                test_role_seat_verbs,
                test_close_resolves_paths_against_the_callers_tree,
                test_campaign_scoping,
+               test_stale_copy_cannot_warn_about_itself,
                test_hook_registration,
                test_corpus_tool,
                test_stop_hook_heartbeat,
