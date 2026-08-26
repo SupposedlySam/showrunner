@@ -9229,18 +9229,66 @@ def main():
        "which is the regression a stale COUNT never caught"
        % ", ".join(sorted(probed & {"br", "tmux", "bash"})), not unexpected, unexpected)
     stale_counts = {}
+    # ONE NOUN WAS AN ENUMERATION. This checked `assertions` only — so "1,263 tests" or "four
+    # entrypoints" would have sailed through, which is the same defect the doc it guards is
+    # about. llm_chat's owner found exactly those two in their own front door: "242 tests, 100%
+    # line coverage on the four entrypoints", where the suite had passed 1,800 some time ago
+    # and the floor covers fourteen files. Nobody re-derived either, because nothing had to.
+    #
+    # The remedy is theirs and lamp-owner's before them: DELETE the count rather than correct
+    # it. There is no version of "242" that survives a test being added. What survives is the
+    # property the gate enforces, which a reader can run.
+    # SPELLED-OUT NUMBERS COUNT. llm_chat's real finding was "the FOUR entrypoints" — a stale
+    # count with no digit in it. A digits-only pattern misses the exact case that prompted the
+    # widening, and an assertion for it passed here only because I had written an escape into
+    # the assertion itself. That is the defect this session keeps producing: a check that
+    # agrees for a reason unrelated to what it claims.
+    # `one` IS EXCLUDED, and not as a convenience. In prose it is the indefinite article wearing
+    # a numeral: "the one test file every change touches", "one verb reads it" — both mean A
+    # SINGLE, neither is a count that can rot. Including it produced two false positives here
+    # immediately, and a check that flags "one X" flags most English.
+    _NUM = (r"(?:[\d,]{2,}|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve"
+            r"|dozen|dozens|hundreds|thousands)")
+    GROWABLE = (r"\b" + _NUM + r"\s+(?:CORE\s+)?"
+                r"(?:assertions?|tests?|verbs?|hooks?|entrypoints?|checks?|mutations?)\b")
+    # A PAST INCIDENT IS NOT A GROWING COUNT, and demanding a reproducer for one would be the
+    # lie this check exists to stop — llm_chat's third row. Excused in writing, default-deny,
+    # so a new one cannot join silently.
+    HISTORICAL = {
+        "38 leaves": "one 16-hour unattended run, described in the past tense — a fact about an "
+                     "incident, not a count of anything this repo grows",
+    }
     for rel_path in ("README.md", "llms.txt", "docs/DESIGN.md"):
         full = os.path.join(ROOT, rel_path)
         if not os.path.exists(full):
             continue
         with open(full) as fh:
-            found = re.findall(r"(\d{2,4})\s+(?:CORE\s+)?assertions?", fh.read())
+            # FLATTENED, because llm_chat's second stale count was invisible to the eye and to
+            # a line-based scan: `205 tests` wrapped across a newline and read as two tokens.
+            flat = re.sub(r"\s+", " ", fh.read())
+        found = [m.group(0) for m in re.finditer(GROWABLE, flat, re.I)
+                 if not any(h in m.group(0) for h in HISTORICAL)]
         if found:
             stale_counts[rel_path] = found
-    ok("...and no tracked doc commits an assertion COUNT again — the number carries nothing a "
-       "reader cannot get by running the command printed beside it, and committing one puts a "
-       "figure that rots into the repo's own credibility line",
+    ok("...and no tracked doc commits a COUNT OF ANYTHING THIS REPO GROWS — tests, assertions, "
+       "verbs, hooks, checks. The number carries nothing a reader cannot get by running the "
+       "command printed beside it, and there is no version of it that survives one being added",
        not stale_counts, stale_counts)
+
+    # THE NOUN LIST IS THE WEAK POINT AND IT IS ASSERTED, not assumed. A check that names one
+    # noun catches one noun; this one has to fail on the nouns it was widened for.
+    for phrase in ("1,263 tests", "242 assertions", "the four entrypoints", "38 hooks",
+                   "twelve verbs"):
+        probe = "This project has %s and is in great shape." % phrase
+        ok("a doc claiming %r is caught, so the widening is real and not decoration" % phrase,
+           bool(re.search(GROWABLE, re.sub(r"\s+", " ", probe), re.I)))
+    # AND THE PATTERN MUST STILL SAY NO. A check that matches everything is not a check.
+    for benign in ("the campaign has depth", "run the tests", "showrunner 0.1.0"):
+        ok("...while %r is left alone, so the widened pattern has not become a yes-machine"
+           % benign, not re.search(GROWABLE, benign, re.I))
+    ok("...and a wrapped count is caught too, because the text is flattened before matching — "
+       "llm_chat missed one by eye AND by line-based scan for exactly this reason",
+       bool(re.search(GROWABLE, re.sub(r"\s+", " ", "we now have 205\ntests passing"), re.I)))
 
     # A RUN THE MACHINE COULD NOT SUPPORT MEASURED NOTHING ABOUT THE CODE. `check` has had this
     # since #41 — a run that could not reach the world exits 3, VOID, distinct from "new

@@ -149,10 +149,11 @@ showrunner lease status [<tree>]     # which trees are held, by whom, and on wha
 showrunner worktree enter            # SessionStart: take this tree's lease, or report who holds it
 showrunner worktree fork --from <t>  # your own tree, off the same base commit as a held one
 showrunner worktree guard            # PreToolUse: DENY a write into a tree another live session holds
-showrunner worktree register         # put ALL FOUR hooks in .claude/settings.json (idempotent):
+showrunner worktree register         # put the hooks it owns in .claude/settings.json (idempotent):
                                      # the worktree guard and the dispatch guard on PreToolUse,
                                      # the inert-Crawler gate on Stop, and the seat announcement
-                                     # on SessionStart AND PostCompact
+                                     # on SessionStart AND PostCompact. The list is the claim; a
+                                     # COUNT here rots the day the verb gains one.
 showrunner whoami                    # what this session IS — a seat DERIVED from where it stands
 showrunner whoami --porcelain        # the SAME resolution as JSON, for a guard to consume
 showrunner role claim <role>         # take an open seat (a role declaring acquire=claim)
@@ -560,9 +561,10 @@ transcript means ALLOWED WITHOUT BEING CHECKED, like every other guard here.
 Both run from tracked shims under `.showrunner/hooks/`, beside `worktree-guard.sh`,
 `inert-crawler-gate.sh` and `waiting-probe.sh`.
 
-**`worktree register` wires FOUR of them, and this sentence used to claim it wired all of
-them.** It writes the worktree guard, the inert-Crawler stop trigger, the seat announcement and
-the dispatch guard. It does not touch:
+**`worktree register` does NOT wire all of them, and this sentence used to claim it did.** It
+writes the worktree guard, the inert-Crawler stop trigger, the seat announcement and the
+dispatch guard. The count is deliberately not stated here — there is no number that survives the
+verb gaining one, and the table below is the thing that has to stay right. It does not touch:
 
 | hook | wired by | why not `register` |
 |---|---|---|
