@@ -9781,6 +9781,48 @@ def main():
        not void_signatures([("g", "l", "the guard says 'too many open files' in its remedy")]),
        void_signatures([("g", "l", "the guard says 'too many open files' in its remedy")]))
 
+    # A SUITE THAT RAN NOTHING REPORTS THE SAME THING AS A SUITE THAT PASSED EVERYTHING.
+    # Measured: emptying the dispatch tuple gives `RESULT: 16 passed, 0 failed` and EXIT 0 —
+    # not zero, a plausible small run, because sixteen module-level assertions live outside the
+    # loop. `verify` and the release polish both gate on this and both would have passed.
+    #
+    # game_loop's auditor hit the same thing by emptying their CASES list, and made the point
+    # that a COUNT cannot fix it: "at least N" is satisfied by duplicating one case. What
+    # carries meaning is which behaviour classes actually ran.
+    #
+    # THE EXPECTATION CANNOT COME FROM THE TUPLE. Deriving "which groups should run" from the
+    # dispatch tuple is satisfied by emptying it — the expectation empties with it. The
+    # independent source is the file's OWN function definitions, which is wcs's identity: a
+    # count taken in a vocabulary the dispatcher does not share.
+    #
+    #     every `def test_*` in this file  ==  every name in the dispatch tuple
+    #
+    # This lives OUTSIDE the group loop on purpose. A floor inside the thing it measures is
+    # removed by the same edit that breaks it.
+    _src = open(os.path.join(HERE, "run.py")).read()
+    _defined = {n.name for n in ast.walk(ast.parse(_src))
+                if isinstance(n, ast.FunctionDef) and n.name.startswith("test_")}
+    try:
+        _a = _src.index("    for fn in (test_locks,")
+        _b = _src.index("test_cli, test_optional):", _a)
+        _dispatched = set(re.findall(r"\btest_\w+", _src[_a:_b] + "test_cli, test_optional"))
+    except ValueError:
+        _dispatched = None
+    if _dispatched is None or _defined != _dispatched:
+        print("\n" + "=" * 72)
+        print("CANNOT VERIFY: the suite did not run every group it defines.")
+        if _dispatched is None:
+            print("  the dispatch tuple could not be located, so nothing here is a coverage "
+                  "result")
+        else:
+            for _n in sorted(_defined - _dispatched):
+                print("  DEFINED BUT NEVER RUN: %s" % _n)
+            for _n in sorted(_dispatched - _defined):
+                print("  DISPATCHED BUT NOT DEFINED: %s" % _n)
+        print("  A suite that skips groups silently reports the same green line as one that "
+              "ran them all.")
+        sys.exit(3)
+
     print("\n" + "=" * 72)
     print("RESULT: %d passed, %d failed, %d skipped" % (len(PASS), len(FAIL), len(SKIP)))
     if void_hits:
