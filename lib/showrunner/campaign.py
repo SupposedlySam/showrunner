@@ -290,11 +290,28 @@ def reconcile(cfg, graph, base="HEAD"):
                     events.emit(cfg, kind, {"crawler": f["crawler"], "leaf": f["leaf"],
                                             "why": f["blocked_detail"] or None})
 
-        if f["harness"] == "drifted":
+        if f["harness"] == "drifted" and (f["alive"] or f["blocked"]):
             # Louder than LIVE: this tree's gate is answering a different question than the
             # orchestrator's, so anything it certifies means less than it appears to.
-            f["verdict"] = ("HARNESS DRIFTED — this Crawler's rules or its harness scripts no "
-                            "longer match the project's; its commit gate owes something else")
+            f["verdict"] = ("HARNESS DRIFTED (LIVE) — this Crawler's rules or its harness "
+                            "scripts no longer match the project's; its commit gate owes "
+                            "something else, and it is still working")
+        elif f["harness"] == "drifted":
+            # IDLE DRIFT IS INERT BY CONSTRUCTION (#66). The cost of drift is a refused commit
+            # on finished work — which needs somebody still working in the tree. A closed leaf
+            # with no live holder cannot pay it.
+            #
+            # Reported at the same severity, it trained the reader to skim: measured in one real
+            # campaign, 48 trees carrying a harness, 42 drifted, ZERO live. Forty-two identical
+            # lines is how the one that matters gets scrolled past — the same collapse this repo
+            # refuses in the inert-Crawler gate, where an allow nobody is told about cannot be
+            # told from a check that ran and was content.
+            #
+            # And the count moved the wrong way: re-provisioning the main checkout, which was
+            # the correct action, raised drift from 26 to 42. A reader taking the number as
+            # "how much is wrong" learned the opposite of the truth.
+            f["verdict"] = ("harness drifted (idle) — no live holder, so its gate cannot refuse "
+                            "anybody; re-provision on resume")
         elif f["harness"] == "undetermined":
             f["verdict"] = "HARNESS UNDETERMINED — cannot tell whether its rules match"
         elif f["blocked"]:

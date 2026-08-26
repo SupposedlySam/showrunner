@@ -1626,6 +1626,23 @@ def cmd_reconcile(args):
     if not findings:
         print("no Crawlers on record")
         return 0
+    # IDLE DRIFT IS SUMMARISED, NOT ENUMERATED (#66). Measured in one real campaign: 48 trees
+    # carrying a harness, 42 drifted, ZERO live. Forty-two identical lines is how the one that
+    # matters gets scrolled past — and the reader who learns to skim this block skims it on the
+    # night a LIVE tree drifts.
+    #
+    # The line stays present as a count, because dropping it entirely would make "no idle drift"
+    # and "idle drift not reported" the same output, which is the collapse this repo spends its
+    # time removing.
+    idle_drift = [f for f in findings if f["verdict"].startswith("harness drifted (idle)")]
+    if idle_drift:
+        findings = [f for f in findings if f not in idle_drift]
+        print("%s%d idle tree(s) are harness-drifted%s — no live holder, so no gate of theirs can "
+              "refuse anybody. Harmless until resumed; re-provision then. (%s)"
+              % (DIM, len(idle_drift), OFF,
+                 ", ".join(sorted(f["crawler"] for f in idle_drift)[:4])
+                 + (" …" if len(idle_drift) > 4 else "")))
+
     for f in findings:
         colour = RED if f["verdict"].startswith("ABANDONED") else (
             GRN if f["verdict"].startswith(("MERGED", "LIVE")) else YEL)

@@ -1476,6 +1476,29 @@ def test_harness_provisioning():
        "question makes everything it certified mean less",
        (finding.get("verdict") or "").startswith("HARNESS DRIFTED"), finding.get("verdict"))
 
+    # #66: GRADED BY WHETHER THE TREE CAN STILL ACT. The cost of drift is a refused commit on
+    # finished work, and that needs somebody still working in the tree — a closed leaf with no
+    # live holder cannot pay it. Reported at one severity it trained the reader to skim:
+    # measured in a real campaign, 48 trees carrying a harness, 42 drifted, ZERO live.
+    #
+    # And the count moved the wrong way. Re-provisioning the main checkout — the correct action
+    # — RAISED drift from 26 to 42, so a reader taking the number as "how much is wrong" learned
+    # the opposite of the truth.
+    ok("a drifted tree with a LIVE holder says so in the verdict, because that is the one whose "
+       "gate can still refuse somebody",
+       "(LIVE)" in (finding.get("verdict") or ""), finding.get("verdict"))
+    _drifted_idle = [f for f in campaign.reconcile(post, gp)
+                     if f["harness"] == "drifted" and not (f["alive"] or f["blocked"])]
+    for _f in _drifted_idle:
+        ok("...while an IDLE drifted tree is graded down rather than shouted, since nothing it "
+           "certifies can refuse anybody: %s" % _f["crawler"],
+           _f["verdict"].startswith("harness drifted (idle)"), _f["verdict"])
+    ok("the drifted-and-live case is not swallowed by the grading — at least one finding still "
+       "carries the loud verdict, or the fix would have silenced the class it exists to surface",
+       any((f.get("verdict") or "").startswith("HARNESS DRIFTED (LIVE)")
+           for f in campaign.reconcile(post, gp)),
+       [f.get("verdict") for f in campaign.reconcile(post, gp)][:3])
+
     # THE UNARMED WATCHDOG (issue #23). `showrunner waiting` was built for one consumer and
     # nothing connected them, so a two-layer install defaults to the guard and the answer not
     # talking — and the failure is the kind that trains people to disable alarms: a correctly
