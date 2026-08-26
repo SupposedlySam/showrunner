@@ -5509,11 +5509,43 @@ def test_stale_copy_cannot_warn_about_itself():
     # a copy cut long before it was written still fires it, which was confirmed by running one.
     # A check that reads durable state survives its own staleness; a check that must be PRESENT
     # to fire does not.
-    with open(os.path.join(ROOT, "lib", "showrunner", "cli.py")) as fh:
-        cli = fh.read()
-    ok("...while the self-vendor BEHIND-HEAD warning compares a recorded sha against live git, "
-       "so it fires from any version of the code including one cut before it existed",
-       "self-vendored pin at" in cli)
+    # RUN IT, DO NOT GREP FOR ITS MESSAGE. This asserted that the string "self-vendored pin at"
+    # appears in cli.py — evidence about BEHAVIOUR taken from SOURCE. wcs measured that exact
+    # shape in their own suite this hour: their assertion matched the words a branch PRINTS,
+    # those words live inside an echo, so the message survives the branch's CONDITION being
+    # broken. Their test passed over the reintroduced bug it was written for.
+    #
+    # Mine had the same structure, and the fix is the same: build a repo whose pin is genuinely
+    # behind HEAD and read what doctor SAYS.
+    behind = tmpdir("pin-behind")
+    def _g(*a):
+        return subprocess.run(["git"] + list(a), cwd=behind, capture_output=True, text=True)
+    _g("init", "-q")
+    _g("config", "user.email", "t@t"); _g("config", "user.name", "t")
+    with open(os.path.join(behind, "a.txt"), "w") as fh:
+        fh.write("one")
+    _g("add", "-A"); _g("commit", "-qm", "first")
+    old_sha = _g("rev-parse", "HEAD").stdout.strip()
+    with open(os.path.join(behind, "a.txt"), "w") as fh:
+        fh.write("two")
+    _g("add", "-A"); _g("commit", "-qm", "second")
+    subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "init",
+                    "--root", behind], capture_output=True)
+    sd = os.path.join(behind, ".showrunner_self", "bin")
+    os.makedirs(sd, exist_ok=True)
+    with open(os.path.join(behind, ".showrunner_self", "PINNED"), "w") as fh:
+        json.dump({"sha": old_sha, "ref": "HEAD"}, fh)
+    shutil.copy(os.path.join(ROOT, "bin", "showrunner"), sd)
+    shutil.copytree(os.path.join(ROOT, "lib"),
+                    os.path.join(behind, ".showrunner_self", "lib"), dirs_exist_ok=True)
+    said = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                          cwd=behind, capture_output=True, text=True).stdout
+    ok("...while a pin genuinely BEHIND HEAD is reported as behind, by running doctor against a "
+       "repo built to be behind — not by finding the message in the source, which survives the "
+       "branch that prints it being broken",
+       "BEHIND" in said and old_sha[:12] in said, said[-260:])
+    ok("...and it names how far behind, so the reader gets a size rather than a flag",
+       "commit(s) BEHIND" in said, said[-200:])
 
     # WHEN THE ANSWER IS UNDEFINED, MAKE IT THE LOUD ONE. Every branch of the pin report needed
     # HEAD, and without it none fired — the line VANISHED, so a pin of unknown age rendered as
