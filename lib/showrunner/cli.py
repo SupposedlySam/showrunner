@@ -2423,11 +2423,24 @@ def build_parser():
     t.add_argument("--holder", default="run")
     t.add_argument("--session")
     t.add_argument("--wait", type=float, default=0)
-    # nargs="*" AND NOT REMAINDER. REMAINDER takes everything after the first positional, so
+    # nargs="*" AND NOT REMAINDER, and the `--` is split off before argparse ever sees it — see
+    # `_split_trailing_command`. REMAINDER takes everything after the first positional, so
     # `lock run device --holder crawler-a -- ./deploy.sh` — the form documented in the README,
     # for the one hard rule this project exists to enforce — put `--holder` into the COMMAND,
-    # left holder at its default, and then tried to execute `--holder` as a program. Both flag
-    # orders parse correctly with "*", and the `--` separator still works.
+    # left holder at its DEFAULT, and then tried to execute `--holder` as a program.
+    #
+    # "*" alone does not fix that, and the comment that stood here said it did. Argparse assigns
+    # positionals in a single pass, so once an optional intervenes the trailing words cannot
+    # reach `command` and fall out as unrecognized arguments — the same documented form, exiting
+    # 2 with a top-level usage dump instead. Measured, both ways round:
+    #
+    #     "*"        device --holder X -- echo hi  -> holder='X'   command=[]  EXTRA=['--','echo','hi']
+    #     REMAINDER  device --holder X -- echo hi  -> holder='run' command=['--holder','X','--',...]
+    #
+    # LIMIT, stated rather than discovered: WITHOUT the `--`, `lock run device --holder X echo hi`
+    # still refuses. That is deliberate. Reaching it would take `parse_known_args`, and swallowing
+    # unrecognized words into the command is how `--hodler crawler-a` becomes a lock silently
+    # recorded against the default holder — the defect this argument has already produced once.
     t.add_argument("command", nargs="*")
     t.set_defaults(func=cmd_lock_run)
 
@@ -2690,10 +2703,52 @@ def _resolve_prose(parser, args):
                          % (opt, len(val), PROSE_MAX, opt))
 
 
+def _takes_trailing_command(parser, argv):
+    """Does the subcommand `argv` names declare a `command` positional to receive what follows `--`?
+
+    Asked BEFORE parsing, and asked of the parser tree rather than assumed, because the answer
+    decides whether `--` is stripped at all. Stripping it unconditionally would break every other
+    subcommand's use of the POSIX separator — `showrunner add -- --starts-with-a-dash` would lose
+    the one thing keeping its title from being read as a flag.
+
+    Walks only tokens that ARE subparser choices, so a flag's value can never be mistaken for a
+    subcommand name. Reads argparse's private structure; if that ever changes shape this returns
+    False and `lock run`'s own assertions fail loudly, rather than the separator quietly going
+    back to being dropped.
+    """
+    node = parser
+    for tok in argv:
+        subs = next((a for a in node._actions
+                     if isinstance(a, argparse._SubParsersAction)), None)
+        if subs is None:
+            break
+        if tok in subs.choices:
+            node = subs.choices[tok]
+    return any(a.dest == "command" for a in node._actions)
+
+
+def _split_trailing_command(parser, argv):
+    """Take everything after the first bare `--` away from argparse, for the verbs that exec.
+
+    Returns (argv_for_argparse, trailing_or_None). Argparse cannot parse
+    `lock run <resource> --holder X -- <cmd...>` in one pass under any nargs — see the note on
+    `lock run`'s `command` argument for the two measured failures — so the separator is honoured
+    here and the words after it are handed back to the `command` positional after parsing.
+    """
+    if "--" not in argv or not _takes_trailing_command(parser, argv):
+        return argv, None
+    cut = argv.index("--")
+    return argv[:cut], argv[cut + 1:]
+
+
 def main(argv=None):
     parser = build_parser()
     _add_prose_twins(parser)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    argv, trailing = _split_trailing_command(parser, argv)
     args = parser.parse_args(argv)
+    if trailing is not None:
+        args.command = list(getattr(args, "command", None) or []) + trailing
     _resolve_prose(parser, args)
     if not getattr(args, "func", None):
         parser.print_help()

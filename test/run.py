@@ -8710,6 +8710,43 @@ def test_observability():
        "holder is mislabelled is one nobody can trace back to a consumer",
        any(e.get("who") == "crawler-a" for e in held), [e.get("who") for e in held])
 
+    # THE OTHER FLAG ORDER, because "both orders parse" is the claim the comment on that argument
+    # made while one of them exited 2. Asserting only the README's order leaves the sentence in
+    # the source unfailable again.
+    ran2 = subprocess.run([sys.executable, exe, "lock", "run", "--holder", "crawler-b",
+                           "device", "--", "echo", "two"],
+                          cwd=lk.root, capture_output=True, text=True, env=env)
+    eq("...and with --holder BEFORE the resource too (%s)"
+       % (ran2.stderr or "").strip()[:60], ran2.returncode, 0)
+    held2 = [e.get("who") for e in EV.read(lk)[0] if e["kind"] == "lock.acquired"]
+    ok("...recording that holder as well, so the fix is the separator and not one lucky order",
+       "crawler-b" in held2, held2)
+
+    # THE STATED LIMIT, asserted so it ages like the premise it is. Without `--`, argparse cannot
+    # reach `command` past an intervening optional, and the only way through would be
+    # parse_known_args — which turns a mistyped `--hodler` into a lock recorded against the
+    # default holder. So this REFUSES, and the assertion below is that it refuses rather than
+    # running under the wrong name.
+    bare = subprocess.run([sys.executable, exe, "lock", "run", "device",
+                           "--holder", "crawler-c", "echo", "three"],
+                          cwd=lk.root, capture_output=True, text=True, env=env)
+    ok("without `--` the bare form REFUSES — a loud exit is acceptable here, a lock quietly "
+       "recorded against the default holder is the defect this argument already produced once",
+       bare.returncode != 0, (bare.returncode, (bare.stderr or "")[:80]))
+    ok("...and nothing was journalled under that holder, so the refusal happened before the "
+       "acquire rather than after it",
+       not any(e.get("who") == "crawler-c" for e in EV.read(lk)[0]),
+       [e.get("who") for e in EV.read(lk)[0]])
+
+    # NON-REGRESSION ON EVERY OTHER VERB. `--` is stripped only where a `command` positional
+    # exists to receive what follows it; strip it everywhere and this title becomes a flag.
+    dashed = subprocess.run([sys.executable, exe, "add", "--", "--starts-with-a-dash"],
+                            cwd=lk.root, capture_output=True, text=True, env=env)
+    ok("`add -- --starts-with-a-dash` still keeps its separator — the split is scoped to verbs "
+       "that exec, so POSIX `--` goes on meaning what it means everywhere else",
+       dashed.returncode == 0 and "starts-with-a-dash" in dashed.stdout,
+       (dashed.returncode, dashed.stdout[-80:], (dashed.stderr or "")[-80:]))
+
     refusals = [e for e in EV.read(lk)[0] if e["kind"] == "lock.refused"]
     ok("a REFUSAL is journalled too, because a contended resource and an idle one are "
        "otherwise the same picture", refusals, kinds(lk))
