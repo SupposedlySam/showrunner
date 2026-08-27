@@ -4001,7 +4001,47 @@ def test_worktree_lease():
     ok("a settings.json that exists, has other people's hooks, and registers NO worktree-guard "
        "is an ERROR too — that is the state of every repo installed before the guard shipped, "
        "and it is the only one of the two an upgrade actually produces",
-       any("registers no worktree-guard" in m for m in errs2), errs2[:2])
+       any("no worktree-guard hook in" in m for m in errs2), errs2[:2])
+    # AND IT NAMES BOTH LAYERS IT READ. "registers no worktree-guard hook" reads as "you have
+    # not registered it" when the honest sentence is "I did not look where you put it" — a
+    # consumer keeping showrunner untracked could only tell the difference by reading source.
+    ok("...and the error NAMES the files it looked in, both layers, so a reader can tell "
+       "'you did not register it' from 'I did not look where you put it'",
+       any("settings.json and" in m and "settings.local.json" in m for m in errs2), errs2[:1])
+
+    # THE ARRANGEMENT DOCTOR ENDORSES MUST NOT ALSO BE AN ERROR. Reported by a consumer whose
+    # repo is shared with a developer running their own install, so showrunner is kept out of
+    # the history entirely: the shim is ignored and the hooks live in the UNTRACKED
+    # settings.local.json. `doctor` praised that arrangement in one line and errored on it
+    # eleven lines later, because the registration check read settings.json alone — while
+    # `dispatch.py` states that hooks live in the local layer and `cli.py`'s own hook-wiring
+    # net already reads both. The pair existed in this codebase and was not carried across.
+    with open(os.path.join(claude_dir, "settings.json"), "w") as fh:
+        json.dump({"hooks": {"PreToolUse": [
+            {"matcher": "Bash", "hooks": [{"type": "command",
+                                           "command": "somebody-elses.sh"}]}]}}, fh)
+    with open(os.path.join(claude_dir, "settings.local.json"), "w") as fh:
+        json.dump({"hooks": {"PreToolUse": [
+            {"matcher": "|".join(lease.GUARD_TOOLS),
+             "hooks": [{"type": "command",
+                        "command": '"$CLAUDE_PROJECT_DIR"/' + lease.GUARD_SHIM}]}]}}, fh)
+    local_only = lease.guard_health(cfg)
+    ok("a guard registered ONLY in the untracked settings.local.json counts as registered — "
+       "that is the one place it can go in a repo keeping showrunner out of its history",
+       not [m for l, m in local_only if l == "error" and "worktree-guard" in m],
+       [m for l, m in local_only if l == "error"][:2])
+
+    # AND THE REMEDY MUST MATCH THE ARRANGEMENT. `register` writes the TRACKED file; following
+    # that fix here would commit the hooks into a file shared with a developer whose own
+    # install would then collide. The consumer did not run it, and only because they read what
+    # it writes first.
+    os.remove(os.path.join(claude_dir, "settings.local.json"))
+    _saved = lease.settings_target(cfg.root, True)
+    ok("`settings_target` names the UNTRACKED layer under --local, so the remedy doctor prints "
+       "for the ignored arrangement writes where the hooks actually belong",
+       _saved.endswith("settings.local.json"), _saved)
+    ok("...and the tracked layer otherwise, which stays the default",
+       lease.settings_target(cfg.root, False).endswith(".claude/settings.json"))
     ok("...distinguished from the missing-file case by its own wording, so the two are not one "
        "assertion joined by `or`",
        not any("nothing registers" in m for m in errs2), errs2[:2])
@@ -5634,8 +5674,10 @@ def test_stale_copy_cannot_warn_about_itself():
     with open(os.path.join(behind, "a.txt"), "w") as fh:
         fh.write("two")
     _g("add", "-A"); _g("commit", "-qm", "second")
-    subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "init",
-                    "--root", behind], capture_output=True)
+    _p_init2 = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "init"],
+                              cwd=behind, capture_output=True, text=True)
+    ok("...and in the pin-behind repo, for the same reason", _p_init2.returncode == 0,
+       (_p_init2.stderr or "")[:160])
     sd = os.path.join(behind, ".showrunner_self", "bin")
     os.makedirs(sd, exist_ok=True)
     with open(os.path.join(behind, ".showrunner_self", "PINNED"), "w") as fh:
@@ -5664,8 +5706,14 @@ def test_stale_copy_cannot_warn_about_itself():
     rc_h = subprocess.run(["git", "rev-parse", "HEAD"], cwd=unborn, capture_output=True)
     ok("a freshly-initialised repo genuinely has no HEAD, so this exercises the real branch "
        "rather than a mocked one", rc_h.returncode != 0)
-    subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "init",
-                    "--root", unborn], capture_output=True)
+    # `init` initialises the CWD; it has no --root. This call used to pass one, so argparse
+    # refused with exit 2 and the test never noticed — a command that did nothing looking
+    # exactly like a command that worked. Run from the directory, and ASSERT it worked.
+    _p_init = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "init"],
+                             cwd=unborn, capture_output=True, text=True)
+    ok("`init` succeeds in the unborn-HEAD repo, so the doctor run below is against a real "
+       "config rather than against a refusal", _p_init.returncode == 0,
+       (_p_init.stderr or "")[:160])
     selfdir = os.path.join(unborn, ".showrunner_self")
     os.makedirs(os.path.join(selfdir, "bin"), exist_ok=True)
     with open(os.path.join(selfdir, "PINNED"), "w") as fh:

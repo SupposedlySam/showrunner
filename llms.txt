@@ -149,7 +149,9 @@ showrunner lease status [<tree>]     # which trees are held, by whom, and on wha
 showrunner worktree enter            # SessionStart: take this tree's lease, or report who holds it
 showrunner worktree fork --from <t>  # your own tree, off the same base commit as a held one
 showrunner worktree guard            # PreToolUse: DENY a write into a tree another live session holds
-showrunner worktree register         # put the hooks it owns in .claude/settings.json (idempotent):
+showrunner worktree register         # put the hooks it owns in .claude/settings.json (idempotent).
+                                     # --local writes settings.local.json (UNTRACKED) instead,
+                                     # for a repo that keeps showrunner out of its history:
                                      # the worktree guard and the dispatch guard on PreToolUse,
                                      # the inert-Crawler gate on Stop, and the seat announcement
                                      # on SessionStart AND PostCompact. The list is the claim; a
@@ -183,6 +185,21 @@ commits onto its branch — which then collides with the same untracked path in 
 
 `showrunner doctor` reports the shim, its arrangement and its registration separately, because a
 guard nobody registered has never once run.
+
+**The registration check reads BOTH settings layers**, and the remedy follows the arrangement. A
+repo that keeps showrunner out of its history puts the hooks in the untracked
+`.claude/settings.local.json` — the only place they can go — and `doctor` used to endorse that
+arrangement in one line and ERROR on it eleven lines later, because the check read
+`settings.json` alone. Worse, its printed remedy wrote the TRACKED file: following it would have
+committed this tool's hooks into a file shared with a developer running their own install.
+
+    showrunner init --local              # register into the untracked layer from the start
+    showrunner worktree register --local # and afterwards
+
+`init` needs it too: it registers the guard before `register` ever runs, so `--local` on the
+later verb alone still left one hook in the tracked file. The error now NAMES the files it read,
+because *"registers no worktree-guard hook"* reads as **you have not registered it** when the
+honest sentence is **I did not look where you put it**.
 
 **It fails OPEN and says so.** No binary, no payload, an exception — all allow, and all print
 that the call was allowed without being checked. A PreToolUse that hard-fails on its own plumbing

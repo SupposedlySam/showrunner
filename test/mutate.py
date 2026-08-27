@@ -239,9 +239,12 @@ TARGETS = [
     # An always-no-op registration is the SILENT half of shipping one: `init` prints nothing,
     # exits 0, and the guard it just placed is never wired to anything. That is the state this
     # leaf found `lock guard` in after the repo's entire life, reproduced by a stub.
+    # ANCHORED ON THE NAME, NOT THE FULL SIGNATURE. This matched `def register_guard(cfg):`
+    # exactly, so adding a `local=False` parameter made it match nothing — and the sweep
+    # correctly reported UNSCOREABLE rather than pretending a measurement had happened.
     ("guard registration", "lease.register_guard", "lib/showrunner/lease.py",
-     r"(def register_guard\(cfg\):\n)",
-     "    return False, ''\ndef _neutered_register_guard(cfg):\n"),
+     r"(def register_guard\([^)]*\):\n)",
+     "    return False, ''\ndef _neutered_register_guard(*a, **k):\n"),
     # Every lock directory that EXISTS, which is not the same set as the configured resources —
     # a worktree lease is named `worktree:<tree>` and never appears in config. An always-empty
     # answer makes `reap` blind to abandoned leases again (the state it exists to surface) and

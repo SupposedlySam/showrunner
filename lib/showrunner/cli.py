@@ -142,7 +142,12 @@ def cmd_init(args):
         print("placed %s — COMMIT IT: `git worktree add` copies tracked files only, so an "
               "uncommitted shim is absent in every worktree" % lease.GUARD_SHIM)
 
-    changed, note = lease.register_guard(cfg)
+    # --local HERE TOO, because `init` runs FIRST. Registering `--local` afterwards still left
+    # one showrunner hook in the tracked settings.json — measured, in a reproduction of the
+    # arrangement a consumer reported — so the verb that cleans up cannot undo the verb that
+    # ran before it. A repo keeping showrunner out of its history has to be able to say so at
+    # the point it is initialised.
+    changed, note = lease.register_guard(cfg, bool(getattr(args, "local", False)))
     if note:
         print(note if changed else "  ⚠ %s" % note)
 
@@ -1020,15 +1025,22 @@ def cmd_worktree_register(args):
     exists instead of printing JSON to paste by hand.
     """
     cfg = _cfg(args)
-    settings = rel(os.path.join(cfg.root, ".claude", "settings.json"), cfg.root)
+    # --local WRITES THE UNTRACKED LAYER, for a repo that keeps showrunner out of its history.
+    # `doctor` endorses that arrangement and its remedy used to name the tracked file, which
+    # would have committed five showrunner hooks into a file shared with other developers.
+    local = bool(getattr(args, "local", False))
+    settings = rel(lease.settings_target(cfg.root, local), cfg.root)
     # BOTH OF SHOWRUNNER'S HOOKS, from one verb. They are registered together because they are
     # installed together and a reader has no way to know there are two — and the second one
     # existing but unregistered is precisely the state this verb was built to end.
     rc = 0
-    for register, what in ((lease.register_guard, "worktree guard"),
-                           (lease.register_stop_trigger, "inert-Crawler stop trigger"),
-                           (lease.register_whoami, "seat announcement (SessionStart+PostCompact)"),
-                           (lease.register_dispatch_guard, "dispatch guard (PreToolUse on Bash)")):
+    for register_fn, what in ((lease.register_guard, "worktree guard"),
+                              (lease.register_stop_trigger, "inert-Crawler stop trigger"),
+                              (lease.register_whoami,
+                               "seat announcement (SessionStart+PostCompact)"),
+                              (lease.register_dispatch_guard,
+                               "dispatch guard (PreToolUse on Bash)")):
+        register = (lambda c, f=register_fn: f(c, local))
         changed, note = register(cfg)
         if changed:
             print(note)
@@ -2162,6 +2174,9 @@ def build_parser():
 
     s = sub.add_parser("init", help="write .showrunner/config.json and the worktree root")
     s.add_argument("--force", action="store_true")
+    s.add_argument("--local", action="store_true",
+                   help="register hooks in .claude/settings.local.json (UNTRACKED) rather than "
+                        "settings.json — for a repo that keeps showrunner out of its history")
     s.set_defaults(func=cmd_init)
 
     s = sub.add_parser("doctor", help="validate config; refuses configurations that degrade silently")
@@ -2291,8 +2306,15 @@ def build_parser():
     t.add_argument("--command", help="a Bash command to judge, instead of reading stdin")
     t.set_defaults(func=cmd_worktree_guard)
 
-    t = wsub.add_parser("register", help="register the guard's PreToolUse hook in "
-                                         ".claude/settings.json (idempotent)")
+    t = wsub.add_parser("register", help="register the hooks this tool owns in "
+                                         ".claude/settings.json "
+                                         "(idempotent). --local writes settings.local.json "
+                                         "instead, for a repo that keeps showrunner untracked")
+    t.add_argument("--local", action="store_true",
+                   help="write .claude/settings.local.json (UNTRACKED) rather than "
+                        "settings.json — the arrangement for a repo that keeps showrunner out "
+                        "of its history, which doctor endorses and whose remedy used to write "
+                        "the tracked file")
     t.set_defaults(func=cmd_worktree_register)
 
     s = sub.add_parser("self", help="pin showrunner's own code at a git ref, for a central "

@@ -556,6 +556,11 @@ def guard_health(cfg):
     # from now on, which is precisely where the guard is for. Observed while building WL-05:
     # the first probe worktree came up with no shim in it at all. Same failure the harness
     # payload has, checked in the same place, for the same reason.
+    # BOUND BEFORE THE BRANCH, because the remedy printed further down reads it and this block
+    # does not always run. It was assigned inside, so a repo with no shim at all crashed the
+    # whole check with an unbound local — a doctor that raises tells the reader nothing, which
+    # is strictly worse than the false ERROR this change exists to remove.
+    shim_ignored = False
     if os.path.exists(shim):
         rc, tracked, _ = git(["ls-files", "--error-unmatch", GUARD_SHIM], cwd=cfg.root)
         if rc != 0 or not (tracked or "").strip():
@@ -575,6 +580,9 @@ def guard_health(cfg):
             # it and provisioning refuses to, because copying it would hand the Crawler a file
             # its own `git add -A` commits onto its branch.
             rc_i, _, _ = git(["check-ignore", "-q", GUARD_SHIM], cwd=cfg.root)
+            # RECORDED, because the remedy printed further down depends on it: in the ignored
+            # arrangement `register` must not write the TRACKED settings file.
+            shim_ignored = rc_i == 0
             if rc_i == 0:
                 out.append(("ok", "%s is ignored rather than tracked, so `spawn` provisions it "
                                   "into each worktree — the arrangement for a repo that keeps "
@@ -601,21 +609,32 @@ def guard_health(cfg):
     # this entry, and the remedy is printed as literal JSON rather than as a command, because a
     # remedy naming a command that does not exist is worse than no remedy and no verb writes
     # this file today.
-    settings = os.path.join(cfg.root, ".claude", "settings.json")
-    registered, matcher = _guard_registration(settings)
+    settings_all = settings_candidates(cfg.root)
+    settings = settings_all[0]
+    registered, matcher = _guard_registration(settings_all)
+    # NAME WHAT WAS READ. "registers no worktree-guard hook" reads as "you have not registered
+    # it" when the honest sentence is "I did not look where you put it" — the consumer who
+    # reported this could only tell the difference by reading the source.
+    looked = " and ".join(rel_or(p, cfg.root) for p in settings_all)
     # A COMMAND, not JSON to paste. This printed the raw hook entry for a reader to copy, which
     # is a remedy that asks somebody to hand-edit the file the guard depends on — and `register`
     # exists precisely so they do not have to. INV: a printed remedy is a claim that a command
     # exists, and now one does.
-    fix = "%s worktree register" % _sr(cfg)
+    # THE REMEDY MUST MATCH THE ARRANGEMENT THIS SAME REPORT JUST ENDORSED. `register` writes
+    # the TRACKED settings.json. In a repo that keeps showrunner out of its history — the
+    # ignored-shim arrangement praised eleven lines above — following that fix commits five
+    # of this tool's hooks into a file shared with developers who have their own install. The
+    # consumer who reported this did not run it, and only because they read what it writes
+    # first. An emphatic ERROR whose remedy is silently wrong for the case it just approved is
+    # worse than no remedy.
+    fix = "%s worktree register%s" % (_sr(cfg), " --local" if shim_ignored else "")
     if registered is None:
-        out.append(("error", "no %s, so nothing registers the worktree guard and it will never "
-                             "run. Fix: `%s`" % (rel_or(settings, cfg.root), fix)))
+        out.append(("error", "no readable settings file (%s), so nothing registers the worktree "
+                             "guard and it will never run. Fix: `%s`" % (looked, fix)))
     elif not registered:
-        out.append(("error", "%s registers no worktree-guard hook. The verb exists and has "
-                             "never once run — which is exactly what was true of `lock guard` "
-                             "for this repo's whole life. Fix: `%s`"
-                             % (rel_or(settings, cfg.root), fix)))
+        out.append(("error", "no worktree-guard hook in %s. The verb exists and has never once "
+                             "run — which is exactly what was true of `lock guard` for this "
+                             "repo's whole life. Fix: `%s`" % (looked, fix)))
     else:
         missing = [t for t in GUARD_TOOLS if t not in (matcher or "")]
         if missing:
@@ -635,7 +654,7 @@ def guard_health(cfg):
         out.append(("warn", "%s exists but is not executable, so the Stop hook cannot run it. "
                             "`chmod +x %s`" % (STOP_TRIGGER, STOP_TRIGGER)))
     else:
-        stop_reg, _ = _stop_registration(settings)
+        stop_reg, _ = _stop_registration(settings_all)
         if stop_reg:
             out.append(("ok", "inert-Crawler stop trigger registered on Stop"))
         else:
@@ -661,7 +680,7 @@ def _register_lock(cfg):
     return os.path.join(cfg.state_dir, "claude-settings.lock")
 
 
-def register_guard(cfg):
+def register_guard(cfg, local=False):
     """Add the guard's PreToolUse entry to .claude/settings.json. Returns (changed, message).
 
     SHIPS ITS OWN REGISTRATION, because the alternative is documented: `lock guard` has existed
@@ -676,7 +695,7 @@ def register_guard(cfg):
     import json
     from .util import atomic_write_json, file_lock
 
-    path = os.path.join(cfg.root, ".claude", "settings.json")
+    path = settings_target(cfg.root, local)
     entry = {"matcher": "|".join(GUARD_TOOLS),
              "hooks": [{"type": "command",
                         "command": "\"$CLAUDE_PROJECT_DIR\"/" + GUARD_SHIM,
@@ -755,7 +774,7 @@ WHOAMI_HOOK = os.path.join(".showrunner", "hooks", "whoami.sh")
 DISPATCH_SHIM = os.path.join(".showrunner", "hooks", "dispatch-guard.sh")
 
 
-def register_dispatch_guard(cfg):
+def register_dispatch_guard(cfg, local=False):
     """Register the dispatch guard on PreToolUse (Bash). Returns (changed, message).
 
     ON BASH SPECIFICALLY, because the matcher IS the fix: a consumer's version matched `Agent`
@@ -767,7 +786,7 @@ def register_dispatch_guard(cfg):
     import json
     from .util import atomic_write_json, file_lock
 
-    path = os.path.join(cfg.root, ".claude", "settings.json")
+    path = settings_target(cfg.root, local)
     entry = {"matcher": "Bash",
              "hooks": [{"type": "command",
                         "command": "\"$CLAUDE_PROJECT_DIR\"/" + DISPATCH_SHIM,
@@ -780,7 +799,7 @@ def register_dispatch_guard(cfg):
             lambda p: _registration(p, "PreToolUse", "dispatch-guard"), "dispatch guard")
 
 
-def register_whoami(cfg):
+def register_whoami(cfg, local=False):
     """Announce the seat on SessionStart AND PostCompact (#36). Returns (changed, message).
 
     BOTH SEAMS, and the second is the whole point. The reported failure had showrunner installed,
@@ -791,7 +810,7 @@ def register_whoami(cfg):
     import json
     from .util import atomic_write_json, file_lock
 
-    path = os.path.join(cfg.root, ".claude", "settings.json")
+    path = settings_target(cfg.root, local)
     entry = {"hooks": [{"type": "command",
                         "command": "\"$CLAUDE_PROJECT_DIR\"/" + WHOAMI_HOOK,
                         "timeout": 20,
@@ -809,7 +828,7 @@ def register_whoami(cfg):
     return changed_any, "\n".join(n for n in notes if n)
 
 
-def register_stop_trigger(cfg):
+def register_stop_trigger(cfg, local=False):
     """Add the inert-Crawler Stop trigger to .claude/settings.json. Returns (changed, message).
 
     SAME ARGUMENT AS THE WORKTREE GUARD, one event over: a gate whose registration is left as an
@@ -820,7 +839,7 @@ def register_stop_trigger(cfg):
     import json
     from .util import atomic_write_json, file_lock
 
-    path = os.path.join(cfg.root, ".claude", "settings.json")
+    path = settings_target(cfg.root, local)
     entry = {"hooks": [{"type": "command",
                         "command": "\"$CLAUDE_PROJECT_DIR\"/" + STOP_TRIGGER,
                         "timeout": 30,
@@ -840,29 +859,71 @@ def register_stop_trigger(cfg):
 def _registration(settings_path, event, marker):
     """(registered, matcher) for OUR entry on `event`, matched by `marker` in its command.
 
-    `registered` is None when the settings file is absent or unreadable — a state kept
-    distinct from False, because "nobody configured hooks here" and "hooks are configured and
-    ours is not among them" are different problems with different remedies.
+    `settings_path` may be ONE path or a list of them, searched in order. A hook counts as
+    registered if it appears in ANY of them.
 
-    Keyed on the EVENT as well as the command, because showrunner now registers on two of them
-    and a detector that only knew one would report the Stop trigger as missing while it sat
-    there working, or as present because a PreToolUse entry happened to match.
+    THAT IS NOT A CONVENIENCE. This read `.claude/settings.json` alone, and a consumer reported
+    `doctor` endorsing their arrangement in one line and erroring on it eleven lines later: the
+    repo keeps showrunner out of its history, so the hooks are in the UNTRACKED
+    `.claude/settings.local.json` — which is where `dispatch.py` itself says they belong, and
+    which `cli.py`'s own hook-wiring net already reads. The pair existed in this codebase and
+    was not carried one function over.
+
+    `registered` is None when NO candidate file could be read — a state kept distinct from
+    False, because "nobody configured hooks here" and "hooks are configured and ours is not
+    among them" are different problems with different remedies. One unreadable file among
+    several readable ones is not None: the answer is whatever the readable ones say.
+
+    Keyed on the EVENT as well as the command, because showrunner registers on several and a
+    detector that only knew one would report the Stop trigger as missing while it sat there
+    working, or as present because a PreToolUse entry happened to match.
     """
     import json
-    try:
-        with open(settings_path) as fh:
-            data = json.load(fh)
-    except (OSError, ValueError):
-        return None, None
-    if not isinstance(data, dict):
-        return None, None
-    for entry in (data.get("hooks") or {}).get(event) or []:
-        if not isinstance(entry, dict):
+    paths = [settings_path] if isinstance(settings_path, str) else list(settings_path)
+    any_readable = False
+    for path in paths:
+        try:
+            with open(path) as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
             continue
-        for hook in entry.get("hooks") or []:
-            if isinstance(hook, dict) and marker in str(hook.get("command") or ""):
-                return True, entry.get("matcher") or ""
-    return False, None
+        if not isinstance(data, dict):
+            continue
+        any_readable = True
+        for entry in (data.get("hooks") or {}).get(event) or []:
+            if not isinstance(entry, dict):
+                continue
+            for hook in entry.get("hooks") or []:
+                if isinstance(hook, dict) and marker in str(hook.get("command") or ""):
+                    return True, entry.get("matcher") or ""
+    return (False, None) if any_readable else (None, None)
+
+
+def settings_target(root, local=False):
+    """Which settings layer a registration WRITES.
+
+    `--local` exists because `doctor` endorses an arrangement its own remedy would break. A repo
+    that keeps showrunner out of its history puts the hooks in the UNTRACKED
+    `settings.local.json`; running the printed `worktree register` there would commit five
+    of this tool's hooks into a file shared with developers who have their own install.
+
+    Reported by a consumer who did not run the remedy, and only because they read what it writes
+    first. A printed fix that is silently wrong for the case the same report just praised is
+    worse than printing no fix at all.
+    """
+    name = "settings.local.json" if local else "settings.json"
+    return os.path.join(root, ".claude", name)
+
+
+def settings_candidates(root):
+    """Both layers a Claude Code hook can legitimately live in, tracked first.
+
+    `settings.local.json` is untracked by design, which is the ONLY place hooks can go in a repo
+    that keeps showrunner out of its history — the arrangement `doctor` explicitly endorses one
+    line before it used to error on it.
+    """
+    return [os.path.join(root, ".claude", "settings.json"),
+            os.path.join(root, ".claude", "settings.local.json")]
 
 
 def _guard_registration(settings_path):
