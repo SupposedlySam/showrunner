@@ -10,7 +10,7 @@ look like they are working right up until the run that they ruin.
 import json
 import os
 
-from .util import Refused, die, main_checkout, slug
+from .util import Refused, caller_tree, die, main_checkout, slug
 
 CONFIG_NAME = "config.json"
 CONFIG_LOCAL_NAME = "config.local.json"
@@ -43,10 +43,27 @@ def _campaign_from_env():
 
 
 class Config:
-    def __init__(self, data, root, path, campaign=None):
+    def __init__(self, data, root, path, campaign=None, tree=None):
         self.data = data
         self.root = root          # the MAIN checkout, absolute
         self.path = path          # where config.json was read from (may not exist)
+        # WHERE THIS CONFIG WAS LOADED FROM — the `--show-toplevel` of the directory `load()`
+        # was called against, realpath'd, or None when nobody recorded one.
+        #
+        # `root` cannot answer this and never could: it resolves through `--git-common-dir`, so
+        # it is the MAIN checkout from every linked worktree by design (INV8) — that is what
+        # makes locks, config and the campaign record agree across Crawlers. Which leaves
+        # nothing on a Config that says which TREE the caller is standing in, and the one
+        # function that needed it (`roles.seat`) reached past its argument to `os.getcwd()`
+        # instead. A function handed a config and answering about the ambient process is two
+        # callers free to disagree, and a true answer to the wrong question is the most
+        # convincing kind of wrong: inside a worktree it reported CRAWLER for a config built
+        # for a repo somewhere else entirely.
+        #
+        # None is a real answer and is announced as one. A construction path that does not set
+        # this makes `seat` say UNKNOWN, which is honest; quietly falling back to the process
+        # cwd would restore exactly the defect this field exists to remove.
+        self.tree = os.path.realpath(tree) if tree else None
         # CAPTURED ONCE, NOT READ ON EVERY ACCESS. The first version resolved the campaign
         # lazily from the environment inside each path property, so a loaded Config changed its
         # answers when os.environ moved — two configs loaded for two campaigns both reported the
@@ -320,11 +337,17 @@ def find_root(start=None):
 
 def load(start=None, required=False, campaign=None):
     root = find_root(start)
+    # BOTH DERIVED FROM THE SAME START DIR, which is what makes their difference meaningful:
+    # `root` walks to the main checkout, `tree` stays where the caller stands, so `root != tree`
+    # is precisely "this caller is in a linked worktree" with no second git call at the point of
+    # use. Recorded at LOAD time for the same reason `campaign` is: a config object has to be a
+    # stable answer about ONE place, or nothing downstream can hold one and trust it.
+    tree = caller_tree(start)
     path = os.path.join(root, STATE_DIR, CONFIG_NAME)
     if not os.path.exists(path):
         if required:
             die("no %s — run `showrunner init` first" % path, code=2)
-        return Config(dict(DEFAULTS), root, path, campaign=campaign)
+        return Config(dict(DEFAULTS), root, path, campaign=campaign, tree=tree)
     with open(path) as fh:
         try:
             data = json.load(fh)
@@ -353,7 +376,7 @@ def load(start=None, required=False, campaign=None):
         if not isinstance(local, dict):
             die("%s must be a JSON object" % local_path, code=2)
         merged.update(local)
-    return Config(merged, root, path, campaign=campaign)
+    return Config(merged, root, path, campaign=campaign, tree=tree)
 
 
 def write(cfg):

@@ -236,7 +236,12 @@ def make_repo(extra_config=None, files=None):
         "collision": {"extra_globs": [], "always_serialize": ["test/**"]},
     })
     data.update(extra_config or {})
-    cfg = config.Config(data, os.path.realpath(d), os.path.join(d, ".showrunner", "config.json"))
+    # `tree` IS PART OF CONSTRUCTING A CONFIG, not an optional extra. A Config records the
+    # working tree it was loaded from, and `roles.seat` answers from it rather than from the
+    # process's cwd; a fixture that skipped it would make every seat UNKNOWN here — loudly, by
+    # design, but it would still be the fixture supplying less than production does.
+    cfg = config.Config(data, os.path.realpath(d), os.path.join(d, ".showrunner", "config.json"),
+                        tree=os.path.realpath(d))
     config.write(cfg)
     # THE FIXTURE SUPPLIED LESS THAN PRODUCTION, which is the quieter direction of the usual
     # warning. Both real entry points place this binary — install.sh copies it, and `init`
@@ -4372,8 +4377,10 @@ def test_seat_and_whoami():
         eq("...and once a campaign exists, the same checkout is the ORCHESTRATOR", where2,
            R.ORCHESTRATOR)
 
-        os.chdir(rec["worktree"])
-        where3, why3 = R.seat(cfg)
+        # Asked of a config LOADED IN the worktree rather than by chdir-ing the process: the
+        # seat is a fact about the tree a config was loaded from, and `load` records it from the
+        # same start directory it resolved the root from.
+        where3, why3 = R.seat(config.load(start=rec["worktree"]))
         eq("a linked worktree is a CRAWLER — derived from --git-common-dir against "
            "--show-toplevel, which no file can override", where3, R.CRAWLER)
         ok("...and the campaign record names its leaf, so the announcement can say which work "
@@ -4381,16 +4388,56 @@ def test_seat_and_whoami():
     finally:
         os.chdir(cwd)
 
+    # THE SEAT COMES FROM THE CONFIG, NOT FROM THE PROCESS. This is the falsifier for the fix,
+    # and it is deliberately shaped so that the old code CANNOT pass it: both configs are asked
+    # in ONE process, from ONE cwd, and they must give DIFFERENT answers. `seat` used to run
+    # `git rev-parse` against `os.getcwd()`, so it returned the same seat for both — and inside
+    # a linked worktree that answer was CRAWLER for a config describing a repo in /tmp, which
+    # is how five assertions in this group failed in every worktree and nowhere else.
+    #
+    # A test that merely passes from both locations does not discriminate; this one fails the
+    # moment `seat` consults the ambient process again, wherever the suite is run from.
+    in_tree = config.Config(cfg.data, cfg.root, cfg.path, tree=rec["worktree"])
+    in_main = config.Config(cfg.data, cfg.root, cfg.path, tree=cfg.root)
+    seat_in_tree, why_tree = R.seat(in_tree)
+    seat_in_main, _why_main = R.seat(in_main)
+    eq("a config loaded IN a linked worktree is a CRAWLER seat", seat_in_tree, R.CRAWLER)
+    eq("...while one loaded in the main checkout of the SAME repo, asked in the SAME process "
+       "from the SAME cwd, is the ORCHESTRATOR — so the answer provably comes from the config "
+       "and not from where this process happens to stand", seat_in_main, R.ORCHESTRATOR)
+    ok("...and the crawler evidence names the tree the CONFIG records, not the one the process "
+       "is in", os.path.basename(os.path.realpath(rec["worktree"])) in why_tree, why_tree)
+
+    # AND `cfg.root` IS NOT THE FIELD TO READ. It resolves through --git-common-dir, so it is the
+    # main checkout from inside every worktree; a fix that reached for it would trade one wrong
+    # answer for another and make every seat an ORCHESTRATOR. Asserted so that regression is a
+    # failure and not a plausible-looking simplification.
+    eq("a Config loaded from inside a worktree still roots at the MAIN checkout, which is why "
+       "`root` cannot answer the seat question and `tree` had to be added",
+       os.path.realpath(config.load(start=rec["worktree"]).root),
+       os.path.realpath(cfg.root))
+    eq("...while its `tree` is the worktree itself, recorded at load time from the same start "
+       "directory", config.load(start=rec["worktree"]).tree,
+       os.path.realpath(rec["worktree"]))
+
     # UNKNOWN IS A REAL ANSWER AND IS ANNOUNCED AS ONE. An announcer that cannot tell and says
     # nothing is indistinguishable from a healthy one, which is exactly how the reported failure
-    # went unnoticed for a whole run.
+    # went unnoticed for a whole run. Note WHERE this is asserted from: a perfectly good repo.
+    # The config records no tree, so the honest answer is UNKNOWN even though the process could
+    # have guessed one — and guessing is the behaviour being removed.
+    unrooted = config.Config(cfg.data, cfg.root, cfg.path, tree=None)
+    where4, why4 = R.seat(unrooted)
+    eq("a config that records no working tree is UNKNOWN, not guessed from the process's cwd",
+       where4, R.UNKNOWN)
+    ok("...and the evidence says which fact was missing, rather than blaming git",
+       "does not record which working tree" in why4, why4)
+
+    # ...and the ORIGINAL condition still holds end-to-end: a config cannot even be loaded
+    # outside a repo, and a tree that is not a git work tree records None.
     outside = tmpdir("not-a-repo")
-    try:
-        os.chdir(outside)
-        where4, why4 = R.seat(cfg)
-        eq("outside any git repository the seat is UNKNOWN, not guessed", where4, R.UNKNOWN)
-    finally:
-        os.chdir(cwd)
+    ok("a directory that is not a git work tree records no tree at all, so nothing downstream "
+       "can mistake it for a location", util.caller_tree(outside) is None,
+       util.caller_tree(outside))
 
     # THE ANNOUNCEMENT IS A MANIFEST, NOT A POINTER. Telling a session where to READ is the same
     # bet that just lost: the reported run had showrunner installed, wired, and 38 leaves done.
@@ -4550,17 +4597,21 @@ def test_crawler_seat_resolves_to_a_role():
         defs, _ = R.spec(cfg)
         ok("the fixture's roles are actually loaded, so the fallback assertions below could have "
            "resolved to `worker` and did not", "worker" in defs, sorted(defs))
-        os.chdir(rec["worktree"])
+        # ONE CONFIG PER TREE, rather than one config and a chdir. `_resolved` reaches the seat
+        # through `seat(cfg)`, which answers about the tree the CONFIG records; a test that moved
+        # the process instead would be asserting against the ambient cwd this seam no longer
+        # reads, and would pass for the wrong reason on the day it broke.
+        wt_cfg = config.load(start=rec["worktree"])
 
         # THE REGRESSION. Every Crawler resolved to the fallback, whose policy denies writes
         # everywhere, INSIDE the tree spawn had just made for it to work in. An audit leaf
         # finished only by routing its evidence around the guard with shell redirection.
-        role_before, how_before = R._resolved(cfg, "sess-c", defs)
+        role_before, how_before = R._resolved(wt_cfg, "sess-c", defs)
         eq("WITHOUT a mapping the Crawler still resolves to the fallback, so this stays opt-in "
            "for every consumer who has written none", role_before, R.FALLBACK)
 
         write({"crawler": "worker"})
-        role, how = R._resolved(cfg, "sess-c", defs)
+        role, how = R._resolved(wt_cfg, "sess-c", defs)
         eq("with the seat mapped, the Crawler resolves to the role the USER named for it",
            role, "worker")
         ok("...and says it was the campaign record that assigned it, naming the leaf — the "
@@ -4576,14 +4627,13 @@ def test_crawler_seat_resolves_to_a_role():
         if rc != 0:
             skip("a hand-added worktree grants nothing", "git worktree add failed")
         else:
-            os.chdir(hand)
             eq("a linked worktree NO campaign record names resolves to the fallback even with "
-               "the seat mapped", R._resolved(cfg, "sess-h", defs)[0], R.FALLBACK)
+               "the seat mapped",
+               R._resolved(config.load(start=hand), "sess-h", defs)[0], R.FALLBACK)
 
         # AND THE MAIN CHECKOUT IS NOT A CREDENTIAL. Shipping `orchestrator` mapped would put a
         # lead in every session that happened to be in the right directory, which is the failure
         # this whole seam replaced.
-        os.chdir(cfg.root)
         eq("the orchestrator seat is left unmapped, so standing in the main checkout of a repo "
            "with a campaign confers no role by itself",
            R._resolved(cfg, "sess-o", defs)[0], R.FALLBACK)
@@ -4599,12 +4649,11 @@ def test_crawler_seat_resolves_to_a_role():
         # A DROPPED MAPPING IS ANNOUNCED, not merely returned. `whoami` is the seam a session
         # actually reads, and a mapping silently ignored there leaves it told `unassigned` while
         # a file it cannot see says otherwise.
-        cfg.data["seat_roles"] = {"crawler": "campaign-lead"}
-        os.chdir(rec["worktree"])
-        body = "\n".join(R.whoami(cfg, session="sess-c"))
+        wt_cfg.data["seat_roles"] = {"crawler": "campaign-lead"}
+        body = "\n".join(R.whoami(wt_cfg, session="sess-c"))
         ok("`whoami` says a seat mapping was IGNORED rather than dropping it quietly",
            "SEAT MAPPING IGNORED" in body, body[-300:])
-        cfg.data.pop("seat_roles", None)
+        wt_cfg.data.pop("seat_roles", None)
 
         # A SEAT MAPPED AT A ROLE NOBODY DEFINED resolves to the fallback, which looks exactly
         # like having written no mapping at all. One typo buys the whole bug back, so `doctor`
@@ -4767,17 +4816,21 @@ def test_role_seat_verbs():
         for _n in ("placed-wt", "hand-added-wt"):
             _p = os.path.join(cl_cfg.worktree_root, _n)
             sh(["git", "worktree", "add", "-q", _p, "-b", "showrunner/%s" % _n], cl_cfg.root)
-        os.chdir(os.path.join(cl_cfg.worktree_root, "placed-wt"))
+        placed = config.load(start=os.path.join(cl_cfg.worktree_root, "placed-wt"))
+        by_hand = config.load(start=os.path.join(cl_cfg.worktree_root, "hand-added-wt"))
         eq("a worktree the campaign RECORDED resolves to its leaf — the tree showrunner placed "
-           "before the session existed", R.crawler_leaf(cl_cfg), "L9")
-        os.chdir(os.path.join(cl_cfg.worktree_root, "hand-added-wt"))
+           "before the session existed", R.crawler_leaf(placed), "L9")
         ok("...and a worktree somebody added BY HAND resolves to nothing, so `git worktree add` "
            "is not a way to grant yourself a role",
-           R.crawler_leaf(cl_cfg) is None, R.crawler_leaf(cl_cfg))
-        os.chdir(cl_cfg.root)
+           R.crawler_leaf(by_hand) is None, R.crawler_leaf(by_hand))
         ok("...and the MAIN checkout is not a crawler leaf either, so an orchestrator cannot "
            "pick up a Crawler's seat by standing still",
            R.crawler_leaf(cl_cfg) is None, R.crawler_leaf(cl_cfg))
+        # ...and all three answers are given in ONE process from ONE cwd, so none of them can be
+        # an artefact of where this test happened to be standing.
+        ok("the three trees are told apart by the CONFIG each was loaded from, not by chdir",
+           len({placed.tree, by_hand.tree, cl_cfg.tree}) == 3,
+           (placed.tree, by_hand.tree, cl_cfg.tree))
     finally:
         os.chdir(_here)
 
