@@ -5313,6 +5313,68 @@ def _borrowed_unmarked(paths, read):
     return sorted(bad)
 
 
+def test_launch_binary_and_failed_launch():
+    group("`spawn --launch`: the binary is configurable, and a failed launch does not strand a "
+          "leaf on a dead pid")
+    if not have("git"):
+        skip("the launch group", "git is not installed")
+        return
+    cfg = make_repo()
+
+    # 1. THE BINARY WAS HARDCODED. On a machine whose only `claude` is bundled inside the editor
+    # extension — not on PATH, no standalone install — EVERY `spawn --launch` failed and the
+    # whole parallel lane was unavailable. `dispatch_config` already carried permission_mode,
+    # default_model, models_by_lane and claude_args, and the same file names an absolute path
+    # for the chat CLI; the launch binary was the one thing that could not be pointed at.
+    eq("with nothing configured the launch binary is `claude` on PATH, unchanged",
+       dispatch.claude_bin(cfg), "claude")
+    cfg.data.setdefault("dispatch", {})["claude_bin"] = "/opt/editor/claude"
+    eq("...and `dispatch.claude_bin` points it somewhere else", dispatch.claude_bin(cfg),
+       "/opt/editor/claude")
+    built = dispatch.build_command(cfg, {"crawler": "c1"}, None, "sess", "brief")
+    eq("...which is what actually lands in argv[0], not just in a getter nothing calls",
+       built[0], "/opt/editor/claude")
+
+    # 2. A FAILED LAUNCH LEFT THE CAMPAIGN MUTATED. The leaf stayed in_progress, claimed by the
+    # invoking shell's pid — dead seconds later — so it was out of `ready`, invisible to the
+    # only discovery surface, and recoverable only by hand.
+    #
+    # PARK RATHER THAN ROLL BACK, and the reason came with the report: the tool's own advice was
+    # `reap`, and on a real campaign `reap` proposed releasing the leaf AND closing a dozen chat
+    # rooms belonging to another agent's Crawlers, because rooms with dead owners are swept in
+    # the same pass. The printed remedy was destructive well outside the failure.
+    sr = os.path.join(ROOT, "bin", "showrunner")
+    with open(os.path.join(cfg.root, ".showrunner", "config.json")) as fh:
+        conf = json.load(fh)
+    conf.setdefault("dispatch", {})["claude_bin"] = "/nonexistent/claude"
+    with open(os.path.join(cfg.root, ".showrunner", "config.json"), "w") as fh:
+        json.dump(conf, fh)
+    subprocess.run([sys.executable, sr, "add", "a leaf", "--id", "L1"],
+                   cwd=cfg.root, capture_output=True)
+    p_spawn = subprocess.run([sys.executable, sr, "spawn", "L1", "--actor", "me", "--launch"],
+                             cwd=cfg.root, capture_output=True, text=True)
+    ok("a launch that cannot start REFUSES rather than reporting success",
+       p_spawn.returncode == 2, (p_spawn.stderr or "")[:160])
+    ok("...and says the leaf was PARKED, naming the unpark that undoes it",
+       "PARKED L1" in p_spawn.stderr and "unpark L1" in p_spawn.stderr,
+       (p_spawn.stderr or "")[-260:])
+    ok("...and says the worktree is kept, because it may hold the only copy of real work",
+       "NOT removed" in p_spawn.stderr, (p_spawn.stderr or "")[-200:])
+
+    shown = subprocess.run([sys.executable, sr, "show", "L1"],
+                           cwd=cfg.root, capture_output=True, text=True).stdout
+    ok("the leaf is parked in the record, not merely described as parked in a message",
+       '"parked": 1' in shown, shown[:200])
+
+    # THE CASCADE THE REPORT WAS REALLY ABOUT. A stale claim steered the reader to `reap`, and
+    # `reap` swept far wider than the failure. A parked leaf is excluded, so the steer never
+    # appears.
+    reaped = subprocess.run([sys.executable, sr, "reap"],
+                            cwd=cfg.root, capture_output=True, text=True).stdout
+    ok("`reap` proposes NOTHING for a parked leaf — the stale-claim steer that led to a "
+       "destructive sweep never appears", "nothing to reap" in reaped, reaped[:200])
+
+
 def test_mutation_anchor_refusal():
     group("A mutation that does not apply must not read as a mutation that was tolerated")
 
@@ -9658,6 +9720,7 @@ def main():
                test_role_seat_verbs,
                test_close_resolves_paths_against_the_callers_tree,
                test_campaign_scoping,
+               test_launch_binary_and_failed_launch,
                test_mutation_anchor_refusal,
                test_borrowed_claims_are_marked,
                test_zero_inventory_matches_reality,

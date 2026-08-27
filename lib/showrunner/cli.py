@@ -498,6 +498,31 @@ def cmd_doctor(args):
             else:
                 print("  %s chat %s resolves: %s" % (GRN + "ok   " + OFF, key, path))
 
+    # THE LAUNCH BINARY, resolved rather than assumed. `doctor` refuses configurations that
+    # degrade silently, and an unresolvable `claude` is one: EVERY `spawn --launch` fails, the
+    # whole parallel lane is unavailable, and the first sign is a failed spawn that has already
+    # created a worktree, a branch, a scratch dir and a CLAIM.
+    #
+    # Reported by a consumer whose only `claude` lives inside the editor extension — not on
+    # PATH, no standalone install, no package-manager formula. Nothing here caught it.
+    _cb = dispatch.claude_bin(cfg)
+    _cb_resolved = _cb if os.path.sep in _cb else shutil.which(_cb)
+    if _cb_resolved and os.path.sep in _cb and not os.access(_cb_resolved, os.X_OK):
+        print("  %s dispatch.claude_bin points at %s, which is not executable. Every "
+              "`spawn --launch` will fail AFTER creating a worktree, a branch and a claim."
+              % (RED + "ERROR" + OFF, _cb))
+        bad += 1
+    elif not _cb_resolved:
+        print("  %s dispatch.claude_bin %r does not resolve — not on PATH and not an absolute "
+              "path. `spawn --launch` cannot start anything; `spawn` without it still prepares "
+              "the room. Set `dispatch.claude_bin` in .showrunner/config.local.json to the "
+              "absolute path (an editor-bundled binary is the common case, and its directory "
+              "carries a version that changes on update)."
+              % (RED + "ERROR" + OFF, _cb))
+        bad += 1
+    else:
+        print("  %s dispatch.claude_bin resolves: %s" % (GRN + "ok   " + OFF, _cb_resolved))
+
     # #22 — knowable from the config with nothing running, so it is worth saying here rather
     # than one Crawler at a time in the middle of a fan-out.
     for path, dirname in harness.inject_conflicts(cfg):
@@ -1607,8 +1632,37 @@ def cmd_spawn(args):
             die("refusing to start a session in a tree with a harness gap: %s\n"
                 "A Crawler without its own rails cannot gate its own commits, and under fan-out "
                 "nobody is watching it." % record["harness_gap"], code=2)
-        out = dispatch.launch(cfg, record, decision, text, session,
-                              dry_run=bool(getattr(args, "dry_run", False)))
+        # A FAILED LAUNCH USED TO LEAVE THE CAMPAIGN MUTATED AND THE LEAF INVISIBLE. The
+        # ordering is right — record first, then start — but nothing compensated when the start
+        # failed. The leaf stayed `in_progress`, claimed by the invoking shell's pid, which is
+        # dead seconds later: out of `ready`, so invisible to the only discovery surface, and
+        # reachable only by a hand-written cleanup.
+        #
+        # PARK, DO NOT ROLL BACK. Reported with the reason: the tool's own advice was `reap`,
+        # and on a real campaign `reap` proposed releasing the leaf AND closing a dozen chat
+        # rooms belonging to another agent's Crawlers, because rooms with dead owners are swept
+        # in the same pass. Following the printed remedy would have been destructive well
+        # outside the failure. A park survives the reaper, keeps the worktree (which may hold
+        # the only copy of real work — this repo surfaces, never deletes), and carries the
+        # launch error as its reason so the next reader sees WHY rather than a bare stall.
+        try:
+            out = dispatch.launch(cfg, record, decision, text, session,
+                                  dry_run=bool(getattr(args, "dry_run", False)))
+        except Refused as exc:
+            if not args.no_claim:
+                try:
+                    g.park(leaf["id"], "launch failed: %s" % exc)
+                    eprint("%sPARKED %s%s — the claim survives `reap` and the leaf stays "
+                           "visible. Its worktree is intact and is NOT removed: it may hold "
+                           "work. `showrunner unpark %s` when the launch problem is fixed."
+                           % (YEL, leaf["id"], OFF, leaf["id"]))
+                except Exception as park_exc:  # noqa: BLE001
+                    eprint("%sCOULD NOT PARK %s after the failed launch: %s%s\n"
+                           "  The leaf is in_progress with a claim on a pid that is already "
+                           "gone. `showrunner release %s` is the targeted fix; do NOT reach "
+                           "for `reap`, which sweeps every dead owner in the campaign."
+                           % (RED, leaf["id"], park_exc, OFF, leaf["id"]))
+            raise
         # THE CLAIM'S LIVENESS MUST NAME THE SESSION, NOT THE SHELL. The claim is taken before
         # the process exists, so until now it recorded whichever shell ran `spawn` — which is
         # gone seconds later, making `reap --apply` release a leaf whose Crawler is still

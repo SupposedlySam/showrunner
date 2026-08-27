@@ -219,11 +219,31 @@ def wire_stop_gate(cfg, record):
     return True, entry["command"]
 
 
+def claude_bin(cfg):
+    """The binary `spawn --launch` starts, from config, defaulting to `claude` on PATH.
+
+    IT WAS HARDCODED, and that made the whole parallel lane unavailable on a machine where the
+    only `claude` is the one bundled inside the editor extension — not on PATH, no standalone
+    install, no package-manager formula. Reported by a consumer for whom EVERY `spawn --launch`
+    failed, with nothing in `doctor` catching it: the first sign was a failed spawn that had
+    already mutated the campaign.
+
+    `dispatch_config` already carries `permission_mode`, `default_model`, `models_by_lane` and
+    `claude_args`, and the same file names an absolute path for the chat CLI. The launch binary
+    was the one thing that could not be pointed at.
+
+    Machine-specific by nature, so `.showrunner/config.local.json` is where an absolute path
+    belongs — the extension directory carries its version and is replaced on update, which is
+    the same trap a pinned path has everywhere else.
+    """
+    return (dispatch_config(cfg).get("claude_bin") or "claude")
+
+
 def build_command(cfg, record, model, session_id, prompt):
     """The argv for one Crawler. Separated from launching so it can be asserted without
     starting a real session, which costs money and a worktree."""
     dcfg = dispatch_config(cfg)
-    cmd = ["claude", "-p", prompt,
+    cmd = [claude_bin(cfg), "-p", prompt,
            "--session-id", session_id,
            "--permission-mode", dcfg.get("permission_mode") or DEFAULT_PERMISSION_MODE,
            "-n", record["crawler"]]

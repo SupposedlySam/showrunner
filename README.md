@@ -181,6 +181,22 @@ quiet, `reap` correctly proposes nothing. Chat is load-bearing for **correctness
 `--launch`, not a convenience. Without it, prefer `spawn` without `--launch` and drive the
 Crawlers yourself.
 
+**The launch binary is configurable, and `doctor` resolves it.** `dispatch.claude_bin` defaults
+to `claude` on PATH. On a machine whose only `claude` is bundled inside an editor extension —
+not on PATH, no standalone install — every `spawn --launch` failed and the whole parallel lane
+was unavailable, with nothing reporting it until a spawn had already created a worktree, a
+branch and a claim. An unresolvable binary is now an ERROR from `doctor`, which is what that
+verb is for.
+
+**A launch that fails parks the leaf rather than stranding it.** `spawn` records first and
+starts second, which is the right order; what was missing was the compensating action. A failed
+start left the leaf `in_progress`, claimed by the invoking shell's pid — gone seconds later —
+so it was out of `ready` and invisible to the only discovery surface. It is parked with the
+launch error as its reason: it survives `reap`, stays visible, and its worktree is kept, because
+that tree may hold the only copy of real work. Deliberately not a rollback — and deliberately
+not a steer to `reap`, which was reported proposing to close a dozen chat rooms belonging to
+another agent's Crawlers, sweeping far wider than the failure.
+
 **`.showrunner/config.local.json` is an untracked overlay** merged over `config.json` by
 top-level key. Machine-specific values — an absolute path only you have — belong there, not in
 the file that ships to every clone.

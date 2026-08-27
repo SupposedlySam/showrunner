@@ -63,6 +63,20 @@ showrunner spawn <leaf> --launch     # ...and STARTS a real Claude Code session 
                                      # and stops, and you start the agent yourself.
 showrunner integrate                 # serial merge, checks re-run on each MERGED result
 
+# THE LAUNCH BINARY IS CONFIGURABLE, and `doctor` resolves it. `dispatch.claude_bin` defaults
+# to `claude` on PATH; set an absolute path in .showrunner/config.local.json when the only
+# binary lives inside an editor extension. Unresolvable means EVERY `--launch` fails, so
+# doctor reports it as an ERROR rather than letting the first failed spawn find out.
+#
+# A LAUNCH THAT FAILS PARKS THE LEAF. spawn records first and starts second — correct — but
+# nothing used to compensate when the start failed: the leaf stayed in_progress on the
+# invoking shell's pid, out of `ready`, invisible to the only discovery surface. It is parked
+# with the launch error as the reason, so it survives `reap` and stays visible, and the
+# worktree is KEPT because it may hold the only copy of real work. `unpark` when fixed.
+# Deliberately not a rollback: the stale-claim steer to `reap` was reported proposing to close
+# a dozen chat rooms belonging to another agent's Crawlers, sweeping far wider than the
+# failure.
+
 # A chat room is NOT optional under --launch. A Crawler refused at its turn-end stays alive
 # and inert, and a message is the only thing that restarts it. Nothing is vendored:
 # git clone https://github.com/SupposedlySam/llm_chat.git ../llm_chat
