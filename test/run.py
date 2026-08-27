@@ -2750,6 +2750,43 @@ def test_integration():
        any(a["kind"] == "crawler" and "not deleted" in a["action"] for a in actions), actions)
     ok("...and the worktree is still on disk after a dry run", os.path.isdir(rec_d["worktree"]))
 
+    # THE PAIRED CASE. Everything above asserts the branch that IS empty, and "the branch never
+    # received a commit" is the one verdict that is true of an empty branch and a lie about every
+    # other one. `is_empty` passed its two arguments to `commits_ahead` in the wrong order, so
+    # `branch_exists` was handed a SHA, looked for refs/heads/<sha>, missed, and returned 0 — and
+    # every branch in every campaign answered "empty". The assertion above passed throughout,
+    # because the case it covers is the one the bug happens to get right. So a dead Crawler
+    # holding real unintegrated commits was reported as having contributed nothing, and `empty`
+    # sits ABOVE `merged` in the ladder, so it masked those verdicts too.
+    dead2 = DeadPid()
+    g.add("committed but never integrated", leaf_id="m6", labels=["backend"])
+    rec_c = worktree.spawn(cfg, g.show("m6"), actor="carrier")
+    campaign.record_spawn(cfg, rec_c, pid=dead2.pid)
+    with open(os.path.join(rec_c["worktree"], "committed.txt"), "w") as fh:
+        fh.write("this one reached a commit\n")
+    sh(["git", "add", "-A"], rec_c["worktree"])
+    sh(["git", "commit", "-q", "-m", "real work, committed"], rec_c["worktree"])
+    g.claim("m6", "carrier", pid=dead2.pid)
+
+    ok("a branch holding a commit is NOT empty — read directly, because the consumer below can "
+       "only see what the ladder lets through",
+       campaign.is_empty(cfg, rec_c["branch"], rec_c["base_sha"]) is False,
+       campaign.is_empty(cfg, rec_c["branch"], rec_c["base_sha"]))
+    ok("...and the empty verdict is still reachable, so the assertion above is not passing "
+       "because the answer went constant in the other direction",
+       campaign.is_empty(cfg, rec_d["branch"], rec_d["base_sha"]) is True,
+       campaign.is_empty(cfg, rec_d["branch"], rec_d["base_sha"]))
+
+    findings = campaign.reconcile(cfg, g, base="main")
+    carrier = next((f for f in findings if f["crawler"] == rec_c["crawler"]), {})
+    ok("reconcile does not tell a reader that a branch carrying a commit never received one — "
+       "that sentence is what licenses treating the tree as garbage",
+       carrier.get("empty") is False
+       and "never received a commit" not in (carrier.get("verdict") or ""), carrier)
+    ok("...and it still reports the Crawler as abandoned, for the reason that is actually true: "
+       "the owner is gone and the work is not integrated",
+       (carrier.get("verdict") or "").startswith("ABANDONED — owner is not alive"), carrier)
+
 
 # ======================================================== CORE: the CLI
 def _fork_output(cli_mod, cfg, name, session):

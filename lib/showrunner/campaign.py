@@ -168,7 +168,12 @@ def is_empty(cfg, branch, base_sha):
     rc, _, _ = git(["cat-file", "-e", "%s^{commit}" % base_sha], cwd=cfg.root)
     if rc != 0:
         return None
-    return commits_ahead(cfg, base_sha, branch) == 0
+    # (cfg, BRANCH, BASE) — `commits_ahead` takes the branch first, and handing it these two the
+    # other way round put a SHA where a branch name goes. `branch_exists` then looked for
+    # refs/heads/<sha>, missed, and returned 0, so this read True for every branch ever spawned.
+    # It survived because the only assertion over it covered the genuinely-empty branch, which is
+    # the case a constant True gets right.
+    return commits_ahead(cfg, branch, base_sha) == 0
 
 
 def lingering_crawlers(cfg):

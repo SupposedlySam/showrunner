@@ -672,9 +672,9 @@ def candidates():
 NOT_SWEPT = {
     # Exercised entirely through a swept caller; a wrong answer surfaces there, and sweeping
     # each costs a full suite run for a signal already carried.
-    "campaign.commits_ahead": "read only by is_merged/is_empty, both reached via reconcile",
+    "campaign.commits_ahead": "read only by is_merged/is_empty, both reached via reconcile in BOTH directions — the abandoned group asserts a branch with a commit and one without",
     "campaign.is_merged": "reached through reconcile, which the integration group asserts",
-    "campaign.is_empty": "reached through reconcile; the abandoned-branch verdict asserts it",
+    "campaign.is_empty": "reached through reconcile, asserted BOTH ways in the abandoned group. The reason here used to read 'the abandoned-branch verdict asserts it' — true, and it excused a producer that was returning a constant True for every branch, because a constant True is what the empty-branch verdict expects. An exclusion reason has to name the direction it covers, or it excuses the half it never looked at",
     "campaign.live": "liveness of one record; the waiting and reap groups assert its effect",
     "graph.SqliteGraph.blockers": "the ready/dependency assertions fail directly if it answers wrongly. NOTE: this reason was written unqualified and silently also excused BrGraph.blockers, which returned [] unconditionally until it was made to refuse — an unfailable accept hidden by an ambiguous key",
     "graph.SqliteGraph.ready": "asserted by name in the graph group, not via a producer stub",
