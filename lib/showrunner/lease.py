@@ -352,12 +352,23 @@ def guard(cfg, session, tool=None, tool_input=None, cwd=None, sr=None):
     write, which is the failure `locks.py` refuses to make and this must not re-make one layer
     up (INV: two layers must never disagree about the rules silently).
 
-    **WHAT IT LOOKS AT, and what that misses.** The tree of every path the payload names, plus
-    the tree the session is standing in. So a `Bash` command that names an absolute path into
-    somebody's tree from OUTSIDE it is NOT caught — the command string is not parsed for paths,
-    deliberately, because a path built from a shell variable is exactly the blindness
-    game_loop's own write guard names rather than pretends to cover. The lease stops a session
-    that is WORKING in a tree, not every conceivable route into it.
+    **WHAT IT LOOKS AT, and what that misses.** The tree of every path the payload names, the
+    tree the session is standing in, AND the absolute paths a `Bash` command string contains —
+    `command_paths()`, used below. Those are REPORTED, never refused: a path can be named
+    without being written, and a guard that denies `echo /other/tree` is one people learn to
+    route around.
+
+    THIS PARAGRAPH SAID THE COMMAND STRING WAS "not parsed for paths, deliberately" for as long
+    as it took to add `command_paths` and not update it — a stale claim in the docstring of the
+    function whose behaviour changed, contradicting llms.txt, which was right. It was nearly
+    used to answer a consumer's issue: the docstring is what a reader consults to decide whether
+    a report is already covered, so a stale one manufactures a wrong verdict rather than an
+    absent answer.
+
+    Still uncovered, and named rather than implied: a path built from a shell VARIABLE, a
+    wrapper script, or a heredoc — the blindness game_loop's own write guard names rather than
+    pretends to cover. The lease stops a session that is WORKING in a tree, not every
+    conceivable route into it.
 
     **An unidentifiable session ALLOWS, loudly.** With no session id there is no way to tell
     the holder from an intruder, and denying would refuse the holder's own writes — the guard
