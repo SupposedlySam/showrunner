@@ -52,8 +52,17 @@ sys.dont_write_bytecode = True
 # one of them this suite invoking the hook, not a turn-end. A freshly-run suite made every hook
 # look freshly reached, which is the single thing the file exists to answer. An instrument its
 # own tests can forge measures nothing, so every hook a test runs stamps somewhere else.
-os.environ["SHOWRUNNER_HEARTBEAT"] = os.path.join(
-    tempfile.mkdtemp(prefix="sr-heartbeat-"), "hook-heartbeat.jsonl")
+# REGISTERED FOR REMOVAL, like every other temp root this suite makes. These two run before
+# `TMPDIRS` exists, so they use atexit rather than `tmpdir()` — and that gap is exactly why they
+# leaked: `tmpdir()` has always registered its roots and `cleanup()` has always emptied them, so
+# the policy was never missing, only unwritten in the three places that did not call it.
+#
+# A neighbouring agent measured ~62,000 entries in this machine's temp root and named the cost,
+# which is not disk: past ARG_MAX a glob there becomes a command that CANNOT RUN and prints
+# nothing, indistinguishable from a clean result. Four searches across three repos failed that
+# way in one evening and nobody noticed.
+_HB_ROOT = tempfile.mkdtemp(prefix="sr-heartbeat-")
+os.environ["SHOWRUNNER_HEARTBEAT"] = os.path.join(_HB_ROOT, "hook-heartbeat.jsonl")
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
 # ── the suite must not read the machine it runs on (#46) ─────────────────────────────────────────
@@ -73,6 +82,9 @@ os.environ["XDG_CONFIG_HOME"] = _CFG_HOME
 # patch, again, so the subprocess CLI assertions inherit it.
 os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(_CFG_HOME, "claude-home")
 import atexit
+import shutil as _shutil
+for _leaky in (_HB_ROOT, _CFG_HOME):
+    atexit.register(_shutil.rmtree, _leaky, True)
 atexit.register(shutil.rmtree, _CFG_HOME, True)
 
 from showrunner import brief, campaign, collide, config, dispatch, gates, graph as G, harness, lanes, lease, locks, pin, roles, util, worktree  # noqa: E402
@@ -5962,6 +5974,64 @@ def _borrowed_unmarked(paths, read):
     return sorted(bad)
 
 
+def _unregistered_tempdirs(sources):
+    """Raw `mkdtemp` calls in the test tree with no cleanup registered near them.
+
+    THE POLICY WAS NEVER MISSING. `tmpdir()` has always appended to `TMPDIRS` and `cleanup()`
+    has always emptied it — three call sites simply did not use it, and each leaked one
+    directory per run. That is the shape a neighbouring agent diagnosed in their own repo:
+    two helpers had teardown and the third did not, so it was never policy, only the place
+    nobody wrote it.
+
+    Returns (path, count) for files whose raw mkdtemp calls outnumber their registrations.
+    """
+    import re as _re
+    bad = []
+    for path, text in sources:
+        raw = len(_re.findall(r"tempfile\.mkdtemp\(", text))
+        if not raw:
+            continue
+        registered = (len(_re.findall(r"atexit\.register\(", text))
+                      + len(_re.findall(r"TMPDIRS\.append\(", text))
+                      + len(_re.findall(r"rmtree\(", text)))
+        if raw > registered:
+            bad.append((path, raw, registered))
+    return bad
+
+
+def test_temp_dirs_are_cleaned_up():
+    group("A fixture root with no teardown scales with the suite, and empty output looks like "
+          "success")
+
+    # WHY THIS IS NOT ABOUT DISK. A neighbouring agent measured ~62,000 entries in this
+    # machine's temp root, 5,428 of them written by this repo's own tools. Past ARG_MAX a glob
+    # in that directory becomes a command that CANNOT RUN and prints nothing — which is
+    # indistinguishable from a clean result. Four searches across three repos failed that way
+    # in one evening and nobody noticed, because empty output is what success looks like.
+    #
+    # So the leak is one more identity-element defect, and its victim is whoever greps next.
+    sources = []
+    for rel_path in ("test/run.py", "test/corpus.py", "test/mutate.py", "test/docs_surface.py"):
+        full = os.path.join(ROOT, rel_path)
+        if os.path.exists(full):
+            with open(full) as fh:
+                sources.append((rel_path, fh.read()))
+    ok("the check has files to look at, so a clean result below is a finding rather than an "
+       "empty list", len(sources) >= 3, [p for p, _ in sources])
+
+    offenders = _unregistered_tempdirs(sources)
+    ok("every raw `tempfile.mkdtemp` in the test tree has a matching teardown — `tmpdir()` "
+       "registers for cleanup, and the three sites that bypassed it are what leaked",
+       not offenders, offenders)
+
+    # THE CHECK MUST BE ABLE TO FAIL, on text this repo does not contain.
+    fake_bad = [("x.py", "d = tempfile.mkdtemp()\nreturn d\n")]
+    fake_ok = [("y.py", "d = tempfile.mkdtemp()\natexit.register(shutil.rmtree, d, True)\n")]
+    eq("a mkdtemp with no teardown is NAMED, so the net can actually fail",
+       len(_unregistered_tempdirs(fake_bad)), 1)
+    eq("...while one with a registration is not", _unregistered_tempdirs(fake_ok), [])
+
+
 def test_boot_token_does_not_drift():
     group("A boot token that drifts turns a live holder into 'proved dead'")
 
@@ -10614,7 +10684,7 @@ def test_cli():
     # afterwards. Only one remedy is executed here; the rest remain checked for existence alone,
     # which is stated rather than implied because a sweep that names its own reach is the only
     # kind that cannot be mistaken for a complete one.
-    bare = tempfile.mkdtemp(prefix="sr-remedy-")
+    bare = tmpdir("sr-remedy")     # registered for cleanup, unlike the raw mkdtemp it replaces
     try:
         sh(["git", "init", "-q"], bare)
         sh(["git", "config", "user.email", "t@t"], bare)
@@ -10731,6 +10801,7 @@ def main():
                test_role_seat_verbs,
                test_close_resolves_paths_against_the_callers_tree,
                test_campaign_scoping,
+               test_temp_dirs_are_cleaned_up,
                test_boot_token_does_not_drift,
                test_guard_entrypoints_agree,
                test_launch_binary_and_failed_launch,
