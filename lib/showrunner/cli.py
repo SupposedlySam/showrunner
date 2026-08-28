@@ -1669,13 +1669,24 @@ def cmd_spawn(args):
     # the spawn goes on to fail for an unrelated reason.
     base_seen = worktree.base_report(cfg, g, leaf, args.base)
     record = worktree.spawn(cfg, leaf, actor=args.actor, base=args.base, branch=args.branch)
-    # The channel is named before the brief is written, so the brief can TELL the Crawler
-    # where to reach the orchestrator. A room the agent is never told about is a room it
-    # never joins, which is indistinguishable from one that was never opened.
-    chat_channel = dispatch.channel_for(cfg, record) if getattr(args, "launch", False) else None
+    # THE ROOM IS OPENED HERE, BEFORE THE BRIEF, and that ordering is the whole fix. The
+    # channel still has to be named before the brief is written — a room the agent is never
+    # told about is one it never joins, indistinguishable from one that was never opened — but
+    # naming was all this used to do. `channel_for` returns a name whenever chat is enabled,
+    # provisioning ran later inside `launch`, and the brief was authored from the name: four
+    # Crawlers in one campaign read "the orchestrator opened a channel for you" out of a spawn
+    # whose own report said `chat not wired: channel not opened`.
+    #
+    # THE BRIEF IS AUTHORED ONCE, which is why provisioning moved rather than the rendering.
+    # `brief.write` puts this text on disk at BRIEF.md and `dispatch.launch` hands the SAME
+    # string to the process as its prompt, so letting `launch` patch the block in afterwards
+    # would mean two writers of one file and a window in which the version a Crawler can read
+    # is the lying one — a window a failed launch leaves behind permanently, since a parked
+    # leaf keeps its worktree. Opening first costs a reorder; there is nothing to patch.
+    chat = dispatch.open_channel(cfg, record) if getattr(args, "launch", False) else None
     text = brief.build(cfg, leaf, record, decision,
                        orchestrator_findings=args.finding or None,
-                       chat_channel=chat_channel)
+                       chat=chat)
     brief_path = brief.write(cfg, record, text)
 
     # Generated here, before the claim, so the claim, the campaign record and the process all
@@ -1729,7 +1740,8 @@ def cmd_spawn(args):
         # launch error as its reason so the next reader sees WHY rather than a bare stall.
         try:
             out = dispatch.launch(cfg, record, decision, text, session,
-                                  dry_run=bool(getattr(args, "dry_run", False)))
+                                  dry_run=bool(getattr(args, "dry_run", False)),
+                                  chat=chat)
         except Refused as exc:
             if not args.no_claim:
                 try:

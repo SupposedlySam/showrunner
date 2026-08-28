@@ -8790,6 +8790,167 @@ def test_dispatch():
        "not mistaken for one nobody has messaged yet", out["channel"], "sr_crawler-a")
 
 
+def _fake_chat_tools(open_rc, stderr=""):
+    """An installer that works and a chat CLI whose `open` succeeds or fails, as asked.
+
+    The failure is the one actually observed: `dispatch.chat` configured, the server down, so
+    the installer lands the hooks and `open` returns non-zero.
+    """
+    d = tmpdir("chattools")
+    installer = os.path.join(d, "install")
+    with open(installer, "w") as fh:
+        fh.write('#!/bin/sh\nmkdir -p "$1/.claude" && printf "{}" > "$1/.claude/settings.local.json"\n')
+    os.chmod(installer, 0o755)
+    cli_path = os.path.join(d, "chat")
+    with open(cli_path, "w") as fh:
+        fh.write('#!/bin/sh\nprintf "%%s\\n" %s >&2\nexit %d\n' % (json.dumps(stderr or "ok"), open_rc))
+    os.chmod(cli_path, 0o755)
+    return installer, cli_path
+
+
+def test_brief_never_asserts_an_unopened_room():
+    group("The brief told a Crawler a room was opened when it was not")
+    if not have("git"):
+        skip("the unopened-room group", "git is not installed")
+        return
+
+    # OBSERVED FOUR TIMES IN ONE CAMPAIGN. `spawn --launch` ran with `dispatch.chat` configured
+    # and the chat server down. `provision_chat` returned (False, "channel not opened: ..."),
+    # the dispatch report said `chat not wired`, and the BRIEF -- the only one of the two a
+    # Crawler reads -- said "The orchestrator opened a channel for you", followed by a join
+    # command that could not succeed. Two Crawlers tried it; one wrote "COULD NOT REACH THE
+    # ORCHESTRATOR" into its verdict.
+    #
+    # ASSERTED ON THE TEXT, because the text is what a Crawler acts on. A dispatch dict that
+    # correctly reports the failure alongside a brief that denies it is the bug, not the fix.
+    cfg = make_repo()
+    g = new_graph(cfg)
+    leaf = g.show(g.add("a leaf with a room", leaf_id="ROOM1"))
+    rec = worktree.spawn(cfg, leaf, actor="c")
+
+    failed = brief.build(cfg, leaf, rec,
+                         chat=("sr_room1", False, "channel not opened: no llm_chat server at "
+                                                  "http://localhost:7717"))
+    ok("a brief written after provisioning FAILED does not claim a channel was opened",
+       "opened a channel for you" not in failed, failed[:0])
+    ok("...and does not hand the Crawler a join command that cannot succeed",
+       " join sr_room1 " not in failed, failed[:0])
+    ok("...it says so plainly instead of going quiet, because silence is indistinguishable "
+       "from chat never having been configured -- and those call for opposite behaviour",
+       "NOT reachable" in failed and "There is no room" in failed, failed[:0])
+    ok("...carries WHY, so the operator reading the Crawler's tree can fix the server rather "
+       "than guess", "no llm_chat server at http://localhost:7717" in failed, failed[:0])
+    ok("...and tells the Crawler what to do instead of asking: record the question in scratch "
+       "and decide it, which is the whole point of knowing",
+       cfg.abspath(rec["scratch"]) in failed and "close-reason" in failed, failed[:0])
+
+    # THE RESTRAINT CASE. A guard that fires on the good path is worse than the bug: it would
+    # cut every Crawler off from a room that really is there.
+    opened = brief.build(cfg, leaf, rec, chat=("sr_room1", True, "sr_room1"))
+    ok("provisioning that SUCCEEDS leaves the join block exactly as it was",
+       "The orchestrator opened a channel for you" in opened and "join sr_room1 --as" in opened,
+       opened[:0])
+    ok("...and says nothing about being unreachable", "NOT reachable" not in opened, opened[:0])
+
+    # AND THE THIRD STATE, which is neither: chat switched off. Unchanged from before this
+    # existed -- no block at all -- because a Crawler that was never going to have a room does
+    # not need to be told one failed.
+    off = brief.build(cfg, leaf, rec, chat=(None, False, "disabled"))
+    ok("chat.enabled false renders no chat block at all, as it always did",
+       "NOT reachable" not in off and "opened a channel" not in off, off[:0])
+    eq("...identically to passing nothing, so the two ways of saying 'no chat' agree",
+       off, brief.build(cfg, leaf, rec))
+
+    # THE LYING FORM MUST NOT BE EXPRESSIBLE. The old signature took a channel NAME, which is
+    # exactly the value that knows nothing about whether a room exists; a caller that still
+    # passes one is asserting a room it has not checked.
+    raised = ""
+    try:
+        brief.build(cfg, leaf, rec, chat="sr_room1")
+    except TypeError as exc:
+        raised = str(exc)
+    ok("passing a bare channel NAME is refused, not rendered -- a name is not a room",
+       "not a channel name" in raised, raised)
+
+    # open_channel is the piece that knows the difference, and it has to run BEFORE the brief.
+    installer, chat_cli = _fake_chat_tools(open_rc=1, stderr="no server listening on 7717")
+    chatty = make_repo({"dispatch": {"chat": {"enabled": True, "channel_prefix": "sr",
+                                              "installer": installer, "cli": chat_cli}}})
+    g2 = new_graph(chatty)
+    leaf2 = g2.show(g2.add("another", leaf_id="ROOM2"))
+    rec2 = worktree.spawn(chatty, leaf2, actor="c")
+    ch, opened_ok, detail = dispatch.open_channel(chatty, rec2)
+    ok("open_channel names the room AND reports that opening it failed, separately",
+       ch and opened_ok is False and "not opened" in detail, (ch, opened_ok, detail))
+    ok("...and the brief built from that result carries the failure, not the name",
+       "opened a channel for you" not in brief.build(chatty, leaf2, rec2,
+                                                     chat=(ch, opened_ok, detail)))
+    nochat = make_repo({"dispatch": {"chat": {"enabled": False}}})
+    eq("...while chat switched off reports no channel rather than a failed one",
+       dispatch.open_channel(nochat, rec2), (None, False, "disabled"))
+
+
+def test_the_brief_on_disk_is_the_one_that_tells_the_truth():
+    group("A Crawler reads the brief FILE, so the fix has to reach it")
+    if not have("git"):
+        skip("the on-disk brief group", "git is not installed")
+        return
+
+    # THE IN-MEMORY STRING IS NOT WHAT A CRAWLER READS. `brief.write` puts the text in the
+    # Crawler's scratch dir before the launch, and the same string is handed to the process as
+    # its prompt. A fix that corrected the returned value while leaving the written file
+    # asserting an unopened room would have fixed nothing anyone can see -- and that is exactly
+    # the shape of the rejected alternative, where `launch` patches the block in after
+    # `brief.write` has already run.
+    installer, chat_cli = _fake_chat_tools(open_rc=1, stderr="no llm_chat server at :7717")
+    cfg = make_repo({"dispatch": {"claude_bin": "/bin/echo",
+                                  "chat": {"enabled": True, "channel_prefix": "sr",
+                                           "installer": installer, "cli": chat_cli}}})
+    sr = os.path.join(ROOT, "bin", "showrunner")
+    subprocess.run([sys.executable, sr, "add", "a leaf", "--id", "D1"],
+                   cwd=cfg.root, capture_output=True)
+    p = subprocess.run([sys.executable, sr, "spawn", "D1", "--actor", "me", "--launch"],
+                       cwd=cfg.root, capture_output=True, text=True,
+                       env=dict(os.environ, NO_COLOR="1"))
+    out = p.stdout + p.stderr
+    ok("the spawn still goes ahead with chat down -- a Crawler that cannot be chatted with is "
+       "degraded, not broken", p.returncode == 0, out[-400:])
+    ok("...and the dispatch report says the chat was not wired, as it always did",
+       "not wired" in out, out[-400:])
+
+    written = [l.split(None, 1)[1].strip() for l in out.splitlines()
+               if l.strip().startswith("brief ")]
+    ok("the spawn names the brief file it wrote", bool(written), out[:400])
+    if written:
+        disk = open(os.path.join(cfg.root, written[0])).read()
+        ok("THE FILE ON DISK does not tell the Crawler a room was opened",
+           "opened a channel for you" not in disk, disk[:0])
+        ok("...and tells it plainly that nobody is listening",
+           "NOT reachable" in disk and "There is no room" in disk, disk[:0])
+
+    # THE SUCCESS PATH, END TO END, through the same real CLI: a room that opens must still
+    # produce the join block on disk, or this guard has cost every Crawler its channel.
+    installer2, ok_cli = _fake_chat_tools(open_rc=0, stderr="opened")
+    cfg2 = make_repo({"dispatch": {"claude_bin": "/bin/echo",
+                                   "chat": {"enabled": True, "channel_prefix": "sr",
+                                            "installer": installer2, "cli": ok_cli}}})
+    subprocess.run([sys.executable, sr, "add", "a leaf", "--id", "D2"],
+                   cwd=cfg2.root, capture_output=True)
+    p2 = subprocess.run([sys.executable, sr, "spawn", "D2", "--actor", "me", "--launch"],
+                        cwd=cfg2.root, capture_output=True, text=True,
+                        env=dict(os.environ, NO_COLOR="1"))
+    out2 = p2.stdout + p2.stderr
+    written2 = [l.split(None, 1)[1].strip() for l in out2.splitlines()
+                if l.strip().startswith("brief ")]
+    ok("a room that really opens is reported as wired", "chat     sr_" in out2, out2[-400:])
+    if written2:
+        disk2 = open(os.path.join(cfg2.root, written2[0])).read()
+        ok("...and the brief ON DISK carries the join block, unchanged",
+           "The orchestrator opened a channel for you" in disk2 and "--as " in disk2, disk2[:0])
+        ok("...with no unreachable block contradicting it",
+           "NOT reachable" not in disk2, disk2[:0])
+
+
 def test_filed_issues_15_to_21():
     group("Issues 15-21, filed from a real --launch in a consuming repo")
     if not have("git"):
@@ -8814,7 +8975,7 @@ def test_filed_issues_15_to_21():
     # produced a finding, on the one session whose attention is not parallel.
     chatty_leaf = g.show(g.add("with a room", leaf_id="L25"))
     rec25 = worktree.spawn(cfg, chatty_leaf, actor="c25")
-    t25 = brief.build(cfg, chatty_leaf, rec25, chat_channel="sr_c25")
+    t25 = brief.build(cfg, chatty_leaf, rec25, chat=("sr_c25", True, "sr_c25"))
     ok("the brief tells a Crawler NOT to post a start notice — the orchestrator wrote the brief "
        "and already has that content", "not post a start notice" in t25.lower(), t25[:0])
     ok("...while keeping the ask-rather-than-guess property that makes the room worth its cost",
@@ -10588,6 +10749,8 @@ def main():
                test_central_install,
                test_installer_leaves_no_vendored_copy,
                test_publishable, test_dispatch, test_filed_issues_15_to_21,
+               test_brief_never_asserts_an_unopened_room,
+               test_the_brief_on_disk_is_the_one_that_tells_the_truth,
                test_claims_about_the_layer_below, test_observability,
                test_cross_branch_overlap_and_lingering,
                test_hook_verbs_never_fail_open_in_silence,
