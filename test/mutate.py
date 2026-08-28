@@ -200,6 +200,16 @@ TARGETS = [
     # swept rather than excused, because each answers a question something acts on: where the
     # bare form's command begins, which config layer won a key, and what a session's transcript
     # path is. A neutered one that returns nothing must be noticed by something.
+    # ARRIVED WITH THE COLLISION-BLIND-TO-LIVE-CLAIMS WORK. Swept rather than excused: it
+    # decides whether starting a leaf would put it in files a LIVE Crawler already holds, and a
+    # neutered one answers "no conflicts" — which reads as safe and is the direction that costs.
+    ("the spawn-time live-collision check", "cli._live_collision_check",
+     "lib/showrunner/cli.py",
+     r"(def _live_collision_check\([^)]*\):\n)",
+     "    return None\ndef _neutered_live_collision(*a, **k):\n"),
+    ("collisions against a LIVE Crawler", "collide.live_conflicts", "lib/showrunner/collide.py",
+     r"(def live_conflicts\(cfg, leaf, live, files=None\):\n)",
+     "    return []\ndef _neutered_live_conflicts(cfg, leaf, live, files=None):\n"),
     ("a dotted key present in a config layer", "config._dotted", "lib/showrunner/config.py",
      r"(def _dotted\(data, key\):\n)",
      "    return False, None\ndef _neutered_dotted(data, key):\n"),
