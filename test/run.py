@@ -9384,6 +9384,13 @@ def test_claims_about_the_layer_below():
         "test/corpus.py":
             "cites an incident in game_loop's tooling as the reason for a control; asserts "
             "nothing about game_loop's behaviour",
+        # NAMES PRODUCERS AND CREDITS A REFINEMENT. `dispatch.observed_models` is a target here
+        # and the CLAIM about what game_loop records lives in dispatch.py, which is classified
+        # there — this file only says which function to neuter. A sweep list that also carried
+        # the claim would be two statements of one fact, free to disagree.
+        "test/mutate.py":
+            "names sweep targets and credits game_loop for a refinement; the claims about "
+            "game_loop's behaviour live in the modules it sweeps, classified there",
     }
 
     for rel_path in claim_files:
