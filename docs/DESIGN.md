@@ -426,6 +426,37 @@ directory afterwards, so one bad pin reaches every project on the machine at onc
 
 ---
 
+## Config: two files, opposite precedence, resolution reported not enforced
+
+`roles.json` and `config.json` live in the same user-level directory and resolve in opposite
+directions. `roles.json` is *permission*: user level wins, because a project able to redefine
+its own role would be widening the very policy that constrains the session editing it.
+`config.json` is *preference*: the project wins, because a repo is a better authority on its own
+lanes, checks and resources than a machine-wide default. Same directory, same shape (JSON,
+merged, one absolute user-level file, one project file) — opposite precedence, and nothing about
+the location tells a reader which way a given file resolves. That is a case of two layers free to
+disagree about the rules silently, so each file states the contrast from where its own reader
+stands (see `config.py` and `roles.py`) rather than trusting that whoever found one has read the
+other.
+
+Resolution is *reported*, not enforced, because there is no single winner that is right for both
+files sharing this mechanism: a rule that always let the user layer win would make a project
+unable to configure its own lanes on a shared machine; a rule that always let the project win
+makes `roles.json`'s user-level guarantee meaningless. So the config loader applies whichever
+precedence the FILE declares, and `showrunner doctor` answers the question a merged dict cannot
+ask itself afterward — for every leaf key set in more than one layer, which file's value won and
+which was shadowed.
+
+That report stops at **leaf-value** granularity on purpose. A dict split across layers with
+disjoint sub-keys — `dispatch.chat` set once at user level, `dispatch.default_model` set at
+project level, the pair this repo's own config uses — is a MERGE: both halves survive, and
+nothing was lost. Reporting shadowing at the top-level key would flag `dispatch` as shadowed in
+that exact case, which is a false positive in precisely the shape the deep merge exists to
+support. Only a dotted path whose own scalar-or-list value was actually replaced by a lower
+layer is a shadow; a dict that merely gained more keys is not.
+
+---
+
 ## Checks: no new failures, never "all green"
 
 A repo with pre-existing failures cannot satisfy "all green", so that version of the gate gets

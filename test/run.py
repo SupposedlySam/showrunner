@@ -755,6 +755,76 @@ def test_user_config_layer():
        "config.json" in src["roles.py"] and "PERMISSION" in src["roles.py"].upper())
 
 
+def test_config_layer_shadow_report():
+    group("`doctor` reports which layer WON a leaf key, and which was shadowed")
+    if not have("git"):
+        skip("the config-layer shadow report group", "git is not installed")
+        return
+
+    def doctor_output(repo, uhome):
+        env = dict(os.environ, XDG_CONFIG_HOME=uhome)
+        return subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                              cwd=repo.root, capture_output=True, text=True, env=env).stdout
+
+    def shadow_lines(out, key):
+        return [l for l in out.splitlines() if key in l and "shadowing" in l]
+
+    # A LEAF VALUE SET IN TWO LAYERS: doctor names the winning file AND the shadowed one, and
+    # marks a shadowed USER-level value distinctly — not buried among `ok` lines.
+    uhome = tmpdir("shadow-uhome")
+    os.makedirs(os.path.join(uhome, "showrunner"), exist_ok=True)
+    upath = os.path.join(uhome, "showrunner", "config.json")
+    with open(upath, "w") as fh:
+        json.dump({"dispatch": {"default_model": "opus"}}, fh)
+    repo = make_repo(extra_config={"dispatch": {"default_model": "sonnet"}})
+    out = doctor_output(repo, uhome)
+    lines = shadow_lines(out, "dispatch.default_model")
+    ok("exactly one shadow line for the leaf key set in both layers", len(lines) == 1, out[:600])
+    line = lines[0] if lines else ""
+    ok("names the winning (project) file", ".showrunner/config.json" in line, line)
+    ok("names the shadowed file by its full user-level path", upath in line, line)
+    ok("marks the shadowed value as coming from the USER layer specifically, and with `warn` "
+       "rather than `note` or `ok` — the line worth reading, not buried among them",
+       "warn" in line and "user-level" in line, line)
+
+    # THE FALSIFIER FOR THE TRAP: a dict set in two layers with DISJOINT sub-keys — the real
+    # `dispatch` shape this repo's own config uses (`dispatch.chat` at user level,
+    # `dispatch.default_model` / `dispatch.models_by_lane` at project level) — is a MERGE.
+    # Nothing was lost, so it must produce NO shadow line, even though `dispatch` itself is a
+    # top-level key present in both files.
+    uhome2 = tmpdir("shadow-uhome-disjoint")
+    os.makedirs(os.path.join(uhome2, "showrunner"), exist_ok=True)
+    with open(os.path.join(uhome2, "showrunner", "config.json"), "w") as fh:
+        json.dump({"dispatch": {"chat": {"enabled": True}}}, fh)
+    repo2 = make_repo(extra_config={"dispatch": {"default_model": "sonnet",
+                                             "models_by_lane": {"serialized": "opus"}}})
+    out2 = doctor_output(repo2, uhome2)
+    ok("a top-level key split across layers with disjoint sub-keys produces NO shadow line — "
+       "dict-vs-dict is a merge, not a shadow",
+       not any("dispatch" in l and "shadowing" in l for l in out2.splitlines()), out2[:600])
+
+    # NO USER FILE PRESENT: the report is quiet, and doctor is otherwise unchanged.
+    uhome3 = tmpdir("shadow-uhome-none")
+    os.makedirs(os.path.join(uhome3, "showrunner"), exist_ok=True)
+    repo3 = make_repo(extra_config={"dispatch": {"default_model": "sonnet"}})
+    out3 = doctor_output(repo3, uhome3)
+    ok("with no user config file, there is no shadow line at all", "shadowing" not in out3, out3[:400])
+    ok("...and `doctor` is otherwise unchanged — still reports 'user config: none'",
+       "user config: none" in out3, out3[:400])
+
+    # THE README LIMIT SENTENCE MUST MATCH THE GRANULARITY THE CODE ACTUALLY REPORTS. A stated
+    # limit that says "dict-level" while the code reports "leaf-level" (or vice versa) is a
+    # caveat that lies about the very thing it exists to warn readers about.
+    with open(os.path.join(ROOT, "README.md")) as fh:
+        readme = fh.read()
+    ok("README documents the per-key resolution report", "shadowed" in readme, None)
+    ok("...and states its limit at LEAF-value granularity, naming the dispatch.chat / "
+       "dispatch.default_model pair as the merge (not shadow) case — the same pair the "
+       "falsifier above exercises against the real code",
+       "leaf-value" in readme and "dispatch.chat" in readme and "dispatch.default_model" in readme
+       and "merge, not a shadow" in readme, None)
+
+
 # =========================================================== CORE: graph
 def test_every_rule_can_fail():
     group("Every validation rule must have a reachable failing input")
@@ -10481,7 +10551,7 @@ def test_optional():
 # ==========================================================================
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_config_refusals, test_user_config_layer, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

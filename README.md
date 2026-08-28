@@ -216,6 +216,15 @@ overrides a user-level list rather than inheriting it. `showrunner doctor` print
 user-level file, if any, was merged, because a merged config cannot be asked where a value came
 from.
 
+**`doctor` also reports, per leaf key, which layer's value won and which was shadowed** —
+naming the two files, and marking a shadowed *user-level* value distinctly rather than burying
+it among `ok` lines. The limit: it reports at **leaf-value** granularity, not dict granularity.
+A top-level key set in two layers with disjoint sub-keys — `dispatch.chat` at user level,
+`dispatch.default_model` at project level, the exact pair above — is a merge, not a shadow, and
+produces no line at all; only a dotted path whose own scalar-or-list value was actually replaced
+by a lower layer counts as shadowed. It says nothing about a value that only ever existed at one
+layer, and nothing about DEFAULTS, which is the tool's own answer rather than a file.
+
 **The project beats the user — which is the opposite of `roles.json`,** the other file in that
 same directory. The two are different kinds of thing: `roles.json` is *permission*, so user
 level wins and a project may only add (a project that could redefine its own role would widen
