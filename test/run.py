@@ -8815,21 +8815,46 @@ def test_observability():
     ok("...recording that holder as well, so the fix is the separator and not one lucky order",
        "crawler-b" in held2, held2)
 
-    # THE STATED LIMIT, asserted so it ages like the premise it is. Without `--`, argparse cannot
-    # reach `command` past an intervening optional, and the only way through would be
-    # parse_known_args — which turns a mistyped `--hodler` into a lock recorded against the
-    # default holder. So this REFUSES, and the assertion below is that it refuses rather than
-    # running under the wrong name.
+    # THE LIMIT WAS LIFTED, AND THESE ASSERTIONS ENCODED THE LIMIT RATHER THAN THE PROPERTY.
+    # They said the bare form (no `--`) must REFUSE, on the reasoning that the only way through
+    # would be `parse_known_args` — which turns a mistyped `--hodler` into a lock recorded
+    # against the DEFAULT holder. A collaborator's fix made the bare form work without that,
+    # so the suite went red on a change that was strictly better.
+    #
+    # Measured before rewriting, because "the test is stale" is the comfortable reading and the
+    # dangerous one:
+    #
+    #     bare form                          runs, exit 0
+    #     status during it                   lock device HELD by pid … (crawler-c)
+    #     `--hodler` (a typo)                REFUSES, exit 2, unrecognized arguments
+    #
+    # So the property the old assertions protected — a typo must never become a lock under the
+    # default holder — survives, by a different mechanism. Asserted as the property now, which
+    # holds whichever way the parser reaches `command`.
     bare = subprocess.run([sys.executable, exe, "lock", "run", "device",
                            "--holder", "crawler-c", "echo", "three"],
                           cwd=lk.root, capture_output=True, text=True, env=env)
-    ok("without `--` the bare form REFUSES — a loud exit is acceptable here, a lock quietly "
-       "recorded against the default holder is the defect this argument already produced once",
-       bare.returncode != 0, (bare.returncode, (bare.stderr or "")[:80]))
-    ok("...and nothing was journalled under that holder, so the refusal happened before the "
-       "acquire rather than after it",
-       not any(e.get("who") == "crawler-c" for e in EV.read(lk)[0]),
-       [e.get("who") for e in EV.read(lk)[0]])
+    ok("the bare form (no `--`) RUNS, and its output is the command's — the documented form is "
+       "not the only reachable one",
+       bare.returncode == 0 and "three" in bare.stdout,
+       (bare.returncode, (bare.stdout or "")[:60], (bare.stderr or "")[:80]))
+    ok("...and the lock is journalled under the NAMED holder, not the default — which is the "
+       "property the old refusal was protecting, and the only reason the refusal existed",
+       any(e.get("who") == "crawler-c" for e in EV.read(lk)[0]),
+       [e.get("who") for e in EV.read(lk)[0]][:4])
+
+    # THE TYPO IS THE REAL SUBJECT. `parse_known_args` would have swallowed `--hodler` and
+    # recorded the lock against the default holder — silently, which is the defect this
+    # argument already produced once. It must still refuse.
+    typo = subprocess.run([sys.executable, exe, "lock", "run", "device",
+                           "--hodler", "crawler-d", "echo", "four"],
+                          cwd=lk.root, capture_output=True, text=True, env=env)
+    ok("a MISTYPED holder flag still refuses rather than falling back to the default holder — "
+       "the bare form was made reachable without buying that defect back",
+       typo.returncode != 0, (typo.returncode, (typo.stderr or "")[:90]))
+    ok("...and nothing was journalled under the mistyped run's holder either",
+       not any(e.get("who") == "crawler-d" for e in EV.read(lk)[0]),
+       [e.get("who") for e in EV.read(lk)[0]][:4])
 
     # NON-REGRESSION ON EVERY OTHER VERB. `--` is stripped only where a `command` positional
     # exists to receive what follows it; strip it everywhere and this title becomes a flag.
