@@ -314,11 +314,27 @@ fall inside a tree another live session holds — `cd /tmp && python3 -c "open('
 other/f','w')"` was previously invisible, because the guard's precondition was where the shell
 stood while its subject is what the command writes.
 
-**It never refuses on this.** A path can be named without being written — an echo, a grep
-pattern, a message — and a guard that denies `echo /other/tree` is one people learn to route
-around. Weaker evidence gets a weaker verdict. The notice says what it cannot see: a path built
-from a shell variable, a wrapper script, or a heredoc. The LEASE is still what protects a tree
-from whatever gets in anyway.
+**It never refuses on this, and that is settled rather than interim.** A path can be named
+without being written — an echo, a grep pattern, a message — and a guard that denies
+`echo /other/tree` is one people learn to route around. Weaker evidence gets a weaker verdict.
+**Report, never refuse** is the permanent posture for path evidence; the LEASE is what protects
+a tree from whatever gets in anyway.
+
+**A LITERAL variable assignment IS resolved**, because that is the shape that occurs by default
+rather than the edge case — an orchestrator reaches its worktrees through variables, so
+`T=/repo/.worktrees/other && echo x > $T/f` is the normal form under fan-out and was invisible
+while the spelled-out path was noticed.
+
+```
+T=/repo/.worktrees/other && echo x > $T/f     resolved and reported
+T=$(pwd) && echo x > $T/f                     NOT resolved — would mean executing it
+T=$OTHER && echo x > $T/f                     NOT resolved — assigned elsewhere
+```
+
+**What it still cannot see, named here rather than left to a docstring:** a wrapper script, a
+heredoc body, a path assembled from parts, and a variable assigned outside the command. Nothing
+is executed to find out, which is the line that decides what is coverable at all — a guard that
+runs a command to decide whether to allow it is not a guard.
 
 ### Spin-down closes a room in FOUR outcomes
 

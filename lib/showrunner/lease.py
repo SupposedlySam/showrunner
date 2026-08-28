@@ -323,18 +323,42 @@ def own_command(command):
 _ABS_TOKEN = re.compile(r"""(?:^|[\s"'=(])(/[^\s"'`;|&)]+)""")
 
 
+# A LITERAL absolute-path assignment, and nothing else. `T=$(...)` and `T=$OTHER` are
+# deliberately unmatched: resolving them would mean executing them, which a guard must not do.
+_LITERAL_ASSIGN = re.compile(r"(?:^|[;&|]\s*|\s)([A-Za-z_][A-Za-z0-9_]*)=\"?(/[^\s\"';|&]+)")
+_VAR_USE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+
+
 def command_paths(command):
     """Absolute paths a shell command mentions. Best-effort by construction.
 
-    It cannot see a path built from a variable, a wrapper script, a heredoc, or anything
-    assembled at runtime — the same blindness the dispatch guard states about itself rather
-    than pretending to cover. Stated here so the caller's message can say what it did not look
-    at, because a notice that implies completeness is worse than none.
+    A LITERAL VARIABLE ASSIGNMENT IS RESOLVED, because that is the shape that occurs by
+    DEFAULT rather than the edge case. An orchestrator reaches its worktrees through variables,
+    so `T=/repo/.worktrees/other && echo x > $T/f` is the normal form under fan-out — and it was
+    invisible while the spelled-out path was noticed. Reported as the case worth covering ahead
+    of the others, and observed here the same day: a refusal elsewhere in this stack named a
+    variable-built target as unresolvable rather than resolving it, so the shape was already
+    familiar when the report arrived.
+
+    ONLY LITERAL ASSIGNMENTS, and nothing is executed. `T=/abs/path` in the same command string
+    is substituted; `T=$(cmd)`, `T=$OTHER` and anything assembled at runtime are not, because
+    resolving those would mean running them — which a guard must never do.
+
+    STILL UNCOVERED, and named rather than implied: a wrapper script, a heredoc body, a path
+    assembled from parts, and a variable assigned anywhere but this command. Same blindness the
+    dispatch guard states about itself. Stated here so the caller's message can say what it did
+    not look at, because a notice that implies completeness is worse than none.
     """
     if not command:
         return []
+    literal = dict(_LITERAL_ASSIGN.findall(command))
+    expanded = command
+    if literal:
+        def _sub(m):
+            return literal.get(m.group(1) or m.group(2), m.group(0))
+        expanded = _VAR_USE.sub(_sub, command)
     out = []
-    for m in _ABS_TOKEN.finditer(command):
+    for m in _ABS_TOKEN.finditer(expanded):
         tok = m.group(1).rstrip(".,:")
         if tok not in out:
             out.append(tok)

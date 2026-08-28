@@ -5999,6 +5999,47 @@ def _unregistered_tempdirs(sources):
     return bad
 
 
+def test_command_paths_resolves_literal_variables():
+    group("A path reached through a variable is the NORMAL shape under fan-out, not an edge case")
+
+    # THE GUARD'S PRECONDITION IS THE CALLER'S ENVIRONMENT; ITS SUBJECT IS THE COMMAND'S WRITE
+    # TARGETS. Those are not the same thing, so it is strongest where it is least needed and
+    # weakest where a stray absolute path is most likely.
+    #
+    # The spelled-out path was already noticed. The VARIABLE form was not — and an orchestrator
+    # reaches its worktrees through variables, so it is the normal form under fan-out. This
+    # repo's own commit gate already refuses a target built from a variable rather than
+    # resolving it, so the shape was known here before it was reported.
+    spelled = 'cd /tmp && python3 -c "open(\'/repo/.worktrees/other/f\',\'w\')"'
+    ok("a spelled-out absolute path is seen", "/repo/.worktrees/other/f"
+       in lease.command_paths(spelled), lease.command_paths(spelled))
+
+    for cmd in ("T=/repo/.worktrees/other && echo x > $T/f",
+                "T=/repo/.worktrees/other; echo x > ${T}/f"):
+        ok("...and so is one reached through a LITERAL variable assignment (%s)" % cmd[:32],
+           "/repo/.worktrees/other/f" in lease.command_paths(cmd), lease.command_paths(cmd))
+
+    # NOTHING IS EXECUTED, which is the line that decides what can be covered at all. Resolving
+    # a command substitution or an indirect variable would mean RUNNING it, and a guard must
+    # never do that to decide whether to allow a call.
+    for cmd, why in (("T=$(pwd) && echo x > $T/f", "a command substitution"),
+                     ("T=$OTHER && echo x > $T/f", "a variable assigned elsewhere")):
+        eq("...while %s stays invisible, because resolving it would mean executing it" % why,
+           lease.command_paths(cmd), [])
+
+    eq("a command naming no absolute path yields nothing", lease.command_paths("echo hi"), [])
+
+    # THE RESIDUAL IS NAMED WHERE A READER STANDS, not only in a docstring — a wrapper script, a
+    # heredoc body, a path assembled from parts. Saying so is cheaper than leaving it open, and
+    # the reporter asked for exactly that rather than for the chase.
+    with open(os.path.join(ROOT, "llms.txt")) as fh:
+        doc = re.sub(r"\s+", " ", fh.read())
+    ok("llms.txt states what the path scan still cannot see, so a reader does not have to infer "
+       "coverage from a notice", "wrapper script" in doc and "heredoc" in doc, doc[:0])
+    ok("...and records that REPORT-never-refuse is the settled posture rather than an interim "
+       "state somebody may reverse", "report, never refuse" in doc.lower())
+
+
 def test_temp_dirs_are_cleaned_up():
     group("A fixture root with no teardown scales with the suite, and empty output looks like "
           "success")
@@ -10989,6 +11030,7 @@ def main():
                test_role_seat_verbs,
                test_close_resolves_paths_against_the_callers_tree,
                test_campaign_scoping,
+               test_command_paths_resolves_literal_variables,
                test_temp_dirs_are_cleaned_up,
                test_boot_token_does_not_drift,
                test_guard_entrypoints_agree,
