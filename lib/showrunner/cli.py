@@ -153,6 +153,56 @@ def cmd_init(args):
     return 0
 
 
+def _flatten_leaves(data, prefix=""):
+    """Dotted-path -> value for every LEAF in `data`. A non-empty dict recurses; anything
+    else — a scalar, a list, or an empty dict — is a leaf, because an empty value is still a
+    value (see config.deep_merge). Flattening at leaf granularity, not top-level-key
+    granularity, is what keeps a dict like `dispatch` — set in two layers with disjoint
+    sub-keys — from being misreported as shadowed when it is actually a merge."""
+    out = {}
+    for k, v in (data or {}).items():
+        path = "%s.%s" % (prefix, k) if prefix else k
+        if isinstance(v, dict) and v:
+            out.update(_flatten_leaves(v, path))
+        else:
+            out[path] = v
+    return out
+
+
+def _config_layer_shadows(cfg):
+    """Per-leaf-key provenance across the user/project/local layers.
+
+    Returns (key, shadowed_layer, shadowed_path, winning_layer, winning_path) for every leaf
+    whose value is set in more than one of those three FILES — DEFAULTS is the tool's own
+    answer, not a file, and is not reported here. This re-reads the layer files directly
+    rather than threading provenance through `Config`/`deep_merge`: that channel would have to
+    be carried by every consumer of a config object for the benefit of this one report.
+    """
+    layers = []
+    if cfg.user_path:
+        layers.append(("user", cfg.user_path, config.read_config_file(cfg.user_path) or {}))
+    if os.path.exists(cfg.path):
+        layers.append(("project", cfg.path, config.read_config_file(cfg.path) or {}))
+    local_path = os.path.join(cfg.root, config.STATE_DIR, config.CONFIG_LOCAL_NAME)
+    if os.path.exists(local_path):
+        layers.append(("local", local_path, config.read_config_file(local_path) or {}))
+
+    flattened = [(name, path, _flatten_leaves(data)) for name, path, data in layers]
+    keys = set()
+    for _, _, flat in flattened:
+        keys.update(flat)
+
+    shadows = []
+    for key in sorted(keys):
+        setters = [(name, path) for name, path, flat in flattened if key in flat]
+        if len(setters) < 2:
+            continue
+        winning_name, winning_path = setters[-1]
+        for shadowed_name, shadowed_path in setters[:-1]:
+            shadows.append((key, shadowed_name, shadowed_path, winning_name, winning_path))
+    return shadows
+
+
 # ----------------------------------------------------------------- doctor
 def cmd_doctor(args):
     cfg = _cfg(args, required=False)
@@ -171,6 +221,18 @@ def cmd_doctor(args):
     print("user config: %s" % (("%s  (merged BENEATH this repo's — the project wins)"
                                 % cfg.user_path) if cfg.user_path
                                else "none (%s)" % config.USER_PATH))
+    # WHICH VALUE WON, PER KEY — "user config: <path>" above says a file is in play, not
+    # whether anything it set actually survived the merge. A shadowed USER-level value is the
+    # quiet failure this exists for, so it is marked `warn`, not buried among `note`s.
+    for key, shadowed_name, shadowed_path, winning_name, winning_path in _config_layer_shadows(cfg):
+        winning_display = winning_path if winning_name == "user" else rel(winning_path, cfg.root)
+        shadowed_display = shadowed_path if shadowed_name == "user" else rel(shadowed_path, cfg.root)
+        if shadowed_name == "user":
+            print("  %s %s: %s wins, shadowing the user-level value in %s"
+                  % (YEL + "warn " + OFF, key, winning_display, shadowed_display))
+        else:
+            print("  %s %s: %s wins, shadowing the %s value in %s"
+                  % (DIM + "note " + OFF, key, winning_display, shadowed_name, shadowed_display))
     findings = cfg.validate()
     bad = 0
     if not os.path.exists(cfg.path):
