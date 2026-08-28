@@ -9312,6 +9312,31 @@ def test_observability():
        not any(e.get("who") == "crawler-d" for e in EV.read(lk)[0]),
        [e.get("who") for e in EV.read(lk)[0]][:4])
 
+    # A FLAG AFTER THE COMMAND WORDS, WHICH THE BARE FORM MAKES POSSIBLE AND THE `--` FORM NEVER
+    # DID. Two answers are defensible and the parser has to pick one, so it is asserted rather
+    # than left to be discovered: from the first command word on, every token is the command's.
+    tail = subprocess.run([sys.executable, exe, "lock", "run", "device",
+                           "--holder", "crawler-e", "echo", "hi", "--verbose"],
+                          cwd=lk.root, capture_output=True, text=True, env=env)
+    ok("a flag AFTER the command words goes TO the command, not to showrunner — past the program "
+       "name the words are the program's, which is what every shell means by that position",
+       tail.returncode == 0 and "hi --verbose" in tail.stdout,
+       (tail.returncode, (tail.stdout or "")[:60], (tail.stderr or "")[:80]))
+
+    # ...EXCEPT ONE OF showrunner's OWN, WHICH IS THE TYPO HAZARD WEARING THE OTHER HAT. Spelled
+    # correctly but placed late, `--holder` would be handed to `echo` and the lock taken under
+    # the DEFAULT holder — the same silently mislabelled lock, reached without any typo at all.
+    late = subprocess.run([sys.executable, exe, "lock", "run", "device",
+                           "echo", "hi", "--holder", "crawler-f"],
+                          cwd=lk.root, capture_output=True, text=True, env=env)
+    ok("...but one of showrunner's OWN flags there REFUSES instead of silently running under the "
+       "default holder, and the refusal names `--` as the way to say it unambiguously",
+       late.returncode != 0 and "--" in (late.stderr or ""),
+       (late.returncode, (late.stderr or "")[-120:]))
+    ok("...and no lock was journalled for that refusal either, under crawler-f OR the default",
+       not any(e.get("who") == "crawler-f" for e in EV.read(lk)[0]),
+       [e.get("who") for e in EV.read(lk)[0]][:6])
+
     # NON-REGRESSION ON EVERY OTHER VERB. `--` is stripped only where a `command` positional
     # exists to receive what follows it; strip it everywhere and this title becomes a flag.
     dashed = subprocess.run([sys.executable, exe, "add", "--", "--starts-with-a-dash"],
