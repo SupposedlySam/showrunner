@@ -3603,6 +3603,63 @@ def test_worktree_lease():
        "is invisible to any check that reads the template",
        not _upgrade_gap, _upgrade_gap)
 
+    # AND THE THIRD COPY: `showrunner init`. install.sh is not the only door -- `init` is a
+    # public subcommand and writes this file itself, and the assertions above never looked at
+    # it, so it drifted twice while they stayed green. bin/ and lib/ were fixed in install.sh
+    # and not in `init`; then config.local.json, seen-issues.json and hook-heartbeat.jsonl were
+    # added to install.sh and not to `init`. A repo created by `init` therefore left
+    # config.local.json neither tracked nor ignored -- reopening, through the other door,
+    # exactly the leak that overlay exists to prevent.
+    #
+    # BOTH DIRECTIONS, deliberately. Asserting that each list merely CONTAINS config.local.json
+    # is the check that would not have caught this bug either: it only ever finds the entry we
+    # already know about. Mutual coverage fails on the NEXT entry somebody adds to one side and
+    # not the other, which is the failure that actually recurs here. Glob coverage counts in
+    # both directions, so `*.lock` and `campaign.json.lock` agree rather than colliding.
+    _tool = config.state_ignore_entries()
+    ok("the tool exposes a non-empty ignore list, so the comparisons below are not vacuous",
+       _tool, _tool)
+
+    def _uncov(xs, ys):
+        return [x for x in xs if x not in ys and not any(_fn.fnmatch(x, g) for g in ys)]
+
+    _init_gap = _uncov(_tool, _ensured)
+    _inst_gap = _uncov(_ensured, _tool)
+    ok("`showrunner init` and install.sh's ensure-list are the SAME list -- two layers must "
+       "never disagree about which files the tool owns, and an entry added to one side only is "
+       "how this drifted twice",
+       not _init_gap and not _inst_gap,
+       {"only in the tool's list": _init_gap, "only in install.sh": _inst_gap})
+    _heredoc_only = _uncov(_theirs, _tool)
+    ok("...and install.sh's create-if-absent template adds nothing the tool does not own -- an "
+       "entry living only in the heredoc reaches fresh installs and nothing else",
+       not _heredoc_only, _heredoc_only)
+
+    # THE OUTPUT, NOT THE LIST. Everything above compares source text; a constant that is right
+    # and never reaches the written file would pass all of it. So run the real binary in a real
+    # repo and ask GIT, which is the only thing whose opinion decides whether the next
+    # `git add -A` commits the overlay.
+    _ig_repo = tmpdir("init-gitignore")
+    sh(["git", "init", "-q", "-b", "main"], _ig_repo)
+    _rc_ig = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "init"],
+                            cwd=_ig_repo, capture_output=True, text=True)
+    ok("`showrunner init` succeeds in a bare repo, so the check below reads a real run and not "
+       "a failed one", _rc_ig.returncode == 0, _rc_ig.stderr.strip()[-400:])
+    # A DIRECTORY PATTERN NEEDS A PATH UNDER IT. `git check-ignore .showrunner/locks` does not
+    # match the rule `locks/` -- the path does not exist, so git cannot know it is a directory
+    # and a trailing-slash rule declines. Probing `locks/x` asks the question the rule answers,
+    # and a glob gets a concrete name for the same reason.
+    def _probe(entry):
+        return os.path.join(".showrunner",
+                            entry + "x" if entry.endswith("/") else entry.replace("*", "x"))
+
+    _leaks = [e for e in _tool
+              if sh(["git", "check-ignore", "-q", _probe(e)], _ig_repo, check=False).returncode != 0]
+    ok("...and git agrees every one of those paths is IGNORED in the repo `init` just made -- "
+       "config.local.json among them, which is the file whose absence from this list put a "
+       "machine-specific overlay one `git add -A` away from being committed",
+       not _leaks, _leaks)
+
     # THE LAST HAND LIST IN THE INSTALLER. SKILL_NAMES is enumerated by hand, and it is the same
     # shape as the hooks bug: the payload ships N, the installer names M, and the difference is
     # silent because a skill that never installs produces no output at all. It matches today,

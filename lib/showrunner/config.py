@@ -16,6 +16,56 @@ CONFIG_NAME = "config.json"
 CONFIG_LOCAL_NAME = "config.local.json"
 STATE_DIR = ".showrunner"
 
+# ONE LIST, AND IT LIVES HERE. This policy — which files under STATE_DIR are the tool's or a
+# run's, and therefore never the consumer's source — had been written out by hand in three
+# places: `cmd_init`, install.sh's create-if-absent heredoc, and install.sh's ensure-present
+# upgrade loop. It drifted twice. First bin/ and lib/, fixed in install.sh while `init` went on
+# writing the old list; then config.local.json, seen-issues.json and hook-heartbeat.jsonl, added
+# to install.sh and never to `init`. The consequence is not cosmetic: config.local.json exists
+# precisely so machine-specific values stay OUT of the tracked config (see the note at the
+# shallow-merge below, which names the real leak that motivated it), so a repo where it is
+# neither tracked nor ignored reopens that leak on the next `git add -A`.
+#
+# It lives in config.py rather than cli.py because this module already owns STATE_DIR and
+# CONFIG_LOCAL_NAME — the layer that owns the concept owns the rule about it — and because a
+# constant here is importable by the suite, which is what lets a test compare install.sh
+# against it instead of comparing one hand-written copy to another.
+#
+# install.sh keeps its own literal copies deliberately: it must write this file before the
+# tool is guaranteed runnable (under --central the binary it places is a shim that exits 1 when
+# no central install exists yet), so making the installer shell out to Python here would trade a
+# drift bug for an install that produces no ignore file at all. The suite closes the gap
+# instead: test/run.py asserts install.sh's lists and this constant agree in BOTH directions, so
+# an entry added to either side and not the other fails rather than drifting a third time.
+#
+# Sections carry their own comment because the reasons differ and a reader of the generated
+# file deserves them: bin/ and lib/ are the TOOL, the rest are observations a campaign
+# regenerates by running.
+STATE_IGNORE_SECTIONS = [
+    ("# showrunner runtime state — not source",
+     ["graph.db", "graph.db-*", "locks/", "scratch/", "campaign.json", "routing.jsonl",
+      "waiting.jsonl", "events.jsonl", "hook-heartbeat.jsonl", "*.lock", "baseline.json",
+      "integration-commit.json"]),
+    ("# Machine-specific overrides and per-machine observations. The docs point people here for\n"
+     "# absolute paths, and without these lines the files land NEITHER TRACKED NOR IGNORED --\n"
+     "# the exact state doctor flags elsewhere, and the state that reopens the leak\n"
+     "# config.local.json exists to prevent.",
+     [CONFIG_LOCAL_NAME, "seen-issues.json"]),
+    ("# The TOOL, not this project — replaced wholesale on upgrade.",
+     ["bin/", "lib/"]),
+]
+
+
+def state_ignore_entries():
+    """Every path the tool claims under STATE_DIR, flat and in written order."""
+    return [e for _, entries in STATE_IGNORE_SECTIONS for e in entries]
+
+
+def state_ignore_text():
+    """The .showrunner/.gitignore body `init` writes, comments and all."""
+    return "".join("%s%s\n%s\n" % ("" if i == 0 else "\n", comment, "\n".join(entries))
+                   for i, (comment, entries) in enumerate(STATE_IGNORE_SECTIONS))
+
 DEFAULTS = {
     "project_name": None,
     "graph": {"backend": "auto", "db": ".showrunner/graph.db", "br_db": None},
