@@ -56,6 +56,7 @@ because nobody inside a single Crawler can observe the collision.
 | the stop gate | `sed`/`grep` over JSON stops matching after a field-order change | parsed as JSON; an unrecognised shape refuses |
 | the br adapter | an unparseable response reads as an empty graph | refuses, naming the command and the output |
 | a claim | its owner dies and the leaf never returns to `ready` | pid + boot token; `reap` reclaims loudly |
+| a claim, again | its owner *lives* and stops working — every process-shaped signal reads healthy | transcript mtime beside the live pid; reported as `stalled`, never reclaimed |
 | the close gate | any non-empty file satisfies `[ -s "$proof" ]` | proof must postdate the claim, and is recorded |
 | a check comparison | a failure with no parseable lines looks like no failure | marked `exit-code-only`, reported as degraded |
 | the collision estimate | an unestimable leaf looks like one that collides with nothing | treated as colliding with everything, reason printed |
@@ -339,6 +340,11 @@ The br adapter cannot answer `stale_claims()`, because br records no liveness on
 **raises rather than returning an empty list**. `[]` would read as "nothing is stale", the one
 answer that must never be produced by not knowing.
 
+It cannot answer `stalled_claims()` either, and for a second missing fact rather than the same
+one: detecting a stall needs the worktree and session id to derive a transcript from, and br's
+claim records neither. It raises for the same reason — `[]` there would read as "every live claim
+is producing", which is precisely the false-LIVE answer the check exists to end.
+
 **Field data, 2026-08.** br 0.2.18 was installed on a consumer machine and its CLI shape confirmed
 first-hand: `br ready` / `blocked` / `coordination status` / `scheduler`, JSON everywhere, and a
 close policy that refuses `update --status closed` so closes carry a reason. It is a good tracker.
@@ -347,6 +353,48 @@ tell they were dead — which is the `stale_claims()` gap in the field rather th
 consumer has since removed br and pinned the vendored backend. The adapter stays: br is a
 reasonable choice for a human-facing tracker, and the honest framing is that **choosing br costs
 you `reap`**, stated at the point of choice rather than discovered a month later.
+
+---
+
+## Agent state is not process state, and it fails in both directions
+
+Two issues, one root cause. **#68** is the false-STALE direction: a live claim read as dead because
+the boot token drifted under an NTP adjustment. **#69** is the false-LIVE direction: a stalled claim
+reads live because the pid still exists. Neither is caught by being careful about the other, because
+being careful about one means trusting the process harder.
+
+Everything showrunner knew about a claim was process-shaped, and a process tells you almost nothing
+about an agent. `ps` reports `Ss` for a session idling at a prompt and one mid-computation alike;
+`%CPU` is a lifetime average, so five minutes of work followed by fifty of silence still reads
+healthy. `heartbeat_ts` looks like the missing signal and is not one — it is written at claim time,
+`Graph.heartbeat()` has no callers, and nothing reads the column, so it records the last *state
+change*. Starting to call it would still report nothing, because there was no consumer to report to.
+
+The signal that works needs no new plumbing. A claim already carries `claim_tree` and
+`claim_session`; the session transcript's path is derivable from exactly those two, and a frozen
+mtime next to a live pid **is** the stalled state. One `stat`.
+
+So a claim is now partitioned three ways rather than two:
+
+| | the process | the transcript | what happens |
+|---|---|---|---|
+| live | alive | moving | nothing |
+| **stalled** | alive | frozen past the threshold | **surfaced by `status` and `reap`, never reclaimed** |
+| abandoned | cannot be running | — | `reap --apply` releases it |
+
+**`stalled` is deliberately inert, and that is the design rather than a missing half.** Reaping the
+session that filed this would have destroyed four uncommitted files and an already-green suite:
+the correct recovery was to unstick the agent and leave the claim alone, after which it committed
+and closed normally. A stalled Crawler's process is the only thing holding its uncommitted work, so
+the verdict that licenses a release — *abandoned* — is exactly the one it does not have.
+
+Two things it refuses to claim. A claim whose transcript **cannot be read** is reported as
+unmeasurable, never as stalled: showrunner does not own that path and infers it from the host's
+directory naming, so an absent file says where it looked, not what the agent did. Folding that into
+a large idle time would report every healthy Crawler on a non-matching host as stalled at once. And
+the derivation mangles **every** non-alphanumeric byte to a dash, not just the separator — a rule
+worth stating because it has been got wrong twice in writing, once missing the dot and once the
+underscore, and each miss reads as a silent session rather than as a failed lookup.
 
 ---
 
