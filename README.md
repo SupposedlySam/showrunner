@@ -158,12 +158,14 @@ git clone https://github.com/SupposedlySam/llm_chat.git ../llm_chat
 ```
 
 ```jsonc
-// .showrunner/config.json  (or config.local.json for paths only your machine has)
+// ~/.config/showrunner/config.json — one chat tool serves every repo, so this belongs at
+// USER level, not per-project. See the four layers below. ABSOLUTE paths here: a relative
+// one resolves against whichever repo is asking, which is not one place.
 "dispatch": {
   "chat": {
     "enabled": true,
-    "cli":       "../llm_chat/bin/llm_chat",
-    "installer": "../llm_chat/install.sh"
+    "cli":       "/abs/path/to/llm_chat/bin/llm_chat",
+    "installer": "/abs/path/to/llm_chat/install.sh"
   }
 }
 ```
