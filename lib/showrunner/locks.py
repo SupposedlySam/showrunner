@@ -32,7 +32,8 @@ import re
 import shutil
 import time
 
-from .util import UNKNOWN_BOOT, boot_token, die, eprint, now, pid_alive, pid_readable
+from .util import (UNKNOWN_BOOT, boot_token, die, eprint, now, pid_alive, pid_readable,
+                   same_boot)
 
 FREE, HELD, STALE = "FREE", "HELD", "STALE"
 # A fourth state, and the reason it exists is the whole point of this module. STALE means
@@ -156,10 +157,14 @@ class Lock:
         is the right direction: this module's whole posture is that 'could not tell' must never
         become 'proved dead'.
         """
-        theirs, ours = h.get("boot"), boot_token()
-        comparable = (theirs and not theirs.endswith(UNKNOWN_BOOT)
-                      and not ours.endswith(UNKNOWN_BOOT))
-        if comparable and theirs != ours:
+        # ONE COMPARISON, shared with `graph.stale_claims`. Both implemented "a different token
+        # means the process cannot still be running", which is two statements of one policy and
+        # free to disagree — and both inherited the same defect: on darwin the boot SECONDS are
+        # recomputed from the clock, so an NTP adjustment of one second made a live holder read
+        # as proved dead. `same_boot` also answers None across two token SCHEMES, so changing
+        # the format cannot itself manufacture the verdict this module is most careful about.
+        verdict = same_boot(h.get("boot"), boot_token())
+        if verdict is False:
             return False
         return pid_alive(h.get("pid"))
 

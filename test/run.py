@@ -5350,6 +5350,53 @@ def _borrowed_unmarked(paths, read):
     return sorted(bad)
 
 
+def test_boot_token_does_not_drift():
+    group("A boot token that drifts turns a live holder into 'proved dead'")
+
+    # THE SECONDS ARE NOT CONSTANT. macOS recomputes boot time from the clock minus uptime, so
+    # an NTP adjustment moves `kern.boottime`'s `sec` by one — and the token is cached for the
+    # life of a process, so two processes that cached either side of one adjustment disagree
+    # FOREVER. Reported from a real campaign with the token observed going BACKWARDS across two
+    # readings fifteen minutes apart, on a machine with two days of uptime.
+    H = "somehost"
+    eq("the same token is the same boot", util.same_boot(H + ":uuid:A", H + ":uuid:A"), True)
+    eq("a genuinely different boot uuid is a different boot",
+       util.same_boot(H + ":uuid:A", H + ":uuid:B"), False)
+    eq("a different HOST is a different boot, and that IS knowable",
+       util.same_boot("other:uuid:A", H + ":uuid:A"), False)
+
+    # THE DRIFT ITSELF, on the fallback scheme. One second is exactly the size of the clock
+    # adjustment being repaired, and the field's own precision is the problem.
+    eq("two boot-seconds one apart are the SAME boot — the drift cannot manufacture a death",
+       util.same_boot(H + ":sec:1787677144", H + ":sec:1787677145"), True)
+    eq("...while a real gap is still a different boot, so the tolerance did not blind it",
+       util.same_boot(H + ":sec:1787677144", H + ":sec:1787677153"), False)
+
+    # THE UPGRADE MUST NOT CAUSE THE BUG IT FIXES. Changing darwin from seconds to a boot uuid
+    # changes every token, so a claim written by an older build differs from every reading by a
+    # newer one. Compared as strings that is mass false STALE, produced by the fix for false
+    # STALE. Two schemes are INCOMPARABLE, not opposed.
+    eq("a legacy untagged token against a new uuid answers CANNOT TELL, not 'different boot'",
+       util.same_boot(H + ":1787677144", H + ":uuid:A"), None)
+    eq("...and so does a tagged seconds token against a uuid",
+       util.same_boot(H + ":sec:1787677144", H + ":uuid:A"), None)
+    eq("an unknown on either side is CANNOT TELL — unchanged, and the posture this module is "
+       "most careful about", util.same_boot(H + ":unknown", H + ":uuid:A"), None)
+
+    # AND THE REAL TOKEN USES THE NON-DRIFTING SCHEME WHERE ONE EXISTS.
+    tok = util.boot_token()
+    ok("this machine's token names its scheme, so two schemes can never be compared as one",
+       tok.count(":") >= 2 or tok.endswith(":unknown"), tok)
+
+    # ONE COMPARISON, NOT TWO. `graph.stale_claims` and `locks._live` each carried the rule and
+    # were free to disagree — the shape this repo has repaired elsewhere. Both call it now.
+    for rel_path in ("lib/showrunner/graph.py", "lib/showrunner/locks.py"):
+        with open(os.path.join(ROOT, rel_path)) as fh:
+            body = fh.read()
+        ok("%s decides boot identity through the shared comparison rather than its own string "
+           "test" % rel_path, "same_boot(" in body)
+
+
 def test_guard_entrypoints_agree():
     group("The shim and the CLI are one guard — they must not disagree about the same call")
     if not have("git") or not have("bash"):
@@ -9875,6 +9922,7 @@ def main():
                test_role_seat_verbs,
                test_close_resolves_paths_against_the_callers_tree,
                test_campaign_scoping,
+               test_boot_token_does_not_drift,
                test_guard_entrypoints_agree,
                test_launch_binary_and_failed_launch,
                test_mutation_anchor_refusal,
