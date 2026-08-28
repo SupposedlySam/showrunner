@@ -70,6 +70,9 @@ showrunner spawn <leaf> --actor <name> [--base <ref>] [--finding "<already check
                                      # REFUSES (exit 3) when a graph dependency's branch is not in
                                      # the base, BEFORE creating anything. --despite-base <leaf>
                                      # accepts it, and must name what it overrides
+                                     # ALSO refuses an IMPLICIT base while the checkout is off the
+                                     # default branch — no graph edge needed. --base HEAD is the
+                                     # confirmation, and is NOT the same as passing nothing
                                      # prepares the room: worktree, branch, scratch, brief, lock, claim
 showrunner spawn <leaf> --launch     # ...and STARTS a real Claude Code session in it, with its own
                                      # hooks, on the model its lane declares. --dry-run to see the

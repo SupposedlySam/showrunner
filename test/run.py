@@ -7075,6 +7075,47 @@ def test_spawn_refuses_a_base_missing_a_dependency():
     ok("...while a leaf that was never spawned carries no base key at all",
        "crawler_base" not in json.loads(p.stdout), p.stdout)
 
+    # THE REPORTED SHAPE, WITH NO GRAPH DEPENDENCY AT ALL. Every check above fires on a
+    # measurement — a declared dep edge whose branch is not an ancestor. The reported failure
+    # named its base in the BRIEF's prose, which showrunner cannot read; if those leaves carried
+    # no dep edge then the dependency check stays silent and the trees are still wrong. This is
+    # the arm that catches it, and it must be exercised on a leaf with NO dependencies or it
+    # would be passing for the other check's reason.
+    sh(["git", "checkout", "-q", "-b", "some-feature"], cfg.root)
+    g.add("lone leaf, no dependencies", leaf_id="b-lone", labels=["backend"])
+
+    def spawn_lone(*extra):
+        return subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"),
+                               "spawn", "b-lone", "--no-claim"] + list(extra),
+                              capture_output=True, text=True, cwd=cfg.root)
+
+    p = spawn_lone()
+    eq("an IMPLICIT base while the checkout sits on a feature branch is refused, even with no "
+       "dependency in the graph to measure against", p.returncode, 3)
+    ok("...and names the branch the checkout is actually on, which is the invisible input",
+       "some-feature" in (p.stdout + p.stderr), p.stdout + p.stderr)
+    ok("...and creates nothing", not os.path.isdir(os.path.join(cfg.worktree_root,
+                                                                "crawler-b-lone")), p.stdout)
+
+    # `--base HEAD` IS THE CONFIRMATION, NOT A BYPASS. It resolves to the same commit the
+    # default would have used; what differs is that somebody typed it. Without this pair the
+    # assertion above passes against a spawn that refuses every feature branch outright.
+    p = spawn_lone("--base", "HEAD")
+    eq("...while naming HEAD explicitly proceeds — the same commit, deliberately chosen",
+       p.returncode, 0)
+    ok("...and the tree is created", os.path.isdir(os.path.join(cfg.worktree_root,
+                                                                "crawler-b-lone")), p.stdout)
+    sh(["git", "checkout", "-q", "main"], cfg.root)
+
+    # AND THE DEFAULT BRANCH ITSELF MUST NOT REFUSE, or the guard is "always on" and the first
+    # thing anybody does is look for the flag that turns it off.
+    g.add("another lone leaf", leaf_id="b-lone2", labels=["backend"])
+    p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"),
+                        "spawn", "b-lone2", "--no-claim"],
+                       capture_output=True, text=True, cwd=cfg.root)
+    eq("an implicit base while standing ON the default branch is exactly the case the default "
+       "exists for, and is not refused", p.returncode, 0)
+
     # UNKNOWN IS NOT MISSING. A dependency that was never spawned has no branch to compare
     # against; refusing there would block work on the strength of not having looked.
     g.add("ghost", leaf_id="b-ghost", labels=["backend"])

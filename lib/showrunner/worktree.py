@@ -454,7 +454,28 @@ def branch_for(leaf_id):
     return "showrunner/%s" % slug(leaf_id, 60)
 
 
-def base_report(cfg, graph, leaf, base="HEAD"):
+def default_branch(cfg):
+    """The branch an implicit base is defensible from, or None if it cannot be determined.
+
+    DERIVED, NEVER CONFIGURED. A `trunk` setting would be one more thing to get wrong, and it
+    would be wrong silently: a stale value reads exactly like a correct one. `origin/HEAD` is
+    what the remote itself says, and the local fallbacks are checked for EXISTENCE rather than
+    assumed, so a repo with neither answers None instead of asserting `main`.
+
+    None is the honest third answer and callers must treat it as "cannot tell", never as "not
+    the default branch" — the difference between not looking and having looked.
+    """
+    rc, out, _ = git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd=cfg.root)
+    if rc == 0 and out.strip():
+        return out.strip().split("/", 1)[-1]
+    for name in ("main", "master"):
+        rc, _, _ = git(["rev-parse", "--verify", "--quiet", "refs/heads/%s" % name], cwd=cfg.root)
+        if rc == 0:
+            return name
+    return None
+
+
+def base_report(cfg, graph, leaf, base="HEAD", explicit=None):
     """What `base` actually resolves to, and whether the leaf's dependencies are in it.
 
     THE DEFAULT IS INVISIBLE AND CONTEXT-DEPENDENT, which is the whole issue (#33). `spawn`
@@ -484,7 +505,14 @@ def base_report(cfg, graph, leaf, base="HEAD"):
         rc3, head_branch, _ = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=cfg.root)
         named = (head_branch or "").strip() or "HEAD"
 
-    out = {"base": base, "sha": sha, "branch": named, "explicit": base != "HEAD",
+    # `explicit` CANNOT BE DERIVED FROM THE STRING. `--base HEAD` and no --base at all produce
+    # the identical value, and they are opposite facts: one is an operator confirming the
+    # checkout is what they mean, the other is nobody having decided. Deriving it made the
+    # confirmation indistinguishable from the default, so the guard that asks for a decision
+    # rejected the decision. Callers that know pass it; the old derivation stays for those that
+    # do not, because it is right for every caller that never had the distinction.
+    out = {"base": base, "sha": sha, "branch": named,
+           "explicit": (base != "HEAD") if explicit is None else bool(explicit),
            "missing": [], "present": [], "unknown": []}
     if not sha:
         out["unknown"].append("git cannot resolve %r in %s" % (base, cfg.root))

@@ -82,6 +82,20 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # #73, the arm that does not need a graph edge. Answering nothing restores the exact
+    # reported behaviour: four Crawlers cut from whatever branch the checkout was on, with the
+    # base named only in the brief\'s prose, which showrunner cannot read.
+    ("refuse an implicit base off the default branch", "cli._implicit_base_check",
+     "lib/showrunner/cli.py",
+     r"(def _implicit_base_check\([^)]*\):\n)",
+     "    return\ndef _neutered_implicit_base_check(cfg, leaf, report, rehearsing=False):\n"),
+    # Answering None means "cannot tell", and the caller is required to treat that as a reason
+    # NOT to refuse — so a neutered version disables the guard above while every message still
+    # reads correctly. The safe-looking direction again: nothing breaks, nothing is checked.
+    ("which branch an implicit base is defensible from", "worktree.default_branch",
+     "lib/showrunner/worktree.py",
+     r"(def default_branch\([^)]*\):\n)",
+     "    return None\ndef _neutered_default_branch(cfg):\n"),
     # #73. Answering nothing restores #33 EXACTLY: the base is still computed, still printed,
     # still correct — and nothing refuses. That is the state four Crawlers were dispatched from,
     # so the mutant is not a hypothetical regression but the shipped behaviour this replaced.
@@ -340,7 +354,10 @@ TARGETS = [
     # silence #33 was filed about, where a chained leaf starts without its dependency and ships
     # half the item with every gate green.
     ("the base a spawn will actually use", "worktree.base_report", "lib/showrunner/worktree.py",
-     r'(def base_report\(cfg, graph, leaf, base="HEAD"\):\n)',
+     # WIDENED TO THE PARAMETER LIST, not pinned to a signature. This anchor went stale the
+     # moment `explicit=` was added, and a stale anchor is a target that silently measures
+     # nothing — the suite's own floor caught it, which is why that floor exists.
+     r'(def base_report\([^)]*\):\n)',
      "    return {'base': base, 'sha': None, 'branch': base, 'explicit': False,\n"
      "            'missing': [], 'present': [], 'unknown': []}\n"
      "def _neutered_base_report(cfg, graph, leaf, base='HEAD'):\n"),

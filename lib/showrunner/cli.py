@@ -1897,6 +1897,62 @@ def _live_collision_check(cfg, g, leaf, despite, rehearsing=False):
     return found
 
 
+def _implicit_base_check(cfg, leaf, report, rehearsing=False):
+    """REFUSE an IMPLICIT base when the checkout is not standing on the default branch (#73).
+
+    The dependency check below fires on a MEASUREMENT — a declared `dep` edge whose branch is
+    not an ancestor. The reported failure does not require one: four Crawlers were dispatched
+    with the base named in the BRIEF\'s prose, which showrunner cannot read and must not
+    pretend to. If those leaves carried no dep edge, every check in this file stays silent and
+    the trees are still wrong.
+
+    THE RULE IS THE REPORTER\'S OWN: defaulting to the primary checkout\'s HEAD "is defensible
+    for a leaf off `main`; it is wrong the moment a campaign has more than one branch in
+    flight." So the default stands where it is defensible and is refused where it is not, and
+    the fix for a Crawler that genuinely should cut from the current branch is to SAY so.
+
+    `--base HEAD` is the confirmation, not a bypass flag. It is the same commit the default
+    would have used; what differs is that somebody typed it. That is the whole cost, and it is
+    paid once per spawn rather than once per campaign, because the checkout can move between
+    two spawns in the same run — which is exactly how #33 happened.
+
+    CANNOT-TELL DOES NOT REFUSE. `default_branch` answers None for a repo with no origin/HEAD
+    and no main or master, and a detached HEAD has no branch name to compare. Both warn and
+    allow: blocking every spawn in an unusual repo would be a guard that is wrong by default,
+    and the one thing worse than a silent wrong base is a tool nobody can run.
+    """
+    if report.get("explicit"):
+        return
+    default = worktree.default_branch(cfg)
+    rc, head, _ = git(["symbolic-ref", "--short", "--quiet", "HEAD"], cwd=cfg.root)
+    head = head.strip() if rc == 0 else ""
+    if not default or not head:
+        eprint("  %sBASE NOT CHECKED against the default branch: %s. Confirm it yourself.%s"
+               % (YEL, "this repo has no origin/HEAD, main or master" if not default
+                  else "the checkout is on a detached HEAD", OFF))
+        return
+    if head == default:
+        return
+    msg = ("%s would be cut from the primary checkout\'s HEAD, and this checkout is on %s, "
+           "not %s.\n"
+           "  base %s @ %s\n"
+           "You did not name a base, so this is wherever the checkout happens to be pointing — "
+           "which is right for a leaf off %s and wrong the moment a campaign has more than one "
+           "branch in flight. The Crawler comes up on a tree whose files are all present and "
+           "all older, finds the problem it was sent to fix is not there, and can close as "
+           "PREMISE REFUTED with evidence that is true of the tree it was given.\n"
+           "Name the base:\n"
+           "    showrunner spawn %s --base <ref>\n"
+           "or confirm the current checkout is what you mean:\n"
+           "    showrunner spawn %s --base HEAD"
+           % (leaf["id"], head, default, report.get("branch") or "?",
+              (report.get("sha") or "?")[:12], default, leaf["id"], leaf["id"]))
+    if rehearsing:
+        eprint("%sWOULD REFUSE: %s%s" % (RED, msg, OFF))
+        return
+    die(msg, code=3)
+
+
 def _base_dependency_check(leaf, report, despite, rehearsing=False):
     """REFUSE a base that definitely lacks work this leaf declares it needs (#73).
 
@@ -1993,7 +2049,10 @@ def cmd_spawn(args):
     # computed twice — once inside the dry-run branch and once after it — which is two callers
     # of one check, free to drift apart, and the drift would be invisible because both look
     # right in isolation.
-    base_seen = worktree.base_report(cfg, g, leaf, args.base)
+    base_seen = worktree.base_report(cfg, g, leaf, args.base or "HEAD",
+                                     explicit=args.base is not None)
+    _implicit_base_check(cfg, leaf, base_seen,
+                         rehearsing=bool(getattr(args, "dry_run", False)))
     _base_dependency_check(leaf, base_seen, getattr(args, "despite_base", None) or [],
                            rehearsing=bool(getattr(args, "dry_run", False)))
     if getattr(args, "dry_run", False):
@@ -2012,7 +2071,8 @@ def cmd_spawn(args):
         print("  command  %s" % " ".join(cmd))
         return 0
 
-    record = worktree.spawn(cfg, leaf, actor=args.actor, base=args.base, branch=args.branch)
+    record = worktree.spawn(cfg, leaf, actor=args.actor, base=args.base or "HEAD",
+                            branch=args.branch)
     # THE ROOM IS OPENED HERE, BEFORE THE BRIEF, and that ordering is the whole fix. The
     # channel still has to be named before the brief is written — a room the agent is never
     # told about is one it never joins, indistinguishable from one that was never opened — but
@@ -2910,7 +2970,11 @@ def build_parser():
     s = sub.add_parser("spawn", help="create a Crawler's worktree, scratch, injection and brief")
     s.add_argument("id")
     s.add_argument("--actor", default="crawler")
-    s.add_argument("--base", default="HEAD")
+    # DEFAULT None, NOT "HEAD". `--base HEAD` is a confirmation that the checkout is what the
+    # operator means, and with a "HEAD" default it was byte-identical to not passing anything —
+    # so the guard asking for a decision could not see one being made.
+    s.add_argument("--base", help="the ref to cut from; defaults to the primary checkout's HEAD, "
+                                  "which is refused off the default branch unless named")
     s.add_argument("--branch")
     s.add_argument("--pid", type=int)
     s.add_argument("--session")

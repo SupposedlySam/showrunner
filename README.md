@@ -290,7 +290,17 @@ tool can produce, because refuted is a legitimate close and reads as a successfu
 So `spawn` exits 3 before creating anything when a dependency's branch is definitely not an ancestor
 of the base, overridden by `--despite-base <leaf>` naming which one — the same rule as
 `--despite-live`. A dependency that *cannot* be checked stays a warning: refusing there would block
-work on the strength of not having looked. `showrunner show <leaf>` reports `crawler_base` — what
+work on the strength of not having looked.
+
+**The second arm needs no graph edge**, because the reported failure had none: the base was named in
+the *brief's prose*, which showrunner cannot read and must not pretend to. An **implicit** base is
+refused whenever the checkout is not standing on the default branch — the reporter's own rule, that
+defaulting to HEAD "is defensible for a leaf off `main`; it is wrong the moment a campaign has more
+than one branch in flight." `--base HEAD` is the confirmation: the same commit the default would
+have used, differing only in that somebody typed it. That distinction had to be built — `--base
+HEAD` and passing nothing were byte-identical, so the guard asking for a decision could not see one
+being made. A repo with no `origin/HEAD`, `main` or `master`, or a detached HEAD, warns and allows:
+cannot-tell must not refuse. `showrunner show <leaf>` reports `crawler_base` — what
 was asked for, the resolved sha, the branch — which was recorded from the start and had no surface.
 
 **Claims carry liveness.** A claim records the owning PID and a boot token. Without that, a Crawler
