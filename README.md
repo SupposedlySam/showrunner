@@ -272,6 +272,27 @@ every colliding leaf — because a guard answered by a reflexive `--force` teach
 to bypass it. It is an **estimate**, from declared paths and grepped symbols, and says so wherever it
 is printed: `overlap` measures, this guesses about work that has produced nothing measurable yet.
 
+**A base that is missing work the leaf depends on is REFUSED, not reported.** `spawn` cuts from
+the primary checkout's HEAD unless told otherwise, and that default is invisible and
+context-dependent: the identical command is right or wrong depending on where an unrelated checkout
+happens to be pointing. Printing the base it used was the previous fix, and it was not enough — the
+line printed *after* the worktree, branch, brief and claim existed, and under `--launch`, after the
+Crawler was already running. Four Crawlers in one run were dispatched onto trees cut from an
+unrelated branch; one caught it by hand and held, and the rest had no reason to look.
+
+The failure is silent and plausible, which is what earns a refusal here. The worktree exists, the
+branch exists, the code compiles, and every file the brief names is present — just older. A Crawler
+that does not think to run `git log -1` finds the function it was sent to fix, finds it does not have
+the problem described, and reports **premise refuted** with real evidence: every word true of the
+tree it was given and false of the tree under review. That is the most expensive wrong answer this
+tool can produce, because refuted is a legitimate close and reads as a successful run.
+
+So `spawn` exits 3 before creating anything when a dependency's branch is definitely not an ancestor
+of the base, overridden by `--despite-base <leaf>` naming which one — the same rule as
+`--despite-live`. A dependency that *cannot* be checked stays a warning: refusing there would block
+work on the strength of not having looked. `showrunner show <leaf>` reports `crawler_base` — what
+was asked for, the resolved sha, the branch — which was recorded from the start and had no surface.
+
 **Claims carry liveness.** A claim records the owning PID and a boot token. Without that, a Crawler
 that dies leaves its leaf claimed forever — `ready` means unblocked *and unclaimed*, so the work
 silently leaves the queue, `ready` goes dry, and the loop terminates **reporting success** on work

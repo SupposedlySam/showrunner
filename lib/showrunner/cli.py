@@ -844,8 +844,28 @@ def cmd_list(args):
 
 
 def cmd_show(args):
+    """The leaf, plus WHAT ITS TREE WAS ACTUALLY CUT FROM if one was spawned (#73).
+
+    `spawn` has recorded `base`/`base_sha` since #33 and nothing ever showed them back. They
+    were load-bearing but invisible: `campaign.is_empty` and `lease.base_sha_of` both read the
+    recorded sha, so the fact existed and no operator surface answered "where is this tree
+    cut from" — the one question a Crawler on a wrong tree needs asked about it. The Crawler
+    that caught the reported case ran `git merge-base --is-ancestor` by hand.
+
+    UNDER ITS OWN KEY, not merged into the leaf. The leaf is a graph record and consumers
+    round-trip it; `crawler_base` is a different fact from a different store, and flattening
+    them would let a stale campaign entry read as graph state.
+    """
     cfg = _cfg(args)
     leaf = _graph(cfg).show(args.id)
+    entry = next((c for c in (campaign.load(cfg).get("crawlers") or [])
+                  if c.get("leaf") == args.id), None)
+    if entry:
+        leaf = dict(leaf)
+        leaf["crawler_base"] = {"asked_for": entry.get("base"),
+                                "sha": entry.get("base_sha"),
+                                "branch": entry.get("branch"),
+                                "crawler": entry.get("crawler")}
     print(json.dumps(leaf, indent=2, sort_keys=True))
     return 0
 
@@ -1877,6 +1897,74 @@ def _live_collision_check(cfg, g, leaf, despite, rehearsing=False):
     return found
 
 
+def _base_dependency_check(leaf, report, despite, rehearsing=False):
+    """REFUSE a base that definitely lacks work this leaf declares it needs (#73).
+
+    #33 built the detection and printed it. #73 is the same failure again — four Crawlers, one
+    run, every tree cut from an unrelated branch the primary checkout happened to be on — which
+    is the evidence that a printed line was not enough. It printed AFTER the worktree, the
+    branch, the brief and the claim existed, and with `--launch`, after the Crawler was already
+    running. One Crawler caught it by hand and held; the rest had no reason to look.
+
+    WHY THIS IS WORTH A REFUSAL AND MOST THINGS ARE NOT. The wrong tree is silent and plausible:
+    the worktree exists, the branch exists, the code compiles, and every file the brief names is
+    present, just older. A Crawler that does not think to run `git log -1` finds the function it
+    was sent to fix, finds it does not have the problem described, and reports PREMISE REFUTED
+    with real evidence — `grep` returning zero matches, every word of it true of the tree it was
+    given and false of the tree under review. That is the most expensive wrong answer this tool
+    can produce, because refuted is a legitimate close and reads as a successful run.
+
+    ONLY ON `missing`, never on `unknown`. Missing is a measurement: the dependency has a branch
+    and it is not an ancestor of this base. Unknown means the graph could not be read — a
+    backend that cannot list dependencies, or a dependency never spawned — and refusing there
+    would block work on the strength of not having looked. It stays a warning, which is the same
+    split `_print_base` already makes.
+
+    THE OVERRIDE NAMES WHAT IT OVERRIDES, exactly as `--despite-live` does and for the reason
+    given there: a bare `--force` is answered reflexively and teaches the next session that the
+    guard is a speed bump. Naming a dependency that is NOT missing is refused too, because an
+    override copied from an earlier command is not a decision.
+    """
+    missing = report.get("missing") or []
+    named = set(despite or [])
+    unmatched = named - {d for d, _ in missing}
+    if unmatched:
+        die("--despite-base named %s, which is not missing from this base.\n"
+            "An override copied from an earlier command is not a decision. Missing here: %s"
+            % (", ".join(sorted(unmatched)),
+               ", ".join(d for d, _ in missing) or "(nothing)"), code=2)
+    uncovered = [(d, b) for d, b in missing if d not in named]
+    if not uncovered:
+        if named:
+            print("%sACCEPTED A BASE MISSING A DEPENDENCY on purpose (--despite-base %s)%s"
+                  % (YEL, ", ".join(sorted(named)), OFF))
+        return
+    detail = "\n".join("  %s (%s) is NOT an ancestor of %s @ %s"
+                       % (d, b, report.get("branch") or "?", (report.get("sha") or "?")[:12])
+                       for d, b in uncovered)
+    origin = ("the base you named" if report.get("explicit")
+              else "the PRIMARY CHECKOUT'S HEAD, which is where an unrelated checkout happens "
+                   "to be pointing — you did not name a base")
+    msg = ("%s would be cut from a base that is missing work it depends on:\n%s\n"
+           "  That base is %s.\n"
+           "The Crawler comes up without that work in history, finds the prerequisite absent, "
+           "and can correctly report a complete honest outcome that is half the item — with "
+           "every gate green.\n"
+           "Cut from a ref that contains it:\n"
+           "    showrunner spawn %s --base %s\n"
+           "or accept it deliberately by naming what you are overriding:\n"
+           "    showrunner spawn %s %s"
+           % (leaf["id"], detail, origin, leaf["id"], uncovered[0][1], leaf["id"],
+              " ".join("--despite-base %s" % d for d, _ in uncovered)))
+    if rehearsing:
+        # The rehearsal must preview the refusal and still create nothing, for the reason
+        # `_live_collision_check` gives: a dry run that shows a clean dispatch and then a real
+        # spawn that refuses is worse than no rehearsal.
+        eprint("%sWOULD REFUSE: %s%s" % (RED, msg, OFF))
+        return
+    die(msg, code=3)
+
+
 def cmd_spawn(args):
     cfg = _cfg(args)
     g = _graph(cfg)
@@ -1901,6 +1989,13 @@ def cmd_spawn(args):
     # shows a clean dispatch and then a real spawn that refuses is worse than no rehearsal.
     _live_collision_check(cfg, g, leaf, getattr(args, "despite_live", None) or [],
                           rehearsing=bool(getattr(args, "dry_run", False)))
+    # COMPUTED ONCE, HERE, so the refusal and the rehearsal read the SAME report. It used to be
+    # computed twice — once inside the dry-run branch and once after it — which is two callers
+    # of one check, free to drift apart, and the drift would be invisible because both look
+    # right in isolation.
+    base_seen = worktree.base_report(cfg, g, leaf, args.base)
+    _base_dependency_check(leaf, base_seen, getattr(args, "despite_base", None) or [],
+                           rehearsing=bool(getattr(args, "dry_run", False)))
     if getattr(args, "dry_run", False):
         session = args.session or dispatch.new_session_id()
         model = dispatch.resolve_model(cfg, decision)
@@ -1912,14 +2007,11 @@ def cmd_spawn(args):
         # IN THE REHEARSAL TOO, and this is the half that matters: the dry run existed to show
         # the operator what a launch would do, and it showed everything except the input that
         # decides correctness.
-        _print_base(worktree.base_report(cfg, g, leaf, args.base))
+        _print_base(base_seen)
         print("  model    %s" % (model or "(inherited)"))
         print("  command  %s" % " ".join(cmd))
         return 0
 
-    # Computed BEFORE the spawn, so a base that is missing a dependency is reported even when
-    # the spawn goes on to fail for an unrelated reason.
-    base_seen = worktree.base_report(cfg, g, leaf, args.base)
     record = worktree.spawn(cfg, leaf, actor=args.actor, base=args.base, branch=args.branch)
     # THE ROOM IS OPENED HERE, BEFORE THE BRIEF, and that ordering is the whole fix. The
     # channel still has to be named before the brief is written — a room the agent is never
@@ -2829,6 +2921,8 @@ def build_parser():
                    help="with --launch: show what would start, and start nothing")
     s.add_argument("--finding", action="append",
                    help="something you already checked; the Crawler is asked to confirm or refute it")
+    s.add_argument("--despite-base", action="append", metavar="LEAF",
+                   help="accept a base missing this dependency, naming which one (#73)")
     s.add_argument("--despite-live", action="append", metavar="LEAF",
                    help="accept a collision with a NAMED live leaf. Repeatable, and it must "
                         "name every colliding leaf — an override that does not say what it is "

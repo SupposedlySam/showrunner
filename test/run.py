@@ -7003,6 +7003,91 @@ def test_corpus_tool():
 
 
 
+
+def test_spawn_refuses_a_base_missing_a_dependency():
+    group("spawn REFUSES a base that lacks work the leaf depends on — #33 detected it and "
+          "printed; #73 is the same failure again, four Crawlers later")
+    if not have("git"):
+        skip("the base refusal group", "git is not installed")
+        return
+    cfg = make_repo()
+    g = new_graph(cfg)
+    g.add("the dependency", leaf_id="b-dep", labels=["backend"])
+    g.add("builds on it", leaf_id="b-next", labels=["backend"])
+    g.dep("b-next", "b-dep")
+    dep = worktree.spawn(cfg, g.show("b-dep"), actor="crawler-dep")
+    with open(os.path.join(dep["worktree"], "dependency.txt"), "w") as fh:
+        fh.write("the prerequisite\n")
+    sh(["git", "add", "-A"], dep["worktree"])
+    sh(["git", "commit", "-q", "-m", "the dependency's work"], dep["worktree"])
+
+    def spawn(*extra):
+        return subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"),
+                               "spawn", "b-next", "--no-claim"] + list(extra),
+                              capture_output=True, text=True, cwd=cfg.root)
+
+    def tree_exists():
+        return os.path.isdir(os.path.join(cfg.worktree_root, "crawler-b-next"))
+
+    # The main checkout is where it started, which does NOT contain the dependency — the
+    # reported shape exactly: an implicit base that is wrong because of where an unrelated
+    # checkout happens to be pointing.
+    p = spawn()
+    eq("a base missing a declared dependency REFUSES rather than printing after the fact",
+       p.returncode, 3)
+    ok("...and creates NO worktree, because #33's line printed after the tree, the branch, "
+       "the brief and the claim already existed", not tree_exists(), p.stdout)
+    ok("...and names the dependency and the base, not just that something is wrong",
+       "b-dep" in (p.stdout + p.stderr), p.stdout + p.stderr)
+    ok("...and says the base came from the primary checkout's HEAD, which is the invisible "
+       "input that decides correctness", "did not name a base" in (p.stdout + p.stderr),
+       p.stdout + p.stderr)
+
+    # THE OVERRIDE MUST NAME WHAT IT OVERRIDES, and naming the wrong thing is not a decision.
+    p = spawn("--despite-base", "b-dep-typo")
+    eq("an override naming something that is NOT missing is refused", p.returncode, 2)
+    ok("...and creates nothing either", not tree_exists(), p.stdout)
+
+    # THE PAIR. Without this, every assertion above passes against a spawn that refuses
+    # everything — which would be a worse tool than the one that printed.
+    p = spawn("--base", dep["branch"])
+    eq("a base that CONTAINS the dependency spawns normally", p.returncode, 0)
+    ok("...and the tree is actually created", tree_exists(), p.stdout + p.stderr)
+
+    # THE RECORDED BASE IS REACHABLE AFTERWARDS. It has been recorded since #33 and no
+    # operator surface ever showed it back, so the one question a Crawler on a wrong tree
+    # needs asked about it had to be answered by hand.
+    p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"),
+                        "show", "b-next"], capture_output=True, text=True, cwd=cfg.root)
+    shown = json.loads(p.stdout)
+    eq("`show` reports the base the tree was actually cut from",
+       (shown.get("crawler_base") or {}).get("asked_for"), dep["branch"])
+    ok("...and the resolved sha, since a branch name moves and the sha is what was used",
+       bool((shown.get("crawler_base") or {}).get("sha")), shown)
+
+    # A LEAF WITH NO CRAWLER MUST NOT GROW AN EMPTY ONE. An always-present key whose value is
+    # null reads as "cut from nothing" rather than "never spawned".
+    p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"),
+                        "show", "b-dep2"], capture_output=True, text=True, cwd=cfg.root)
+    g.add("never spawned", leaf_id="b-dep2", labels=["backend"])
+    p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"),
+                        "show", "b-dep2"], capture_output=True, text=True, cwd=cfg.root)
+    ok("...while a leaf that was never spawned carries no base key at all",
+       "crawler_base" not in json.loads(p.stdout), p.stdout)
+
+    # UNKNOWN IS NOT MISSING. A dependency that was never spawned has no branch to compare
+    # against; refusing there would block work on the strength of not having looked.
+    g.add("ghost", leaf_id="b-ghost", labels=["backend"])
+    g.add("after the ghost", leaf_id="b-after", labels=["backend"])
+    g.dep("b-after", "b-ghost")
+    p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"),
+                        "spawn", "b-after", "--no-claim"],
+                       capture_output=True, text=True, cwd=cfg.root)
+    eq("a dependency that CANNOT be checked does not refuse — that would block work on the "
+       "strength of not having looked", p.returncode, 0)
+    ok("...but it is still said out loud, rather than passing silently",
+       "NOT CHECKED" in (p.stdout + p.stderr), p.stdout + p.stderr)
+
 def test_fail_open_is_counted_not_just_announced():
     group("A fail-open notice arrives beside a SUCCESSFUL result — so something downstream "
           "must be able to ASK how many there were")
@@ -11169,6 +11254,7 @@ def main():
                test_stale_copy_cannot_warn_about_itself,
                test_hook_registration,
                test_corpus_tool,
+               test_spawn_refuses_a_base_missing_a_dependency,
                test_fail_open_is_counted_not_just_announced,
                test_stop_hook_heartbeat,
                test_every_shipped_hook_parses,

@@ -82,6 +82,14 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # #73. Answering nothing restores #33 EXACTLY: the base is still computed, still printed,
+    # still correct — and nothing refuses. That is the state four Crawlers were dispatched from,
+    # so the mutant is not a hypothetical regression but the shipped behaviour this replaced.
+    # A producer whose death returns the tool to its previous, working-looking state dies
+    # invisibly, which is why a printed line needed a mutant to prove it had grown teeth.
+    ("refuse a base missing a dependency", "cli._base_dependency_check", "lib/showrunner/cli.py",
+     r"(def _base_dependency_check\(leaf, report, despite, rehearsing=False\):\n)",
+     "    return\ndef _neutered_base_dependency_check(leaf, report, despite, rehearsing=False):\n"),
     # #71. Answering nothing is the SAFE-looking direction: every guard still fails open, still
     # prints its notice, still allows the call — the system returns exactly to the state the
     # issue described, where the only trace is a line beside a successful result that the

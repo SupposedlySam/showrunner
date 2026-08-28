@@ -67,8 +67,9 @@ showrunner ready                     # unblocked AND unclaimed leaves — the on
 showrunner plan                      # group them into waves whose estimated file sets do not overlap
 showrunner route                     # which lane each leaf takes, and the rule that decided
 showrunner spawn <leaf> --actor <name> [--base <ref>] [--finding "<already checked>"]
-                                     # prints the base it cuts from, and REFUSES to be quiet when
-                                     # a graph dependency's branch is not in it
+                                     # REFUSES (exit 3) when a graph dependency's branch is not in
+                                     # the base, BEFORE creating anything. --despite-base <leaf>
+                                     # accepts it, and must name what it overrides
                                      # prepares the room: worktree, branch, scratch, brief, lock, claim
 showrunner spawn <leaf> --launch     # ...and STARTS a real Claude Code session in it, with its own
                                      # hooks, on the model its lane declares. --dry-run to see the
