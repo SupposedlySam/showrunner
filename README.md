@@ -197,9 +197,34 @@ that tree may hold the only copy of real work. Deliberately not a rollback — a
 not a steer to `reap`, which was reported proposing to close a dozen chat rooms belonging to
 another agent's Crawlers, sweeping far wider than the failure.
 
-**`.showrunner/config.local.json` is an untracked overlay** merged over `config.json` by
-top-level key. Machine-specific values — an absolute path only you have — belong there, not in
-the file that ships to every clone.
+**Config is four layers, and only the middle one ships.** Each is overlaid on the one above:
+
+| | |
+|---|---|
+| built-in defaults | the tool's own answer |
+| `~/.config/showrunner/config.json` | **the user** — set once, applies to every repo on this machine |
+| `.showrunner/config.json` | the project, tracked and shipped to every clone |
+| `.showrunner/config.local.json` | **this machine**, untracked — an absolute path only you have |
+
+Dicts merge key by key; **lists and scalars replace wholesale**, at every layer. So a
+`dispatch.chat` you configured once at user level survives a project that sets only
+`dispatch.default_model`, while a project's `lanes` replaces the user's entirely — half a lane
+is a configuration nobody wrote. An empty value is a value: a project writing `"checks": []`
+overrides a user-level list rather than inheriting it. `showrunner doctor` prints which
+user-level file, if any, was merged, because a merged config cannot be asked where a value came
+from.
+
+**The project beats the user — which is the opposite of `roles.json`,** the other file in that
+same directory. The two are different kinds of thing: `roles.json` is *permission*, so user
+level wins and a project may only add (a project that could redefine its own role would widen
+the policy constraining the session editing it); `config.json` is *preference*, so the project
+wins, because a repo is the better authority on its own lanes, checks and resources.
+
+**Some keys are refused at user level**, loudly, naming the file: `project_name` (it feeds the
+chat channel prefix and orchestrator identity — machine-wide, every repo would open rooms under
+one prefix, a collision already measured here), `lock_root` (one absolute root shared by
+unrelated repos makes them serialize against each other — a mutex that is quietly the wrong
+one), and `graph.db` / `baseline`, which are one campaign's state and mean nothing machine-wide.
 
 **The model is declared, observed, and compared — never enforced.** A lane names a model,
 `spawn --launch` passes it, game_loop records what actually ran, and `showrunner reconcile`

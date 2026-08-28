@@ -51,11 +51,21 @@ import json
 import os
 
 from . import locks
-from .util import session_pid, short_session, slug
+from .util import session_pid, short_session, slug, user_config_dir
 
-USER_PATH = os.path.join(
-    os.path.expanduser(os.environ.get("XDG_CONFIG_HOME") or "~/.config"),
-    "showrunner", "roles.json")
+# PRECEDENCE HERE IS THE OPPOSITE OF `config.json`'s, AND THAT IS DELIBERATE. Both files live in
+# `user_config_dir()` and both are overlaid by the project, so a reader standing at either one
+# will assume the other works the same way. It does not:
+#
+#     roles.json   is PERMISSION.  The user level WINS (see `spec` and `seat_roles` below) —
+#                                  project-wins would let a session widen the policy that
+#                                  constrains it, which is privilege escalation.
+#     config.json  is PREFERENCE.  The PROJECT wins (see config.load) — a repo is the better
+#                                  authority on its own lanes, checks and resources.
+#
+# Stated in both files rather than in one, because a caveat filed where the reader does not
+# stand is a caveat they never had.
+USER_PATH = os.path.join(user_config_dir(), "roles.json")
 
 FALLBACK = "unassigned"
 ACQUIRE = ("claim", "assign")

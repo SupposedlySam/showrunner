@@ -348,6 +348,11 @@ a seat is obtained, and what the fields a guard reads say. Definitions live at a
 (`roles.json` under your config home) because an in-repo config is writable by the very session it
 constrains — measured, not assumed. A project may ADD a role there, never redefine one.
 
+**Precedence here is the REVERSE of `config.json`'s**, which lives in the same directory: roles
+are PERMISSION and the user wins, config is PREFERENCE and the project wins. Two files, one
+folder, opposite rules — stated on both sides on purpose, because whichever one you opened
+first is the one you will assume the other follows.
+
 Two acquisition modes are the whole model, and they replace any lead/worker taxonomy, because that
 distinction was never about names — it was about how the seat is obtained:
 
@@ -999,9 +1004,39 @@ bash shim that execs a shared copy at `$SHOWRUNNER_CENTRAL` (default `~/.claude/
 The shim is machine-agnostic and byte-identical in every project, so a consumer who commits it
 anyway is not committing anything about their machine.
 
-**Only the CODE is shared.** There is no `SHOWRUNNER_HOME` equivalent and none is needed:
+**Only the CODE is shared, and the config is FOUR LAYERS with the project on top.**
 `config.load` resolves the project from the cwd's git root, so the central binary run inside a
-consumer repo — or inside one of its worktrees — reads THAT repo's config, graph and locks.
+consumer repo — or inside one of its worktrees — reads THAT repo's config, graph and locks:
+
+```
+DEFAULTS                              the tool's own answer
+  ~/.config/showrunner/config.json    the USER — set once, applies to every repo (XDG_CONFIG_HOME)
+    .showrunner/config.json           the PROJECT, tracked and shipped to every clone
+      .showrunner/config.local.json   THIS MACHINE, untracked
+```
+
+There is still no `SHOWRUNNER_HOME` and none is needed: `XDG_CONFIG_HOME` already relocates the
+user level, and it is the same directory `roles.json` lives in — resolved through one helper so
+the two files cannot drift about where "user level" is.
+
+Dicts merge key by key; **lists and scalars replace wholesale**, uniformly at every layer. A
+`dispatch.chat` set once at user level survives a project that sets only
+`dispatch.default_model`; a project's `lanes` replaces the user's entirely, because half a lane
+is a configuration nobody wrote. An empty value is a value — a project writing `"checks": []`
+overrides a user-level list rather than inheriting it. `doctor` prints which user-level file was
+merged (or that there was none), since a merged config cannot be asked where a value came from.
+
+**The PROJECT beats the USER here — the opposite of `roles.json` in that same directory,** and
+the difference is the kind of thing each file is. `roles.json` is PERMISSION: user level wins,
+because a project that could redefine its own role would widen the policy constraining the
+session editing it. `config.json` is PREFERENCE: the project wins, because a repo is the better
+authority on its own lanes, checks and resources.
+
+**Four keys are REFUSED at user level**, loudly, naming the file and the key: `project_name`
+(it feeds the chat channel prefix and the orchestrator identity, so machine-wide it gives every
+repo one prefix — the crossed-rooms collision already measured here), `lock_root` (one absolute
+root shared by UNRELATED repos serializes them against each other: a mutex that is quietly the
+wrong mutex), and `graph.db` / `baseline`, which are one campaign's state.
 
 **When central is missing, the fail posture splits.** Hook verbs (`lock guard`,
 `worktree guard`, `worktree enter`, `stop-gate`) exit 0, because a PreToolUse that hard-fails on
