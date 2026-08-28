@@ -253,6 +253,13 @@ def reconcile(cfg, graph, base="HEAD"):
             found = worktree.dirty(wt)
             f["uncommitted"] = [] if found is None else found
             f["uncommitted_unknown"] = found is None
+        # THE TREE IS EVIDENCE, AND UNKNOWN IS NOT CLEAN. Read once here because the verdict
+        # ladder below asks it three times, and because "clean" is the only answer that licenses
+        # the words "safe to clean up". A failed read must not collapse into it: `reap` already
+        # refuses to print "no uncommitted work found" over a git that errored, and a verdict
+        # derived from the same read owes the same restraint.
+        f["tree"] = ("unknown" if f.get("uncommitted_unknown")
+                     else "dirty" if f["uncommitted"] else "clean")
         if scratch and os.path.isdir(scratch):
             f["scratch_files"] = [x for x in sorted(os.listdir(scratch)) if x != "README.txt"]
 
@@ -331,6 +338,58 @@ def reconcile(cfg, graph, base="HEAD"):
         elif f["empty"] and f["leaf_status"] not in ("closed", "refuted"):
             # Contained in base only because it never contributed anything.
             f["verdict"] = "ABANDONED — the branch never received a commit"
+        elif f["empty"] and f["tree"] != "clean":
+            # CLOSING A LEAF IS A CLAIM; THE BRANCH IS THE FACT (issue: reconcile-never-committed).
+            #
+            # The clause above deliberately excuses a closed leaf from the abandoned verdict, and
+            # that exclusion used to hand it straight to `merged` — which answers True here for
+            # the wrong reason. `is_merged` asks whether base contains every commit on the branch,
+            # and a branch with NO commits satisfies that vacuously. So a Crawler that was refused
+            # by its commit gate, closed its leaf anyway and exited with its work staged and
+            # uncommitted was reported as "MERGED — safe to clean up" over the only copy of it.
+            # Observed; the near-miss was caught by a human's standing rule about never deleting a
+            # dirty worktree, not by this report. The uncommitted-changes line was printed, but
+            # subordinate to a headline contradicting it, and a guard that depends on the reader
+            # distrusting its own headline is not a guard.
+            #
+            # "No unique commits" and "merged" are different states with OPPOSITE remedies, and
+            # this is the only one where the cheap action is irreversible — so it outranks
+            # `merged`, and it never says safe. The leaf's status is what the Crawler asserted;
+            # the branch is what actually happened, and the branch wins.
+            #
+            # The `in_progress` path above is untouched on purpose: that one is already correct
+            # (it says "never received a commit", which is true), it is what `reap` keys on, and
+            # a fix that made the common path noisier would be paid on every wave.
+            f["verdict"] = (
+                "NEVER COMMITTED — leaf %s, but the branch has no commits, so the %s in %s "
+                "%s the only copy; commit from that tree or it is lost"
+                % (f["leaf_status"],
+                   "tree could NOT BE READ" if f["tree"] == "unknown"
+                   else "%d uncommitted change(s)" % len(f["uncommitted"]),
+                   f["worktree"],
+                   "may be" if f["tree"] == "unknown" else "are"))
+        elif f["empty"]:
+            # THE AMBIGUOUS CORNER, decided rather than inherited: closed, nothing committed, and
+            # the tree is clean. This is the shape of a legitimately REFUTED premise — a leaf that
+            # correctly declined to build something produces no commit and leaves no tree — so it
+            # is not an alarm and does not get one. But it is not `merged` either: nothing was
+            # ever merged, and saying so is a false factual claim in the one report a reader uses
+            # to decide what to delete. It says what is true of both halves instead — there is
+            # nothing at risk, and there is nothing waiting to be integrated.
+            f["verdict"] = ("NOTHING TO INTEGRATE — leaf %s and the branch never received a "
+                            "commit; the tree is clean, so nothing is at risk here" % f["leaf_status"])
+        elif f["merged"] and f["tree"] != "clean":
+            # Merged is a fact about COMMITS, and "safe to clean up" is a claim about the whole
+            # tree. They come apart exactly here: every commit on this branch really is in base,
+            # and the worktree still holds changes that are not in anything. Deleting it on the
+            # strength of the first fact destroys work the first fact says nothing about.
+            f["verdict"] = (
+                "MERGED, BUT THE TREE IS NOT CLEAN — its commits are in the base and %s; "
+                "resolve that before deleting anything"
+                % ("%s could NOT BE READ, so whether more is there is UNKNOWN" % f["worktree"]
+                   if f["tree"] == "unknown"
+                   else "%d uncommitted change(s) in %s are in nothing"
+                        % (len(f["uncommitted"]), f["worktree"])))
         elif f["merged"]:
             f["verdict"] = "MERGED — safe to clean up"
         elif f["leaf_status"] in ("closed", "refuted") and f["branch_exists"]:
@@ -555,7 +614,14 @@ def reap(cfg, graph, base="HEAD", apply=False):
     # 3. Worktrees and scratch dirs of dead Crawlers. Reported, never deleted: they may
     #    hold the only copy of real work.
     for f in reconcile(cfg, graph, base):
-        if f["verdict"].startswith("ABANDONED"):
+        # NEVER COMMITTED BELONGS IN THIS BLOCK, whatever the leaf says. The filter used to key
+        # on ABANDONED alone, which reads as "whose owner is gone" — but the property this block
+        # is about is "this tree may hold the only copy of real work", and a leaf closed over an
+        # uncommitted tree has exactly that property while claiming the opposite. Before the
+        # verdict existed such a Crawler reported MERGED and was skipped here too, so the tree
+        # holding the work appeared in no line `reap` printed.
+        never = f["verdict"].startswith("NEVER COMMITTED")
+        if f["verdict"].startswith("ABANDONED") or never:
             detail = []
             if f.get("uncommitted_unknown"):
                 # READ BACK WHERE IT MATTERS, not written and forgotten: this line is the one
@@ -572,12 +638,18 @@ def reap(cfg, graph, base="HEAD", apply=False):
                 "kind": "crawler",
                 "crawler": f["crawler"],
                 "leaf": f["leaf"],
-                "why": "owner not alive, work not integrated",
+                "why": ("leaf %s, but the branch never received a commit" % f["leaf_status"])
+                       if never else "owner not alive, work not integrated",
                 "action": "SURFACED, not deleted" + (": " + "; ".join(detail) if detail else
                                                      " (no uncommitted work found)"),
             })
             if apply:
-                set_state(cfg, f["crawler"], "abandoned", reaped_ts=now())
+                # NOT relabelled `abandoned` when the leaf closed: the Crawler did stop, and
+                # overwriting its own recorded state with a word that contradicts its leaf is how
+                # the next reader loses the one fact that matters here — that a close was claimed
+                # over work that never landed.
+                if not never:
+                    set_state(cfg, f["crawler"], "abandoned", reaped_ts=now())
     return actions, warnings
 
 
