@@ -6126,6 +6126,38 @@ def test_guard_entrypoints_agree():
         eq("...and they agree with %s too, so the fix is in the SHARED resolver rather than "
            "copied into one path" % label, a, b)
 
+    # THE TEXT IS A DETECTOR AND IT HAS TO BE KEPT ONE. Fixing #56 cost it: the divergence was
+    # caught because the two entrypoints WORDED the fail-open differently, and afterwards they
+    # differed by default — so a future divergence would produce two different messages that
+    # look exactly like today's two different messages.
+    #
+    # The behavioural assertion above catches what it was written to compare. The text caught
+    # the case nobody had thought to compare yet. Asserting the sentence keeps the cheap
+    # detector working WITHOUT relying on somebody noticing.
+    def context_of(p):
+        out = (p.stdout or "") + (p.stderr or "")
+        try:
+            return json.loads(out.strip())["hookSpecificOutput"]["additionalContext"]
+        except Exception:                                        # noqa: BLE001
+            return out
+
+    env_bare = dict(os.environ)
+    env_bare.pop("CLAUDE_PROJECT_DIR", None)
+    shim_out = context_of(subprocess.run(["bash", shim], input=payload, cwd=outside,
+                                         capture_output=True, text=True, env=env_bare))
+    cli_out = context_of(subprocess.run([sys.executable, sr, "dispatch", "guard"],
+                                        input=payload, cwd=outside, capture_output=True,
+                                        text=True, env=env_bare))
+    ok("the shim's fail-open sentence names BOTH anchors it tried, so a reader can tell "
+       "'nowhere resolved' from 'the guard broke'",
+       "neither the working directory nor CLAUDE_PROJECT_DIR" in shim_out, shim_out[:140])
+    ok("...and the CLI says the SAME sentence, so a future divergence in either one breaks a "
+       "check rather than waiting for somebody to notice the wording",
+       "neither the working directory nor CLAUDE_PROJECT_DIR" in cli_out, cli_out[:140])
+    ok("...and neither has fallen back to the generic wrapper, which names no anchor at all",
+       "it raised" not in shim_out and "it raised" not in cli_out,
+       (shim_out[:80], cli_out[:80]))
+
     # AND THE REFUSAL SURVIVES. A fallback that made everything resolve would be worse than the
     # bug: `find_root` must still refuse when nothing can answer.
     env = dict(os.environ); env.pop("CLAUDE_PROJECT_DIR", None)
