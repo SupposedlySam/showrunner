@@ -2442,10 +2442,22 @@ def build_parser():
     #     "*"        device --holder X -- echo hi  -> holder='X'   command=[]  EXTRA=['--','echo','hi']
     #     REMAINDER  device --holder X -- echo hi  -> holder='run' command=['--holder','X','--',...]
     #
-    # LIMIT, stated rather than discovered: WITHOUT the `--`, `lock run device --holder X echo hi`
-    # still refuses. That is deliberate. Reaching it would take `parse_known_args`, and swallowing
-    # unrecognized words into the command is how `--hodler crawler-a` becomes a lock silently
-    # recorded against the default holder — the defect this argument has already produced once.
+    # THE LIMIT WAS LIFTED, and what replaced it is narrower than the limit was. The bare form
+    # `lock run device --holder X echo hi` now RUNS, because `_split_trailing_command` finds where
+    # the command starts and cuts there — argparse still sees exactly one shape, the one above.
+    #
+    # What is REFUSED is now an option-like token argparse does not recognise, and the distinction
+    # sits there rather than at "no `--`" because that is where the actual hazard is. Measured on
+    # `parse_known_args`, the mechanism the old limit named and rejected:
+    #
+    #     device --holder X echo hi   -> holder='X'   cmd=[]  EXTRA=['echo','hi']
+    #     device --hodler X echo hi   -> holder='run' cmd=[]  EXTRA=['--hodler','X','echo','hi']
+    #
+    # The second line IS the defect this argument already produced once: a typo becomes a lock
+    # recorded against the DEFAULT holder, silently. So unrecognized option-like tokens are never
+    # swallowed — they are left in the argv and argparse rejects them, loudly, as it always did.
+    # Trailing POSITIONAL words are what the bare form was ever asking for, and those are separable
+    # from flags; a word after the command's program name is the command's, a stray flag is not.
     t.add_argument("command", nargs="*")
     t.set_defaults(func=cmd_lock_run)
 
@@ -2708,20 +2720,23 @@ def _resolve_prose(parser, args):
                          % (opt, len(val), PROSE_MAX, opt))
 
 
-def _takes_trailing_command(parser, argv):
-    """Does the subcommand `argv` names declare a `command` positional to receive what follows `--`?
+def _trailing_command_node(parser, argv):
+    """Resolve (node, index) for the subcommand `argv` names, if it takes a trailing command.
 
     Asked BEFORE parsing, and asked of the parser tree rather than assumed, because the answer
     decides whether `--` is stripped at all. Stripping it unconditionally would break every other
     subcommand's use of the POSIX separator — `showrunner add -- --starts-with-a-dash` would lose
     the one thing keeping its title from being read as a flag.
 
+    `index` is where that subcommand's OWN arguments begin, which the bare-form split below needs
+    and the `--` split does not. Returns (None, None) when the verb declares no `command`.
+
     Walks only tokens that ARE subparser choices, so a flag's value can never be mistaken for a
     subcommand name. Reads argparse's private structure; if that ever changes shape this returns
-    False and `lock run`'s own assertions fail loudly, rather than the separator quietly going
-    back to being dropped.
+    (None, None) and `lock run`'s own assertions fail loudly, rather than the separator quietly
+    going back to being dropped.
     """
-    node = parser
+    node, i = parser, 0
     for tok in argv:
         subs = next((a for a in node._actions
                      if isinstance(a, argparse._SubParsersAction)), None)
@@ -2729,21 +2744,96 @@ def _takes_trailing_command(parser, argv):
             break
         if tok in subs.choices:
             node = subs.choices[tok]
-    return any(a.dest == "command" for a in node._actions)
+        i += 1
+    if not any(a.dest == "command" for a in node._actions):
+        return None, None
+    return node, i
+
+
+def _bare_command_start(node, argv, i):
+    """Index in `argv` where the command words begin WITHOUT a `--`, or None if undecidable.
+
+    This is the whole bare form: rather than teaching argparse a second way to reach `command`,
+    find the split point ourselves and hand argparse an argv that ends before it — so the bare
+    form and the `--` form converge on the ONE path, and anything this scan cannot decide falls
+    through to argparse unchanged and is refused there.
+
+    Fails CLOSED on purpose, at every branch that is not certain: an option shape it does not
+    model, a positional it cannot count, an option-like token it does not recognise. The last of
+    those is the point — `--hodler crawler-a` is not swallowed into the command here, it is left
+    in the argv for argparse to reject as an unrecognized argument, which is where the loud
+    failure this whole argument exists to preserve comes from.
+    """
+    opts = {}
+    for a in node._actions:
+        if a.option_strings:
+            n = 1 if a.nargs is None else a.nargs
+            if not isinstance(n, int):
+                return None            # '?', '*', '+' on an OPTION — not modelled, so not guessed
+            for s in a.option_strings:
+                opts[s] = n
+    slots = 0
+    for a in node._actions:
+        if a.option_strings or a.dest == "command":
+            continue
+        if a.nargs is None:
+            slots += 1
+        elif a.nargs == "?":
+            slots += 1                 # may consume 0; over-counting only DELAYS the split point
+        else:
+            return None                # a variadic non-command positional has no split point
+    j = i
+    while j < len(argv):
+        tok = argv[j]
+        if tok.startswith("-") and tok != "-":
+            n = opts.get(tok.split("=", 1)[0])
+            if n is None:
+                return None            # unrecognized: leave it for argparse to refuse
+            j += 1 + (0 if "=" in tok else n)
+            continue
+        if slots:
+            slots -= 1
+            j += 1
+            continue
+        return j
+    return None                        # no command words at all — cmd_lock_run says so better
 
 
 def _split_trailing_command(parser, argv):
-    """Take everything after the first bare `--` away from argparse, for the verbs that exec.
+    """Take the command words away from argparse, for the verbs that exec.
 
     Returns (argv_for_argparse, trailing_or_None). Argparse cannot parse
     `lock run <resource> --holder X -- <cmd...>` in one pass under any nargs — see the note on
     `lock run`'s `command` argument for the two measured failures — so the separator is honoured
     here and the words after it are handed back to the `command` positional after parsing.
+
+    Without a `--`, the same is done at the split point `_bare_command_start` finds. From that
+    point on every token is the command's, INCLUDING flags — `lock run device ./deploy.sh -v`
+    gives `-v` to `./deploy.sh`, because a word that arrives after the program name is the
+    program's in every shell. The one exception is a flag that is also one of THIS verb's own:
+    `lock run device echo hi --holder X` would otherwise run under the default holder while
+    looking like it named one, which is the silent mislabelled lock this parser has already
+    shipped once. That refuses, and names the `--` that expresses it unambiguously.
     """
-    if "--" not in argv or not _takes_trailing_command(parser, argv):
+    node, i = _trailing_command_node(parser, argv)
+    if node is None:
         return argv, None
-    cut = argv.index("--")
-    return argv[:cut], argv[cut + 1:]
+    if "--" in argv:
+        cut = argv.index("--")
+        return argv[:cut], argv[cut + 1:]
+    if not any(a.dest == "command" and a.nargs == "*" for a in node._actions):
+        return argv, None              # REMAINDER already reaches `command` bare; leave it alone
+    cut = _bare_command_start(node, argv, i)
+    if cut is None:
+        return argv, None
+    own = {s for a in node._actions for s in a.option_strings}
+    stolen = [t for t in argv[cut:] if t.split("=", 1)[0] in own]
+    if stolen:
+        parser.error("%s after the command words is ambiguous: it would be read as the command's, "
+                     "leaving this lock recorded under the DEFAULT holder while looking like it "
+                     "named one. Put it before the command, or use `--` to mark where the command "
+                     "starts." % stolen[0])
+    return argv[:cut], argv[cut:]
 
 
 def main(argv=None):
