@@ -25,7 +25,7 @@ import fnmatch
 import os
 import re
 
-from .util import run
+from .util import Refused, run
 
 # Tokens common enough in prose that grepping them would match the whole repo.
 _STOPWORDS = {
@@ -284,3 +284,98 @@ def plan_waves(cfg, leaves, files=None):
             "shared surface(s) excluded from the parallel decision and owed to serialised "
             "integration instead: %s" % ", ".join(shared_all[:8]))
     return waves, estimates, notes
+
+
+# ------------------------------------------------- live claims (issue #71)
+# `plan_waves` reads `graph.ready()`, which is unblocked AND UNCLAIMED. A leaf another Crawler
+# is working right now is not merely absent from the output — it is absent from the INPUT, so
+# its paths are never considered occupied. `overlap` cannot cover the gap either: it measures
+# committed diffs, and a Crawler twenty minutes in with nothing committed has no commits on its
+# branch, so it is not an in-flight branch by that definition and contributes nothing.
+#
+# Measured twice, on two consecutive campaigns of this repo. Both times `plan` recommended a
+# wave-1 leaf whose declared paths overlapped a LIVE Crawler's on two files, `overlap` said
+# "0 in-flight branch(es)", and the collision was avoided by hand. The second time the branch
+# EXISTED — created at spawn — and still counted as zero, because it counts branches with
+# commits. So the invisible window is not "before the branch exists", it is "before the first
+# commit", which for these Crawlers was most of their run.
+#
+# This closes the window from the one fact that exists the whole time: the CLAIM. A claimed,
+# live leaf gets the same blast-radius estimate `plan_waves` already computes for a ready one,
+# and that estimate needs no commit, no diff and no branch.
+
+
+def live_claims(graph):
+    """(leaves, caveat) — claimed leaves whose owner may still be running.
+
+    THE GRAPH OWNS CLAIM LIVENESS and this must not become a second statement of it. #68 (a
+    live claim read as dead) and #69 (a dead session read as live) were both fixed in
+    `stale_claims`/`stalled_claims`; re-deriving the rule here is how two layers start
+    disagreeing silently. So this is the COMPLEMENT of `stale_claims` over in-progress leaves:
+    anything the graph cannot prove abandoned is treated as still occupying its paths.
+
+    That direction is deliberate and matches `plan_waves`: an unknown radius collides with
+    everything, because a false collision costs one wave and a missed one costs a merge
+    conflict nobody is watching.
+
+    A BACKEND THAT CANNOT ANSWER SAYS SO. `BrGraph.stale_claims` refuses rather than returning
+    an empty list, and folding that refusal into "nothing is live" would rebuild the exact
+    blindness this exists to close. The refusal becomes a caveat carried beside the leaves, and
+    every in-progress leaf counts as occupied until something can adjudicate it.
+    """
+    from .graph import IN_PROGRESS
+    claimed = [l for l in graph.list(status=IN_PROGRESS) if not l.is_epic]
+    try:
+        stale = {leaf["id"] for leaf, _ in graph.stale_claims()}
+    except Refused as exc:
+        return claimed, ("owner liveness could NOT be adjudicated (%s) — every claimed leaf is "
+                         "counted as occupied, which is conservative, not measured" % exc)
+    return [l for l in claimed if l["id"] not in stale], None
+
+
+def live_conflicts(cfg, leaf, live, files=None):
+    """Would starting `leaf` now put it in files a LIVE Crawler is already in?
+
+    Returns a list of findings, one per live claim that collides, each with the exclusive
+    paths that BLOCK and the shared surfaces that do not.
+
+    Scoped to `exclusive` paths for the same reason `plan_waves` is: paths matching
+    `collision.always_serialize` are the file every change touches, and letting one of them
+    block would serialise the whole campaign behind whichever Crawler happens to be running —
+    a check that looks like an unexplained slowdown is one somebody removes. They are reported
+    beside the decision and owed to serialised integration instead (#9).
+
+    THIS IS AN ESTIMATE, from declared paths and grepped symbols, and every caller must print
+    it as one. `overlap` measures; this guesses, and it guesses about work that has produced
+    nothing measurable yet.
+    """
+    files = tracked_files(cfg.root) if files is None else files
+    mine = estimate(cfg, leaf, files)
+    out = []
+    for other in live:
+        if other["id"] == leaf["id"]:
+            continue
+        theirs = estimate(cfg, other, files)
+        clash = mine["exclusive"] & theirs["exclusive"]
+        shared = mine["shared"] & theirs["shared"]
+        # A leaf whose radius cannot be estimated at all is treated as colliding with
+        # everything here too — the same rule `plan_waves` applies, for the same reason.
+        blind = not mine["estimable"] or not theirs["estimable"]
+        if not clash and not shared and not blind:
+            continue
+        out.append({
+            "leaf": other["id"],
+            "title": other.get("title") or "",
+            "actor": other.get("actor"),
+            "session": other.get("claim_session"),
+            "pid": other.get("claim_pid"),
+            "parked": bool(other.get("parked")),
+            "files": sorted(clash),
+            "shared": sorted(shared),
+            "basis": theirs["basis"],
+            "blind": blind,
+            # SHARED-ONLY IS NOT A BLOCK. Recorded so a caller can print the surface without
+            # refusing over it, which is what keeps the refusal worth obeying.
+            "blocks": bool(clash) or blind,
+        })
+    return out

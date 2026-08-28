@@ -250,6 +250,19 @@ good, only conservative: a false collision costs one wave of latency, a missed o
 conflict in an unattended run with nobody watching. Shared surfaces (the one test file every change
 touches) are configured as such and owed to serialized integration instead of blocking parallelism.
 
+**...and it counts what is already running.** `plan` groups `ready` work, which is unblocked *and
+unclaimed*, so a Crawler working right now is absent from the **input** and its files were never
+considered occupied; `overlap` measures committed diffs, so a Crawler twenty minutes in with nothing
+committed is not an in-flight branch by that definition — and a branch existing is not enough, since
+it counts branches with commits. Between them that left the whole working life of a Crawler up to its
+first commit invisible. `plan` now reports live claims **beside** its waves (the grouping itself is
+unchanged, because "how would I group this if nothing were running" is a real question before a
+campaign starts), and `showrunner spawn` refuses a leaf whose estimate collides with a live claim.
+The refusal is overridden by naming what it overrides — `--despite-live <leaf>`, which must name
+every colliding leaf — because a guard answered by a reflexive `--force` teaches every later session
+to bypass it. It is an **estimate**, from declared paths and grepped symbols, and says so wherever it
+is printed: `overlap` measures, this guesses about work that has produced nothing measurable yet.
+
 **Claims carry liveness.** A claim records the owning PID and a boot token. Without that, a Crawler
 that dies leaves its leaf claimed forever — `ready` means unblocked *and unclaimed*, so the work
 silently leaves the queue, `ready` goes dry, and the loop terminates **reporting success** on work

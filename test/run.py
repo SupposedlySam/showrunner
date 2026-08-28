@@ -10096,6 +10096,155 @@ def test_cross_branch_overlap_and_lingering():
        not campaign.lingering_crawlers(cfg), campaign.lingering_crawlers(cfg))
 
 
+def test_live_claims_are_visible_before_a_commit():
+    group("plan and spawn see a LIVE Crawler that has not committed yet (#71)")
+    if not have("git"):
+        skip("the live-claim group", "git is not installed")
+        return
+    cfg = make_repo({}, files={
+        "README.md": "seed\n",
+        "lib/cli.py": "shared entry point\n",
+        "lib/collide.py": "estimator\n",
+        "lib/unrelated.py": "nothing to do with the others\n",
+        "test/run.py": "suite\n",
+    })
+    g = new_graph(cfg)
+    # The live one. Its declared paths are what the incident named: a shared module and the
+    # suite, which is `always_serialize` in this fixture.
+    g.add("rewrite the brief", leaf_id="LIVE",
+          labels=["backend"], paths=["lib/cli.py", "test/run.py"])
+    # The one `plan` recommended into wave 1 on the real campaign.
+    g.add("close the collision window", leaf_id="NEXT",
+          labels=["backend"], paths=["lib/collide.py", "lib/cli.py", "test/run.py"])
+    # The restraint case: real work, live campaign, no shared path.
+    g.add("touch nothing they touch", leaf_id="FAR",
+          labels=["backend"], paths=["lib/unrelated.py"])
+
+    exe = os.path.join(ROOT, "bin", "showrunner")
+    env = dict(os.environ, NO_COLOR="1")
+
+    def sr(*argv):
+        return subprocess.run([sys.executable, exe] + list(argv), cwd=cfg.root,
+                              capture_output=True, text=True, env=env)
+
+    # THE NON-REGRESSION BASELINE, taken FIRST: `plan` before anything is claimed is answering
+    # a legitimate question, and a fix that starts counting live work must not stop answering it.
+    quiet = sr("plan", "--json")
+    quiet_json = json.loads(quiet.stdout[quiet.stdout.index("{"):]) if "{" in quiet.stdout else {}
+    eq("`plan` on a quiet campaign exits 0", quiet.returncode, 0)
+    ok("...and says nothing about live claims, because there are none — the pre-existing "
+       "question is still answered exactly as before",
+       "LIVE CLAIMS" not in quiet.stdout and not quiet_json.get("live"),
+       quiet.stdout[-400:])
+    baseline_waves = quiet_json.get("waves")
+
+    # THE EXACT STATE MEASURED ON THE CAMPAIGN: claimed, a live owning pid, a branch that
+    # EXISTS, and ZERO commits on it. A branch created at spawn is a real ref and `overlap`
+    # still counts it as nothing, so a fix keyed to branch existence would not close this.
+    sh(["git", "branch", "showrunner/LIVE"], cfg.root)
+    g.claim("LIVE", "briefroom", pid=os.getpid(), tree=cfg.root, session="s-live")
+    head = sh(["git", "rev-parse", "HEAD"], cfg.root).stdout.strip()
+    tip = sh(["git", "rev-parse", "showrunner/LIVE"], cfg.root).stdout.strip()
+    eq("the live Crawler's branch exists and carries NO commits — the window that is invisible",
+       tip, head)
+    eq("...and its leaf is out of `ready` entirely, which is WHY plan could not see it: a "
+       "claimed leaf is absent from the INPUT, not merely from the output",
+       sorted(l["id"] for l in g.ready()), ["FAR", "NEXT"])
+
+    live, caveat = collide.live_claims(g)
+    eq("the claim itself is the fact that exists the whole time — no commit, no diff, no branch "
+       "needed", sorted(l["id"] for l in live), ["LIVE"])
+    ok("...and nothing about it was unadjudicable, so no caveat is owed", caveat is None, caveat)
+
+    files = collide.tracked_files(cfg.root)
+    hit = collide.live_conflicts(cfg, g.show("NEXT"), live, files)
+    ok("a ready leaf that overlaps a LIVE claim is reported as colliding, asserted with zero "
+       "commits on the live branch", hit and hit[0]["blocks"], hit)
+    ok("...naming the shared module it estimates in common", "lib/cli.py" in (hit or [{}])[0].get("files", []), hit)
+    ok("...while the always_serialize surface is reported BESIDE the decision and does not "
+       "block, or one file every change touches would serialise the whole campaign",
+       "test/run.py" in (hit or [{}])[0].get("shared", [])
+       and "test/run.py" not in (hit or [{}])[0].get("files", []), hit)
+
+    # RESTRAINT. Pair every non-event assertion with the case where it happens: the block above
+    # is the event, this is the same machinery declining to fire.
+    miss = collide.live_conflicts(cfg, g.show("FAR"), live, files)
+    ok("a live claim with NO path overlap does not block an unrelated leaf — a fix that "
+       "serialises the campaign behind any single Crawler has replaced one defect with another",
+       not miss, miss)
+
+    # `overlap` is UNCHANGED, and its honesty about its own emptiness is the thing to preserve:
+    # it is right about the question it answers.
+    ov = sr("overlap")
+    eq("`overlap` exits 0", ov.returncode, 0)
+    ok("...and still reports 0 in-flight branches as a real answer rather than pretending to "
+       "cover this — it measures committed diffs and there is nothing committed",
+       "This is a real answer, not an empty one" in ov.stdout, ov.stdout[-300:])
+
+    # `plan` now answers BOTH questions.
+    p = sr("plan", "--json")
+    pj = json.loads(p.stdout[p.stdout.index("{"):]) if "{" in p.stdout else {}
+    ok("`plan` names the live claim the waves do not account for",
+       "LIVE CLAIMS" in p.stdout and "LIVE" in (pj.get("live") or []), p.stdout[-600:])
+    ok("...and says which wave-1 leaf collides with it",
+       "NEXT" in (pj.get("live_conflicts") or {}), p.stdout[-600:])
+    ok("...and prints that this is an ESTIMATE, not a measurement — the heuristic must say so "
+       "where it is printed", "ESTIMATE" in (p.stdout + p.stderr), (p.stdout + p.stderr)[-300:])
+    # The grouping itself is still computed from `ready` alone — the live claim is reported
+    # BESIDE it, never folded into it. `plan`'s existing question ("how would I group this work
+    # if nothing were running") is legitimate before a campaign starts and still gets its answer.
+    ready_headless = [l for l in g.ready() if "backend" in l.labels_list]
+    expect_waves, _, _ = collide.plan_waves(cfg, ready_headless)
+    eq("...while the wave grouping is unchanged — still a pure function of `ready`, with the "
+       "live claim reported beside it rather than folded into it", pj.get("waves"), expect_waves)
+    ok("...so the live leaf never appears in a wave", "LIVE" not in sum(pj.get("waves") or [], []),
+       pj.get("waves"))
+
+    # SPAWN IS THE VERB THAT CANNOT BE SKIPPED.
+    ref = sr("spawn", "NEXT", "--no-claim")
+    eq("`spawn` REFUSES a leaf that collides with a live claim (exit 3)", ref.returncode, 3)
+    ok("...naming the live leaf and the file, not just refusing",
+       "LIVE" in ref.stderr and "lib/cli.py" in ref.stderr, ref.stderr[-500:])
+    ok("...and creating nothing: a refusal that left a worktree behind would poison the retry",
+       not os.path.isdir(os.path.join(cfg.root, ".showrunner", "worktrees", "crawler-next")),
+       os.listdir(os.path.join(cfg.root, ".showrunner")))
+
+    rehearsal = sr("spawn", "NEXT", "--dry-run", "--launch")
+    ok("...and `--dry-run` PREVIEWS that refusal rather than showing a clean dispatch — a "
+       "rehearsal that disagrees with the real spawn is worse than no rehearsal",
+       "WOULD REFUSE" in rehearsal.stderr, (rehearsal.stdout + rehearsal.stderr)[-400:])
+
+    bogus = sr("spawn", "NEXT", "--no-claim", "--despite-live", "SOMETHING-ELSE")
+    ok("an override that names a leaf which is NOT colliding is refused, SAYING SO — an "
+       "override copied from an earlier command is not a decision. Asserted on the reason "
+       "rather than the exit code, because argparse also exits 2 on a flag it does not know",
+       bogus.returncode == 2 and "is not colliding with" in bogus.stderr, bogus.stderr[-400:])
+
+    far = sr("spawn", "FAR", "--no-claim")
+    eq("...while the unrelated leaf spawns normally with a Crawler live (%s)"
+       % (far.stderr or "").strip()[-120:], far.returncode, 0)
+
+    okc = sr("spawn", "NEXT", "--no-claim", "--despite-live", "LIVE")
+    eq("naming the live leaf lets the spawn through (%s)" % (okc.stderr or "").strip()[-120:],
+       okc.returncode, 0)
+    ok("...and says out loud that a collision was accepted on purpose",
+       "ACCEPTED A LIVE COLLISION" in okc.stdout, okc.stdout[-300:])
+
+    # NON-REGRESSION, MEASURED RATHER THAN ARGUED: release the claim and `plan` must print
+    # byte-for-byte what it printed before anything was ever claimed.
+    g.release("LIVE", "test")
+    again = sr("plan", "--json")
+    eq("with nothing running, `plan` prints exactly what it printed before the fix had "
+       "anything to see — identical output, not merely a similar shape",
+       again.stdout, quiet.stdout)
+
+    # THE FALSIFIER IS NOT IN HERE. The pre-fix state is "plan and spawn read `ready`, which
+    # excludes a claimed leaf", and the honest way to show these assertions depend on the fix is
+    # to put lib/showrunner back and run this group — done out of band, captured in the leaf's
+    # scratch. An in-process stub that feeds live_conflicts an empty list would only prove that
+    # an empty list yields nothing, which is a belief this test already shares.
+
+
 def test_retracted_doc_claims():
     group("Claims the docs used to make that are now false")
     # A DOCUMENTATION PASS FOUND FOUR, and none of them could have been caught by reading the
@@ -10753,6 +10902,7 @@ def main():
                test_the_brief_on_disk_is_the_one_that_tells_the_truth,
                test_claims_about_the_layer_below, test_observability,
                test_cross_branch_overlap_and_lingering,
+               test_live_claims_are_visible_before_a_commit,
                test_hook_verbs_never_fail_open_in_silence,
                test_retracted_doc_claims,
                test_cli, test_optional):
