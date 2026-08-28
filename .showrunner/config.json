@@ -93,10 +93,6 @@
     "default_model": "sonnet",
     "models_by_lane": {
       "serialized": "opus"
-    },
-    "chat": {
-      "enabled": false,
-      "channel_prefix": "showrunner"
     }
   }
 }
