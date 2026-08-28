@@ -26,7 +26,8 @@ import shutil
 import sqlite3
 import time
 
-from .util import Refused, boot_token, die, eprint, now, pid_alive, pid_readable, run, slug
+from .util import (Refused, boot_token, die, eprint, now, pid_alive, pid_readable, run,
+                   same_boot, slug)
 
 OPEN = "open"
 IN_PROGRESS = "in_progress"
@@ -183,7 +184,15 @@ class SqliteGraph:
                 continue
             claim_boot = leaf.get("claim_boot")
             pid = leaf.get("claim_pid")
-            if claim_boot and claim_boot != token:
+            # ONE COMPARISON, shared with `locks._live`. This was `claim_boot != token`, which
+            # read a DRIFTING value as proof of death: macOS recomputes boot seconds from the
+            # clock, so an NTP adjustment moved the token by one second and a live claim was
+            # offered for release. It also would have read every pre-upgrade claim as a
+            # different boot the moment the token format changed.
+            #
+            # `same_boot` answers True / False / None, and None means CANNOT TELL — which falls
+            # through to the pid check below rather than to a release.
+            if claim_boot and same_boot(claim_boot, token) is False:
                 out.append((leaf, "claimed on a different boot (%s, now %s) — its process "
                                   "cannot still be running" % (claim_boot, token)))
             elif not pid_readable(pid):

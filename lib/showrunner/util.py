@@ -98,24 +98,100 @@ _BOOT_TOKEN = None
 
 
 def _read_boot_token():
+    """A per-boot identity, SCHEME-TAGGED so two schemes are never compared as if they were one.
+
+    THE SECONDS ARE NOT CONSTANT. macOS does not store boot time; it recomputes it from the
+    current clock minus uptime, so an NTP adjustment moves `kern.boottime`'s `sec` by a second.
+    The token is cached for the life of a process (deliberately — see `boot_token`), so two
+    processes that cached on opposite sides of one adjustment disagree FOREVER, and every
+    cross-process liveness comparison between them is wrong in the one direction this module
+    is most careful about: a live holder read as proved dead.
+
+    Reported from a real campaign, with the token observed going BACKWARDS across two readings
+    fifteen minutes apart on a machine with two days of uptime. `/proc/stat`'s `btime` on Linux
+    is the same shape of value and inherits the same doubt.
+
+    So prefer an identifier the kernel MINTS ONCE PER BOOT and does not recompute:
+    `kern.bootsessionuuid` on darwin, `/proc/sys/kernel/random/boot_id` on Linux. The seconds
+    remain as a fallback, tagged as such, so a machine without the uuid still gets liveness.
+    """
     host = os.uname().nodename
     try:
         if sys.platform == "darwin":
-            out = subprocess.run(
-                ["sysctl", "-n", "kern.boottime"],
-                capture_output=True, text=True, timeout=5,
-            ).stdout
+            uuid = subprocess.run(["sysctl", "-n", "kern.bootsessionuuid"],
+                                  capture_output=True, text=True, timeout=5).stdout.strip()
+            if uuid:
+                return "%s:uuid:%s" % (host, uuid)
+            out = subprocess.run(["sysctl", "-n", "kern.boottime"],
+                                 capture_output=True, text=True, timeout=5).stdout
             m = re.search(r"sec\s*=\s*(\d+)", out)
             if m:
-                return "%s:%s" % (host, m.group(1))
+                return "%s:sec:%s" % (host, m.group(1))
         else:
+            try:
+                with open("/proc/sys/kernel/random/boot_id") as fh:
+                    uuid = fh.read().strip()
+                if uuid:
+                    return "%s:uuid:%s" % (host, uuid)
+            except OSError:
+                pass
             with open("/proc/stat") as fh:
                 for line in fh:
                     if line.startswith("btime "):
-                        return "%s:%s" % (host, line.split()[1])
+                        return "%s:sec:%s" % (host, line.split()[1])
     except Exception:
         pass
     return "%s:unknown" % host
+
+
+def _boot_parts(token):
+    """(host, scheme, value) for a token, understanding the LEGACY untagged form.
+
+    Claims written before the scheme tag existed read `host:<digits>`. Those are the seconds
+    scheme; saying so here is what keeps the upgrade from reading every one of them as a
+    different boot.
+    """
+    if not token:
+        return None, None, None
+    bits = str(token).split(":")
+    if len(bits) >= 3 and bits[1] in ("uuid", "sec"):
+        return bits[0], bits[1], ":".join(bits[2:])
+    if len(bits) == 2:
+        return bits[0], ("unknown" if bits[1] == "unknown" else "sec"), bits[1]
+    return None, None, None
+
+
+def same_boot(theirs, ours):
+    """True / False / None — and None means CANNOT TELL, never "proved dead".
+
+    ONE COMPARISON, because there were two and they are the same rule. `graph.stale_claims` and
+    `locks._live` each implemented "different token means the process cannot still be running",
+    which is exactly the shape this repo has had to repair elsewhere: two statements of one
+    policy, free to disagree.
+
+    THE UPGRADE ITSELF WOULD OTHERWISE CAUSE THE BUG. Switching darwin from seconds to a boot
+    uuid changes the token, so every claim recorded by an older build would suddenly differ from
+    every reading by a newer one — mass false STALE, produced by the fix for false STALE. Two
+    DIFFERENT SCHEMES are therefore incomparable, not opposed.
+
+    Within the seconds scheme, a ±1s difference is treated as the same boot: the drift being
+    repaired is exactly one second of clock adjustment, and the field's own precision is the
+    problem. Suggested by the reporter, and cheap enough to keep for the fallback path.
+    """
+    h1, s1, v1 = _boot_parts(theirs)
+    h2, s2, v2 = _boot_parts(ours)
+    if not s1 or not s2 or "unknown" in (s1, s2):
+        return None
+    if h1 != h2:
+        return False                      # a different machine is a different boot, knowably
+    if s1 != s2:
+        return None                       # seconds vs uuid: incomparable, not different
+    if s1 == "uuid":
+        return v1 == v2
+    try:
+        return abs(int(v1) - int(v2)) <= 1
+    except (TypeError, ValueError):
+        return None
 
 
 def pid_readable(pid):

@@ -184,6 +184,12 @@ TARGETS = [
     # The identity two worktrees of one repo must AGREE on. None everywhere means no two trees
     # ever share a git dir, so lease and lock identity silently stop matching -- every check still
     # runs, still returns, and never fires. Same shape as the jurisdiction mutant below.
+    # THE ONE COMPARISON BOTH LIVENESS SITES SHARE. Neutered to always answer None it says
+    # "cannot tell" everywhere, which is the SAFE direction — so the mutant proves the
+    # assertions notice a comparison that stopped discriminating, not merely one that broke.
+    ("boot identity, shared by graph and locks", "util.same_boot", "lib/showrunner/util.py",
+     r"(def same_boot\(theirs, ours\):\n)",
+     "    return None\ndef _neutered_same_boot(theirs, ours):\n"),
     ("shared git dir identity", "util.git_common_dir", "lib/showrunner/util.py",
      r"(def git_common_dir\(path\):\n)",
      "    return None\ndef _neutered_git_common_dir(path):\n"),
@@ -692,6 +698,11 @@ NOT_SWEPT = {
     "config.Config.resource": "lookup; the lock group fails if it answers wrongly",
     "util.pid_alive": "the claim-liveness and lock-staleness assertions cover both answers",
     "util.repo_root": "every fixture would fail to build if it answered wrongly",
+    # A PRIVATE HELPER WITH ONE CALLER, and that caller IS swept. Neutering `_boot_parts`
+    # neuters `same_boot` by construction, so a separate mutant measures the same assertions
+    # twice and reports it as extra coverage — a number bought with no safety.
+    "util._boot_parts": "the only caller is util.same_boot, which is swept; neutering this "
+                        "neuters that by construction",
     # SAME CLASS AS ITS SIBLING ABOVE, and MEASURED before being excused rather than assumed:
     # neutering it CRASHED ten groups instead of flipping their assertions, so the sweep
     # reported UNSCOREABLE — no measurement, which is not a coverage result. Hardening ten
