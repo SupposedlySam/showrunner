@@ -172,6 +172,31 @@ def provision_chat(cfg, record, channel):
     return True, channel
 
 
+def open_channel(cfg, record):
+    """Name the room AND open it, and return WHICH of those actually happened.
+
+    Returns `(channel, opened, detail)`. `channel` is None when chat is switched off; otherwise
+    it is the name, and `opened` says whether a room by that name now exists.
+
+    SPLIT OUT OF `launch` SO THE BRIEF CAN BE WRITTEN AFTER THE ROOM IS OPENED, NOT BEFORE.
+    `channel_for` returns a NAME whenever `chat.enabled` is true and knows nothing about
+    whether provisioning worked, and the brief used to be authored from that bare name — so
+    one `spawn` told a Crawler "the orchestrator opened a channel for you" in the brief and
+    reported `chat not wired: channel not opened` in its own dispatch report, four lines
+    apart, on the same run. Observed four times in one campaign.
+
+    `provision_chat` already carries the lesson for the REPORT: a name is not a room, and
+    reporting one as if it were is a claim about a thing that was never made. This is the
+    function that lets the BRIEF carry it too, and the only thing that makes that possible is
+    that it runs before the sentence rather than after it.
+    """
+    channel = channel_for(cfg, record)
+    if not channel:
+        return None, False, "disabled"
+    opened, detail = provision_chat(cfg, record, channel)
+    return channel, opened, detail
+
+
 def wire_stop_gate(cfg, record):
     """Give the Crawler's own tree a turn-end trigger that runs showrunner's stop gate.
 
@@ -265,14 +290,22 @@ def new_session_id():
     return str(uuid.uuid4())
 
 
-def launch(cfg, record, decision, brief, session_id, dry_run=False):
-    """Record first, then start. See the module docstring for why that order is not cosmetic."""
+def launch(cfg, record, decision, brief, session_id, dry_run=False, chat=None):
+    """Record first, then start. See the module docstring for why that order is not cosmetic.
+
+    `chat` is an already-taken `open_channel` result, `(channel, opened, detail)`. The caller
+    passes it when it opened the room ITSELF, before writing the brief — which `spawn` must do,
+    because the brief asserts the room exists and the brief is authored once. Opening it again
+    here would be a second `open` on a live room, and worse would let the brief and the dispatch
+    report disagree about whether it worked, which is exactly the split this parameter closes.
+    Left None, this provisions the room itself, so a caller with no brief to write is unchanged.
+    """
     wt = cfg.abspath(record["worktree"])
     if not os.path.isdir(wt):
         raise Refused("worktree %s does not exist — spawn it before dispatching" % wt)
 
     model = resolve_model(cfg, decision)
-    channel = channel_for(cfg, record)
+    channel = chat[0] if chat is not None else channel_for(cfg, record)
     cmd = build_command(cfg, record, model, session_id, brief)
 
     if dry_run:
@@ -287,7 +320,9 @@ def launch(cfg, record, decision, brief, session_id, dry_run=False):
     gate_ok, gate_detail = wire_stop_gate(cfg, record)
 
     chat_ok, chat_detail = (False, "disabled")
-    if channel:
+    if chat is not None:
+        _, chat_ok, chat_detail = chat
+    elif channel:
         chat_ok, chat_detail = provision_chat(cfg, record, channel)
 
     log = os.path.join(cfg.abspath(record["scratch"]), "session.log")

@@ -263,6 +263,31 @@ cheap enough to be worth answering.
 
 """
 
+NO_CHAT_BLOCK = """\
+## You are NOT reachable — nobody is listening
+
+The orchestrator tried to open a channel for you, and it did not open:
+
+    {reason}
+
+**There is no room.** Do not try to join one — the join fails, and working out whether that
+was your fault costs you a turn. Nothing you post reaches anyone and no answer is coming, so
+silence here is not the orchestrator thinking: it is nobody.
+
+**Write it down instead of asking it.** The question you would have posted goes in your
+scratch dir, which outlives this worktree:
+
+    {scratch}/QUESTIONS.md
+
+Then decide it yourself and keep working. Say in your close-reason which way you went, what
+that rests on, and what would have changed it. That is the orchestrator's copy of the
+conversation you could not have, and it is worth more than a guess reported as a finding.
+
+A Crawler that knows it cannot reach anyone can do this. One that has been told a room exists
+waits for an answer, or posts into nothing and reads the silence back as agreement.
+
+"""
+
 LOCK_BLOCK = """\
 This leaf is serialized behind the single-consumer resource **{resource}**. Do not run the
 consuming command directly. Run it through the lock so the lock is held by the process
@@ -325,7 +350,19 @@ def sr_bin(cfg):
 
 
 def build(cfg, leaf, spawn_record, decision=None, orchestrator_findings=None,
-          chat_channel=None):
+          chat=None):
+    """`chat` is the PROVISIONING RESULT — `(channel, opened, detail)` — never a bare name.
+
+    IT USED TO BE THE NAME, and a name is not a room. `dispatch.channel_for` hands back a
+    channel whenever `chat.enabled` is true, whether or not anything was ever opened, and this
+    function rendered "the orchestrator opened a channel for you" from it as a statement of
+    fact — in the same `spawn` whose dispatch report said `chat not wired`. The Crawler acts on
+    the brief, not on the report, so four of them in one campaign were handed a claim about a
+    thing that was never made plus a join command that could not succeed.
+
+    Taking the result rather than the name is what makes that unrepresentable: there is no
+    longer a value you can pass that asserts a room without also asserting it opened.
+    """
     decision = decision or lanes.route(cfg, leaf)
 
     lock_block = ""
@@ -334,16 +371,36 @@ def build(cfg, leaf, spawn_record, decision=None, orchestrator_findings=None,
                                        crawler=spawn_record["crawler"])
 
     chat_block = ""
-    if chat_channel:
-        # THE RESOLVED ABSOLUTE PATH, never the bare word. `llm_chat` is not on PATH for a
-        # consumer who vendors it, and the bare name shipped in every brief: inbound worked
-        # (the delivery hooks carry absolute paths), outbound did not, and the half that worked
-        # is the half that hid the other. showrunner already has this value and `doctor`
-        # already resolves it -- the same argument as `--version` answering from where the code
-        # lives: the tool knows, so the tool should say.
-        _cli = dispatch.chat_path(cfg, "cli") or "llm_chat"
-        chat_block = CHAT_BLOCK.format(channel=chat_channel, crawler=spawn_record["crawler"],
-                                       chat_cli=_cli)
+    if isinstance(chat, str):
+        # A caller passing the old bare name is asserting a room it has not checked. Refuse
+        # loudly rather than render it: the whole point of the parameter change is that the
+        # lying form cannot be expressed, and a string that unpacks by accident would put it
+        # back.
+        raise TypeError(
+            "brief.build takes the provisioning RESULT (channel, opened, detail), not a "
+            "channel name — a name is not a room. Use dispatch.open_channel(cfg, record).")
+    if chat is not None:
+        channel, opened, detail = chat
+        if channel and opened:
+            # THE RESOLVED ABSOLUTE PATH, never the bare word. `llm_chat` is not on PATH for a
+            # consumer who vendors it, and the bare name shipped in every brief: inbound worked
+            # (the delivery hooks carry absolute paths), outbound did not, and the half that
+            # worked is the half that hid the other. showrunner already has this value and
+            # `doctor` already resolves it -- the same argument as `--version` answering from
+            # where the code lives: the tool knows, so the tool should say.
+            _cli = dispatch.chat_path(cfg, "cli") or "llm_chat"
+            chat_block = CHAT_BLOCK.format(channel=channel, crawler=spawn_record["crawler"],
+                                           chat_cli=_cli)
+        elif channel:
+            # SAY IT, DO NOT OMIT IT. Silence here is indistinguishable from chat never having
+            # been configured, and the two call for opposite behaviour: with chat off the
+            # Crawler was never going to ask anyone anything, while here a room was meant to
+            # exist and does not, so every question it would have posted now has to be decided
+            # alone and recorded. A Crawler cannot route around a channel it does not know was
+            # supposed to be there.
+            chat_block = NO_CHAT_BLOCK.format(
+                reason=detail or "no reason reported",
+                scratch=cfg.abspath(spawn_record["scratch"]))
 
     shares = spawn_record.get("shares") or worktree.audit_shared(cfg)
     shared_block = ""
