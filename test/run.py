@@ -536,6 +536,220 @@ def test_config_refusals():
            not bad, bad)
 
 
+# ==================================================== CORE: the user layer
+def test_user_config_layer():
+    group("A user-level config.json, merged BENEATH the repo's")
+    if not have("git"):
+        skip("the user config group", "git is not installed")
+        return
+
+    # THE SUITE MUST NOT READ THE MACHINE IT RUNS ON (#46). config.USER_PATH is computed at
+    # import from XDG_CONFIG_HOME, which run.py points at a temp dir before importing anything
+    # — so this file inherits that isolation instead of introducing an env var of its own.
+    ok("config.USER_PATH is inside the suite's temp XDG dir, not the developer's ~/.config",
+       config.USER_PATH.startswith(_CFG_HOME), config.USER_PATH)
+    eq("...and it resolves to the SAME user-level directory as roles.json, so the two files "
+       "cannot drift about where 'user level' is",
+       os.path.dirname(config.USER_PATH), os.path.dirname(roles.USER_PATH))
+
+    def with_user(data, repo=None, project=None, local=None):
+        """load() a repo with `data` as the user-level config. Returns the Config."""
+        cfg = repo or make_repo(project)
+        if local is not None:
+            with open(os.path.join(cfg.root, ".showrunner", "config.local.json"), "w") as fh:
+                json.dump(local, fh)
+        upath = os.path.join(tmpdir("userconf"), "config.json")
+        if data is not None:
+            with open(upath, "w") as fh:
+                json.dump(data, fh)
+        prev = config.USER_PATH
+        config.USER_PATH = upath
+        try:
+            return config.load(start=cfg.root)
+        finally:
+            config.USER_PATH = prev
+
+    # THE CASE PROTECTING EVERY REPO THAT WILL NEVER HAVE ONE. With no user file, the merge
+    # must produce byte-for-byte what the old DEFAULTS + project shallow merge produced.
+    plain = make_repo()
+    with open(plain.path) as fh:
+        on_disk = json.load(fh)
+    old_way = dict(config.DEFAULTS)
+    old_way.update(on_disk)
+    loaded = with_user(None, repo=plain)
+    eq("no user file present: the merged config is EXACTLY what it was before this layer "
+       "existed", loaded.data, old_way)
+    eq("...and the Config says so rather than leaving the reader to guess which files were "
+       "read", loaded.user_path, None)
+    ok("...and `tree` is still set, so seat resolution does not degrade to UNKNOWN on the new "
+       "path", loaded.tree == os.path.realpath(plain.root), loaded.tree)
+
+    # DEEP FOR DICTS. The whole point of the layer: something set once at user level must not
+    # be erased by a project that merely mentions the same top-level key.
+    c = with_user({"dispatch": {"chat": {"enabled": True, "cli": "/user/llm_chat"}}},
+                  project={"dispatch": {"default_model": "opus"}})
+    eq("a global dispatch.chat SURVIVES a project that sets only dispatch.default_model",
+       c.data["dispatch"].get("chat"), {"enabled": True, "cli": "/user/llm_chat"})
+    eq("...and the project's own key is there too, so nothing was merged by dropping a layer",
+       c.data["dispatch"].get("default_model"), "opus")
+    ok("...and the user file is named on the Config, since a merged dict cannot be asked where "
+       "a value came from", c.user_path and c.user_path.endswith("config.json"), c.user_path)
+
+    # WHOLESALE FOR LISTS, which is the rule the original shallow merge was written to protect:
+    # half a lane or half a resource is a configuration nobody wrote.
+    c = with_user({"lanes": [{"name": "user-a", "lane": "headless", "match": {"labels": ["x"]}},
+                             {"name": "user-b", "lane": "headless", "match": {"labels": ["y"]}}],
+                   "resources": [{"name": "user-dev", "match": ["z"]}]},
+                  project={"lanes": [{"name": "proj", "lane": "headless",
+                                      "match": {"labels": ["a"]}}],
+                           "resources": [{"name": "proj-dev", "match": ["b"]}]})
+    eq("a project `lanes` REPLACES a global `lanes` wholesale — never element-wise, so a "
+       "half-overridden rule remains impossible",
+       [l["name"] for l in c.data["lanes"]], ["proj"])
+    eq("...and `resources` likewise", [r["name"] for r in c.data["resources"]], ["proj-dev"])
+
+    # PRECEDENCE, ASSERTED. This is the decision that is the REVERSE of roles.json's.
+    c = with_user({"default_lane": "headless",
+                   "dispatch": {"chat": {"cli": "/user/bin", "enabled": True}}},
+                  project={"default_lane": "serialized",
+                           "dispatch": {"chat": {"cli": "/project/bin"}}})
+    eq("THE PROJECT BEATS THE USER for the same leaf key — config is preference, and a repo is "
+       "the better authority on its own lanes", c.data["dispatch"]["chat"]["cli"], "/project/bin")
+    eq("...at the top level too", c.data["default_lane"], "serialized")
+    eq("...while a sibling key the project did not mention is still the user's, which is what "
+       "makes this a merge and not a replacement",
+       c.data["dispatch"]["chat"]["enabled"], True)
+
+    # AND THE LOCAL OVERLAY IS STILL THE LAST WORD, now under the new depth.
+    c = with_user({"dispatch": {"chat": {"cli": "/user/bin", "enabled": True}}},
+                  project={"dispatch": {"chat": {"cli": "/project/bin"}}},
+                  local={"dispatch": {"chat": {"cli": "/local/bin"}}})
+    eq("config.local.json still beats config.json, and beats the user layer",
+       c.data["dispatch"]["chat"]["cli"], "/local/bin")
+    eq("...and it too merges deeply rather than dropping the keys it did not mention",
+       c.data["dispatch"]["chat"]["enabled"], True)
+
+    # KEYS A MACHINE-WIDE FILE MAY NOT SET. Refused, not warned: a silently shared lock root is
+    # a mutex that is quietly not one.
+    for key, value, needle in (
+            ("project_name", "everything", "project_name"),
+            ("lock_root", "/tmp/sr-global-locks", "lock_root"),
+            ("baseline", "/tmp/baseline.json", "baseline"),
+    ):
+        raises("REFUSES %s at machine scope" % key,
+               lambda k=key, v=value: with_user({k: v}), needle)
+    raises("REFUSES a nested graph.db at machine scope, so the refusal is not top-level-only",
+           lambda: with_user({"graph": {"db": "/tmp/graph.db"}}), "graph.db")
+
+    # The refusal has to say WHICH FILE — the whole ABSOLUTE path, not the bare name every
+    # layer shares — or the reader is left grepping three files for a key they may not have
+    # written and one of them is not in this repo at all.
+    upath = os.path.join(tmpdir("userconf-named"), "config.json")
+    with open(upath, "w") as fh:
+        json.dump({"lock_root": "/tmp/sr-global-locks"}, fh)
+    prev, config.USER_PATH = config.USER_PATH, upath
+    try:
+        config.load(start=make_repo().root)
+        msg = ""
+    except Refused as exc:
+        msg = str(exc)
+    finally:
+        config.USER_PATH = prev
+    ok("...and the refusal names the FILE the key came from by its full path, not just the key",
+       upath in msg, (upath, msg))
+    ok("...and says why, so it reads as a scoping rule rather than an arbitrary denial",
+       "machine-wide" in msg, msg)
+
+    # THE COMPANION CASE. A refusal list that refuses everything is a layer nobody can use.
+    c = with_user({"graph": {"backend": "vendored"}, "default_lane": "headless",
+                   "checks": [{"name": "t", "cmd": "true"}]})
+    eq("a user file setting graph.backend is ACCEPTED — only the per-repo and per-campaign keys "
+       "are refused", (c.data.get("graph") or {}).get("backend"), "vendored")
+    eq("...and the project's graph.db is untouched beside it, so the nested refusal did not "
+       "cost the nested merge", (c.data.get("graph") or {}).get("db"), ".showrunner/graph.db")
+
+    # PATH-SHAPED VALUES GET THE EXISTING RULE, not a second one — and named against the user
+    # file, whose author is the least likely person to be reading this repo's doctor output.
+    try:
+        with_user({"worktree_root": "$HOME/trees"})
+        msg = ""
+    except Refused as exc:
+        msg = str(exc)
+    ok("an unexpanded $VAR in the user file is refused by the SAME path_problem rule, naming "
+       "the file", "NOT expanded" in msg and "worktree_root" in msg, msg)
+
+    # A file that exists and cannot be parsed is not "nothing there".
+    upath = os.path.join(tmpdir("userconf-bad"), "config.json")
+    with open(upath, "w") as fh:
+        fh.write("{ not json")
+    prev = config.USER_PATH
+    config.USER_PATH = upath
+    try:
+        raises("an unparseable user file is REFUSED, never silently treated as absent",
+               lambda: config.load(start=make_repo().root), "not valid JSON")
+    finally:
+        config.USER_PATH = prev
+
+    # DOES IT REACH THE CLI? Everything above calls `config.load` directly, and a layer that
+    # merges correctly in-process but is not read by the real entry point is a layer nobody
+    # has. So: a REAL `showrunner doctor`, in a repo whose own config configures no checks,
+    # with the user layer supplying them — and the assertion is on the OUTPUT changing, not on
+    # the file existing. The subprocess computes USER_PATH from XDG_CONFIG_HOME at import, so
+    # the env var is the whole wiring; no second override exists and none is needed.
+    _uhome = tmpdir("userconf-cli")
+    os.makedirs(os.path.join(_uhome, "showrunner"), exist_ok=True)
+    _urepo = make_repo()
+    _env = dict(os.environ, XDG_CONFIG_HOME=_uhome)
+    _before = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                             cwd=_urepo.root, capture_output=True, text=True, env=_env).stdout
+    ok("with no user file, `doctor` warns that no checks are configured — the control, without "
+       "which the line below proves nothing", "no checks configured" in _before, _before[:400])
+    ok("...and it SAYS there is no user config, naming where one would go, so 'none' is a "
+       "reported state rather than a silence", "user config: none" in _before, _before[:400])
+    with open(os.path.join(_uhome, "showrunner", "config.json"), "w") as fh:
+        json.dump({"checks": [{"name": "user-check", "cmd": "true"}]}, fh)
+    # A PROJECT THAT WRITES `"checks": []` HAS SAID SOMETHING, and it outranks the user layer —
+    # the same precedence as any other value, including when the value is empty. Caught by this
+    # test failing on its first run: the fixture writes every DEFAULTS key out to disk, so the
+    # repo was overriding rather than inheriting, which is the arm asserted here.
+    _explicit = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                               cwd=_urepo.root, capture_output=True, text=True, env=_env).stdout
+    ok("a project that explicitly sets `checks: []` still beats the user's list — an empty "
+       "value is a value, not an absence", "no checks configured" in _explicit, _explicit[:400])
+    _cfgfile = os.path.join(_urepo.root, ".showrunner", "config.json")
+    with open(_cfgfile) as fh:
+        _proj = json.load(fh)
+    _proj.pop("checks", None)
+    with open(_cfgfile, "w") as fh:
+        json.dump(_proj, fh)
+    _after = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                            cwd=_urepo.root, capture_output=True, text=True, env=_env).stdout
+    ok("a checks list set ONCE at user level reaches a real `doctor` in a repo that configures "
+       "none — the warning is gone", "no checks configured" not in _after, _after[:400])
+    ok("...and doctor names the outside file that is affecting this repo, since every check it "
+       "printed ran against the MERGED config",
+       os.path.join(_uhome, "showrunner", "config.json") in _after, _after[:400])
+    with open(os.path.join(_uhome, "showrunner", "config.json"), "w") as fh:
+        json.dump({"project_name": "everything"}, fh)
+    _refuse = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                             cwd=_urepo.root, capture_output=True, text=True, env=_env)
+    ok("and the machine-scope refusal fires through the CLI too, non-zero and naming the key",
+       _refuse.returncode != 0 and "project_name" in (_refuse.stderr + _refuse.stdout),
+       (_refuse.returncode, _refuse.stderr[:300]))
+
+    # THE CAVEAT MUST BE FILED WHERE EACH READER STANDS. These two files sit in one directory
+    # with OPPOSITE precedence; a reader who opens either one must learn that.
+    src = {}
+    for name in ("config.py", "roles.py"):
+        with open(os.path.join(ROOT, "lib", "showrunner", name)) as fh:
+            src[name] = fh.read()
+    ok("config.py states that its precedence is the reverse of roles.json's",
+       "roles.json" in src["config.py"] and "PREFERENCE" in src["config.py"].upper())
+    ok("...and roles.py carries the pointer from the other side, so the rule is not discovered "
+       "only by whoever happened to read the other file",
+       "config.json" in src["roles.py"] and "PERMISSION" in src["roles.py"].upper())
+
+
 # =========================================================== CORE: graph
 def test_every_rule_can_fail():
     group("Every validation rule must have a reachable failing input")
@@ -590,7 +804,12 @@ def test_every_rule_can_fail():
     # a metric that can never be satisfied is its own kind of dead check. So: pin the number
     # of error branches. Adding one trips this, and the fix is to add a case above proving the
     # new rule can fire, or to say here why it cannot.
-    EXPECTED_ERROR_BRANCHES = 10
+    #
+    # 10 -> 9 when the user config layer landed: the two `path_problem` branches (the named
+    # keys, and inject paths) became one loop over `config.path_shaped`, which the user layer
+    # reuses so the two cannot disagree about what is path-shaped. NO CASE WAS REMOVED ABOVE —
+    # both inputs still reach the surviving branch, which is the property this group is for.
+    EXPECTED_ERROR_BRANCHES = 9
     with open(os.path.join(ROOT, "lib", "showrunner", "config.py")) as fh:
         branches = fh.read().count('"error"') - 1        # -1: the require_valid() filter
     eq("the validator has exactly the error branches this group accounts for — a new one must "
@@ -9885,7 +10104,7 @@ def test_optional():
 # ==========================================================================
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_config_refusals, test_every_rule_can_fail, test_graph, test_lifecycle, test_close_gate,
+    for fn in (test_locks, test_config_refusals, test_user_config_layer, test_every_rule_can_fail, test_graph, test_lifecycle, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

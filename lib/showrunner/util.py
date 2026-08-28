@@ -319,6 +319,24 @@ def main_checkout(start=None):
     return os.path.dirname(common.rstrip("/")) or "/"
 
 
+def user_config_dir():
+    """The ONE user-level directory showrunner keeps anything in. `~/.config/showrunner`.
+
+    TWO MODULES ANSWER THE SAME QUESTION HERE, so neither may compute it. `roles.py` reads
+    `roles.json` from user level and `config.py` reads `config.json` from user level; two
+    expressions of "where is user level" is two layers free to disagree silently (INV12), and
+    the disagreement would surface as a file the user wrote and the tool never read — which
+    looks exactly like a setting that did not take effect.
+
+    `XDG_CONFIG_HOME` is the override, and there is deliberately no second env var for it. The
+    suite sets it to a temp dir before importing anything so no test reads the developer's real
+    `~/.config` (#46); a showrunner-specific variable would have to be threaded into every
+    subprocess test separately to buy the same isolation.
+    """
+    return os.path.join(
+        os.path.expanduser(os.environ.get("XDG_CONFIG_HOME") or "~/.config"), "showrunner")
+
+
 def slug(text, maxlen=48):
     s = re.sub(r"[^a-zA-Z0-9]+", "-", str(text)).strip("-").lower()
     return (s[:maxlen] or "x").strip("-")

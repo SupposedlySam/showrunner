@@ -163,6 +163,14 @@ def cmd_doctor(args):
     print("repo: %s" % cfg.root)
     print("config: %s%s" % (rel(cfg.path, cfg.root),
                             "" if os.path.exists(cfg.path) else "  (MISSING — run `showrunner init`)"))
+    # A FILE OUTSIDE THIS REPO IS AFFECTING THIS REPO, so say so unprompted. Every check below
+    # runs against the MERGED config, and a merged dict cannot be asked where a value came
+    # from; without this line a setting nobody can find in `.showrunner/` reads as the tool
+    # inventing it. Printed in both directions on purpose — "none" is the state of every repo
+    # that will never have one, and it is what makes the other line mean something.
+    print("user config: %s" % (("%s  (merged BENEATH this repo's — the project wins)"
+                                % cfg.user_path) if cfg.user_path
+                               else "none (%s)" % config.USER_PATH))
     findings = cfg.validate()
     bad = 0
     if not os.path.exists(cfg.path):

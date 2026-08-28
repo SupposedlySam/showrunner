@@ -5,16 +5,47 @@ is deliberately strict in one direction: **anything whose misconfiguration would
 guard silently a no-op is a hard refusal, not a warning** (INV8). A lock root that is
 worktree-relative, or a worktree root outside the repo, are both configurations that
 look like they are working right up until the run that they ruin.
+
+FOUR LAYERS, EACH ONE OVERLAID ON THE ONE ABOVE IT:
+
+    DEFAULTS                                   the tool's own answer
+    ~/.config/showrunner/config.json           the USER — set once, applies to every repo
+    <repo>/.showrunner/config.json             the PROJECT, tracked and shipped to every clone
+    <repo>/.showrunner/config.local.json       THIS MACHINE, untracked
+
+**THE PROJECT BEATS THE USER, WHICH IS THE OPPOSITE OF `roles.json`** — a file that lives in the
+same user-level directory. The two are not the same kind of thing and must not share a rule:
+
+    roles.json   is PERMISSION.  User level wins. A project that could redefine a role would be
+                                 widening the policy that constrains the session editing it.
+    config.json  is PREFERENCE.  The project wins. A repo is the better authority on its own
+                                 lanes, checks and resources than a machine-wide default is.
+
+Said again in `roles.py`, on purpose: a reader standing at either file must learn that the rule
+is not uniform, and a caveat filed where the reader does not stand is a caveat they never had.
+
+MERGE DEPTH IS UNIFORM ACROSS EVERY LAYER: dicts merge key by key, lists and scalars replace
+wholesale. See `deep_merge` for why that is the same rule the shallow merge was protecting, not
+a reversal of it. Two overlays with different depths would be two layers disagreeing about the
+rules silently (INV12), and the disagreement would surface only in the config hardest to debug.
+
+SOME KEYS ARE REFUSED AT USER LEVEL. A machine-wide value is wrong — not merely unusual — for
+anything that names one repo's identity or one repo's state; see MACHINE_SCOPE_REFUSED.
 """
 
 import json
 import os
 
-from .util import Refused, caller_tree, die, main_checkout, slug
+from .util import Refused, caller_tree, die, main_checkout, slug, user_config_dir
 
 CONFIG_NAME = "config.json"
 CONFIG_LOCAL_NAME = "config.local.json"
 STATE_DIR = ".showrunner"
+
+# The user layer. Resolved through the SAME helper as `roles.USER_PATH` and at the same moment
+# (import), so the two files cannot drift about where "user level" is — and so the suite's
+# `XDG_CONFIG_HOME` isolation (#46) covers this file for free, subprocess tests included.
+USER_PATH = os.path.join(user_config_dir(), CONFIG_NAME)
 
 # ONE LIST, AND IT LIVES HERE. This policy — which files under STATE_DIR are the tool's or a
 # run's, and therefore never the consumer's source — had been written out by hand in three
@@ -93,10 +124,16 @@ def _campaign_from_env():
 
 
 class Config:
-    def __init__(self, data, root, path, campaign=None, tree=None):
+    def __init__(self, data, root, path, campaign=None, tree=None, user_path=None):
         self.data = data
         self.root = root          # the MAIN checkout, absolute
         self.path = path          # where config.json was read from (may not exist)
+        # The user-level file that CONTRIBUTED to `data`, or None when there was none. A merged
+        # dict cannot be asked which layer a value came from, so the one question a confused
+        # reader actually has — "is a file outside this repo affecting me?" — has to be answered
+        # by recording it here and printing it (see `doctor`). None means no such file existed,
+        # which is the case every repo that will never have one stays in.
+        self.user_path = user_path
         # WHERE THIS CONFIG WAS LOADED FROM — the `--show-toplevel` of the directory `load()`
         # was called against, realpath'd, or None when nobody recorded one.
         #
@@ -322,19 +359,8 @@ class Config:
                         "The costs are not symmetric: a wrong headless route collides on a "
                         "single-consumer resource, a wrong serialized route is just slower."))
 
-        for label, raw in (("lock_root", self.get("lock_root")),
-                           ("worktree_root", self.get("worktree_root")),
-                           ("scratch_root", self.get("scratch_root")),
-                           ("baseline", self.get("baseline")),
-                           ("graph.db", (self.get("graph") or {}).get("db")),
-                           ("graph.br_db", (self.get("graph") or {}).get("br_db")),
-                           ("harness.installer", (self.get("harness") or {}).get("installer"))):
+        for label, raw in path_shaped(self.get):
             problem = path_problem(label, raw)
-            if problem:
-                out.append(("error", problem))
-        for entry in self.get("inject") or []:
-            raw = entry if isinstance(entry, str) else (entry or {}).get("path")
-            problem = path_problem("inject path %r" % raw, raw)
             if problem:
                 out.append(("error", problem))
 
@@ -378,6 +404,122 @@ def path_problem(label, raw):
     return None
 
 
+def path_shaped(get):
+    """Every configured value that names a path, as (label, raw) pairs.
+
+    ONE LIST, so `validate` and the user-layer check below cannot end up disagreeing about
+    what is path-shaped — a key checked in one place and not the other is a rule with a hole
+    in exactly the layer nobody was looking at. `get` is a `Config.get` or a plain dict's
+    `.get`, which have the same signature; the caller decides whether DEFAULTS are behind it.
+    """
+    pairs = [("lock_root", get("lock_root")),
+             ("worktree_root", get("worktree_root")),
+             ("scratch_root", get("scratch_root")),
+             ("baseline", get("baseline")),
+             ("graph.db", (get("graph") or {}).get("db")),
+             ("graph.br_db", (get("graph") or {}).get("br_db")),
+             ("harness.installer", (get("harness") or {}).get("installer"))]
+    for entry in get("inject") or []:
+        raw = entry if isinstance(entry, str) else (entry or {}).get("path")
+        pairs.append(("inject path %r" % raw, raw))
+    return pairs
+
+
+# WHAT A MACHINE-WIDE FILE MAY NOT SAY, and why each one is a refusal rather than a warning.
+# Every entry here names something that belongs to ONE repo or ONE campaign; set once for the
+# machine it is not a preference applied broadly, it is the same wrong answer everywhere.
+MACHINE_SCOPE_REFUSED = (
+    ("project_name",
+     "it feeds dispatch.chat.channel_prefix and the orchestrator identity, so every repo on "
+     "this machine would open its Crawler rooms under the same prefix. That collision has "
+     "already been measured here with two campaigns in one checkout: rooms crossed, another "
+     "campaign's messages received, and `owed` debt accrued for questions never seen"),
+    ("lock_root",
+     "a lock names a single-consumer resource, and one absolute root shared by UNRELATED repos "
+     "makes them serialize against each other — while a per-repo default keeps the trees of one "
+     "repo sharing one. A machine-wide value is a mutex that is quietly the wrong mutex"),
+    ("graph.db",
+     "the leaf graph is one campaign's state; there is nothing for it to mean machine-wide"),
+    ("baseline",
+     "the baseline is one campaign's observation of one repo; there is nothing for it to mean "
+     "machine-wide"),
+)
+
+
+def _dotted(data, key):
+    """(present, value) for a dotted key, so a nested entry can be refused by name."""
+    cur = data
+    for part in key.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return False, None
+        cur = cur[part]
+    return True, cur
+
+
+def deep_merge(base, over):
+    """`over` laid on `base`: dicts merge key by key, lists and scalars REPLACE wholesale.
+
+    THE RULE THE OLD SHALLOW MERGE WAS PROTECTING SURVIVES INTACT, which is why this is not a
+    reversal of it. That comment refused a deep merge because "a deep merge lets a local file
+    silently half-override a rule (half a lane, half a resource) and produce a configuration
+    nobody wrote" — and the two things it names are LISTS. Lists still replace wholesale, so a
+    half-written lane is still impossible; what changes is that `dispatch.chat` set at one layer
+    now survives a layer below setting only `dispatch.default_model`, instead of vanishing.
+
+    Applied at EVERY layer, deliberately. A user layer that deep-merged and a local layer that
+    did not would be two overlays disagreeing about the rules, discoverable only by whoever is
+    already debugging the config.
+    """
+    out = dict(base)
+    for k, v in (over or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def read_config_file(path):
+    """The JSON object at `path`, or None when there is no file. Refuses anything else.
+
+    A missing file is a real answer and the common one. A file that exists and cannot be parsed
+    is NOT "nothing there": returning {} for it would silently run the config the author thought
+    they had replaced.
+    """
+    if not os.path.exists(path):
+        return None
+    with open(path) as fh:
+        try:
+            data = json.load(fh)
+        except json.JSONDecodeError as exc:
+            die("%s is not valid JSON: %s" % (path, exc), code=2)
+    if not isinstance(data, dict):
+        die("%s must be a JSON object" % path, code=2)
+    return data
+
+
+def user_layer(path=None):
+    """The user-level config, refused if it says anything only a repo may say. {} when absent."""
+    path = path or USER_PATH
+    data = read_config_file(path)
+    if data is None:
+        return {}
+    for key, why in MACHINE_SCOPE_REFUSED:
+        present, value = _dotted(data, key)
+        if present and value is not None:
+            die("%s sets %r (%r), which is not allowed in a machine-wide config: %s.\n"
+                "Move it to the repo's .showrunner/%s." % (path, key, value, why, CONFIG_NAME),
+                code=2)
+    # Path-shaped values get the SAME rule as everywhere else — `path_problem`, not a second
+    # one — but named against the file they came from, since a user file is the layer whose
+    # author is least likely to be looking at the repo doctor reports on.
+    for label, raw in path_shaped(data.get):
+        problem = path_problem("%s: %s" % (path, label), raw)
+        if problem:
+            die(problem, code=2)
+    return data
+
+
 def find_root(start=None):
     root = main_checkout(start)
     if not root:
@@ -394,17 +536,19 @@ def load(start=None, required=False, campaign=None):
     # stable answer about ONE place, or nothing downstream can hold one and trust it.
     tree = caller_tree(start)
     path = os.path.join(root, STATE_DIR, CONFIG_NAME)
+
+    # THE USER LAYER SITS BENEATH THE PROJECT'S, so a setting made once applies to every repo
+    # and any repo can still override it. Read even when this repo has no config of its own:
+    # the whole point is that it does not need one. `user_layer` refuses the keys a machine-wide
+    # file may not set (MACHINE_SCOPE_REFUSED) before any of it reaches a Config.
+    user_path = USER_PATH if os.path.exists(USER_PATH) else None
+    merged = deep_merge(DEFAULTS, user_layer())
+
     if not os.path.exists(path):
         if required:
             die("no %s — run `showrunner init` first" % path, code=2)
-        return Config(dict(DEFAULTS), root, path, campaign=campaign, tree=tree)
-    with open(path) as fh:
-        try:
-            data = json.load(fh)
-        except json.JSONDecodeError as exc:
-            die("%s is not valid JSON: %s" % (path, exc), code=2)
-    merged = dict(DEFAULTS)
-    merged.update(data)
+        return Config(merged, root, path, campaign=campaign, tree=tree, user_path=user_path)
+    merged = deep_merge(merged, read_config_file(path))
 
     # A LOCAL, UNTRACKED OVERLAY, and the absence of one is what caused a real leak. Some
     # settings are facts about THIS machine — where a chat tool is installed, an absolute
@@ -413,20 +557,13 @@ def load(start=None, required=False, campaign=None):
     # never chose. Without somewhere else to put them they end up tracked anyway, which is
     # exactly how internal tooling reached a public repo here.
     #
-    # Shallow merge by top-level key, deliberately: a deep merge lets a local file silently
-    # half-override a rule (half a lane, half a resource) and produce a configuration nobody
-    # wrote. Replacing a whole key is a change you can see.
-    local_path = os.path.join(root, STATE_DIR, CONFIG_LOCAL_NAME)
-    if os.path.exists(local_path):
-        with open(local_path) as fh:
-            try:
-                local = json.load(fh)
-            except json.JSONDecodeError as exc:
-                die("%s is not valid JSON: %s" % (local_path, exc), code=2)
-        if not isinstance(local, dict):
-            die("%s must be a JSON object" % local_path, code=2)
-        merged.update(local)
-    return Config(merged, root, path, campaign=campaign, tree=tree)
+    # It is the LAST word, above the project and the user both, and it merges by the one rule
+    # every layer here uses — see `deep_merge`, which explains why the half-a-lane hazard the
+    # original shallow merge was written against is still impossible.
+    local = read_config_file(os.path.join(root, STATE_DIR, CONFIG_LOCAL_NAME))
+    if local is not None:
+        merged = deep_merge(merged, local)
+    return Config(merged, root, path, campaign=campaign, tree=tree, user_path=user_path)
 
 
 def write(cfg):
