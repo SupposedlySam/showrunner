@@ -33,11 +33,13 @@ import argparse
 # are hypotheses that happen to have come from a careful source, and at least one has already
 # been retracted by its author.
 
+import atexit
 import glob
 import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -49,6 +51,34 @@ HOOKS = os.path.join(ROOT, ".showrunner", "hooks")
 
 PROMISE_GATE = os.path.join(HOOKS, "future-tense-gate.sh")
 PIPELINE_GATE = os.path.join(HOOKS, "pipeline-status-gate.sh")
+
+
+_SCRATCH = None
+
+
+def scratch(name):
+    """A subdirectory of ONE temp root for this process, removed when the process exits.
+
+    EVERY CALL USED TO MAKE ITS OWN `mkdtemp` AND NOTHING REMOVED THEM. Three per run — the
+    environment, the promise-gate fixture, the control fixture — so this tool alone left more
+    than five thousand directories in the machine's temp root.
+
+    The cost is not disk. A neighbouring agent measured ~62,000 entries in that one directory
+    and the consequence they reported is the point: past ARG_MAX a glob there becomes a command
+    that CANNOT RUN and prints nothing, which is indistinguishable from a clean result. Four
+    searches across three repos failed that way in one evening and nobody noticed, because
+    empty output is what success looks like.
+
+    So: one root, cleaned at exit, and the subdirectories are named rather than random — a
+    leak that recurs is easier to find when its parent has a name.
+    """
+    global _SCRATCH
+    if _SCRATCH is None:
+        _SCRATCH = tempfile.mkdtemp(prefix="sr-corpus-")
+        atexit.register(shutil.rmtree, _SCRATCH, True)
+    d = os.path.join(_SCRATCH, name)
+    os.makedirs(d, exist_ok=True)
+    return d
 
 
 def transcripts():
@@ -157,7 +187,7 @@ def _env():
     few thousand times would make all of them look freshly reached — which is exactly how the
     heartbeat's own first reading was corrupted, by the test suite.
     """
-    d = tempfile.mkdtemp(prefix="sr-corpus-")
+    d = scratch("env")
     return dict(os.environ,
                 SHOWRUNNER_HEARTBEAT=os.path.join(d, "heartbeat.jsonl"),
                 CLAUDE_PROJECT_DIR=ROOT)
@@ -165,7 +195,7 @@ def _env():
 
 def run_promise_gate(texts, env):
     """Feed each closing to the REAL Stop hook and collect what it refuses."""
-    d = tempfile.mkdtemp(prefix="sr-corpus-t-")
+    d = scratch("promise-fixture")
     tp = os.path.join(d, "t.jsonl")
     fired = []
     for t in texts:
@@ -210,7 +240,7 @@ def self_check(env):
 
     # POSITIVE CONTROLS. Parsing is not firing: a hook can parse and still match nothing after a
     # bad edit, and the sweep would report a clean corpus rather than a broken instrument.
-    d = tempfile.mkdtemp(prefix="sr-corpus-c-")
+    d = scratch("controls")
     tp = os.path.join(d, "c.jsonl")
     with open(tp, "w") as fh:
         fh.write(json.dumps({"type": "assistant", "message": {"content": [

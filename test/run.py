@@ -52,8 +52,17 @@ sys.dont_write_bytecode = True
 # one of them this suite invoking the hook, not a turn-end. A freshly-run suite made every hook
 # look freshly reached, which is the single thing the file exists to answer. An instrument its
 # own tests can forge measures nothing, so every hook a test runs stamps somewhere else.
-os.environ["SHOWRUNNER_HEARTBEAT"] = os.path.join(
-    tempfile.mkdtemp(prefix="sr-heartbeat-"), "hook-heartbeat.jsonl")
+# REGISTERED FOR REMOVAL, like every other temp root this suite makes. These two run before
+# `TMPDIRS` exists, so they use atexit rather than `tmpdir()` — and that gap is exactly why they
+# leaked: `tmpdir()` has always registered its roots and `cleanup()` has always emptied them, so
+# the policy was never missing, only unwritten in the three places that did not call it.
+#
+# A neighbouring agent measured ~62,000 entries in this machine's temp root and named the cost,
+# which is not disk: past ARG_MAX a glob there becomes a command that CANNOT RUN and prints
+# nothing, indistinguishable from a clean result. Four searches across three repos failed that
+# way in one evening and nobody noticed.
+_HB_ROOT = tempfile.mkdtemp(prefix="sr-heartbeat-")
+os.environ["SHOWRUNNER_HEARTBEAT"] = os.path.join(_HB_ROOT, "hook-heartbeat.jsonl")
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 
 # ── the suite must not read the machine it runs on (#46) ─────────────────────────────────────────
@@ -73,6 +82,9 @@ os.environ["XDG_CONFIG_HOME"] = _CFG_HOME
 # patch, again, so the subprocess CLI assertions inherit it.
 os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(_CFG_HOME, "claude-home")
 import atexit
+import shutil as _shutil
+for _leaky in (_HB_ROOT, _CFG_HOME):
+    atexit.register(_shutil.rmtree, _leaky, True)
 atexit.register(shutil.rmtree, _CFG_HOME, True)
 
 from showrunner import brief, campaign, collide, config, dispatch, gates, graph as G, harness, lanes, lease, locks, pin, roles, util, worktree  # noqa: E402
@@ -5962,6 +5974,64 @@ def _borrowed_unmarked(paths, read):
     return sorted(bad)
 
 
+def _unregistered_tempdirs(sources):
+    """Raw `mkdtemp` calls in the test tree with no cleanup registered near them.
+
+    THE POLICY WAS NEVER MISSING. `tmpdir()` has always appended to `TMPDIRS` and `cleanup()`
+    has always emptied it — three call sites simply did not use it, and each leaked one
+    directory per run. That is the shape a neighbouring agent diagnosed in their own repo:
+    two helpers had teardown and the third did not, so it was never policy, only the place
+    nobody wrote it.
+
+    Returns (path, count) for files whose raw mkdtemp calls outnumber their registrations.
+    """
+    import re as _re
+    bad = []
+    for path, text in sources:
+        raw = len(_re.findall(r"tempfile\.mkdtemp\(", text))
+        if not raw:
+            continue
+        registered = (len(_re.findall(r"atexit\.register\(", text))
+                      + len(_re.findall(r"TMPDIRS\.append\(", text))
+                      + len(_re.findall(r"rmtree\(", text)))
+        if raw > registered:
+            bad.append((path, raw, registered))
+    return bad
+
+
+def test_temp_dirs_are_cleaned_up():
+    group("A fixture root with no teardown scales with the suite, and empty output looks like "
+          "success")
+
+    # WHY THIS IS NOT ABOUT DISK. A neighbouring agent measured ~62,000 entries in this
+    # machine's temp root, 5,428 of them written by this repo's own tools. Past ARG_MAX a glob
+    # in that directory becomes a command that CANNOT RUN and prints nothing — which is
+    # indistinguishable from a clean result. Four searches across three repos failed that way
+    # in one evening and nobody noticed, because empty output is what success looks like.
+    #
+    # So the leak is one more identity-element defect, and its victim is whoever greps next.
+    sources = []
+    for rel_path in ("test/run.py", "test/corpus.py", "test/mutate.py", "test/docs_surface.py"):
+        full = os.path.join(ROOT, rel_path)
+        if os.path.exists(full):
+            with open(full) as fh:
+                sources.append((rel_path, fh.read()))
+    ok("the check has files to look at, so a clean result below is a finding rather than an "
+       "empty list", len(sources) >= 3, [p for p, _ in sources])
+
+    offenders = _unregistered_tempdirs(sources)
+    ok("every raw `tempfile.mkdtemp` in the test tree has a matching teardown — `tmpdir()` "
+       "registers for cleanup, and the three sites that bypassed it are what leaked",
+       not offenders, offenders)
+
+    # THE CHECK MUST BE ABLE TO FAIL, on text this repo does not contain.
+    fake_bad = [("x.py", "d = tempfile.mkdtemp()\nreturn d\n")]
+    fake_ok = [("y.py", "d = tempfile.mkdtemp()\natexit.register(shutil.rmtree, d, True)\n")]
+    eq("a mkdtemp with no teardown is NAMED, so the net can actually fail",
+       len(_unregistered_tempdirs(fake_bad)), 1)
+    eq("...while one with a registration is not", _unregistered_tempdirs(fake_ok), [])
+
+
 def test_boot_token_does_not_drift():
     group("A boot token that drifts turns a live holder into 'proved dead'")
 
@@ -6055,6 +6125,38 @@ def test_guard_entrypoints_agree():
         a, b = verdicts(env_extra)
         eq("...and they agree with %s too, so the fix is in the SHARED resolver rather than "
            "copied into one path" % label, a, b)
+
+    # THE TEXT IS A DETECTOR AND IT HAS TO BE KEPT ONE. Fixing #56 cost it: the divergence was
+    # caught because the two entrypoints WORDED the fail-open differently, and afterwards they
+    # differed by default — so a future divergence would produce two different messages that
+    # look exactly like today's two different messages.
+    #
+    # The behavioural assertion above catches what it was written to compare. The text caught
+    # the case nobody had thought to compare yet. Asserting the sentence keeps the cheap
+    # detector working WITHOUT relying on somebody noticing.
+    def context_of(p):
+        out = (p.stdout or "") + (p.stderr or "")
+        try:
+            return json.loads(out.strip())["hookSpecificOutput"]["additionalContext"]
+        except Exception:                                        # noqa: BLE001
+            return out
+
+    env_bare = dict(os.environ)
+    env_bare.pop("CLAUDE_PROJECT_DIR", None)
+    shim_out = context_of(subprocess.run(["bash", shim], input=payload, cwd=outside,
+                                         capture_output=True, text=True, env=env_bare))
+    cli_out = context_of(subprocess.run([sys.executable, sr, "dispatch", "guard"],
+                                        input=payload, cwd=outside, capture_output=True,
+                                        text=True, env=env_bare))
+    ok("the shim's fail-open sentence names BOTH anchors it tried, so a reader can tell "
+       "'nowhere resolved' from 'the guard broke'",
+       "neither the working directory nor CLAUDE_PROJECT_DIR" in shim_out, shim_out[:140])
+    ok("...and the CLI says the SAME sentence, so a future divergence in either one breaks a "
+       "check rather than waiting for somebody to notice the wording",
+       "neither the working directory nor CLAUDE_PROJECT_DIR" in cli_out, cli_out[:140])
+    ok("...and neither has fallen back to the generic wrapper, which names no anchor at all",
+       "it raised" not in shim_out and "it raised" not in cli_out,
+       (shim_out[:80], cli_out[:80]))
 
     # AND THE REFUSAL SURVIVES. A fallback that made everything resolve would be worse than the
     # bug: `find_root` must still refuse when nothing can answer.
@@ -9314,6 +9416,13 @@ def test_claims_about_the_layer_below():
         "test/corpus.py":
             "cites an incident in game_loop's tooling as the reason for a control; asserts "
             "nothing about game_loop's behaviour",
+        # NAMES PRODUCERS AND CREDITS A REFINEMENT. `dispatch.observed_models` is a target here
+        # and the CLAIM about what game_loop records lives in dispatch.py, which is classified
+        # there — this file only says which function to neuter. A sweep list that also carried
+        # the claim would be two statements of one fact, free to disagree.
+        "test/mutate.py":
+            "names sweep targets and credits game_loop for a refinement; the claims about "
+            "game_loop's behaviour live in the modules it sweeps, classified there",
     }
 
     for rel_path in claim_files:
@@ -10763,7 +10872,7 @@ def test_cli():
     # afterwards. Only one remedy is executed here; the rest remain checked for existence alone,
     # which is stated rather than implied because a sweep that names its own reach is the only
     # kind that cannot be mistaken for a complete one.
-    bare = tempfile.mkdtemp(prefix="sr-remedy-")
+    bare = tmpdir("sr-remedy")     # registered for cleanup, unlike the raw mkdtemp it replaces
     try:
         sh(["git", "init", "-q"], bare)
         sh(["git", "config", "user.email", "t@t"], bare)
@@ -10880,6 +10989,7 @@ def main():
                test_role_seat_verbs,
                test_close_resolves_paths_against_the_callers_tree,
                test_campaign_scoping,
+               test_temp_dirs_are_cleaned_up,
                test_boot_token_does_not_drift,
                test_guard_entrypoints_agree,
                test_launch_binary_and_failed_launch,

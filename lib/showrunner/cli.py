@@ -1118,6 +1118,36 @@ def _stamp_or(ts):
     return stamp(ts) if ts else "?"
 
 
+# THE SENTENCE THE SHIMS ALSO SAY, so the two entrypoints can be compared BY THEIR WORDS.
+#
+# Fixing #56 cost a detector. That divergence — the shim carrying the CLAUDE_PROJECT_DIR
+# fallback while the CLI did not — was caught because the message text was the tell: the
+# pre-fix sentence in the CLI output was visible evidence the fallback had not reached it,
+# before any assertion existed to compare the two.
+#
+# Afterwards they differed by DEFAULT. The shim named both anchors it tried; the CLI wrapped
+# everything as `it raised <Refused>`. Behaviour agreed, so nothing was broken — and a future
+# divergence would have produced two different messages that looked exactly like today's two
+# different messages. A behavioural assertion catches what it was written to compare; the text
+# was what caught the case nobody had thought to compare yet.
+NO_REPO_FAIL_OPEN = ("neither the working directory nor CLAUDE_PROJECT_DIR resolves to a git "
+                     "repository, so this call was ALLOWED WITHOUT BEING CHECKED")
+
+
+def _fail_open_text(which, exc, consequence):
+    """One fail-open sentence for both CLI guards, matching the shims for the case that happens.
+
+    ANY OTHER EXCEPTION KEEPS ITS TYPE AND MESSAGE. An unexpected failure is different
+    information, and flattening it would trade one lost detector for another.
+    """
+    head = "⚠ THE %s GUARD DID NOT RUN — " % which
+    if "not inside a git repository" in str(exc):
+        return "%s%s. %s Check: `showrunner doctor`" % (head, NO_REPO_FAIL_OPEN, consequence)
+    return ("%sit raised %s: %s. This tool call was ALLOWED WITHOUT BEING CHECKED. %s "
+            "Repair it, do not work around it: `showrunner doctor`."
+            % (head, type(exc).__name__, exc, consequence))
+
+
 def cmd_worktree_register(args):
     """Put the guard's PreToolUse entry in .claude/settings.json. Idempotent.
 
@@ -1356,9 +1386,9 @@ def cmd_dispatch_guard(args):
         allow, message, detail = dispatch.dispatch_guard(cfg, session, tool=tool,
                                                          tool_input=tool_input)
     except Exception as exc:                                    # noqa: BLE001 — see docstring
-        return _allow_loudly(
-            "⚠ THE DISPATCH GUARD DID NOT RUN — it raised %s: %s. This tool call was ALLOWED "
-            "WITHOUT BEING CHECKED." % (type(exc).__name__, exc))
+        return _allow_loudly(_fail_open_text(
+            "DISPATCH", exc,
+            "A raw `claude -p` would skip the worktree, the lease, the claim and the room."))
 
     if allow:
         if message:
@@ -1408,11 +1438,9 @@ def cmd_worktree_guard(args):
         allow, message, detail = lease.guard(cfg, session, tool=tool, tool_input=tool_input,
                                              cwd=cwd)
     except Exception as exc:                                    # noqa: BLE001 — see docstring
-        return _allow_loudly(
-            "⚠ THE WORKTREE GUARD DID NOT RUN — it raised %s: %s. This tool call was ALLOWED "
-            "WITHOUT BEING CHECKED, and a worktree held by another live session is NOT "
-            "protected. Repair it, do not work around it: `showrunner doctor`."
-            % (type(exc).__name__, exc))
+        return _allow_loudly(_fail_open_text(
+            "WORKTREE", exc,
+            "A worktree held by another live session is NOT protected right now."))
 
     if allow:
         if detail.get("degraded"):

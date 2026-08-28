@@ -190,6 +190,45 @@ TARGETS = [
     ("boot identity, shared by graph and locks", "util.same_boot", "lib/showrunner/util.py",
      r"(def same_boot\(theirs, ours\):\n)",
      "    return None\ndef _neutered_same_boot(theirs, ours):\n"),
+    # ARRIVED WITH THE PARALLEL #69 WORK and was unaccounted on the merged trunk. Swept rather
+    # than excused: it derives a path against somebody else's directory layout, so a mutant is
+    # what says whether the new stalled-Crawler assertions notice it going silent — which is
+    # exactly the case its own docstring warns about, an absent file meaning "not where we
+    # looked" rather than "no session".
+    # ARRIVED WITH PARALLEL WORK ON THE TRUNK, and the accounting refused to let any of them
+    # pass unaccounted — which is the gate doing its job on code I did not write. Each is
+    # swept rather than excused, because each answers a question something acts on: where the
+    # bare form's command begins, which config layer won a key, and what a session's transcript
+    # path is. A neutered one that returns nothing must be noticed by something.
+    ("a dotted key present in a config layer", "config._dotted", "lib/showrunner/config.py",
+     r"(def _dotted\(data, key\):\n)",
+     "    return False, None\ndef _neutered_dotted(data, key):\n"),
+    ("a config file read, distinguishing absent from unparseable", "config.read_config_file",
+     "lib/showrunner/config.py",
+     r"(def read_config_file\(path\):\n)",
+     "    return None\ndef _neutered_read_config(path):\n"),
+    ("the user-level config layer", "config.user_layer", "lib/showrunner/config.py",
+     r"(def user_layer\(path=None\):\n)",
+     "    return {}\ndef _neutered_user_layer(path=None):\n"),
+    ("where the bare form's command begins", "cli._bare_command_start",
+     "lib/showrunner/cli.py",
+     r"(def _bare_command_start\(node, argv, i\):\n)",
+     "    return None\ndef _neutered_bare_start(node, argv, i):\n"),
+    ("which config layer shadowed which", "cli._config_layer_shadows",
+     "lib/showrunner/cli.py",
+     r"(def _config_layer_shadows\(cfg\):\n)",
+     "    return []\ndef _neutered_layer_shadows(cfg):\n"),
+    ("every leaf key in a config layer", "cli._flatten_leaves", "lib/showrunner/cli.py",
+     r"(def _flatten_leaves\(data, prefix=\"\"\):\n)",
+     "    return {}\ndef _neutered_flatten(data, prefix=\"\"):\n"),
+    ("the subcommand that takes a trailing command", "cli._trailing_command_node",
+     "lib/showrunner/cli.py",
+     r"(def _trailing_command_node\(parser, argv\):\n)",
+     "    return None, None\ndef _neutered_trailing(parser, argv):\n"),
+    ("the transcript path derived from another tool's layout", "util.transcript_path",
+     "lib/showrunner/util.py",
+     r"(def transcript_path\(tree, session\):\n)",
+     "    return None\ndef _neutered_transcript_path(tree, session):\n"),
     ("shared git dir identity", "util.git_common_dir", "lib/showrunner/util.py",
      r"(def git_common_dir\(path\):\n)",
      "    return None\ndef _neutered_git_common_dir(path):\n"),
