@@ -5350,6 +5350,62 @@ def _borrowed_unmarked(paths, read):
     return sorted(bad)
 
 
+def test_guard_entrypoints_agree():
+    group("The shim and the CLI are one guard — they must not disagree about the same call")
+    if not have("git") or not have("bash"):
+        skip("the entrypoint-agreement group", "git or bash is not installed")
+        return
+
+    # TWO ENTRYPOINTS TO ONE GUARD, and only one of them got the fix. The shell shims learned to
+    # resolve the repo from CLAUDE_PROJECT_DIR when cwd could not answer; the Python path did
+    # not, so `dispatch-guard.sh` EVALUATED a call while `showrunner dispatch guard` failed open
+    # beside it — with the variable set and valid.
+    #
+    # Reachable rather than theoretical: a consumer had BOTH registered, so the fixed shim's
+    # silence was drowned out by the unfixed CLI's warning and the session read as
+    # guarded-but-noisy rather than partly unguarded.
+    #
+    # AND I CLOSED THAT ISSUE AS FIXED, having probed only the shims. The clean result was about
+    # a subject I chose, not about the guard. This asserts the PROPERTY the reporter asked for —
+    # that the two cannot disagree — rather than re-testing one of them.
+    outside = tmpdir("no-repo-here")
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "echo hi"}})
+    shim = os.path.join(ROOT, ".showrunner", "hooks", "dispatch-guard.sh")
+    sr = os.path.join(ROOT, "bin", "showrunner")
+
+    def verdicts(env_extra):
+        env = dict(os.environ)
+        env.pop("CLAUDE_PROJECT_DIR", None)
+        env.update(env_extra)
+        a = subprocess.run(["bash", shim], input=payload, cwd=outside,
+                           capture_output=True, text=True, env=env)
+        b = subprocess.run([sys.executable, sr, "dispatch", "guard"], input=payload, cwd=outside,
+                           capture_output=True, text=True, env=env)
+        fo = lambda p: "DID NOT RUN" in (p.stdout + p.stderr)   # noqa: E731
+        return fo(a), fo(b)
+
+    shim_ran, cli_ran = verdicts({"CLAUDE_PROJECT_DIR": ROOT})
+    ok("with CLAUDE_PROJECT_DIR set and cwd outside any repo, the CLI evaluates the call rather "
+       "than failing open — the case a consumer hit with both forms registered", not cli_ran)
+    eq("...and the two entrypoints AGREE, which is the property, not the individual verdict",
+       shim_ran, cli_ran)
+
+    for label, env_extra in (("no CLAUDE_PROJECT_DIR", {}),
+                             ("CLAUDE_PROJECT_DIR pointing outside a repo",
+                              {"CLAUDE_PROJECT_DIR": outside})):
+        a, b = verdicts(env_extra)
+        eq("...and they agree with %s too, so the fix is in the SHARED resolver rather than "
+           "copied into one path" % label, a, b)
+
+    # AND THE REFUSAL SURVIVES. A fallback that made everything resolve would be worse than the
+    # bug: `find_root` must still refuse when nothing can answer.
+    env = dict(os.environ); env.pop("CLAUDE_PROJECT_DIR", None)
+    p_st = subprocess.run([sys.executable, sr, "status"], cwd=outside,
+                          capture_output=True, text=True, env=env)
+    eq("a verb outside any repo, with no harness anchor, still REFUSES — the fallback did not "
+       "turn 'cannot resolve' into a guess", p_st.returncode, 2)
+
+
 def test_launch_binary_and_failed_launch():
     group("`spawn --launch`: the binary is configurable, and a failed launch does not strand a "
           "leaf on a dead pid")
@@ -9794,6 +9850,7 @@ def main():
                test_role_seat_verbs,
                test_close_resolves_paths_against_the_callers_tree,
                test_campaign_scoping,
+               test_guard_entrypoints_agree,
                test_launch_binary_and_failed_launch,
                test_mutation_anchor_refusal,
                test_borrowed_claims_are_marked,

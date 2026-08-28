@@ -310,13 +310,48 @@ def main_checkout(start=None):
     main checkout's `.git`. Config, locks and the campaign record must resolve to ONE
     place for every Crawler (INV8), so they key off this rather than off the cwd.
     """
-    rc, out, _ = git(["rev-parse", "--git-common-dir"], cwd=start or os.getcwd())
-    if rc != 0:
-        return repo_root(start)
-    common = out.strip()
-    if not os.path.isabs(common):
-        common = os.path.abspath(os.path.join(start or os.getcwd(), common))
-    return os.path.dirname(common.rstrip("/")) or "/"
+    for anchor in _root_anchors(start):
+        rc, out, _ = git(["rev-parse", "--git-common-dir"], cwd=anchor)
+        if rc != 0:
+            found = repo_root(anchor)
+            if found:
+                return found
+            continue
+        common = out.strip()
+        if not os.path.isabs(common):
+            # ANCHORED ON WHAT PRODUCED IT, never on $PWD. A relative --git-common-dir is
+            # relative to the directory git was RUN in; joining it against the process cwd
+            # would resolve the fallback answer against the very location that could not
+            # answer. Flagged by the reporter before it could bite.
+            common = os.path.abspath(os.path.join(anchor, common))
+        return os.path.dirname(common.rstrip("/")) or "/"
+    return None
+
+
+def _root_anchors(start):
+    """Where to look for the repo, in order: the caller's choice, then the HARNESS.
+
+    CWD IS NOT A PROXY FOR WHAT A GUARD PROTECTS. Resolving only from cwd made showrunner's
+    Python entrypoints strongest exactly where they are least needed — already inside the repo
+    — and absent exactly where a stray absolute path is most likely, which is a scratch
+    directory. Working from a scratchpad is the ordinary shape of orchestration.
+
+    The shell shims gained this fallback and the PYTHON PATH DID NOT, so
+    `.showrunner/hooks/dispatch-guard.sh` evaluated the call while
+    `showrunner dispatch guard` — a separately-registerable entrypoint to the SAME guard —
+    failed open beside it, with `CLAUDE_PROJECT_DIR` set and valid. A consumer had both
+    registered: the fixed shim's silence was drowned out by the unfixed CLI's warning, so the
+    session read as guarded-but-noisy rather than partly unguarded.
+
+    Fixed in the ONE resolver every entrypoint shares, so the two cannot disagree again — the
+    repair the reporter asked for, rather than a second copy of the fallback.
+    """
+    seen, out = set(), []
+    for cand in (start, os.getcwd(), os.environ.get("CLAUDE_PROJECT_DIR")):
+        if cand and cand not in seen and os.path.isdir(cand):
+            seen.add(cand)
+            out.append(cand)
+    return out
 
 
 def slug(text, maxlen=48):
