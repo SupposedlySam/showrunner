@@ -34,7 +34,7 @@ import subprocess
 import uuid
 
 from . import campaign, locks
-from .util import Refused, boot_token, die, eprint, now, pid_alive, rel, short_session
+from .util import Refused, boot_token, die, eprint, now, pid_alive, rel, short_session, same_boot
 
 # MEASURED, AND THE OPPOSITE OF WHAT I FIRST REASONED. This was `acceptEdits`, chosen because
 # bypassPermissions "is a wider door than the problem needs". The prediction was wrong: under
@@ -472,7 +472,20 @@ def lingering(entry, grace=LINGER_GRACE_SECONDS):
     # usually yields a false NEGATIVE — absent, so you conclude nothing happened. Here it
     # yields a false POSITIVE, and a false positive that is wired to an action is the shape
     # worth being frightened of.
-    if entry.get("boot") and entry["boot"] != boot_token():
+    # THE SHARED COMPARISON, not a third copy of the rule. Named in #68's blast radius, and I
+    # fixed the other sites while closing that issue — leaving the drifting-seconds defect live
+    # here. A raw `!=` reads a one-second NTP adjustment as a different boot, and would read
+    # every pre-upgrade record that way the moment the token format changed.
+    # `is not True`, NOT `is False`, and the difference is the whole posture of this check.
+    # Its siblings REPORT, so "cannot tell" falls through to a pid test there. This one ACTS —
+    # it feeds a SIGTERM — so an unconfirmed boot must not license one. Only a POSITIVE match
+    # proceeds; None and False both stop.
+    #
+    # Caught by a fixture whose token is deliberately malformed (`a-previous-boot`). Under the
+    # old string `!=` any difference counted; under a scheme-aware comparison an unparseable
+    # token is cannot-tell, and routing that to the acting branch would have turned the one
+    # check here that acts into a false positive wired to a signal.
+    if entry.get("boot") and same_boot(entry["boot"], boot_token()) is not True:
         return None
     pid = entry.get("pid")
     if not pid or not pid_alive(pid):

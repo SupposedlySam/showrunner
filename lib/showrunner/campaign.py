@@ -41,7 +41,7 @@ import os
 import time
 
 from .util import (atomic_write_json, boot_token, die, eprint, file_lock, git, now,
-                   pid_alive, rel, run, short_session, try_file_lock)
+                   pid_alive, rel, run, same_boot, short_session, try_file_lock)
 from . import events, gates, locks, worktree
 
 RECORD = "campaign.json"
@@ -204,7 +204,12 @@ def lingering_crawlers(cfg):
 
 def live(entry):
     """A Crawler is live only if its PID responds AND it was recorded this boot."""
-    if entry.get("boot") and entry["boot"] != boot_token():
+    # THE SHARED COMPARISON, not a third copy of the rule. This site was named in #68's blast
+    # radius and I fixed the other two while closing it — leaving the drifting-seconds defect
+    # live in one of the three places the reporter listed. A raw `!=` here reads a one-second
+    # NTP adjustment as proof of death, and would have read every pre-upgrade record as a
+    # different boot the moment the token format changed.
+    if entry.get("boot") and same_boot(entry["boot"], boot_token()) is False:
         return False
     return pid_alive(entry.get("pid"))
 
