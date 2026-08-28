@@ -470,6 +470,34 @@ def reap(cfg, graph, base="HEAD", apply=False):
         if apply:
             graph.release(leaf["id"], "reaped: %s" % why)
 
+    # 1b. Claims whose owner is ALIVE and has stopped producing (#69). SURFACED, NEVER
+    #     RELEASED -- the one verdict here that reap deliberately walks past, even with
+    #     --apply. A stalled Crawler still owns its process, and that process still holds the
+    #     only copy of whatever it has not committed: in the filing incident the worktree held
+    #     four uncommitted files and an already-green 6473-test suite, and releasing the claim
+    #     would have destroyed both. The correct recovery is to unstick the agent and leave the
+    #     claim where it is, which is what this line tells the reader to do.
+    #
+    #     Note this is the OPPOSITE failure to the one above. A stale claim is reported because
+    #     its owner cannot be running; a stalled claim is reported because its owner IS running
+    #     and that is exactly what makes it invisible. Neither check can see the other's case.
+    try:
+        stalled = graph.stalled_claims()
+    except Exception as exc:                                            # noqa: BLE001
+        stalled = []
+        warnings.append(str(exc))
+    for leaf, why in stalled:
+        actions.append({
+            "kind": "stalled",
+            "leaf": leaf["id"],
+            "actor": leaf.get("actor"),
+            "why": why,
+            "action": "SURFACED, not released — and --apply will not touch it either. Its "
+                      "process is alive and may hold uncommitted work, so prompt %s to see "
+                      "whether it is wedged; reclaim only after its tree is safe."
+                      % (leaf.get("actor") or "its owner"),
+        })
+
     # 2. Locks whose holder is dead. The lock already reclaims lazily on the next
     #    acquire; reaping makes the abandonment *visible* instead of silently absorbed.
     # CONFIGURED RESOURCES **AND** WORKTREE LEASES. This iterated `ls.names()`, which is the

@@ -224,6 +224,94 @@ def pid_alive(pid):
         return True
 
 
+# ------------------------------------------------------- the session transcript
+# THE ONE SIGNAL THAT SEPARATES "WORKING" FROM "WEDGED" (#69). Every other liveness fact
+# showrunner holds is about a PROCESS, and a process parked at a prompt is byte-identical to
+# one mid-computation: `ps` reports `Ss` for both, and `%CPU` is a lifetime average, so a
+# session that did five minutes of work and then stalled for fifty still reports a healthy
+# number. Measured in the incident that filed this: 0.13s of CPU accrued over 56 minutes, and
+# every showrunner-visible signal said the Crawler was working.
+#
+# `heartbeat_ts` is not the missing signal either, and is worth naming so nobody reaches for
+# it: `Graph.heartbeat()` has no callers and nothing reads the column, so the field records the
+# last STATE CHANGE, not the last sign of life. Starting to call it would still report nothing.
+#
+# The transcript is the only artefact that moves when the AGENT moves, and it needs no new
+# plumbing: a claim already carries `claim_tree` and `claim_session`, and the host's path is
+# derivable from exactly those two.
+
+
+def projects_root():
+    """Where the host keeps session transcripts.
+
+    `CLAUDE_CONFIG_DIR` wins because the host honours it; `~/.claude` is the default. Read at
+    CALL time rather than import time so a test can point it somewhere and so a session that
+    exports it mid-run is not answered from a stale cache.
+    """
+    base = (os.environ.get("CLAUDE_CONFIG_DIR") or "").strip()
+    return os.path.join(base or os.path.join(os.path.expanduser("~"), ".claude"), "projects")
+
+
+# EVERY non-alphanumeric byte, not just the separator. The issue says "separators replaced by
+# dashes" and a premise check on this repo added "the dot is replaced too" -- both are true and
+# both are incomplete. Measured against this machine's own projects directory: the checkout
+# `.../programs/llm_chat` resolves to `-Users-...-programs-llm-chat`, so the UNDERSCORE is
+# mangled as well, and no directory there contains a byte outside [A-Za-z0-9-]. A resolver that
+# replaced only `/` and `.` would miss every project with an underscore in its path and report
+# "no transcript" for a session that has one.
+_TRANSCRIPT_SLUG = re.compile(r"[^A-Za-z0-9]")
+
+
+def transcript_path(tree, session):
+    """The transcript file a session working in `tree` should be writing, or None.
+
+    A DERIVATION AGAINST SOMEBODY ELSE'S LAYOUT, and every caller is told so rather than left
+    to assume. showrunner does not own this path and is not told it; the rule is inferred from
+    the directory names the host produces. So an absent file means "not where we looked", which
+    is a fact about the derivation as much as about the session -- see `transcript_activity`,
+    which refuses to collapse the two.
+
+    The mangling is also LOSSY: `llm_chat`, `llm-chat` and `llm.chat` all slug to the same
+    directory. The session id in the filename is what keeps the answer unambiguous, so a
+    collision costs nothing here -- but a caller that ever derives a DIRECTORY alone and reads
+    whatever sessions are in it would be reading a neighbour's.
+    """
+    if not tree or not session:
+        return None
+    tree = os.path.abspath(os.path.expanduser(str(tree)))
+    return os.path.join(projects_root(), _TRANSCRIPT_SLUG.sub("-", tree), "%s.jsonl" % session)
+
+
+def transcript_activity(tree, session):
+    """When this session last wrote anything: {"path", "idle", "mtime", "why"}.
+
+    `idle` is seconds since the transcript last changed, and it is **None whenever the file
+    could not be read** -- with `why` naming which failure it was. A FAILED READ IS NOT A FACT
+    ABOUT THE WORLD: "the session has been silent for an hour" and "the host stores transcripts
+    somewhere this derivation does not reach" are indistinguishable to `stat`, and only the
+    first says anything about the agent. Folding a missing file into a large idle time would
+    manufacture a stalled verdict for every consumer whose host does not match the rule above
+    -- a false positive on healthy runs, which is how a report stops being read.
+
+    Nothing here decides anything. It reports a measurement; the threshold lives with the
+    caller that has to choose when to speak.
+    """
+    path = transcript_path(tree, session)
+    if not path:
+        missing = "worktree" if not tree else "session id"
+        return {"path": None, "idle": None, "mtime": None,
+                "why": "the claim carries no %s, so no transcript can be derived for it"
+                       % missing}
+    try:
+        mtime = int(os.path.getmtime(path))
+    except OSError as exc:
+        return {"path": path, "idle": None, "mtime": None,
+                "why": "could not read %s (%s) -- NOT evidence that the session is silent, "
+                       "only that nothing was readable where showrunner looked"
+                       % (path, exc.__class__.__name__)}
+    return {"path": path, "idle": max(0, now() - mtime), "mtime": mtime, "why": ""}
+
+
 SESSION_PROCESS = "claude"
 # The one basis that proves a resolved session process. Named because a caller
 # checking "did this actually resolve?" must not spell it a second time.

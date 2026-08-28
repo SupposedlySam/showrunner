@@ -663,6 +663,24 @@ def cmd_status(args):
         stale = []
     if stale:
         print("  %s%d stale claim(s)%s — run `showrunner reap`" % (RED, len(stale), OFF))
+    # #69 — THE THIRD VERDICT, next to the other two and pointedly NOT offering reap. Every
+    # signal status had was about a process, and a session parked at a prompt is indis-
+    # tinguishable from one mid-computation by any of them: one Crawler produced nothing for
+    # 55 minutes while `ps`, `%CPU` and `heartbeat_ts` all read healthy, and a human caught it
+    # by asking why goldens were taking 74 minutes. The remedy printed here is to PROMPT the
+    # session, never to reclaim it — a stalled Crawler's process is the only thing holding its
+    # uncommitted work, so the reap this line does not suggest is the destructive one.
+    try:
+        stalled = g.stalled_claims()
+    except Refused:
+        stalled = []
+    for leaf, why in stalled:
+        print("  %sstalled%s %-16s %-9s %s" % (RED, OFF, leaf["id"],
+                                               leaf.get("actor") or "?", why))
+    if stalled:
+        eprint("  A stalled Crawler is ALIVE, so do NOT reap it — its process may hold the "
+               "only copy of uncommitted work. Prompt the session; reclaim only if its tree "
+               "turns out to be safe.")
     # #29 — SURFACED WHERE SOMEBODY IS ALREADY LOOKING. The detection existed and was reachable
     # only through `reap`, a verb somebody has to decide to run — and a lingering process is
     # invisible by construction, so nothing prompts that decision. Two of them polled for four

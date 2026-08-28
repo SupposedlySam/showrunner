@@ -28,7 +28,7 @@ install.
 
 ```
 ./.showrunner/bin/showrunner doctor     # refuses a config that would degrade silently
-./.showrunner/bin/showrunner status     # ready / claimed / parked / locks / stale claims
+./.showrunner/bin/showrunner status     # ready / claimed / parked / locks / stale + STALLED claims
 ```
 
 `doctor` exits non-zero on anything that would degrade **silently**: no config at all (every check
@@ -86,6 +86,9 @@ showrunner reap                      # dry run; --apply to reclaim dead Crawlers
                                      # close rooms they left open, and SIGTERM processes that
                                      # outlived their leaf. `close` already closed the room and
                                      # marked the Crawler finished; this catches what died badly.
+                                     # It also SURFACES stalled claims and never touches them:
+                                     # a live process whose transcript has stopped moving. Not
+                                     # even --apply reclaims one — see below.
 showrunner reconcile                 # on resume: merged / abandoned / live / BLOCKED — ask FIRST
 showrunner amend <leaf> --premise .. # correct a CLOSED leaf's premise by SUPERSEDING it: the
                                      # original verdict stays readable, because a record that can
@@ -251,6 +254,22 @@ git common dir, the lock root, the graph and the campaign record.
 nothing here can prompt it — `reap` correctly proposes nothing and every other signal reads
 healthy. Send it something in its room. If chat is disabled you have no way to reach it, which is
 why the room is not optional under `--launch`.
+
+**A STALLED Crawler is the same family and a different detector (#69).** It was not refused by
+anything — it simply stopped producing, and a live pid cannot tell you so: `ps` reports `Ss` for a
+session parked at a prompt and one mid-computation alike, and `%CPU` is a lifetime average, so a
+Crawler that worked five minutes and stalled fifty still reads healthy. `heartbeat_ts` does not
+help either; it is written at claim time and nothing reads it. The signal that does work needs no
+new plumbing: a claim already carries `claim_tree` and `claim_session`, and the session transcript
+derived from those two has a frozen mtime beside a live pid.
+
+`status` and `reap` now print it as a third verdict — **live / stalled / abandoned** — and neither
+one acts on it, including `reap --apply`. That restraint is the point rather than an unfinished
+edge: the incident that filed this held four uncommitted files and an already-green suite in the
+stalled worktree, so reclaiming the leaf would have destroyed both. The remedy is to prompt the
+session; reclaim only once its tree is known to be safe. A claim whose transcript cannot be read
+is reported as unmeasurable and never as stalled — showrunner does not own that path, so a failed
+read is a fact about where it looked, not about what the agent did.
 
 **Do not fan out past what `plan` allows.** Two leaves can be mutually unblocked and still be the same
 edit: the graph models dependencies, not files. A false collision costs one wave of latency; a missed

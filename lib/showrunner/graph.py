@@ -27,7 +27,25 @@ import sqlite3
 import time
 
 from .util import (Refused, boot_token, die, eprint, now, pid_alive, pid_readable, run,
-                   same_boot, slug)
+                   same_boot, slug, transcript_activity)
+
+# How long a LIVE claim's transcript must sit unchanged before `stalled_claims` says so.
+#
+# WHY AN INVENTED NUMBER IS DEFENSIBLE HERE, held to the same rule as `dispatch.LINGER_GRACE_
+# SECONDS`: a number that yields a FACT is a fabrication, one that budgets a decision toward
+# caution is a budget. This one authorises no action at all -- `stalled` is reported and never
+# reclaimed -- so all it budgets is ATTENTION, and the direction of error is stated: it errs
+# toward SILENCE.
+#
+# The floor is set by the longest legitimate quiet stretch, because the transcript gains a line
+# when a tool call RETURNS, not while it runs. showrunner's own `verify` re-runs the suite once
+# per stale pattern and is documented to its Crawlers as taking "minutes, not seconds", so a
+# healthy session genuinely writes nothing for several minutes at a time. Fifteen minutes clears
+# that with room; the incident that filed #69 sat frozen for fifty-five.
+#
+# And the raw measurement rides along with every verdict, so a reader who thinks this number is
+# wrong for their run can discount it without having to trust it.
+STALL_IDLE_SECONDS = 900
 
 OPEN = "open"
 IN_PROGRESS = "in_progress"
@@ -207,6 +225,63 @@ class SqliteGraph:
                 out.append((leaf, "owning pid %s is not alive" % pid))
         for leaf, why in unprovable:
             eprint("note: %s holds a claim that cannot be adjudicated — %s" % (leaf["id"], why))
+        return out
+
+    def stalled_claims(self, idle_seconds=STALL_IDLE_SECONDS):
+        """(leaf, why) for LIVE claims whose session has stopped producing (#69).
+
+        THE THIRD VERDICT, and deliberately not a kind of stale. `stale_claims` answers "can
+        this claim's owner still be running", and a stalled Crawler answers YES to that: its
+        process is alive, its boot matches, and there is nothing about it a pid check can see.
+        The two together partition a claim three ways --
+
+            live       the process is alive and its transcript is moving
+            stalled    the process is alive and its transcript is FROZEN   <- this method
+            abandoned  the process cannot be running                       <- stale_claims
+
+        -- which is the point of the issue: #68 is the false-STALE direction (a live claim read
+        as dead because `boot_token` drifted) and this is the false-LIVE direction. One root
+        cause, agent state inferred from process state, failing in opposite directions. So this
+        is ADDITIVE and `stale_claims` above is untouched; a fix here that widened that method
+        would re-break the side somebody has already fixed twice.
+
+        NOTHING IN THIS REPO ACTS ON THE RESULT, and that is a design constraint rather than an
+        unfinished edge. Reaping a stalled session in the filing incident would have destroyed
+        four files of uncommitted work and an already-green suite; the correct recovery was to
+        unstick the agent and leave the claim alone, after which it committed and closed
+        normally. A stalled Crawler is the one state where the process still holds the only
+        copy of the work, so `reap --apply` must surface it and walk past it.
+
+        Claims whose transcript cannot be READ are reported on stderr and excluded, never
+        counted as stalled: a derived path that does not resolve says where showrunner looked,
+        not what the agent did.
+        """
+        token = boot_token()
+        out, unreadable = [], []
+        for leaf in self.list(status=IN_PROGRESS):
+            if leaf.get("parked"):
+                continue
+            # A claim `stale_claims` would report is ABANDONED, not stalled, and must not be
+            # counted twice -- a leaf appearing under both verdicts would offer a reader a
+            # release and a do-not-touch for the same claim in one report.
+            claim_boot = leaf.get("claim_boot")
+            if claim_boot and same_boot(claim_boot, token) is False:
+                continue
+            pid = leaf.get("claim_pid")
+            if not pid_readable(pid) or not pid_alive(pid):
+                continue
+            act = transcript_activity(leaf.get("claim_tree"), leaf.get("claim_session"))
+            if act["idle"] is None:
+                unreadable.append((leaf, act["why"]))
+                continue
+            if act["idle"] < idle_seconds:
+                continue
+            out.append((leaf, "process %s is alive, but its transcript has not changed for "
+                              "%dm (threshold %dm) — %s"
+                              % (pid, act["idle"] // 60, idle_seconds // 60, act["path"])))
+        for leaf, why in unreadable:
+            eprint("note: %s holds a live claim whose activity cannot be measured — %s"
+                   % (leaf["id"], why))
         return out
 
     # -- writes ------------------------------------------------------------
@@ -643,6 +718,18 @@ class BrGraph:
             "spawn through `showrunner spawn`, which records a live PID in the campaign "
             "record — `showrunner status` shows it and `showrunner reap` acts on it, "
             "neither of which goes through the graph backend.",
+            code=3)
+
+    def stalled_claims(self, idle_seconds=STALL_IDLE_SECONDS):
+        # Same posture as stale_claims above, for a different missing fact. Detecting a stall
+        # needs `claim_tree` and `claim_session` to derive the transcript from, and this
+        # adapter's claim() records neither -- br has nowhere to put them. Returning [] would
+        # read as "every live claim is producing", which is the exact false-LIVE answer #69
+        # exists to end, arriving from the one backend that cannot know.
+        raise Refused(
+            "the br backend records no worktree or session id on a claim, so a stalled "
+            "session cannot be detected here (issue #69). Reap or run `status` against the "
+            "vendored backend, which stores both at claim time.",
             code=3)
 
     def claim(self, leaf_id, actor, pid=None, tree=None, session=None):

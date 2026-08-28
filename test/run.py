@@ -67,6 +67,11 @@ sys.path.insert(0, os.path.join(ROOT, "lib"))
 # module covers the subprocess tests too, since they inherit it.
 _CFG_HOME = tempfile.mkdtemp(prefix="sr-suite-config-")
 os.environ["XDG_CONFIG_HOME"] = _CFG_HOME
+# SAME RULE, SECOND ROOT (#69). `util.transcript_path` falls back to the real `~/.claude` when
+# CLAUDE_CONFIG_DIR is unset, and `status` now derives a transcript path for every live claim --
+# so an unset var here has the suite stat the DEVELOPER's own sessions. An env var rather than a
+# patch, again, so the subprocess CLI assertions inherit it.
+os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(_CFG_HOME, "claude-home")
 import atexit
 atexit.register(shutil.rmtree, _CFG_HOME, True)
 
@@ -920,6 +925,134 @@ def test_lifecycle():
     ok("a PARKED claim is not stale (a Crawler at a usage limit is not dead)",
        "w2" not in stale_ids, stale_ids)
     ok("a live claim is never reaped", "w3" not in stale_ids, stale_ids)
+
+
+# ============================================ CORE: stalled sessions (#69)
+def _fake_transcript(projects, tree, session, idle):
+    """Plant a transcript where `util.transcript_path` will derive it, aged `idle` seconds."""
+    path = util.transcript_path(tree, session)
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    with open(path, "w") as fh:
+        fh.write('{"type":"assistant"}\n')
+    stamped = time.time() - idle
+    os.utime(path, (stamped, stamped))
+    return path
+
+
+def test_stalled_sessions():
+    group("A live process is not a working agent (issue #69)")
+    cfg = make_repo()
+    g = new_graph(cfg)
+
+    # THE DERIVATION, PINNED. Every assertion below rests on showrunner resolving a claim to
+    # the same file the host writes, and that rule is inferred from somebody else's layout
+    # rather than published. The three cases here are the three that have actually been got
+    # wrong: the issue's own text says "separators replaced by dashes" (misses the dot), a
+    # premise check on this repo added the dot (misses the underscore), and this machine's
+    # projects directory contains `-Users-...-programs-llm-chat` for a checkout named
+    # `llm_chat`. A resolver that stops at `/` and `.` reports "no transcript" for every
+    # project with an underscore in its path -- which reads as a silent session.
+    home = tempfile.mkdtemp(prefix="sr-projects-")
+    _prev_cfg_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    os.environ["CLAUDE_CONFIG_DIR"] = home
+    try:
+        derived = util.transcript_path("/tmp/a.b/llm_chat", "S1")
+        ok("the transcript path mangles the separator, the dot AND the underscore",
+           derived == os.path.join(home, "projects", "-tmp-a-b-llm-chat", "S1.jsonl"), derived)
+        ok("CLAUDE_CONFIG_DIR is honoured, so this suite never reads the developer's own "
+           "transcripts", derived.startswith(home), derived)
+
+        # A FAILED READ IS NOT A FACT ABOUT THE WORLD. `stat` cannot tell "this agent has been
+        # silent for an hour" from "the host keeps transcripts somewhere this rule does not
+        # reach", and only the first says anything about the agent. If an absent file collapsed
+        # into a large idle time, every consumer whose host does not match the derivation would
+        # see all its healthy Crawlers reported stalled at once.
+        absent = util.transcript_activity("/tmp/nowhere-at-all", "S-missing")
+        ok("an unreadable transcript reports idle=None, never a large idle time",
+           absent["idle"] is None, absent)
+        ok("...and says it could not look, rather than what the session did",
+           "NOT evidence" in absent["why"], absent["why"])
+        ok("a claim carrying no session id is an absence too, not silence",
+           util.transcript_activity("/tmp/x", None)["idle"] is None)
+
+        tree = os.path.join(cfg.root, "tree-a")
+        g.add("a session that stops producing", leaf_id="s1")
+        g.claim("s1", "wedged-crawler", pid=os.getpid(), tree=tree, session="SESS-STALLED")
+        _fake_transcript(home, tree, "SESS-STALLED", idle=3600)
+
+        g.add("a session that is working", leaf_id="s2")
+        g.claim("s2", "busy-crawler", pid=os.getpid(), tree=tree, session="SESS-LIVE")
+        _fake_transcript(home, tree, "SESS-LIVE", idle=5)
+
+        stalled = g.stalled_claims()
+        ids = [l["id"] for l, _ in stalled]
+        ok("a live pid whose transcript is FROZEN is reported stalled — the signal every "
+           "process-shaped check is blind to", "s1" in ids, ids)
+        ok("a live pid whose transcript is MOVING is not", "s2" not in ids, ids)
+        ok("the report carries the measurement, not just the verdict, so a reader who "
+           "distrusts the threshold can discount it",
+           any("60m" in why and "threshold 15m" in why for _, why in stalled), stalled)
+
+        # The threshold is a parameter, and the control that proves the detector is not simply
+        # answering "everything is stalled": at a 2-hour bar neither of these qualifies.
+        ok("the idle threshold is honoured rather than hardcoded into the verdict",
+           g.stalled_claims(idle_seconds=7200) == [], g.stalled_claims(idle_seconds=7200))
+
+        # A LIVE CLAIM WITH NO TRANSCRIPT IS NOT STALLED. Same rule as the unreadable pid one
+        # layer up: showrunner reports where it looked, and declines to convert that into a
+        # statement about the agent.
+        g.add("a live session showrunner cannot measure", leaf_id="s3")
+        g.claim("s3", "unmeasurable", pid=os.getpid(), tree=tree, session="SESS-NO-FILE")
+        ok("a live claim whose transcript cannot be READ is not called stalled",
+           "s3" not in [l["id"] for l, _ in g.stalled_claims()], g.stalled_claims())
+
+        # THE TWO VERDICTS MUST NOT OVERLAP (#68 is the other direction of this same root
+        # cause). A claim offered to the reader as both "release it" and "do not touch it"
+        # is worse than either verdict alone.
+        dead = DeadPid()
+        g.add("a genuinely abandoned session", leaf_id="s4")
+        g.claim("s4", "ghost", pid=dead.pid, tree=tree, session="SESS-DEAD")
+        _fake_transcript(home, tree, "SESS-DEAD", idle=3600)
+        ok("a claim whose process is DEAD is stale, not stalled — abandoned and wedged are "
+           "different states and only one of them licenses a release",
+           "s4" in [l["id"] for l, _ in g.stale_claims()]
+           and "s4" not in [l["id"] for l, _ in g.stalled_claims()])
+        ok("...and the stalled claim is NOT reported stale, so `reap` is never offered it",
+           "s1" not in [l["id"] for l, _ in g.stale_claims()], g.stale_claims())
+
+        g.park("s1", "checking park still wins")
+        ok("a PARKED claim is not stalled either — an accounted-for pause is not a wedge",
+           "s1" not in [l["id"] for l, _ in g.stalled_claims()])
+        g.unpark("s1")
+        _fake_transcript(home, tree, "SESS-STALLED", idle=3600)  # unpark stamps nothing here
+        ok("...and unparking brings it back, so the exclusion above is not vacuous",
+           "s1" in [l["id"] for l, _ in g.stalled_claims()])
+
+        # THE WHOLE POINT OF THE ISSUE. Reaping the stalled session in the filing incident
+        # would have destroyed four uncommitted files and an already-green suite. `--apply` is
+        # allowed to see it and must refuse to act on it.
+        actions, _w = campaign.reap(cfg, g, apply=False)
+        mine = [a for a in actions if a.get("leaf") == "s1"]
+        ok("reap SURFACES the stalled claim, which nothing did before — it was invisible to "
+           "status and reap alike", mine and mine[0]["kind"] == "stalled", actions)
+        ok("...and the printed remedy is to prompt the session, never to reclaim it",
+           mine and "not released" in mine[0]["action"], mine)
+
+        campaign.reap(cfg, g, apply=True)
+        ok("reap --APPLY leaves the stalled claim alone — its process is alive and may hold "
+           "the only copy of uncommitted work",
+           g.show("s1")["status"] == G.IN_PROGRESS
+           and g.show("s1")["actor"] == "wedged-crawler", g.show("s1"))
+        ok("the control: --apply DID release the genuinely abandoned one, so the guard above "
+           "is not just a reaper that stopped working",
+           g.show("s4")["status"] == G.OPEN, g.show("s4"))
+    finally:
+        if _prev_cfg_dir is None:
+            os.environ.pop("CLAUDE_CONFIG_DIR", None)
+        else:
+            os.environ["CLAUDE_CONFIG_DIR"] = _prev_cfg_dir
+        shutil.rmtree(home, ignore_errors=True)
 
 
 # =========================================================== CORE: gates
@@ -8046,16 +8179,27 @@ def test_publishable():
         for i, line in enumerate(body.splitlines(), 1):
             if "pid_alive(" in line and not line.strip().startswith(("#", "from", "import")):
                 readers.append("%s:%d" % (name, i))
-    # Seven: campaign.live, dispatch.lingering, graph.stale_claims, graph.claim, locks._live,
-    # and TWO in reap's terminate block — added when SIGTERM stopped claiming a retirement it
-    # had not witnessed. Those two are safe without their own boot check for a reason worth
-    # writing down rather than assuming: they run only after `lingering()` returned non-None,
-    # and `lingering` refuses across a boot. The pid is known to be this boot before either
-    # call is reached, so the audit is inherited THROUGH A GUARD rather than skipped.
+    # Eight: campaign.live, dispatch.lingering, graph.stale_claims, graph.stalled_claims,
+    # graph.claim, locks._live, and TWO in reap's terminate block — added when SIGTERM stopped
+    # claiming a retirement it had not witnessed. Those two are safe without their own boot
+    # check for a reason worth writing down rather than assuming: they run only after
+    # `lingering()` returned non-None, and `lingering` refuses across a boot. The pid is known
+    # to be this boot before either call is reached, so the audit is inherited THROUGH A GUARD
+    # rather than skipped.
+    #
+    # `graph.stalled_claims` (#69) is the eighth, and this is its justification rather than an
+    # inherited pass. It scopes by boot FIRST and in the opposite direction to its siblings: a
+    # claim proved to be from a different boot is SKIPPED here, because that claim is abandoned
+    # and belongs to `stale_claims` — reporting it under both verdicts would hand a reader a
+    # release and a do-not-touch for the same leaf. A boot that cannot be told falls through to
+    # the pid check, which is the same posture `stale_claims` takes and is safe for the same
+    # reason it is unsafe in `lingering`: this reader REPORTS and nothing acts on the result,
+    # so the worst case is a line of output about a claim nobody may touch anyway.
+    #
     # Every one of them must decide what a pid means ACROSS A BOOT before it trusts the answer.
     # If this number changes, the new reader is the thing to look at — not this assertion.
     eq("pid_alive has exactly the readers that were audited for boot scoping; a new one must "
-       "justify itself rather than inherit the audit", len(readers), 7)
+       "justify itself rather than inherit the audit", len(readers), 8)
 
     # INTERNAL TOOLING MUST NOT REACH A PUBLIC CLONE. The package manager used to dogfood
     # these repos is ours; a stranger has never heard of it, cannot install it, and should
@@ -10337,7 +10481,7 @@ def test_optional():
 # ==========================================================================
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_config_refusals, test_user_config_layer, test_every_rule_can_fail, test_graph, test_lifecycle, test_close_gate,
+    for fn in (test_locks, test_config_refusals, test_user_config_layer, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,
