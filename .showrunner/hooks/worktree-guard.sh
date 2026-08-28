@@ -31,7 +31,20 @@
 # Keep this file trivially correct. All real logic lives in `showrunner worktree guard`.
 set -u
 
+# THE SAME LEDGER THE CLI WRITES, so a fail-open from either entrypoint is countable. The
+# notice reaches an agent mid-task and is reliably skimmed; a COUNT that `doctor` reports is
+# read by somebody who has stopped to look. Best-effort — a ledger that cannot be written must
+# never turn a fail-open into a hard failure, which would block the write that repairs it.
+_record_fail_open() {
+  _r="${CLAUDE_PROJECT_DIR:-}"
+  [ -n "$_r" ] || _r="$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)" || return 0
+  [ -d "$_r/.showrunner" ] || return 0
+  printf '{"ts":%s,"notice":"%s guard failed open"}\n' "$(date +%s)" "worktree" \
+    >> "$_r/.showrunner/fail-open.jsonl" 2>/dev/null || true
+}
+
 notice() {
+  _record_fail_open
   # additionalContext is what actually reaches the agent on an allow. Fixed strings only —
   # this is the piece that must never itself be the thing that breaks.
   printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"%s"}}\n' "$1"

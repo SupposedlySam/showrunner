@@ -183,6 +183,15 @@ quiet, `reap` correctly proposes nothing. Chat is load-bearing for **correctness
 `--launch`, not a convenience. Without it, prefer `spawn` without `--launch` and drive the
 Crawlers yourself.
 
+**A guard that fails open is COUNTED, not just announced.** When a guard cannot do its check —
+no repo, unreadable config — it allows the call and prints a notice saying it did not check. That
+was already true, and it was quiet anyway: the notice arrives beside a *successful* tool result,
+which is the channel an agent mid-task skims. Rewording it louder would treat a delivery problem
+as a copywriting problem. Every fail-open now appends to `.showrunner/fail-open.jsonl`, and
+`doctor` reports how many calls went unchecked — a count is the fact a per-call banner cannot
+carry, and `doctor` is read by somebody who has stopped to look. Both entrypoints record through
+the same funnel, and an unparseable ledger reports UNKNOWN rather than none.
+
 **The launch binary is configurable, and `doctor` resolves it.** `dispatch.claude_bin` defaults
 to `claude` on PATH. On a machine whose only `claude` is bundled inside an editor extension —
 not on PATH, no standalone install — every `spawn --launch` failed and the whole parallel lane

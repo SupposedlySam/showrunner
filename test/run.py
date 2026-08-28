@@ -7002,6 +7002,132 @@ def test_corpus_tool():
        "AND the redirected one written", good, [])
 
 
+
+def test_fail_open_is_counted_not_just_announced():
+    group("A fail-open notice arrives beside a SUCCESSFUL result — so something downstream "
+          "must be able to ASK how many there were")
+    if not have("git"):
+        skip("the fail-open ledger group", "git is not installed")
+        return
+    cfg = make_repo()
+    ledger = os.path.join(cfg.root, ".showrunner", "fail-open.jsonl")
+
+    def doctor():
+        p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                           cwd=cfg.root, capture_output=True, text=True)
+        return p.stdout
+
+    # THE THREE ANSWERS MUST BE DISTINGUISHABLE. "no guard failed open", "N did", and "the
+    # record cannot be read" are three different facts, and the first and third are the pair
+    # this repo keeps collapsing: an empty read and a broken reader both render as silence.
+    out = doctor()
+    ok("with no ledger at all, doctor says none rather than staying quiet",
+          "no guard has failed open" in out)
+
+    # A REAL FAIL-OPEN THROUGH THE REAL ENTRYPOINT, not a hand-written ledger line. A test that
+    # writes the record it then reads back proves the reader works and nothing about whether
+    # anything ever writes one — the defect class this suite exists to catch.
+    shim = os.path.join(cfg.root, ".showrunner", "hooks", "dispatch-guard.sh")
+    os.makedirs(os.path.dirname(shim), exist_ok=True)
+    shutil.copy(os.path.join(ROOT, ".showrunner", "hooks", "dispatch-guard.sh"), shim)
+    os.chmod(shim, 0o755)
+    env = dict(os.environ, CLAUDE_PROJECT_DIR=cfg.root)
+    # No .showrunner/config.json in a scratch repo makes the guard degrade — which is the
+    # condition under test, reached the way a user reaches it.
+    p = subprocess.run(["bash", shim], input='{"tool_name":"Bash","tool_input":'
+                       '{"command":"echo hi"}}', capture_output=True, text=True,
+                       cwd=cfg.root, env=env)
+    ok("a degraded guard still ALLOWS the call (fail-open, not fail-shut)", p.returncode == 0)
+    fired = os.path.exists(ledger) and open(ledger).read().strip()
+    ok("...and it left a durable record, so the notice is not the only trace", bool(fired))
+
+    # NOT GATED ON THE READ ABOVE. Gating these on `fired` made a dead recorder flip exactly
+    # ONE assertion and silence three, which the sweep reported as THIN — the coverage looked
+    # like one assertion happening to notice rather than four. These read doctor's OUTPUT,
+    # which is safe with no ledger at all, so a dead recorder fails every one of them.
+    out = doctor()
+    ok("doctor reports the COUNT — the fact a banner cannot carry",
+       "ALLOWED WITHOUT BEING CHECKED" in out)
+    ok("...and names the file to read, not just the number", "fail-open.jsonl" in out)
+    # ACCUMULATION IS THE POINT. One unchecked call and twenty are different facts about a
+    # session; a per-call notice cannot express the difference because each one looks the same
+    # as the last.
+    for _ in range(4):
+        subprocess.run(["bash", shim], input='{"tool_name":"Bash","tool_input":'
+                       '{"command":"echo hi"}}', capture_output=True, text=True,
+                       cwd=cfg.root, env=env)
+    out = doctor()
+    ok("the count ACCUMULATES rather than resetting per call",
+       "5 tool call(s) were ALLOWED" in out)
+
+    # A LEDGER THAT CANNOT BE PARSED MUST NOT READ AS ZERO. This is the identity-element defect
+    # in its exact shape: json.loads throwing and the file being empty both leave the list
+    # empty, and one of those means "nothing went unchecked" while the other means "no idea".
+    with open(ledger, "w") as fh:
+        fh.write("{not json at all\n")
+    out = doctor()
+    ok("an unparseable ledger says UNKNOWN, never 'none'",
+          "UNKNOWN" in out and "no guard has failed open" not in out)
+
+    # THE CLI ENTRYPOINT WRITES THE SAME LEDGER. Two entrypoints per guard is this repo's
+    # standing hazard — a shim and a `showrunner <verb>` that are free to disagree.
+    #
+    # AND IT MUST RECORD WHEN CONFIG IS WHAT FAILED. The first version keyed the ledger off
+    # `config.load().state_dir`, which is unavailable in exactly the case that makes a guard
+    # fail open — a ledger whose coverage was the complement of its purpose. Asserting on the
+    # SOURCE ("the call is present") would have passed against that version, which is why this
+    # runs the verb from a directory with no config and reads the file back.
+    os.remove(ledger)
+    conf = os.path.join(cfg.root, ".showrunner", "config.json")
+    good = open(conf).read()
+
+    def cli_guard():
+        return subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"),
+                               "dispatch", "guard", "--command", "echo hi"],
+                              capture_output=True, text=True, cwd=cfg.root,
+                              env=dict(os.environ, CLAUDE_PROJECT_DIR=cfg.root))
+    # THE CONTROL FIRST: a HEALTHY guard must write nothing, or the count means nothing. A
+    # ledger that grows on every call would report a number that is large, alarming and about
+    # nothing — the alarm that is ignored because it is always on.
+    p = cli_guard()
+    ok("a guard that actually RAN records nothing — the count must mean unchecked, not called",
+       p.returncode == 0 and not os.path.exists(ledger))
+
+    with open(conf, "w") as fh:
+        fh.write("{ this is not json")
+    try:
+        p = cli_guard()
+        ok("the CLI entrypoint fails open too (the two must not disagree)", p.returncode == 0)
+        ok("...and records it, even though an unloadable config is WHY it failed open",
+           os.path.exists(ledger) and bool(open(ledger).read().strip()))
+    finally:
+        with open(conf, "w") as fh:
+            fh.write(good)
+
+    # THE COMPANION, so the CLI half is not one assertion deep either. WHERE the ledger lives
+    # is its own producer — the first version put it somewhere unreachable whenever config was
+    # the thing that broke — and this reads the entry back through doctor rather than through
+    # the path the writer just used, which would agree with itself either way.
+    #
+    # AFTER the config is restored, not inside the window: `doctor` loads config too, so asking
+    # it to report while config is deliberately corrupt tests the wrong thing and fails for a
+    # reason unrelated to the ledger. Found by running it.
+    ok("...and doctor can find and count what the CLI wrote",
+       "1 tool call(s) were ALLOWED" in doctor())
+
+    # THE OTHER CLI GUARD, AND A DIFFERENT FAIL-OPEN BRANCH. `worktree guard` degrades on an
+    # UNREADABLE PAYLOAD rather than on config, and it is a separate verb — two guards
+    # answering one event in one repo are free to disagree about whether they leave a trace,
+    # and a count that silently covers only one of them is worse than no count, because it
+    # reads as the whole picture.
+    p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"),
+                        "worktree", "guard"], input="not a payload at all",
+                       capture_output=True, text=True, cwd=cfg.root,
+                       env=dict(os.environ, CLAUDE_PROJECT_DIR=cfg.root))
+    ok("the OTHER guard verb fails open on an unreadable payload", p.returncode == 0)
+    ok("...and it lands in the SAME ledger, so the count spans both guards",
+       "2 tool call(s) were ALLOWED" in doctor())
+
 def test_stop_hook_heartbeat():
     group("Did the Stop hook RUN — the one question registration, parsing and 'has fired' "
           "cannot answer")
@@ -11043,6 +11169,7 @@ def main():
                test_stale_copy_cannot_warn_about_itself,
                test_hook_registration,
                test_corpus_tool,
+               test_fail_open_is_counted_not_just_announced,
                test_stop_hook_heartbeat,
                test_every_shipped_hook_parses,
                test_pipeline_status_gate,

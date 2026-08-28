@@ -82,6 +82,28 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # #71. Answering nothing is the SAFE-looking direction: every guard still fails open, still
+    # prints its notice, still allows the call — the system returns exactly to the state the
+    # issue described, where the only trace is a line beside a successful result that the
+    # reporter said they skimmed themselves. Nothing in a run says the ledger stopped being
+    # written, which is why the count needs a mutant rather than a test that merely reads it.
+    # THE SHIM HALF IS MEASURED BY HAND, not here. This tool derives its targets from PYTHON
+    # sources, so a bash producer is rejected as a stale declaration — correctly, and a target
+    # that reports STALE on every run is a permanent false alarm, which is the exact failure
+    # #71 is about. Measured manually instead, on 2026-08-28: neutering `_record_fail_open` in
+    # .showrunner/hooks/dispatch-guard.sh fails "...and it left a durable record", and nothing
+    # else. So the shim recorder IS covered; what is missing is the automation, not the check.
+    # Answering None means "no .showrunner anywhere", which drops the record silently — and it
+    # is the SAFE-looking direction, because the guard still fails open and still prints. This
+    # producer exists only because the first version keyed the ledger off config, which is
+    # unavailable in exactly the case that makes a guard fail open; a mutant is what proves the
+    # replacement is load-bearing rather than decorative.
+    ("where the fail-open ledger lives", "cli._fail_open_root", "lib/showrunner/cli.py",
+     r"(def _fail_open_root\(\):\n)",
+     "    return None\ndef _neutered_fail_open_root():\n"),
+    ("the fail-open ledger", "cli._record_fail_open", "lib/showrunner/cli.py",
+     r"(def _record_fail_open\(notice\):\n)",
+     "    return\ndef _neutered_record_fail_open(notice):\n"),
     # Answering None everywhere restores the exact defect: doctor goes back to reporting only
     # PROVENANCE, which fires identically whether a copy is current or twenty commits behind. A
     # producer whose death returns the tool to its previous, working-looking state dies

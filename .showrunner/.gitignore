@@ -11,6 +11,7 @@ config.local.json
 campaign.json.lock
 events.jsonl
 hook-heartbeat.jsonl
+fail-open.jsonl
 waiting.jsonl
 *.lock
 seen-issues.json

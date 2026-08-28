@@ -75,7 +75,8 @@ USER_PATH = os.path.join(user_config_dir(), CONFIG_NAME)
 STATE_IGNORE_SECTIONS = [
     ("# showrunner runtime state — not source",
      ["graph.db", "graph.db-*", "locks/", "scratch/", "campaign.json", "routing.jsonl",
-      "waiting.jsonl", "events.jsonl", "hook-heartbeat.jsonl", "*.lock", "baseline.json",
+      "waiting.jsonl", "events.jsonl", "hook-heartbeat.jsonl", "fail-open.jsonl",
+      "*.lock", "baseline.json",
       "integration-commit.json"]),
     ("# Machine-specific overrides and per-machine observations. The docs point people here for\n"
      "# absolute paths, and without these lines the files land NEITHER TRACKED NOR IGNORED --\n"

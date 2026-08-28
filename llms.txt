@@ -20,6 +20,19 @@ would it still hold?* And the rule showrunner adds, because its guards are cross
 guard must fail loud, never quiet.** A mutex that is silently a no-op is worse than no mutex, because
 nobody inside a single Crawler can observe the collision.
 
+**"Loud" is a property of the channel, not of the wording.** A guard that degrades prints a notice
+saying so — and that notice arrives as hook output beside a SUCCESSFUL tool result, which is the
+channel an agent concentrating on something else skims. The person who reported this said it about
+their own reading, and they were the one who had just filed the guard issue. Writing the notice in
+capitals does not fix that; it treats a delivery problem as a copywriting problem.
+
+So every fail-open also appends to `.showrunner/fail-open.jsonl`, and `doctor` reports the COUNT.
+That is the part a notice cannot carry: one unchecked call and twenty are different facts about a
+session, and each individual notice looks exactly like the last. `doctor` is read by somebody who
+has stopped to look. The ledger distinguishes three answers that otherwise collapse into silence —
+no guard failed open, N did, and the record cannot be parsed — because an empty read and a broken
+reader render identically, which is this repo's most-repeated defect.
+
 `showrunner` is **not a global command** — it is the project-local binary
 `./.showrunner/bin/showrunner`. Call it by that path. Python 3 standard library only; nothing to
 install.

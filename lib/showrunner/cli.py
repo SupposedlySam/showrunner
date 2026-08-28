@@ -457,6 +457,39 @@ def cmd_doctor(args):
               "watchdog that never fired." % (RED + "ERROR" + OFF, rel(_wj, cfg.root), _e))
         bad += 1
 
+    # HOW MANY CALLS WENT UNCHECKED, because until now nothing downstream ever asked. A guard
+    # that fails open says so — correctly — as hook output beside a SUCCESSFUL tool result, and
+    # an agent concentrating on something else skims it. The reporter said exactly that about
+    # their own reading, and they were the person who had just filed the guard issue.
+    #
+    # That satisfies "a degraded guard must fail loud" in letter only: the guard is quiet in the
+    # sense that matters, which is whether the behaviour of the thing being warned changes. A
+    # louder wording would treat a delivery problem as a copywriting problem. A COUNT read by
+    # somebody who has stopped to look is a different fact from a banner skimmed mid-task.
+    _fo = os.path.join(cfg.state_dir, "fail-open.jsonl")
+    try:
+        with open(_fo) as _fh:
+            _rows = [json.loads(l) for l in _fh if l.strip()]
+    except OSError:
+        _rows = []
+    except ValueError:
+        _rows = None
+    if _rows is None:
+        print("  %s the fail-open ledger (%s) cannot be parsed, so how many calls went "
+              "unchecked is UNKNOWN — which is not the same as none."
+              % (YEL + "warn " + OFF, rel(_fo, cfg.root)))
+    elif _rows:
+        _last = max(int(r.get("ts") or 0) for r in _rows)
+        _age = int(now()) - _last
+        _ago = ("%dm" % (_age // 60)) if _age < 7200 else ("%dh" % (_age // 3600))
+        print("  %s %d tool call(s) were ALLOWED WITHOUT BEING CHECKED, most recently %s ago. "
+              "Each printed a notice beside a successful result, which is the channel an agent "
+              "mid-task skims. Read them: %s — then fix what degraded and delete the file."
+              % (YEL + "warn " + OFF, len(_rows), _ago, rel(_fo, cfg.root)))
+    else:
+        print("  %s no guard has failed open here — the ledger is empty, which is a different "
+              "answer from it being unreadable" % (GRN + "ok   " + OFF))
+
     # WHICH STOP HOOKS ACTUALLY RAN, compared against EACH OTHER. Registration is a fact about
     # a file, a clean parse is a fact about source, and "has fired" is a fact about the past.
     # None of them is a fact about the last turn, which is the only thing a Stop gate is for.
@@ -1221,9 +1254,68 @@ def _allow_loudly(notice):
     this is the shape `.game_loop/bin/guard-writes.sh` uses for the same purpose, in this repo,
     on every tool call, which makes it the mechanism with observed evidence behind it.
     """
+    _record_fail_open(notice)
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
                                              "additionalContext": notice}}))
     return 0
+
+
+def _record_fail_open(notice):
+    """Append the fail-open to a durable ledger, so something downstream can ASK.
+
+    THE NOTICE IS TECHNICALLY EMITTED AND RELIABLY UNREAD. It arrives as hook output beside a
+    successful tool result, and an agent concentrating on something else skims it — the
+    reporter said so about their own reading, and they were the person who had just filed the
+    guard issue. Nothing downstream ever asked whether it was consumed, which makes the failure
+    silent by construction and satisfies "fail loud" in letter only.
+
+    A louder wording would treat a delivery problem as a copywriting problem. A COUNT is a
+    different fact from a banner: N unchecked calls in a session is not something a reader can
+    skim past in the same way, and `doctor` is read by somebody who has stopped to look rather
+    than by somebody mid-task.
+
+    Best-effort by construction: a ledger that cannot be written must never turn a fail-open
+    into a hard failure, which would block the write that repairs the guard.
+    """
+    try:
+        root = _fail_open_root()
+        if not root:
+            return
+        with open(os.path.join(root, ".showrunner", "fail-open.jsonl"), "a") as fh:
+            fh.write(json.dumps({"ts": now(), "notice": notice[:300]}) + "\n")
+    except Exception:                                            # noqa: BLE001
+        pass
+
+
+def _fail_open_root():
+    """Find a `.showrunner` WITHOUT loading config, because config is why we are here.
+
+    The first version keyed the ledger off `config.load().state_dir` — which is unavailable in
+    precisely the case that makes a guard fail open. It would have recorded the fail-opens that
+    least needed recording and dropped every one caused by an unreadable config: a ledger whose
+    coverage is the complement of its purpose. Found by asking what `_cfg` raising means for
+    the line that runs afterward, and confirmed by running it from a no-repo directory.
+
+    The anchors are the shims' anchors, in the shims' order — two entrypoints for one guard is
+    this repo's standing hazard, and a ledger they disagree about is the same defect wearing a
+    different hat.
+    """
+    seen = set()
+    for anchor in (os.environ.get("CLAUDE_PROJECT_DIR"), os.getcwd(),
+                   os.path.dirname(os.path.dirname(os.path.dirname(
+                       os.path.abspath(__file__))))):
+        if not anchor or anchor in seen:
+            continue
+        seen.add(anchor)
+        here = os.path.abspath(anchor)
+        while True:
+            if os.path.isdir(os.path.join(here, ".showrunner")):
+                return here
+            parent = os.path.dirname(here)
+            if parent == here:
+                break
+            here = parent
+    return None
 
 
 def cmd_whoami(args):

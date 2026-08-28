@@ -142,6 +142,7 @@ routing.jsonl
 waiting.jsonl
 events.jsonl
 hook-heartbeat.jsonl
+fail-open.jsonl
 *.lock
 baseline.json
 integration-commit.json
@@ -186,7 +187,7 @@ sr_added=0
 for entry in "bin/" "lib/" "graph.db" "graph.db-*" "locks/" "scratch/" "campaign.json" \
              "routing.jsonl" "waiting.jsonl" "events.jsonl" "*.lock" "baseline.json" \
              "integration-commit.json" "config.local.json" "seen-issues.json" \
-             "hook-heartbeat.jsonl"; do
+             "hook-heartbeat.jsonl" "fail-open.jsonl"; do
   if ! grep -qxF "$entry" "$sr_ignore" 2>/dev/null; then
     if [ "$sr_added" = 0 ]; then
       printf '\n# showrunner runtime state and the tool itself, added by install.sh. Present on a\n# fresh install and topped up on every upgrade, because a rule that only lands when the\n# file is first created never reaches anybody who already had the tool.\n' >>"$sr_ignore"
