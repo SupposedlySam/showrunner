@@ -692,6 +692,19 @@ NOT_SWEPT = {
     "config.Config.resource": "lookup; the lock group fails if it answers wrongly",
     "util.pid_alive": "the claim-liveness and lock-staleness assertions cover both answers",
     "util.repo_root": "every fixture would fail to build if it answered wrongly",
+    # SAME CLASS AS ITS SIBLING ABOVE, and MEASURED before being excused rather than assumed:
+    # neutering it CRASHED ten groups instead of flipping their assertions, so the sweep
+    # reported UNSCOREABLE — no measurement, which is not a coverage result. Hardening ten
+    # groups against a None repo root to score a producer whose neutering takes the whole
+    # suite down is work that buys a number and no safety.
+    #
+    # What the exclusion is NOT covering for: the CLAUDE_PROJECT_DIR fallback this function
+    # gained is asserted directly, in `test_guard_entrypoints_agree`, by driving BOTH
+    # entrypoints in three environments and requiring them to agree.
+    "util.main_checkout": "every fixture resolves through it, so neutering it crashes ten "
+                          "groups rather than flipping assertions — measured, and reported "
+                          "UNSCOREABLE. Its new fallback is covered by the entrypoint-agreement "
+                          "assertions instead",
     "collide.tracked_files": "git listing; plan_waves is swept and consumes it",
 
     # Return an exit code rather than a finding. Their behaviour is asserted through the CLI
