@@ -37,3 +37,8 @@ __pycache__/
 # committed once because nothing ignored it, and a consumer running `register` would get the
 # same stray file in their repo.
 .claude/*.sr-lock.lock
+
+# Added by saggar — local files that shouldn't be committed
+.saggar/**/*.local.*
+.saggar/scratchpad.md
+.saggar/jobs/
