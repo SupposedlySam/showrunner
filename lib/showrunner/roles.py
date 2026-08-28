@@ -316,13 +316,12 @@ def crawler_leaf(cfg):
     existed, and a worktree somebody added by hand is not. Only the former may resolve to a
     working role -- otherwise `git worktree add` is a way to grant yourself one.
     """
-    from .util import run
     from . import campaign as _campaign
 
-    rc, top, _ = run(["git", "rev-parse", "--show-toplevel"], cwd=os.getcwd())
-    if rc != 0 or not (top or "").strip():
+    tree = getattr(cfg, "tree", None)
+    if not tree:
         return None
-    here = os.path.basename(os.path.realpath(top.strip()))
+    here = os.path.basename(tree)
     try:
         for c in (_campaign.load(cfg).get("crawlers") or []):
             if c.get("crawler") == here:
@@ -335,28 +334,38 @@ def crawler_leaf(cfg):
 def seat(cfg):
     """Where this session STANDS. Returns (seat, evidence). Never raises.
 
-    Derived from two facts showrunner already has: whether the cwd is a linked worktree, and
-    whether this repo carries a campaign. UNKNOWN is a real answer and is announced as one — an
-    announcer that cannot tell and says nothing is indistinguishable from a healthy one, which is
-    exactly how the reported failure went unnoticed for a whole run.
+    Derived from two facts THE CONFIG already carries: the tree it was loaded from against the
+    main checkout it resolved to, and whether this repo carries a campaign. UNKNOWN is a real
+    answer and is announced as one — an announcer that cannot tell and says nothing is
+    indistinguishable from a healthy one, which is exactly how the reported failure went
+    unnoticed for a whole run.
+
+    ANSWERED FROM `cfg`, NEVER FROM THE AMBIENT PROCESS. This ran two `git rev-parse` calls
+    against `os.getcwd()` while taking a config it used only for the campaign record, so it
+    answered about wherever the process happened to stand rather than about the repo it was
+    handed. Every caller inside a linked worktree got CRAWLER for a config built elsewhere, the
+    `seat_roles` mapping never fired, and five assertions failed in every worktree and nowhere
+    else — a defect that presents as "the suite is flaky in worktrees" and is really a function
+    disagreeing with its own argument.
+
+    `cfg.root` is NOT the fix and must not be substituted for `cfg.tree`: it resolves through
+    `--git-common-dir` and so is the main checkout from every worktree, which would make every
+    seat an ORCHESTRATOR. It is one HALF of the comparison; `cfg.tree` is the other.
     """
-    from .util import run
     from . import campaign as _campaign
 
-    rc, common, _ = run(["git", "rev-parse", "--git-common-dir"], cwd=os.getcwd())
-    rc2, top, _ = run(["git", "rev-parse", "--show-toplevel"], cwd=os.getcwd())
-    if rc != 0 or rc2 != 0:
-        return UNKNOWN, "not inside a git repository, so neither seat can be derived"
-    common, top = (common or "").strip(), (top or "").strip()
-    if not common or not top:
-        return UNKNOWN, "git answered neither --git-common-dir nor --show-toplevel"
-    main = os.path.realpath(os.path.dirname(
-        common if os.path.isabs(common) else os.path.join(os.getcwd(), common)))
+    tree = getattr(cfg, "tree", None)
+    if not tree:
+        return UNKNOWN, ("this config does not record which working tree it was loaded from, so "
+                         "neither seat can be derived — said rather than guessed from the "
+                         "process's own directory, which is a fact about the caller and not "
+                         "about this repo")
+    main = os.path.realpath(cfg.root)
 
-    if os.path.realpath(top) != main:
+    if tree != main:
         leaf = crawler_leaf(cfg)
         return CRAWLER, ("standing in a linked worktree (%s)%s"
-                         % (os.path.basename(top),
+                         % (os.path.basename(tree),
                             "; the campaign record names its leaf %s" % leaf if leaf else
                             "; no campaign record names it, so it was not placed by spawn"))
 
