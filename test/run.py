@@ -2864,9 +2864,13 @@ def test_integration():
        "def f()" in open(os.path.join(cfg.root, "src/a.py")).read())
 
     findings = campaign.reconcile(cfg, g, base="main")
-    ok("reconcile reports the merged Crawler as MERGED",
-       any(f["crawler"] == rec_a["crawler"] and f["verdict"].startswith("MERGED") for f in findings),
-       findings)
+    # THE RESTRAINT CASE for the never-committed fix below, and asserted as the WHOLE string
+    # rather than a prefix: "MERGED, BUT THE TREE IS NOT CLEAN" also starts with "MERGED", so a
+    # prefix here would go on passing if the genuine case were rerouted into the cautious one.
+    # The fix must not be "never say safe again".
+    merged_a = next((f for f in findings if f["crawler"] == rec_a["crawler"]), {})
+    ok("a branch genuinely merged, with a clean tree, still reports safe to clean up",
+       merged_a.get("verdict") == "MERGED — safe to clean up", merged_a)
 
     # Two branches, disjoint files, semantically incompatible.
     rec_b = crawler("m2", "src/a.py", "# a\nregister(\"x\")\n")
@@ -3010,6 +3014,82 @@ def test_integration():
     ok("...and it still reports the Crawler as abandoned, for the reason that is actually true: "
        "the owner is gone and the work is not integrated",
        (carrier.get("verdict") or "").startswith("ABANDONED — owner is not alive"), carrier)
+
+    # CLOSING A LEAF IS A CLAIM; THE BRANCH IS THE FACT.
+    #
+    # Observed: a Crawler was refused by its commit gate, closed its leaf anyway and exited with
+    # its work staged and uncommitted. `is_merged` asks whether base contains every commit on the
+    # branch, and a branch with NO commits satisfies that vacuously — so reconcile ranked it
+    # "MERGED — safe to clean up" over the only copy of the work. The uncommitted-changes line
+    # was printed underneath, subordinate to a headline that contradicted it; the near-miss was
+    # caught by a human's rule about never deleting a dirty worktree, not by this report.
+    #
+    # The empty-branch verdict already existed and was already honest. What overrode it was the
+    # leaf being CLOSED, which the clause excuses from abandonment — and that exclusion handed
+    # the case straight to `merged`.
+    def never_committed(leaf_id, actor, dirty, premise="holds"):
+        """Spawn, write nothing to the branch, close the leaf. `dirty` writes an uncommitted file."""
+        g.add("closed without committing", leaf_id=leaf_id, labels=["backend"])
+        rec = worktree.spawn(cfg, g.show(leaf_id), actor=actor)
+        campaign.record_spawn(cfg, rec, pid=DeadPid().pid)
+        if dirty:
+            with open(os.path.join(rec["worktree"], "the-only-copy.txt"), "w") as fh:
+                fh.write("staged, never committed, and this tree is where it lives\n")
+        g.claim(leaf_id, actor)
+        proof = os.path.join(cfg.root, "proof-%s.txt" % leaf_id)
+        with open(proof, "w") as fh:
+            fh.write("closed %s\n" % leaf_id)
+        gates.close_gate(cfg, g, leaf_id, os.path.basename(proof), "done", premise=premise,
+                         premise_read="README.md")
+        return rec
+
+    rec_nc = never_committed("m7", "gitignore", dirty=True)
+    findings = campaign.reconcile(cfg, g, base="main")
+    nc = next((f for f in findings if f["crawler"] == rec_nc["crawler"]), {})
+    ok("a CLOSED leaf whose branch never received a commit, over a DIRTY tree, is not called "
+       "merged and is never called safe to clean up — the branch is the fact, the close is only "
+       "a claim, and this is the one state where the cheap action is irreversible",
+       not (nc.get("verdict") or "").startswith("MERGED")
+       and "safe to clean up" not in (nc.get("verdict") or ""), nc)
+    ok("...and the headline itself says the tree is the only copy, rather than leaving that to a "
+       "line underneath it — a guard that needs the reader to distrust its own headline is not "
+       "a guard",
+       "NEVER COMMITTED" in (nc.get("verdict") or "")
+       and "only copy" in (nc.get("verdict") or ""), nc)
+    ok("...and `merged` is still True underneath, so this passes because the VERDICT changed, "
+       "not because the merge test quietly started answering differently",
+       nc.get("merged") is True and nc.get("empty") is True, nc)
+    actions, _ = campaign.reap(cfg, g, base="main", apply=False)
+    ok("...and reap surfaces that tree instead of skipping it: before the verdict existed it "
+       "read MERGED, which is not what reap's abandoned filter matches, so the tree holding the "
+       "work appeared in no line reap printed",
+       any(a["kind"] == "crawler" and a["crawler"] == rec_nc["crawler"]
+           and "not deleted" in a["action"] for a in actions), actions)
+
+    # THE AMBIGUOUS CORNER, decided rather than left to fall through: closed, nothing committed,
+    # tree CLEAN. This is the shape of a legitimately refuted premise — declining to build
+    # something correctly produces no commit and leaves no tree — so it is not an alarm. It is
+    # also not `merged`: nothing was ever merged, and that sentence is a false factual claim in
+    # the one report a reader uses to decide what to delete.
+    rec_ncc = never_committed("m8", "refuter", dirty=False, premise="refuted")
+    findings = campaign.reconcile(cfg, g, base="main")
+    ncc = next((f for f in findings if f["crawler"] == rec_ncc["crawler"]), {})
+    ok("closed, nothing committed, tree CLEAN gets its own verdict: nothing at risk and nothing "
+       "waiting to integrate — not an alarm, and not a claim that anything merged",
+       ncc.get("verdict", "").startswith("NOTHING TO INTEGRATE")
+       and "never received a commit" in ncc.get("verdict", ""), ncc)
+    ok("...and it is NOT the never-committed alarm, so a refuted leaf — a successful outcome "
+       "that produces no commit by design — does not report as work about to be destroyed",
+       "NEVER COMMITTED" not in ncc.get("verdict", ""), ncc)
+
+    # THE PATH THAT WAS ALREADY RIGHT, re-read after the change. `in_progress` + no commits is
+    # the case reconcile already got right and the case `reap` keys on, so the whole cost of a
+    # wrong fix here lands on the common path: every wave has live and dead in-progress Crawlers
+    # in it, and only some have a closed leaf over an uncommitted tree.
+    findings = campaign.reconcile(cfg, g, base="main")
+    ghost = next((f for f in findings if f["crawler"] == rec_d["crawler"]), {})
+    eq("an in_progress leaf with no commits still reports exactly what it did before",
+       ghost.get("verdict"), "ABANDONED — the branch never received a commit")
 
 
 # ======================================================== CORE: the CLI

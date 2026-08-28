@@ -1811,8 +1811,11 @@ def cmd_reconcile(args):
                  + (" …" if len(idle_drift) > 4 else "")))
 
     for f in findings:
-        colour = RED if f["verdict"].startswith("ABANDONED") else (
-            GRN if f["verdict"].startswith(("MERGED", "LIVE")) else YEL)
+        # `MERGED — ` WITH ITS DASH, not the bare prefix. "MERGED, BUT THE TREE IS NOT CLEAN"
+        # also starts with MERGED, and colouring it green would restore in the terminal exactly
+        # the reassurance the sentence was written to withdraw.
+        colour = RED if f["verdict"].startswith(("ABANDONED", "NEVER COMMITTED")) else (
+            GRN if f["verdict"].startswith(("MERGED — ", "LIVE")) else YEL)
         print("%s%-28s%s %s" % (colour, f["crawler"], OFF, f["verdict"]))
         print("    leaf %s (%s) · branch %s%s" % (
             f["leaf"], f["leaf_status"], f["branch"], "" if f["branch_exists"] else " [gone]"))
