@@ -1590,6 +1590,53 @@ def cmd_plan(args):
         for leaf in serialized:
             d = decisions[leaf["id"]]
             print("  %-16s resource=%-10s %s" % (leaf["id"], d.get("resource") or "?", d["why"]))
+
+    # WHAT IS ALREADY RUNNING (#71). The waves above are computed from `ready`, which is
+    # unblocked AND UNCLAIMED — so a Crawler working right now is absent from the INPUT and its
+    # files are never considered occupied. That is the correct answer to "how would I group this
+    # work if nothing were running", and it is a legitimate question BEFORE a campaign starts,
+    # so the grouping is left exactly as it was. What was missing is the other question, the one
+    # an orchestrator mid-campaign is actually asking, and it is appended rather than folded in.
+    #
+    # Nothing is printed when nothing is live, so `plan` on a quiet campaign is unchanged.
+    live, caveat = collide.live_claims(g)
+    conflicts = {}
+    if live:
+        files = collide.tracked_files(cfg.root)
+        for leaf in headless:
+            found = collide.live_conflicts(cfg, leaf, live, files)
+            if found:
+                conflicts[leaf["id"]] = found
+    if live:
+        print("%sLIVE CLAIMS%s — %d claimed leaf/leaves are being worked NOW, and the waves "
+              "above do not account for them:" % (BOLD, OFF, len(live)))
+        for leaf in live:
+            print("  %s%-16s claimed by %s%s%s" % (DIM, leaf["id"], leaf.get("actor") or "?",
+                                                   " (PARKED)" if leaf.get("parked") else "", OFF))
+        if caveat:
+            eprint("  %s%s%s" % (YEL, caveat, OFF))
+    for leaf_id, found in sorted(conflicts.items()):
+        for c in found:
+            if c["blocks"]:
+                print("  %sCOLLIDES%s %s  <->  %s (live)" % (RED, OFF, leaf_id, c["leaf"]))
+            else:
+                print("  %sshared surface only%s %s <-> %s (live)"
+                      % (DIM, OFF, leaf_id, c["leaf"]))
+            for f in c["files"][:8]:
+                print("      both estimate %s" % f)
+            if c["blind"]:
+                print("      one of the two has NO estimable blast radius — treated as "
+                      "colliding with everything")
+            for f in c["shared"][:8]:
+                print("      %sshared surface, owed to serialised integration, not blocking: "
+                      "%s%s" % (DIM, f, OFF))
+    if conflicts:
+        eprint("%sThis is an ESTIMATE from declared paths and grepped symbols, not a "
+               "measurement.%s `overlap` measures, and it cannot see a live Crawler that has "
+               "not committed yet — a branch existing is not enough, it counts branches with "
+               "commits. `spawn` refuses these unless you name the live leaf with "
+               "--despite-live." % (YEL, OFF))
+
     if args.json:
         print(json.dumps({
             "waves": waves,
@@ -1597,6 +1644,11 @@ def cmd_plan(args):
             "estimates": {k: {"paths": sorted(v["paths"]), "shared": sorted(v["shared"]),
                               "basis": v["basis"]} for k, v in estimates.items()},
             "notes": notes,
+            # Additive: a reader that never looks at these gets exactly the plan it got before.
+            "live": [l["id"] for l in live],
+            "live_caveat": caveat,
+            "live_conflicts": conflicts,
+            "estimated": True,
         }, indent=2, sort_keys=True))
     return 0
 
@@ -1631,6 +1683,80 @@ def _print_base(report):
             d for d, _ in report["present"]))
 
 
+def _live_collision_check(cfg, g, leaf, despite, rehearsing=False):
+    """Refuse to open a room inside files a LIVE Crawler is already in (#71).
+
+    SPAWN IS THE PLACE THIS HAS TO LIVE. `plan` reports the same finding one screen earlier,
+    and an orchestrator that reads `plan` carefully was never the failure mode — the failure
+    mode is one that does not read it, or reads it and has forgotten by the third wave. This
+    is the one verb that cannot be skipped by a careless caller, because it is what actually
+    creates the tree.
+
+    THE OVERRIDE NAMES WHAT IT OVERRIDES. `--despite-live <leaf-id>`, repeatable, and it must
+    cover every colliding leaf or the refusal stands. A bare `--force` is answered reflexively
+    within a week and teaches every later session that the guard is a speed bump; naming the
+    live Crawler you are choosing to collide with costs a read of the refusal, which is the
+    read the guard exists to force. Naming a leaf that is not colliding is refused too — an
+    override copied from a previous command is not a decision.
+
+    Shared surfaces do not block, for the reason `plan_waves` gives: `always_serialize` names
+    the file every change touches, so blocking on it would serialise the campaign behind
+    whichever Crawler is running and the guard would look like the reason the run is slow.
+    """
+    live, caveat = collide.live_claims(g)
+    if not live:
+        return []
+    found = collide.live_conflicts(cfg, leaf, live)
+    blocking = [c for c in found if c["blocks"]]
+    for c in found:
+        if not c["blocks"]:
+            eprint("  %sshared surface with live %s (owed to serialised integration, not "
+                   "blocking): %s%s" % (DIM, c["leaf"], ", ".join(c["shared"][:6]), OFF))
+    if not blocking:
+        return found
+    named = set(despite)
+    unmatched = named - {c["leaf"] for c in blocking}
+    uncovered = [c for c in blocking if c["leaf"] not in named]
+    lines = []
+    for c in blocking:
+        who = c.get("actor") or "?"
+        lines.append("  %s (live, claimed by %s%s)%s"
+                     % (c["leaf"], who, ", PARKED" if c["parked"] else "",
+                        " — NO estimable blast radius on one side, so it is treated as "
+                        "colliding with everything" if c["blind"] else ""))
+        for f in c["files"][:8]:
+            lines.append("      both estimate %s" % f)
+    detail = "\n".join(lines)
+    if unmatched:
+        die("--despite-live named %s, which is not colliding with %s right now.\n"
+            "An override copied from an earlier command is not a decision. Colliding live "
+            "leaves are:\n%s"
+            % (", ".join(sorted(unmatched)), leaf["id"],
+               detail or "  (none)"), code=2)
+    if uncovered:
+        cmd = " ".join("--despite-live %s" % c["leaf"] for c in uncovered)
+        msg = ("%s overlaps work a LIVE Crawler is doing right now:\n%s\n"
+               "%s"
+               "This is an ESTIMATE from declared paths and grepped symbols, not a "
+               "measurement — `overlap` measures, and it CANNOT see this: a Crawler with no "
+               "commits has no in-flight branch by that definition, even when its branch "
+               "exists.\n"
+               "Wait for it to close, or accept the collision deliberately by naming it:\n"
+               "    showrunner spawn %s %s"
+               % (leaf["id"], detail,
+                  ("  %s\n" % caveat) if caveat else "",
+                  leaf["id"], cmd))
+        if rehearsing:
+            # The rehearsal must show what the real spawn would refuse, and still create
+            # nothing. Refusing here would make --dry-run unable to preview its own refusal.
+            eprint("%sWOULD REFUSE: %s%s" % (RED, msg, OFF))
+            return found
+        die(msg, code=3)
+    print("%sACCEPTED A LIVE COLLISION on purpose (--despite-live %s):%s\n%s"
+          % (YEL, ", ".join(sorted(named)), OFF, detail))
+    return found
+
+
 def cmd_spawn(args):
     cfg = _cfg(args)
     g = _graph(cfg)
@@ -1649,6 +1775,12 @@ def cmd_spawn(args):
     if getattr(args, "dry_run", False) and not getattr(args, "launch", False):
         die("--dry-run applies to --launch; it shows the command a launch WOULD run.\n"
             "Without --launch there is nothing to rehearse.", code=64)
+
+    # AFTER the argument check and BEFORE anything is created, in both the real path and the
+    # rehearsal. A dry run must be able to preview the refusal it would hit — a rehearsal that
+    # shows a clean dispatch and then a real spawn that refuses is worse than no rehearsal.
+    _live_collision_check(cfg, g, leaf, getattr(args, "despite_live", None) or [],
+                          rehearsing=bool(getattr(args, "dry_run", False)))
     if getattr(args, "dry_run", False):
         session = args.session or dispatch.new_session_id()
         model = dispatch.resolve_model(cfg, decision)
@@ -2577,6 +2709,10 @@ def build_parser():
                    help="with --launch: show what would start, and start nothing")
     s.add_argument("--finding", action="append",
                    help="something you already checked; the Crawler is asked to confirm or refute it")
+    s.add_argument("--despite-live", action="append", metavar="LEAF",
+                   help="accept a collision with a NAMED live leaf. Repeatable, and it must "
+                        "name every colliding leaf — an override that does not say what it is "
+                        "overriding is answered reflexively")
     s.set_defaults(func=cmd_spawn)
 
     s = sub.add_parser("brief", help="print a Crawler's brief")
