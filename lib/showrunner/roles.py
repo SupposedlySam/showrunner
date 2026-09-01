@@ -433,6 +433,66 @@ def enforced_lines(role_def):
 # the orchestrator still hand-rolled `git worktree add` 42 times. The load-bearing lines are
 # carried HERE, at every session boundary, because that is the only place they are certain to be
 # read. It is paid for at every start and every compaction, which is the price of it working.
+def verb_inventory():
+    """Every top-level verb, DERIVED FROM THE PARSER that defines them.
+
+    A compacted agent that cannot remember what the tool does reaches for what it already
+    knows — `git worktree add`, a raw `claude -p`, a hand-rolled todo list — and the tool it
+    was told to use in hour one is unused by hour six. Reported exactly that way: an agent
+    several compactions deep "wasn't even using it". Naming three verbs, as the seat manifest
+    does, answers "how do I dispatch" and not "what else is there".
+
+    NEVER A HAND-WRITTEN LIST. A second enumeration of the verbs is a list that goes stale the
+    first time somebody adds one, and a stale inventory is worse than none: it teaches that the
+    missing verb does not exist. argparse already holds the only authoritative copy.
+
+    Returns [] rather than raising. whoami's one forbidden outcome is silence, so a failure
+    here must cost the inventory line and nothing else.
+    """
+    try:
+        import argparse as _argparse
+
+        from .cli import build_parser
+        for action in build_parser()._actions:
+            if isinstance(action, _argparse._SubParsersAction):
+                return sorted(action.choices)
+    except Exception:                                           # noqa: BLE001
+        pass
+    return []
+
+
+def campaign_state(cfg):
+    """WHAT THE CAMPAIGN IS DOING, counted from the graph rather than named.
+
+    "Which campaign am I on" is not answered by a name. A name is a label an agent can hold
+    and still not know whether there is work, whether it is blocked, or whether it is finished
+    — and the reported failure was an agent that had lost the campaign entirely across
+    compactions. The counts ARE the identity: 12 ready and 3 running is a different situation
+    from 0 ready and 41 closed, and an agent that knows which one it is in cannot mistake a
+    finished campaign for an idle one.
+
+    Derived every call. A cached summary is a second copy of the graph, free to disagree with
+    it, and disagreement here reads as authority because it arrives in the same breath as the
+    seat.
+
+    Returns None when the graph cannot be read, and the caller SAYS so — "cannot tell" and
+    "nothing to do" are the two answers this repo keeps collapsing.
+    """
+    try:
+        from . import graph as _graph
+
+        g = _graph.open_graph(cfg)
+        rows = g.list()
+        ready = len(g.ready())
+    except Exception:                                           # noqa: BLE001
+        return None
+    counts = {}
+    for row in rows:
+        key = (row.get("status") or "?")
+        counts[key] = counts.get(key, 0) + 1
+    return {"total": len(rows), "ready": ready, "by_status": counts}
+
+
 _SEAT_MANIFEST = {
     ORCHESTRATOR: [
         "You dispatch through the tool, never around it:",
@@ -520,8 +580,41 @@ def whoami(cfg, session=None):
     if r["campaign"]:
         out.append("  campaign: %s" % r["campaign"])
 
+    # WHAT THE CAMPAIGN IS DOING, before the seat manifest. The reported failure is an agent
+    # several compactions deep that had lost which campaign it was on and stopped using the
+    # tool at all. The seat lines answer "how do I dispatch"; they never answered "is there
+    # anything to dispatch", and an agent that cannot tell a finished campaign from an idle one
+    # has no reason to consult the tool again.
+    state = campaign_state(cfg)
+    if state is None:
+        out.append("  campaign work: THE GRAPH COULD NOT BE READ, so this cannot tell you "
+                   "whether there is work — which is not the same as there being none.")
+    elif state["total"]:
+        parts = ", ".join("%d %s" % (n, k)
+                          for k, n in sorted(state["by_status"].items(), key=lambda kv: -kv[1]))
+        out.append("  campaign work: %d leaf/leaves — %s; %d READY to dispatch now."
+                   % (state["total"], parts, state["ready"]))
+        if not state["ready"]:
+            out.append("  Nothing is ready: either the graph is finished or every ready leaf is "
+                       "claimed. `%s ready` and `%s status` say which." % (sr, sr))
+
     for line in _SEAT_MANIFEST.get(where, []):
         out.append("  " + line.replace("{sr}", sr))
+
+    # THE REST OF THE TOOL, so a compacted agent reaches for it instead of for what it already
+    # knows. Derived from the parser; see verb_inventory.
+    verbs = verb_inventory()
+    if verbs:
+        line, wrapped = "", []
+        for verb in verbs:
+            if len(line) + len(verb) + 1 > 84:
+                wrapped.append(line)
+                line = ""
+            line += (" " if line else "") + verb
+        wrapped.append(line)
+        out.append("  all %d verbs (`%s <verb> --help` for any of them):" % (len(verbs), sr))
+        for chunk in wrapped:
+            out.append("    " + chunk)
 
     if r["problems"]:
         out.append("  ROLE DEFINITIONS UNREADABLE: %s" % r["problems"][0])

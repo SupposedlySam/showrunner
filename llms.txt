@@ -71,6 +71,9 @@ off — so if you are running unattended, say that it is unarmed rather than pro
 ## If you are the ORCHESTRATOR
 
 ```
+showrunner reach                     # PreToolUse: reads a tool payload and names the showrunner
+                                     # mechanism for what it reached for. ADVICE ONLY, exit 0
+                                     # always, silent when it has nothing specific to say
 showrunner ready                     # unblocked AND unclaimed leaves — the only discovery entrypoint
 showrunner plan                      # group them into waves whose estimated file sets do not overlap
 showrunner route                     # which lane each leaf takes, and the rule that decided
@@ -509,7 +512,34 @@ SessionStart hook cannot block.
 ```
 showrunner whoami                    # SessionStart AND PostCompact  (whoami.sh)
 showrunner dispatch guard            # PreToolUse on BASH            (dispatch-guard.sh)
+showrunner reach                     # PreToolUse on Write|Edit|NotebookEdit|Bash|TodoWrite
+                                     #                               (reach-gate.sh)
 ```
+
+**`whoami` carries the campaign's STATE, not just a name.** A compacted agent that has lost which
+campaign it is on is not helped by a label; the counts are the identity. It reports how many
+leaves exist, how they are split by status, and how many are READY to dispatch right now — and
+when the graph cannot be read it says so, because "no work" and "could not look" are opposite
+facts that both render as silence. It also prints **every** verb, derived from the argparse
+parser rather than a second list that would go stale. Naming only the dispatch verbs answered
+"how do I dispatch" and nothing else, so an agent needing anything else had no reason to think
+the tool could do it.
+
+**`reach` names the mechanism at the moment of reach.** An agent that cannot remember a tool does
+not stop working — it reaches for what it already knows: `git worktree add`, a private todo list,
+a note in a memory file. Each of those produces a plausible result, which is why nothing ever
+objected. SessionStart and PostCompact announce the tool once into a window that then fills with
+other things; the moment somebody types `git worktree add` is the moment they have a specific
+intent that a specific verb serves.
+
+It is **advice and never a refusal** — every reach it names is legitimate somewhere, and a gate
+that blocks a legitimate shape trains its own bypass. It is **silent when it has nothing
+specific**, because a notice on every call is an alarm that is always on. Rules that name a
+foreign mechanism (game_loop's `harden`) carry a `requires` path and stay quiet where that
+project is absent, and every verb a rule names is checked against the parser's own list by the
+suite, so a rule pointing at a renamed verb fails the run rather than teaching that the tool
+cannot do the thing. Heredoc bodies are stripped before matching: text *about* `git worktree add`
+is not somebody running it.
 
 ### Where a ZERO is trustworthy here, and where you are on your own
 

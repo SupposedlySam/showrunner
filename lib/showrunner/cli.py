@@ -11,7 +11,7 @@ import shutil
 import sys
 
 from . import (__version__, brief, campaign, collide, config, dispatch, events, gates,
-               graph as G, harness, lanes, lease, locks, pin, roles, worktree)
+               reach, graph as G, harness, lanes, lease, locks, pin, roles, worktree)
 from .util import (RESOLVED_BASIS, Refused, die, eprint, git, now, package_root,
                    rel, resolve_from_caller, run, short_session, slug, stamp)
 
@@ -1516,6 +1516,39 @@ def cmd_dispatch_guard(args):
         return 0
     eprint(message)
     return 2
+
+
+def cmd_reach(args):
+    """PreToolUse: name the mechanism for what this call reached for. NEVER refuses.
+
+    Always exits 0. This fires on Write, Edit and Bash — the same breadth as the write guard —
+    so a bug here that exited non-zero would lock the repo against its own repair (INV5), and
+    unlike the lease guard it protects nothing by blocking. Its entire product is context.
+
+    SILENT WHEN NOTHING MATCHES, and that is the one place silence is right: this speaks only
+    when it has a specific verb for a specific intent. A notice on every call is an alarm that
+    is always on, which is the failure #71 was about — and the reader would learn to skim
+    exactly the channel this depends on.
+    """
+    payload, problem = reach.hook_payload(sys.stdin)
+    if problem:
+        # NOT a fail-open notice. A guard that could not check has to say so because something
+        # went unprotected; this one protects nothing, so an unreadable payload costs advice and
+        # announcing it would spend the reader's attention to report that nothing happened.
+        return 0
+    tool = payload.get("tool_name") or ""
+    tool_input = payload.get("tool_input") or {}
+    try:
+        cfg = _cfg(args, required=False, guard=True)
+        root, sr = cfg.root, brief.sr_bin(cfg)
+    except Exception:                                           # noqa: BLE001
+        root, sr = None, None
+    hits = reach.advise(tool, tool_input, root)
+    text = reach.render(hits, sr)
+    if text:
+        print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                                 "additionalContext": text}}))
+    return 0
 
 
 def cmd_worktree_guard(args):
@@ -3129,6 +3162,10 @@ def build_parser():
                    help="JSON on stdout — THE CONTRACT. The prose form splits its verdict across "
                         "stdout and its BLOCKED finding across both streams; build on this one")
     s.set_defaults(func=cmd_waiting)
+
+    s = sub.add_parser("reach", help="PreToolUse: name the mechanism for what a call reached "
+                                     "for; advice only, never refuses")
+    s.set_defaults(func=cmd_reach)
 
     s = sub.add_parser("baseline", help="record the current check results as the comparison point")
     s.set_defaults(func=cmd_baseline)

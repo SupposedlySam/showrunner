@@ -82,6 +82,39 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # Answering [] is the SAFE-looking direction: every call still proceeds, nothing errors, and
+    # the tool returns to exactly the state that was reported — an agent reaching for what it
+    # already knows and nothing naming the mechanism. A producer whose death restores the
+    # previous, working-looking behaviour dies invisibly, which is the whole reason this one
+    # needs a mutant rather than a test that merely reads its table.
+    # Answering "" makes every rule fail to match, which looks exactly like a repo where nobody
+    # reached for anything — the silent, healthy-looking state. This producer is also where the
+    # FIELD SCOPING lives: matching a dumped payload instead would fire on the content of a
+    # write, so its death is both "no advice" and "advice about the wrong thing".
+    ("the text a reach rule matches against", "reach._searchable", "lib/showrunner/reach.py",
+     r"(def _searchable\([^)]*\):\n)",
+     "    return \"\"\ndef _neutered_searchable(tool, tool_input):\n"),
+    # Answering "" means the hook prints nothing, which is INDISTINGUISHABLE from the silence it
+    # is supposed to keep when it has nothing to say — the identity element sitting exactly on
+    # top of the healthy case.
+    ("the advice text a reach renders", "reach.render", "lib/showrunner/reach.py",
+     r"(def render\([^)]*\):\n)",
+     "    return \"\"\ndef _neutered_render(hits, sr=None):\n"),
+    ("the mechanism for what a call reached for", "reach.advise", "lib/showrunner/reach.py",
+     r"(def advise\([^)]*\):\n)",
+     "    return []\ndef _neutered_advise(tool, tool_input, root=None):\n"),
+    # Answering {} means "no leaves", which whoami prints as a campaign with nothing in it — the
+    # confident zero this repo keeps finding. The compacted agent is told there is no work
+    # rather than told the count could not be taken.
+    ("what the campaign is doing", "roles.campaign_state", "lib/showrunner/roles.py",
+     r"(def campaign_state\([^)]*\):\n)",
+     "    return None\ndef _neutered_campaign_state(cfg):\n"),
+    # Answering [] restores the exact reported failure: the inventory silently disappears and
+    # whoami goes back to naming only the dispatch verbs, which is what left an agent with no
+    # reason to believe the tool could do anything else.
+    ("every verb the parser defines", "roles.verb_inventory", "lib/showrunner/roles.py",
+     r"(def verb_inventory\([^)]*\):\n)",
+     "    return []\ndef _neutered_verb_inventory():\n"),
     # #73, the arm that does not need a graph edge. Answering nothing restores the exact
     # reported behaviour: four Crawlers cut from whatever branch the checkout was on, with the
     # base named only in the brief\'s prose, which showrunner cannot read.

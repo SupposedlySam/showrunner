@@ -87,7 +87,7 @@ for _leaky in (_HB_ROOT, _CFG_HOME):
     atexit.register(_shutil.rmtree, _leaky, True)
 atexit.register(shutil.rmtree, _CFG_HOME, True)
 
-from showrunner import brief, campaign, collide, config, dispatch, gates, graph as G, harness, lanes, lease, locks, pin, roles, util, worktree  # noqa: E402
+from showrunner import brief, campaign, collide, config, dispatch, gates, graph as G, harness, lanes, lease, locks, pin, reach, roles, util, worktree  # noqa: E402
 from showrunner.util import Refused, boot_token as boot_token_for_test  # noqa: E402
 
 VERBOSE = "-v" in sys.argv or "--verbose" in sys.argv
@@ -7160,6 +7160,141 @@ def test_spawn_refuses_a_base_missing_a_dependency():
        "NOT CHECKED" in (p.stdout + p.stderr), p.stdout + p.stderr)
 
 
+
+def test_a_compacted_agent_is_told_what_it_forgot():
+    group("What a compacted agent gets back: the campaign's STATE and the whole verb list — "
+          "an agent that cannot remember the tool reaches for what it already knows")
+    if not have("git"):
+        skip("the re-injection group", "git is not installed")
+        return
+    cfg = make_repo()
+    g = new_graph(cfg)
+
+    # AN EMPTY GRAPH AND A BUSY ONE MUST READ DIFFERENTLY. The reported failure is an agent that
+    # had lost which campaign it was on; a line that says the same thing either way would not
+    # have told it anything, and "no campaign" and "campaign with nothing ready" are opposite
+    # situations that the previous announcement rendered identically — as silence.
+    state = roles.campaign_state(cfg)
+    eq("an empty graph reports zero leaves rather than failing to answer", state["total"], 0)
+
+    g.add("first piece of work", leaf_id="c1", labels=["backend"])
+    g.add("second piece", leaf_id="c2", labels=["backend"])
+    g.dep("c2", "c1")
+    state = roles.campaign_state(cfg)
+    eq("...and a populated graph counts every leaf", state["total"], 2)
+    eq("...and counts only what is actually dispatchable as READY — c2 is blocked by c1",
+       state["ready"], 1)
+
+    text = "\n".join(roles.whoami(cfg))
+    ok("whoami names how much work exists, which is the question 'which campaign am I on' is "
+       "actually asking", "2 leaf/leaves" in text, text[:400])
+    ok("...and how much is dispatchable right now", "1 READY" in text, text[:400])
+
+    # THE VERB INVENTORY, DERIVED. Three verbs answered "how do I dispatch" and nothing else, so
+    # an agent needing anything else had no reason to believe the tool could do it.
+    verbs = roles.verb_inventory()
+    ok("the verb inventory is derived from the parser and is not a stub", len(verbs) > 20, verbs)
+    for expected in ("spawn", "ready", "close", "doctor", "reach"):
+        ok("...and contains %s, so the list is the real one" % expected, expected in verbs)
+    ok("whoami prints the whole inventory, not a chosen few",
+       all(v in text for v in ("integrate", "reconcile", "overlap")), text[-500:])
+
+    # DERIVED, NEVER LISTED. A second copy of the verbs is one that goes stale the first time a
+    # verb is added, and a stale inventory teaches that a real verb does not exist.
+    src = open(os.path.join(ROOT, "lib", "showrunner", "roles.py")).read()
+    ok("the inventory reads the parser rather than hard-coding names",
+       "build_parser" in src and '"spawn", "ready", "close"' not in src)
+
+    # THE GRAPH BEING UNREADABLE MUST NOT READ AS 'NOTHING TO DO'. Same identity-element defect
+    # this repo keeps finding: an empty count and a failed read are opposite facts.
+    broken = make_repo()
+    dbp = os.path.join(broken.root, ".showrunner", "graph.db")
+    os.makedirs(os.path.dirname(dbp), exist_ok=True)
+    with open(dbp, "w") as fh:
+        fh.write("this is not a sqlite database")
+    ok("an unreadable graph answers None, which the caller must not print as zero",
+       roles.campaign_state(broken) is None)
+    ok("...and whoami SAYS it could not tell, rather than showing a confident zero",
+       "COULD NOT BE READ" in "\n".join(roles.whoami(broken)),
+       "\n".join(roles.whoami(broken))[:300])
+
+
+def test_reaching_for_the_wrong_thing_names_the_right_one():
+    group("When an agent reaches for what it already knows, the mechanism it should have used "
+          "is named AT THE MOMENT OF REACH — advice, never a refusal")
+    if not have("git"):
+        skip("the reach group", "git is not installed")
+        return
+    cfg = make_repo()
+    root = cfg.root
+
+    def fires(tool, tool_input, at=None):
+        return [n for n, _ in reach.advise(tool, tool_input, at if at is not None else root)]
+
+    # EACH RULE FIRES ON ITS OWN REACH.
+    ok("creating a worktree by hand names spawn",
+       "worktree-by-hand" in fires("Bash", {"command": "git worktree add .worktrees/a -b x"}))
+    ok("a private todo list beside a graph names ready",
+       "todo-beside-a-graph" in fires("TodoWrite", {"todos": []}))
+    ok("cutting a branch for parallel work names spawn",
+       "branch-for-parallel-work" in fires("Bash", {"command": "git checkout -b feature/x"}))
+
+    # THE CONTROLS. Every assertion above is equally satisfied by a rule that fires on
+    # everything, which would be an alarm that is always on — the failure #71 is about, and the
+    # one that teaches a reader to skim the channel this depends on.
+    ok("an ordinary command says nothing", fires("Bash", {"command": "ls -la"}) == [])
+    ok("an ordinary write says nothing",
+       fires("Write", {"file_path": "/tmp/notes.txt"}) == [])
+    ok("reading a file about worktrees is not creating one — the reach is the COMMAND, not the "
+       "subject", fires("Bash", {"command": "cat docs/git-worktree-add.md"}) == [])
+
+    # THE FIELD SCOPING IS THE CONTROL THAT MATTERS. Matching a dumped payload would fire on the
+    # CONTENT of a write, so a commit message mentioning a memory file would trip the memory
+    # rule. A rule about a path has to stay a rule about a path.
+    ok("a write whose CONTENT mentions memory/ but whose path does not is left alone",
+       fires("Write", {"file_path": "/tmp/x.md", "content": "notes about memory/ layout"}) == [])
+
+    # FOREIGN MECHANISMS ARE DETECTED, NEVER ASSUMED. game_loop is consumed by this repo and not
+    # shipped with it, so a repo without it must never be told to run its command.
+    mem = {"file_path": os.path.join(root, "memory", "a-lesson.md")}
+    ok("the memory rule stays SILENT where game_loop is absent, rather than naming a command "
+       "the reader does not have", fires("Write", mem) == [])
+    os.makedirs(os.path.join(root, ".game_loop", "bin"), exist_ok=True)
+    with open(os.path.join(root, ".game_loop", "bin", "game_loop"), "w") as fh:
+        fh.write("#!/bin/sh\n")
+    ok("...and speaks once it IS present", "memory-write-could-be-hardened" in fires("Write", mem))
+
+    # THE RULES NAME VERBS, AND A NAMED VERB MUST EXIST. A table pointing at a renamed verb is
+    # worse than no table: it teaches that the tool cannot do the thing.
+    verbs = set(roles.verb_inventory())
+    for name, _tools, _pat, verb, _req, message in reach.RULES:
+        if verb:
+            ok("rule %s names `%s`, which the parser still defines" % (name, verb),
+               verb in verbs, sorted(verbs)[:12])
+        for quoted in re.findall(r"`showrunner ([a-z-]+)", message):
+            ok("rule %s quotes `showrunner %s`, which still exists" % (name, quoted),
+               quoted in verbs)
+
+    # IT IS ADVICE. A gate that blocks a legitimate shape trains its own bypass, and every reach
+    # here is legitimate somewhere.
+    p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "reach"],
+                       input=json.dumps({"tool_name": "Bash",
+                                         "tool_input": {"command": "git worktree add a"}}),
+                       capture_output=True, text=True, cwd=cfg.root)
+    eq("the verb exits 0 even when it has something to say — it never denies", p.returncode, 0)
+    ok("...and says it through additionalContext, which is what reaches the agent on an allow",
+       "additionalContext" in p.stdout, p.stdout[:200])
+    ok("...and says the call is proceeding, so it is not mistaken for a refusal",
+       "proceeding" in p.stdout, p.stdout[:300])
+
+    # A PAYLOAD IT CANNOT READ COSTS ADVICE AND NOTHING ELSE.
+    p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "reach"],
+                       input="not json", capture_output=True, text=True, cwd=cfg.root)
+    eq("an unreadable payload still exits 0", p.returncode, 0)
+    eq("...and stays silent, because this protects nothing and announcing a non-event is how a "
+       "channel gets skimmed", p.stdout.strip(), "")
+
+
 def test_only_guards_may_anchor_to_their_own_checkout():
     group("the own-location fallback is GUARD-ONLY — every other verb must refuse rather than "
           "guess which repo it meant (#74)")
@@ -11457,6 +11592,8 @@ def main():
                test_hook_registration,
                test_corpus_tool,
                test_spawn_refuses_a_base_missing_a_dependency,
+               test_a_compacted_agent_is_told_what_it_forgot,
+               test_reaching_for_the_wrong_thing_names_the_right_one,
                test_only_guards_may_anchor_to_their_own_checkout,
                test_fail_open_is_counted_not_just_announced,
                test_stop_hook_heartbeat,

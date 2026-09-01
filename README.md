@@ -183,6 +183,24 @@ quiet, `reap` correctly proposes nothing. Chat is load-bearing for **correctness
 `--launch`, not a convenience. Without it, prefer `spawn` without `--launch` and drive the
 Crawlers yourself.
 
+**What a compacted agent gets back.** An agent several compactions deep had lost which campaign
+it was on and what verbs existed, and stopped using the tool at all — doing the work by hand in a
+repo carrying a live campaign. `whoami`, which runs on SessionStart **and PostCompact**, now
+carries the campaign's *state* rather than the bare fact that one exists: how many leaves, how
+they split by status, and how many are READY right now. It prints every verb, derived from the
+argparse parser rather than a hand-written list that would go stale. It previously named only
+the dispatch verbs, which answered "how do I dispatch" and nothing else.
+
+**And `reach` names the mechanism at the moment of reach.** An agent that cannot remember a tool
+does not stop working; it reaches for what it knows — `git worktree add`, a private todo list, a
+note in a memory file — and each of those produces a plausible result, which is why nothing ever
+objected. A PreToolUse hook reads the payload and, when it has something specific, says which
+verb serves that intent. It is advice and never a refusal, because every reach it names is
+legitimate somewhere and a gate that blocks a legitimate shape trains its own bypass; it is
+silent otherwise, because a notice on every call is an alarm that is always on. Rules naming
+game_loop's `harden` stay quiet in repos without game_loop, and every verb a rule names is
+verified against the parser by the suite.
+
 **A guard finds its project from its own location before it gives up.** `cwd` and
 `CLAUDE_PROJECT_DIR` used to be the only anchors, so a tool call from a scratch directory with no
 harness variable was allowed unchecked — including a raw `claude -p` — while the hook answering it

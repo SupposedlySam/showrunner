@@ -88,6 +88,15 @@
                     }
                 ],
                 "matcher": "Bash"
+            },
+            {
+                "matcher": "Write|Edit|NotebookEdit|Bash|TodoWrite",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "\"$CLAUDE_PROJECT_DIR\"/.showrunner/hooks/reach-gate.sh"
+                    }
+                ]
             }
         ],
         "SessionStart": [
