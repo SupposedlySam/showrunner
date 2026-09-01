@@ -59,6 +59,17 @@ One line per reading, newest last:
   than copied onto a page where the population moves underneath them. Contract numbers were
   VERIFIED instead of removed — `PROSE_MAX = 400` and the Python 3.7 floor both hold.
 
+- both — read whole at HEAD on 2026-09-01 — found rot that only a whole read finds: today's edits
+  had put `gc` and `reach` at the TOP of the ORCHESTRATOR block in llms.txt, above `ready`, so the
+  first thing an orchestrator read was a maintenance verb and a hook rather than "the only
+  discovery entrypoint". Both were inserted where the anchor was, not where they belong; `gc` now
+  sits beside `reap`/`reconcile` and `reach` stays in the hooks section. Also: `reach-gate.sh` was
+  missing from the hook-registration table that the surrounding prose calls "the thing that has to
+  stay right"; the trustworthy-ZERO table claimed to be complete and predated four new
+  cannot-tell-vs-none answers (the fail-open count, the worktree count, `gc`'s sizes, `whoami`'s
+  campaign counts); and llms.txt's verify block named two instruments where README's names four.
+  No drifting counts introduced — the surface check and the count check both pass.
+
 ## What a reading is
 
 Lines read end to end, in order, in one pass — not a search, not a section, not "I wrote most of

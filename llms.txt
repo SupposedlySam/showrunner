@@ -71,12 +71,6 @@ off — so if you are running unattended, say that it is unarmed rather than pro
 ## If you are the ORCHESTRATOR
 
 ```
-showrunner gc                        # remove worktrees whose branch is MERGED and whose tree is
-                                     # CLEAN. Dry-run by default; --apply performs it. Dirty,
-                                     # unreadable and unmerged trees are reported and KEPT
-showrunner reach                     # PreToolUse: reads a tool payload and names the showrunner
-                                     # mechanism for what it reached for. ADVICE ONLY, exit 0
-                                     # always, silent when it has nothing specific to say
 showrunner ready                     # unblocked AND unclaimed leaves — the only discovery entrypoint
 showrunner plan                      # group them into waves whose estimated file sets do not overlap
 showrunner route                     # which lane each leaf takes, and the rule that decided
@@ -120,6 +114,12 @@ showrunner reap                      # dry run; --apply to reclaim dead Crawlers
                                      # It also SURFACES stalled claims and never touches them:
                                      # a live process whose transcript has stopped moving. Not
                                      # even --apply reclaims one — see below.
+showrunner gc                        # remove worktrees whose branch is MERGED and whose tree is
+                                     # CLEAN. Dry-run by default; --apply performs it. Dirty,
+                                     # unreadable and unmerged trees are reported and KEPT.
+                                     # `integrate` already does this on success (--keep-trees
+                                     # opts out); gc is for the backlog and for trees whose
+                                     # leaf integrated before this existed
 showrunner reconcile                 # on resume: merged / abandoned / live / BLOCKED — ask FIRST
 showrunner amend <leaf> --premise .. # correct a CLOSED leaf's premise by SUPERSEDING it: the
                                      # original verdict stays readable, because a record that can
@@ -556,6 +556,10 @@ checked. This is the complete list, so a reader knows where the coverage stops:
 | `test/mutate.py` (0 kills) | it REFUSES on a red baseline, and computes kills as a set difference over assertion NAMES — a test that was already failing can never count as coverage |
 | `test/corpus.py` (0 fires) | it refuses to report from a gate that cannot refuse a known positive, and exits **3** so a caller reading non-zero as "there were fires" cannot read a broken sweep backwards |
 | `showrunner doctor` (no finding) | says CANNOT TELL rather than guessing when the comparand is missing — an unreadable baseline, a pin with no HEAD to compare against, a hook that has never stamped |
+| `doctor`'s fail-open count (0) | an absent ledger reads as "no guard has failed open"; one that cannot be PARSED reads as UNKNOWN. An empty read and a broken reader are the pair this repo most often collapses |
+| `doctor`'s worktree count (0) | a worktree root that cannot be listed says UNKNOWN, not none |
+| `showrunner gc` (nothing to reclaim) | it prints every tree it held back WITH the reason, so "nothing to reclaim" is distinguishable from "nothing was looked at". A tree whose SIZE could not be measured reports `?`, never `0` — `os.walk` yields nothing for a missing path, so the naive version returned a confident zero |
+| `whoami`'s campaign counts (0 leaves) | a graph that cannot be read says so instead of printing a campaign with nothing in it |
 
 **Everywhere else you are on your own.** A quiet guard, an empty grep, a check that printed
 nothing — none of those has a control behind it, and the honest reading of each is *could not
@@ -718,7 +722,7 @@ authorisation" to satisfy a word-ban has traded a visible stall for an invisible
 transcript means ALLOWED WITHOUT BEING CHECKED, like every other guard here.
 
 Both run from tracked shims under `.showrunner/hooks/`, beside `worktree-guard.sh`,
-`inert-crawler-gate.sh` and `waiting-probe.sh`.
+`inert-crawler-gate.sh`, `reach-gate.sh` and `waiting-probe.sh`.
 
 **`worktree register` does NOT wire all of them, and this sentence used to claim it did.** It
 writes the worktree guard, the inert-Crawler stop trigger, the seat announcement and the
@@ -729,6 +733,7 @@ verb gaining one, and the table below is the thing that has to stay right. It do
 |---|---|---|
 | `future-tense-gate.sh` | by hand | added after the verb; registering it is a one-line settings edit |
 | `pipeline-status-gate.sh` | by hand | same |
+| `reach-gate.sh` | by hand | same — and it is ADVICE, so a repo that does not want the nudges simply leaves it unregistered and loses nothing enforced |
 | `waiting-probe.sh` | **NOBODY — deliberately** | arming an idle watchdog is a human decision, stated forty lines above this one: *a probe an agent can set is a watchdog an agent can switch off* |
 
 The old sentence contradicted that earlier warning while sitting six hundred lines away from it,
@@ -1158,7 +1163,13 @@ what is there now. Nothing hashes the contents.
 ## Verifying the tool itself
 
 ```
-python3 test/run.py        # needs only Python 3 + git
+python3 test/run.py        # needs only Python 3 + git. Exits 3 — not 1 — when it did not run
+                           # every group it defines, so "nothing ran" and "something failed"
+                           # are different codes
+python3 test/mutate.py     # which producers anything would NOTICE if they broke. REFUSES on a
+                           # red baseline rather than computing kills against it
+python3 test/corpus.py     # the turn-end gates, fed a real transcript. Implements no predicate
+                           # of its own — it feeds the hook FILES
 bash prototype/demo.sh     # the original shell POC; it prints its own pass/skip counts
 ```
 
