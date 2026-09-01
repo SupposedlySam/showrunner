@@ -20,6 +20,14 @@ would it still hold?* And the rule showrunner adds, because its guards are cross
 guard must fail loud, never quiet.** A mutex that is silently a no-op is worse than no mutex, because
 nobody inside a single Crawler can observe the collision.
 
+**A guard resolves the repo from its own location when nothing else can (#74).** cwd and
+`CLAUDE_PROJECT_DIR` were the only two anchors, so a call made from a scratch directory with no
+harness variable went unchecked — while the shim answering it was sitting inside the project the
+whole time. That anchor is a `fallback=` parameter that ONLY the two guard verbs pass: a guard is
+asked about a call happening right now and must answer, whereas every other verb may refuse and
+must. Making it global made `showrunner ready` from a scratch directory quietly report on
+showrunner's own checkout — a wrong answer shaped exactly like a right one, caught by the suite.
+
 **"Loud" is a property of the channel, not of the wording.** A guard that degrades prints a notice
 saying so — and that notice arrives as hook output beside a SUCCESSFUL tool result, which is the
 channel an agent concentrating on something else skims. The person who reported this said it about

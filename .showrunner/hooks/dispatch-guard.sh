@@ -42,11 +42,21 @@ if [ -z "$common" ] && [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
   common="$(git -C "$CLAUDE_PROJECT_DIR" rev-parse --git-common-dir 2>/dev/null)" || common=""
   [ -n "$common" ] && anchor="$CLAUDE_PROJECT_DIR"
 fi
+# #74: LOCATE A BINARY, DO NOT DECIDE A REPO. When neither cwd nor the harness
+# resolves, this used to notice and exit, so the shared Python resolver was never
+# reached and could not apply its own last anchor. A hook file lives inside the
+# project, so it can find a binary to ASK — and asking is all it does: WHICH repo
+# that binary guards stays entirely inside util._root_anchors, the one resolver both
+# entrypoints share. Deciding a root here is how the shim and the CLI disagreed once.
+near=0
 if [ -z "$common" ]; then
-  notice "⚠ THE DISPATCH GUARD DID NOT RUN — neither the working directory nor CLAUDE_PROJECT_DIR resolves to a git repository, so this call was ALLOWED WITHOUT BEING CHECKED. A raw \`claude -p\` would skip the worktree, the lease, the claim and the room. Check: showrunner doctor"
+  root="$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)" || root=""
+  near=1
 fi
-case "$common" in /*) ;; *) common="$anchor/$common" ;; esac
-root="$(cd "$(dirname "$common")" 2>/dev/null && pwd)" || root=""
+if [ "$near" = 0 ]; then
+  case "$common" in /*) ;; *) common="$anchor/$common" ;; esac
+  root="$(cd "$(dirname "$common")" 2>/dev/null && pwd)" || root=""
+fi
 
 for candidate in "$root/.showrunner_self/bin/showrunner" \
                  "$root/.showrunner/bin/showrunner" \
@@ -66,4 +76,8 @@ for candidate in "$root/.showrunner_self/bin/showrunner" \
   fi
 done
 
+
+if [ "$near" = 1 ]; then
+  notice "⚠ THE DISPATCH GUARD DID NOT RUN — neither the working directory nor CLAUDE_PROJECT_DIR resolves to a git repository, so this call was ALLOWED WITHOUT BEING CHECKED. A raw \`claude -p\` would skip the worktree, the lease, the claim and the room. Check: showrunner doctor"
+fi
 notice "⚠ THE DISPATCH GUARD DID NOT RUN — no showrunner binary was found under the main checkout, so this call was ALLOWED WITHOUT BEING CHECKED. Check: showrunner doctor"

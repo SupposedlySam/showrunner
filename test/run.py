@@ -2890,16 +2890,31 @@ def test_guards_anchor_off_cwd():
            "works rather than the shell where it stands" % name,
            "DID NOT RUN" not in said, said[:170])
 
-        blind = subprocess.run(["bash", shim], cwd=outside, input=payload,
-                               capture_output=True, text=True,
-                               env={k: v for k, v in os.environ.items()
-                                    if k != "CLAUDE_PROJECT_DIR"})
+        # #74 CHANGED WHAT "NO ANCHOR" MEANS. This used to run the IN-REPO shim with the
+        # environment stripped and call that anchorless. It is not: the shim is sitting in the
+        # project the whole time, and overlooking that is the defect #74 reported. The control
+        # is still a control — a guard that genuinely cannot answer must still say so — but it
+        # needs a shim that is genuinely nowhere, which is a copy outside any repo.
+        env_blind = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+        in_repo = subprocess.run(["bash", shim], cwd=outside, input=payload,
+                                 capture_output=True, text=True, env=env_blind)
+        ok("%s resolves from its OWN LOCATION when cwd and the harness both answer nothing — "
+           "the shim was inside the project the entire time" % name,
+           "DID NOT RUN" not in (in_repo.stdout + in_repo.stderr),
+           (in_repo.stdout + in_repo.stderr)[:170])
+
+        loose_dir = os.path.join(tmpdir("guard-anchor-loose"), "sub", "hooks")
+        os.makedirs(loose_dir, exist_ok=True)
+        loose = os.path.join(loose_dir, name)
+        shutil.copy(shim, loose)
+        blind = subprocess.run(["bash", loose], cwd=outside, input=payload,
+                               capture_output=True, text=True, env=env_blind)
         blind_said = blind.stdout + blind.stderr
         # THE POSITIVE CONTROL. Every assertion above is equally satisfied by a guard that has
         # stopped failing open at all -- including one broken to refuse nothing and say nothing.
         # With no anchor there IS no question this guard can answer, and it must still say so.
-        ok("...and with NO anchor at all it still fails open and SAYS it was not checked — the "
-           "fix narrows when that happens, it does not remove it",
+        ok("...and with NO anchor at all — a shim outside any repo — it still fails open and "
+           "SAYS it was not checked; the fix narrows when that happens, it does not remove it",
            "ALLOWED WITHOUT BEING CHECKED" in blind_said, blind_said[:170])
         ok("...and the notice names BOTH things it tried, so the remedy is not a guess",
            "CLAUDE_PROJECT_DIR" in blind_said, blind_said[:170])
@@ -6184,9 +6199,24 @@ def test_guard_entrypoints_agree():
 
     env_bare = dict(os.environ)
     env_bare.pop("CLAUDE_PROJECT_DIR", None)
-    shim_out = context_of(subprocess.run(["bash", shim], input=payload, cwd=outside,
+    # BOTH COPIES LIVE OUTSIDE ANY REPO (#74). This used to run the in-repo shim and the
+    # in-repo binary with the environment stripped and call that "no anchor". It is not: both
+    # are sitting in the project, and each now resolves from its own location — which is the
+    # hole #74 reported. The DETECTOR this test exists to be is unchanged: the two entrypoints
+    # must word the fail-open identically, so a future divergence breaks a check instead of
+    # waiting for somebody to notice. Only the fixture moved, to a place where neither can
+    # answer, because that is the only place the sentence is still reachable.
+    loose = tmpdir("guard-wording-loose")
+    loose_shim = os.path.join(loose, "sub", "hooks", "dispatch-guard.sh")
+    os.makedirs(os.path.dirname(loose_shim), exist_ok=True)
+    shutil.copy(shim, loose_shim)
+    shutil.copytree(os.path.join(ROOT, "lib"), os.path.join(loose, "lib"))
+    os.makedirs(os.path.join(loose, "bin"), exist_ok=True)
+    loose_sr = os.path.join(loose, "bin", "showrunner")
+    shutil.copy(sr, loose_sr)
+    shim_out = context_of(subprocess.run(["bash", loose_shim], input=payload, cwd=outside,
                                          capture_output=True, text=True, env=env_bare))
-    cli_out = context_of(subprocess.run([sys.executable, sr, "dispatch", "guard"],
+    cli_out = context_of(subprocess.run([sys.executable, loose_sr, "dispatch", "guard"],
                                         input=payload, cwd=outside, capture_output=True,
                                         text=True, env=env_bare))
     ok("the shim's fail-open sentence names BOTH anchors it tried, so a reader can tell "
@@ -7128,6 +7158,46 @@ def test_spawn_refuses_a_base_missing_a_dependency():
        "strength of not having looked", p.returncode, 0)
     ok("...but it is still said out loud, rather than passing silently",
        "NOT CHECKED" in (p.stdout + p.stderr), p.stdout + p.stderr)
+
+
+def test_only_guards_may_anchor_to_their_own_checkout():
+    group("the own-location fallback is GUARD-ONLY — every other verb must refuse rather than "
+          "guess which repo it meant (#74)")
+    if not have("git"):
+        skip("the guard-only anchor group", "git is not installed")
+        return
+    outside = tmpdir("guard-only-outside")            # deliberately NOT a git repo
+    sr = os.path.join(ROOT, "bin", "showrunner")
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+
+    def run_verb(*argv, **kw):
+        return subprocess.run([sys.executable, sr] + list(argv), cwd=outside,
+                              capture_output=True, text=True, env=env, **kw)
+
+    # A GUARD IS ASKED ABOUT A CALL HAPPENING RIGHT NOW and has to answer something.
+    p = run_verb("dispatch", "guard",
+                 input='{"tool_name":"Bash","tool_input":{"command":"claude -p \\"w\\""}}')
+    ok("a guard verb resolves from the checkout it runs out of, rather than failing open beside "
+       "a repo it is sitting in", "DID NOT RUN" not in (p.stdout + p.stderr),
+       (p.stdout + p.stderr)[:170])
+
+    # EVERY OTHER VERB IS ASKED A QUESTION IT MAY REFUSE, AND MUST. Making the anchor global
+    # rather than a guard-only parameter made `ready` from a scratch directory quietly answer
+    # about showrunner's OWN checkout — a wrong answer that looks exactly like a right one. The
+    # suite caught it, which is why this pair is here rather than a comment.
+    p = run_verb("ready")
+    eq("a NON-guard verb outside any repo still REFUSES — the fallback must not turn 'cannot "
+       "resolve' into a guess about whichever repo the binary lives in", p.returncode, 2)
+    ok("...and says why, rather than answering about the wrong repo",
+       "not inside a git repository" in (p.stdout + p.stderr), (p.stdout + p.stderr)[:170])
+
+    # THE PAIR FOR THE REFUSAL: the same verb from inside a repo answers normally, so the
+    # assertion above is not satisfied by a verb that refuses everywhere.
+    cfg = make_repo()
+    p = subprocess.run([sys.executable, sr, "ready"], cwd=cfg.root, capture_output=True,
+                       text=True, env=env)
+    eq("...while the same verb inside a repo answers normally", p.returncode, 0)
+
 
 def test_fail_open_is_counted_not_just_announced():
     group("A fail-open notice arrives beside a SUCCESSFUL result — so something downstream "
@@ -11296,6 +11366,7 @@ def main():
                test_hook_registration,
                test_corpus_tool,
                test_spawn_refuses_a_base_missing_a_dependency,
+               test_only_guards_may_anchor_to_their_own_checkout,
                test_fail_open_is_counted_not_just_announced,
                test_stop_hook_heartbeat,
                test_every_shipped_hook_parses,

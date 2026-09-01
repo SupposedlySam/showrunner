@@ -12,17 +12,24 @@ import sys
 
 from . import (__version__, brief, campaign, collide, config, dispatch, events, gates,
                graph as G, harness, lanes, lease, locks, pin, roles, worktree)
-from .util import (RESOLVED_BASIS, Refused, die, eprint, git, now, rel,
-                   resolve_from_caller, run, short_session, slug, stamp)
+from .util import (RESOLVED_BASIS, Refused, die, eprint, git, now, package_root,
+                   rel, resolve_from_caller, run, short_session, slug, stamp)
 
 BOLD, DIM, RED, GRN, YEL, OFF = "\033[1m", "\033[2m", "\033[31m", "\033[32m", "\033[33m", "\033[0m"
 if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
     BOLD = DIM = RED = GRN = YEL = OFF = ""
 
 
-def _cfg(args, required=True):
-    cfg = config.load(required=required)
-    return cfg
+def _cfg(args, required=True, guard=False):
+    """`guard=True` lets the resolver fall back to the checkout this code runs from (#74).
+
+    ONLY the guards. A guard is asked about a tool call happening right now and has to answer;
+    every other verb is asked a question it may refuse, and refusing beats answering about
+    whichever repo the binary happens to live in. Making that anchor global made `ready` from a
+    scratch directory quietly report on showrunner's own checkout, which the suite catches.
+    """
+    return config.load(required=required,
+                       fallback=package_root() if guard else None)
 
 
 def _graph(cfg):
@@ -1488,7 +1495,7 @@ def cmd_dispatch_guard(args):
             "so this tool call was ALLOWED WITHOUT BEING CHECKED. A raw `claude -p` would skip "
             "the worktree, the lease, the claim and the room." % problem)
     try:
-        cfg = _cfg(args)
+        cfg = _cfg(args, guard=True)
         session = (args.session or payload.get("session_id")
                    or os.environ.get("SHOWRUNNER_SESSION") or "")
         tool = payload.get("tool_name") or ""
@@ -1537,7 +1544,7 @@ def cmd_worktree_guard(args):
             "live session is NOT protected right now. Check `showrunner doctor`." % problem)
 
     try:
-        cfg = _cfg(args)
+        cfg = _cfg(args, guard=True)
         session = (args.session or payload.get("session_id")
                    or os.environ.get("SHOWRUNNER_SESSION") or "")
         tool = args.tool or payload.get("tool_name") or ""

@@ -467,14 +467,24 @@ def repo_root(start=None):
     return out.strip()
 
 
-def main_checkout(start=None):
+def package_root():
+    """The checkout this code is running out of. ONLY the guards may anchor to it (#74).
+
+    A guard must answer about a call happening right now; every other verb may — and must —
+    refuse rather than guess which repo it meant. Kept here beside the resolver so the two
+    facts sit together, rather than in whichever caller needed it first.
+    """
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def main_checkout(start=None, fallback=None):
     """The MAIN checkout, even when called from inside a linked worktree.
 
     A worktree's `--show-toplevel` is the worktree; its `--git-common-dir` points at the
     main checkout's `.git`. Config, locks and the campaign record must resolve to ONE
     place for every Crawler (INV8), so they key off this rather than off the cwd.
     """
-    for anchor in _root_anchors(start):
+    for anchor in _root_anchors(start, fallback):
         rc, out, _ = git(["rev-parse", "--git-common-dir"], cwd=anchor)
         if rc != 0:
             found = repo_root(anchor)
@@ -492,7 +502,7 @@ def main_checkout(start=None):
     return None
 
 
-def _root_anchors(start):
+def _root_anchors(start, fallback=None):
     """Where to look for the repo, in order: the caller's choice, then the HARNESS.
 
     CWD IS NOT A PROXY FOR WHAT A GUARD PROTECTS. Resolving only from cwd made showrunner's
@@ -509,9 +519,20 @@ def _root_anchors(start):
 
     Fixed in the ONE resolver every entrypoint shares, so the two cannot disagree again — the
     repair the reporter asked for, rather than a second copy of the fallback.
+
+    `fallback` IS LAST, AND ONLY THE GUARDS PASS ONE (#74). A guard is asked about a call that
+    is happening right now and must answer something; every other verb is asked a question it
+    is allowed to refuse, and MUST refuse rather than guess — `showrunner ready` run from a
+    scratch directory has to say it cannot find a repo, never quietly answer about whichever
+    checkout the binary happens to live in. Making this anchor global did exactly that, and the
+    suite caught it: "the fallback did not turn 'cannot resolve' into a guess" is an assertion.
+
+    So the anchor is a PARAMETER, not a fourth default. It is last, so it speaks only after
+    every anchor that actually knows has declined, and under a central install the package root
+    simply is not a git repo, which leaves the fail-open exactly as it was.
     """
     seen, out = set(), []
-    for cand in (start, os.getcwd(), os.environ.get("CLAUDE_PROJECT_DIR")):
+    for cand in (start, os.getcwd(), os.environ.get("CLAUDE_PROJECT_DIR"), fallback):
         if cand and cand not in seen and os.path.isdir(cand):
             seen.add(cand)
             out.append(cand)

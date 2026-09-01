@@ -183,6 +183,14 @@ quiet, `reap` correctly proposes nothing. Chat is load-bearing for **correctness
 `--launch`, not a convenience. Without it, prefer `spawn` without `--launch` and drive the
 Crawlers yourself.
 
+**A guard finds its project from its own location before it gives up.** `cwd` and
+`CLAUDE_PROJECT_DIR` used to be the only anchors, so a tool call from a scratch directory with no
+harness variable was allowed unchecked — including a raw `claude -p` — while the hook answering it
+was inside the project the entire time. The fallback is a parameter only the guard verbs pass,
+because a guard must answer about a call happening now while every other verb may refuse; making it
+global turned `ready` outside a repo into a quiet answer about showrunner's own checkout. A shim
+genuinely outside any repo still fails open and still says so.
+
 **A guard that fails open is COUNTED, not just announced.** When a guard cannot do its check —
 no repo, unreadable config — it allows the call and prints a notice saying it did not check. That
 was already true, and it was quiet anyway: the notice arrives beside a *successful* tool result,

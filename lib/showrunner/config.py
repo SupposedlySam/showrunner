@@ -521,15 +521,15 @@ def user_layer(path=None):
     return data
 
 
-def find_root(start=None):
-    root = main_checkout(start)
+def find_root(start=None, fallback=None):
+    root = main_checkout(start, fallback)
     if not root:
         die("not inside a git repository — showrunner orchestrates a repo", code=2)
     return root
 
 
-def load(start=None, required=False, campaign=None):
-    root = find_root(start)
+def load(start=None, required=False, campaign=None, fallback=None):
+    root = find_root(start, fallback)
     # BOTH DERIVED FROM THE SAME START DIR, which is what makes their difference meaningful:
     # `root` walks to the main checkout, `tree` stays where the caller stands, so `root != tree`
     # is precisely "this caller is in a linked worktree" with no second git call at the point of

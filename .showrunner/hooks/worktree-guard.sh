@@ -67,19 +67,29 @@ if [ -z "$common" ] && [ -n "${CLAUDE_PROJECT_DIR:-}" ]; then
   common="$(git -C "$CLAUDE_PROJECT_DIR" rev-parse --git-common-dir 2>/dev/null)" || common=""
   [ -n "$common" ] && anchor="$CLAUDE_PROJECT_DIR"
 fi
+# #74: LOCATE A BINARY, DO NOT DECIDE A REPO. When neither cwd nor the harness
+# resolves, this used to notice and exit, so the shared Python resolver was never
+# reached and could not apply its own last anchor. A hook file lives inside the
+# project, so it can find a binary to ASK — and asking is all it does: WHICH repo
+# that binary guards stays entirely inside util._root_anchors, the one resolver both
+# entrypoints share. Deciding a root here is how the shim and the CLI disagreed once.
+near=0
 if [ -z "$common" ]; then
-  notice "⚠ THE WORKTREE GUARD DID NOT RUN — neither the working directory nor CLAUDE_PROJECT_DIR resolves to a git repository, so this tool call was ALLOWED WITHOUT BEING CHECKED. A worktree held by another live session is NOT protected. Check: showrunner doctor"
+  root="$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)" || root=""
+  near=1
 fi
 
 # --git-common-dir answers relatively (\".git\") when the cwd is the repo root, so resolve it
 # against the ANCHOR it was computed in before taking its parent. Skipping this made the root's
 # parent the repo — and using $PWD here after resolving via CLAUDE_PROJECT_DIR would reintroduce
 # the same bug from the other direction.
-case "$common" in
-  /*) ;;
-   *) common="$anchor/$common" ;;
-esac
-root="$(cd "$(dirname "$common")" 2>/dev/null && pwd)" || root=""
+if [ "$near" = 0 ]; then
+  case "$common" in
+    /*) ;;
+     *) common="$anchor/$common" ;;
+  esac
+  root="$(cd "$(dirname "$common")" 2>/dev/null && pwd)" || root=""
+fi
 
 # THE SAME ORDER brief.sr_bin resolves in, and deliberately not a second resolver: a
 # self-vendored PINNED copy first (see .showrunner_self — code a mid-edit cannot break), then
@@ -109,4 +119,8 @@ for candidate in "$root/.showrunner_self/bin/showrunner" \
   fi
 done
 
+
+if [ "$near" = 1 ]; then
+  notice "⚠ THE WORKTREE GUARD DID NOT RUN — neither the working directory nor CLAUDE_PROJECT_DIR resolves to a git repository, so this tool call was ALLOWED WITHOUT BEING CHECKED. A worktree held by another live session is NOT protected. Check: showrunner doctor"
+fi
 notice "⚠ THE WORKTREE GUARD DID NOT RUN — no showrunner binary was found (looked for .showrunner/bin/showrunner and bin/showrunner under the main checkout), so this tool call was ALLOWED WITHOUT BEING CHECKED. A worktree held by another live session is NOT protected. Check: showrunner doctor"
