@@ -27,6 +27,7 @@ import argparse
 
 import ast
 import filecmp
+import glob
 import hashlib
 import json
 import re
@@ -7551,9 +7552,130 @@ def test_stop_hook_heartbeat():
 
 
 
+def test_embedded_code_inside_hooks_is_checked_too():
+    group("A hook that EMBEDS Python is not verified by `bash -n` — a syntax checker cannot see "
+          "inside anything it treats as data")
+    if not have("bash"):
+        skip("the embedded-code group", "bash is not installed")
+        return
+
+    # REPORTED BY game_loop's owner, PROVEN HERE BEFORE ACTING. A checker that does not execute
+    # cannot see inside a heredoc, a quoted template, or an embedded script of another language.
+    # Code written into that region is invisible to it, and a clean check reads as a verified
+    # file. Measured: breaking the Python inside whoami.sh's heredoc leaves `bash -n` PASSING,
+    # and the hook then exits 1 having printed no JSON at all — which for a SessionStart hook is
+    # the entire failure, because its one forbidden outcome is silence.
+    #
+    # That is the exact gap in test_every_REGISTERED_hook_parses, which shipped hours earlier
+    # and whose prose claimed more than `bash -n` can deliver. The claim is corrected there.
+    hooks = sorted(glob.glob(os.path.join(ROOT, ".showrunner", "hooks", "*.sh")))
+    ok("there are hooks to examine, so this is not passing over an empty set", len(hooks) >= 4)
+
+    # DERIVED FROM THE FILES, never a list of which hooks embed Python — such a list goes stale
+    # the first time one gains or loses a block, and staleness here reads as coverage.
+    heredoc = re.compile(r"python3?[^\n]*<<-?\s*['\"]?(\w+)['\"]?\n(.*?)^\1$", re.S | re.M)
+    # THE SHELL'S OWN APOSTROPHE ESCAPE, or this truncates mid-string and reports the fragment
+    # as broken Python. `'"'"'` closes the quoted string, emits a literal apostrophe and reopens
+    # it — the idiom every non-trivial `-c` block uses, and pipeline-status-gate.sh uses it in
+    # prose. A naive non-greedy match stopped at the first quote and called the offcut a syntax
+    # error: a check crying wolf about the file it is verifying is worse than no check, because
+    # the next real failure reads as the same noise.
+    dash_c = re.compile(r"""python3?\s+-\s*c\s+'((?:[^']|'"'"')*)'""", re.S)
+    examined = 0
+    for path in hooks:
+        with open(path) as fh:
+            body = fh.read()
+        blocks = [m.group(2) for m in heredoc.finditer(body)]
+        blocks += [m.group(1).replace(chr(39) + '"' + chr(39) + '"' + chr(39), chr(39))
+                   for m in dash_c.finditer(body)]
+        for i, block in enumerate(blocks):
+            examined += 1
+            try:
+                ast.parse(block)
+                bad = ""
+            except SyntaxError as exc:
+                bad = "%s (line %s)" % (exc.msg, exc.lineno)
+            ok("%s: embedded Python block %d parses — `bash -n` treats this region as DATA and "
+               "passes over whatever it contains" % (os.path.basename(path), i + 1), not bad, bad)
+    ok("...and blocks were actually found, so a change in how hooks embed Python fails here "
+       "rather than quietly reducing this to a no-op", examined >= 3, examined)
+
+
+def test_hooks_that_must_speak_are_driven_and_not_merely_parsed():
+    group("The hooks whose one forbidden outcome is SILENCE are RUN against a payload that must "
+          "produce output — the only honest verification of an embedded language")
+    if not have("bash") or not have("git"):
+        skip("the drive-the-hook group", "bash and git are needed")
+        return
+
+    # THE OTHER HALF, and the one owner argues is the only honest one: drive the artifact and
+    # assert on what comes out, not on what the source parses to. A static check that sees into
+    # the heredoc still cannot say the hook WORKS — only that its text is well-formed. These
+    # payloads are chosen so that silence is definitely wrong.
+    env = dict(os.environ, CLAUDE_PROJECT_DIR=ROOT)
+
+    def drive(name, payload):
+        return subprocess.run(["bash", os.path.join(ROOT, ".showrunner", "hooks", name)],
+                              input=payload, capture_output=True, text=True, cwd=ROOT, env=env)
+
+    # whoami announces the seat on SessionStart and PostCompact and has no "nothing to say" case
+    # by construction — every failure path inside it still prints something.
+    p = drive("whoami.sh", "{}")
+    ok("whoami.sh produces output for an empty payload — silence is the one outcome it is not "
+       "allowed to have", bool(p.stdout.strip()), (p.stdout[:120], p.stderr[:200]))
+    try:
+        ctx = json.loads(p.stdout)["hookSpecificOutput"]["additionalContext"]
+    except Exception:                                            # noqa: BLE001
+        ctx = ""
+    ok("...and it is JSON carrying additionalContext, which is what actually reaches the agent",
+       bool(ctx), p.stdout[:200])
+    ok("...and it names the seat, so the announcement carries the fact it exists to carry",
+       any(w in ctx.upper() for w in ("ORCHESTRATOR", "CRAWLER", "SOLO", "COULD NOT")), ctx[:200])
+
+    # THE PROOF THAT THIS SEES WHAT `bash -n` CANNOT. A copy with its embedded Python broken
+    # still parses as shell; driving it is what catches it. Without this pair, every assertion
+    # above is equally satisfied by a suite that never noticed a broken block at all.
+    broken_dir = tmpdir("hook-embedded-broken")
+    broken = os.path.join(broken_dir, "whoami.sh")
+    with open(os.path.join(ROOT, ".showrunner", "hooks", "whoami.sh")) as fh:
+        src = fh.read()
+    with open(broken, "w") as fh:
+        fh.write(src.replace("import json, sys", "import json, sys\nthis is not python("))
+    parsed = subprocess.run(["bash", "-n", broken], capture_output=True, text=True)
+    eq("a hook whose EMBEDDED Python is broken still passes `bash -n` — the blind spot, "
+       "measured rather than asserted", parsed.returncode, 0)
+    run_broken = subprocess.run(["bash", broken], input="{}", capture_output=True, text=True,
+                                cwd=ROOT, env=env)
+    ok("...and driving it is what catches it: it prints no JSON at all",
+       not run_broken.stdout.strip(), run_broken.stdout[:160])
+
+    # pipeline-status-gate's whole job is to notice `$?` after a pipe. This is the shape it was
+    # built for, so silence here means the embedded Python did not run.
+    p = drive("pipeline-status-gate.sh",
+              json.dumps({"tool_name": "Bash",
+                          "tool_input": {"command": "ls | head -3; echo done=$?"}}))
+    ok("pipeline-status-gate.sh speaks on the exact shape it exists to catch",
+       "additionalContext" in p.stdout, (p.stdout[:120], p.stderr[:200]))
+
+    p = drive("reach-gate.sh",
+              json.dumps({"tool_name": "Bash",
+                          "tool_input": {"command": "git worktree add .worktrees/x -b y"}}))
+    ok("reach-gate.sh speaks on the reach it exists to name",
+       "additionalContext" in p.stdout, (p.stdout[:120], p.stderr[:200]))
+
+    # THE CONTROL. Every assertion above is satisfied by a hook that emits on EVERYTHING, which
+    # is an alarm that is always on — the specific way an advisory gate stops being read.
+    p = drive("pipeline-status-gate.sh",
+              json.dumps({"tool_name": "Bash", "tool_input": {"command": "echo hello"}}))
+    eq("...while an ordinary command draws nothing from the pipeline gate", p.stdout.strip(), "")
+    p = drive("reach-gate.sh",
+              json.dumps({"tool_name": "Bash", "tool_input": {"command": "echo hello"}}))
+    eq("...and nothing from the reach gate either", p.stdout.strip(), "")
+
+
 def test_every_REGISTERED_hook_parses():
-    group("Every hook THIS REPO ACTUALLY REGISTERS parses — shipped-by-install.sh and "
-          "registered-in-settings are two different sets, and only one was checked")
+    group("Every hook THIS REPO ACTUALLY REGISTERS parses AS SHELL — narrower than it sounds, "
+          "because `bash -n` cannot see inside a heredoc")
     if not have("bash"):
         skip("the registered-hook parse group", "bash is not installed")
         return
@@ -7575,6 +7697,15 @@ def test_every_REGISTERED_hook_parses():
     # written, and `verify` runs it before a commit — so a broken hook cannot be COMMITTED, and
     # cannot reach a consumer. The transient local lockout stays possible, and the only guard
     # against it is `bash -n` on a copy before installing, which is discipline, not mechanism.
+    #
+    # AND `bash -n` CANNOT SEE INSIDE A HEREDOC, which narrows this further than its first
+    # wording implied. Reported by game_loop's owner and measured here: a checker that does not
+    # execute treats an embedded region as DATA, so Python written into one is invisible and a
+    # clean check reads as a verified file. Breaking the Python inside whoami.sh leaves THIS
+    # assertion green while the hook exits 1 printing nothing at all. So this covers the SHELL
+    # text only; test_embedded_code_inside_hooks_is_checked_too parses what is inside those
+    # regions, and test_hooks_that_must_speak_are_driven_and_not_merely_parsed drives the hooks
+    # against payloads where silence is wrong — the only honest check of an embedded language.
     settings = os.path.join(ROOT, ".claude", "settings.json")
     if not os.path.isfile(settings):
         skip("the registered-hook parse group", "this repo has no .claude/settings.json")
@@ -11597,6 +11728,8 @@ def main():
                test_only_guards_may_anchor_to_their_own_checkout,
                test_fail_open_is_counted_not_just_announced,
                test_stop_hook_heartbeat,
+               test_embedded_code_inside_hooks_is_checked_too,
+               test_hooks_that_must_speak_are_driven_and_not_merely_parsed,
                test_every_REGISTERED_hook_parses,
                test_every_shipped_hook_parses,
                test_pipeline_status_gate,
