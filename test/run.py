@@ -7415,6 +7415,97 @@ def test_stop_hook_heartbeat():
            os.path.exists(redirected) and os.path.getsize(redirected) > 0)
 
 
+
+def test_every_REGISTERED_hook_parses():
+    group("Every hook THIS REPO ACTUALLY REGISTERS parses — shipped-by-install.sh and "
+          "registered-in-settings are two different sets, and only one was checked")
+    if not have("bash"):
+        skip("the registered-hook parse group", "bash is not installed")
+        return
+
+    # THE COMPANION TO test_every_shipped_hook_parses, not a replacement. That one derives its
+    # list from install.sh, which is the right source for "what a consumer receives". It is the
+    # wrong source for "what runs here": .claude/settings.json registers hooks install.sh does
+    # not ship, and a parse error in one of those is invisible to the shipped-list check.
+    #
+    # WHY A PARSE ERROR IS THE WORST CASE AND NOT MERELY ONE OF THEM. Measured today, at cost:
+    # an unclosed `if` in worktree-guard.sh made bash fail to parse the file, and as a
+    # PreToolUse hook that refuses Bash, Edit AND Write, so no tool available to this session
+    # could repair the file that was doing the refusing. A human ran `git checkout` by hand.
+    # Every fail-open path in that hook is downstream of parsing and none of them ran — its
+    # header promises a hook cannot lock the repo against its own repair, and a syntax error is
+    # exactly the case that promise does not cover.
+    #
+    # THIS CANNOT PREVENT THAT LOCKOUT, and saying so is the point. It runs after a file is
+    # written, and `verify` runs it before a commit — so a broken hook cannot be COMMITTED, and
+    # cannot reach a consumer. The transient local lockout stays possible, and the only guard
+    # against it is `bash -n` on a copy before installing, which is discipline, not mechanism.
+    settings = os.path.join(ROOT, ".claude", "settings.json")
+    if not os.path.isfile(settings):
+        skip("the registered-hook parse group", "this repo has no .claude/settings.json")
+        return
+    with open(settings) as fh:
+        data = json.load(fh)
+
+    # DERIVED FROM THE REGISTRATION, never listed here — a second list is how one goes stale,
+    # which is the defect this file keeps finding elsewhere.
+    commands = []
+    for event, entries in (data.get("hooks") or {}).items():
+        for entry in entries or []:
+            for hook in entry.get("hooks") or []:
+                cmd = hook.get("command") or ""
+                if cmd:
+                    commands.append((event, cmd))
+    ok("the registration is readable and non-empty, so this check has a population rather than "
+       "vacuously passing over nothing", bool(commands), len(commands))
+
+    checked = 0
+    for event, cmd in commands:
+        # The registered command is a shell string. Take the first token that names a real file
+        # under this repo; anything else (a bare verb, another tool's binary) is not ours to
+        # parse and is skipped rather than guessed at.
+        # THE WHOLE PATH, not a whitespace token. `"$CLAUDE_PROJECT_DIR"/.showrunner/hooks/x.sh`
+        # splits into the bare variable and the remainder once the quotes go, and the variable
+        # alone resolves to the repo ROOT — a directory, which then failed the exists check for
+        # every hook at once. A check that reports ten failures with an empty filename is
+        # reporting on its own parsing, not on the thing under test.
+        for rel_path in re.findall(r'\$CLAUDE_PROJECT_DIR"?(/[^\s"]+)', cmd):
+            path = os.path.join(ROOT, rel_path.lstrip("/"))
+            # ONLY THIS REPO'S OWN HOOKS. .claude/settings.json also registers game_loop's
+            # binaries, which are Python with no .py suffix — feeding those to `bash -n` failed
+            # them all and would have made this check a standing complaint about another
+            # project's files. Own the check at the layer that owns the thing checked.
+            if os.path.join(".showrunner", "hooks") not in path:
+                continue
+            if not os.path.isfile(path):
+                ok("%s registers %s, which EXISTS — registered-and-absent is worse than "
+                   "unregistered, because registration is what makes it look present"
+                   % (event, os.path.basename(path)), False, path)
+                continue
+            checked += 1
+            # THE SHEBANG DECIDES THE PARSER, not the extension. issue-waker.py carries one and
+            # a hook without a suffix would otherwise be guessed at — which is how game_loop's
+            # `watchdog` came to be parsed as bash.
+            with open(path) as _hf:
+                first = _hf.readline()
+            if path.endswith(".py") or "python" in first:
+                try:
+                    with open(path) as _hf:
+                        ast.parse(_hf.read())
+                    bad = ""
+                except (SyntaxError, OSError, ValueError) as exc:      # noqa: BLE001
+                    bad = str(exc)
+            else:
+                proc = subprocess.run(["bash", "-n", path], capture_output=True, text=True)
+                bad = proc.stderr.strip() if proc.returncode != 0 else ""
+            ok("%s hook %s parses — a PreToolUse hook that does not refuses every Bash, Edit "
+               "and Write, including the one that would repair it"
+               % (event, os.path.basename(path)), not bad, bad[:200])
+
+    ok("...and the check actually parsed something, so a registration this could not read "
+       "fails here rather than passing as 'nothing to check'", checked >= 3, checked)
+
+
 def test_every_shipped_hook_parses():
     group("Every hook install.sh ships is SYNTACTICALLY VALID — a broken one is not caught by "
           "anything else in this suite")
@@ -11369,6 +11460,7 @@ def main():
                test_only_guards_may_anchor_to_their_own_checkout,
                test_fail_open_is_counted_not_just_announced,
                test_stop_hook_heartbeat,
+               test_every_REGISTERED_hook_parses,
                test_every_shipped_hook_parses,
                test_pipeline_status_gate,
                test_issue_waker,
