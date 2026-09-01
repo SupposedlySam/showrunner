@@ -7162,6 +7162,139 @@ def test_spawn_refuses_a_base_missing_a_dependency():
 
 
 
+def test_a_worktree_is_reclaimed_when_its_work_lands():
+    group("A merged, clean worktree is reclaimed — and nothing else is, because the branch "
+          "surviving is what makes the removal lossless (#75)")
+    if not have("git"):
+        skip("the worktree reclaim group", "git is not installed")
+        return
+    cfg = make_repo()
+    g = new_graph(cfg)
+
+    def spawn(leaf_id, title):
+        # RECORDED, because `reclaimable` reads the CAMPAIGN, not the filesystem. `worktree.spawn`
+        # makes the tree; `campaign.record_spawn` is what makes it a Crawler the tool knows about,
+        # and cmd_spawn calls both. A test that skipped the second saw no findings at all — which
+        # read as "nothing to reclaim" rather than as "nothing was looked at".
+        g.add(title, leaf_id=leaf_id, labels=["backend"])
+        rec = worktree.spawn(cfg, g.show(leaf_id), actor="crawler-" + leaf_id)
+        campaign.record_spawn(cfg, rec)
+        return rec
+
+    def commit_in(rec, name):
+        with open(os.path.join(rec["worktree"], name), "w") as fh:
+            fh.write("work\n")
+        sh(["git", "add", "-A"], rec["worktree"])
+        sh(["git", "commit", "-q", "-m", "work on " + name], rec["worktree"])
+
+    # MERGED AND CLEAN — the only case that may be removed.
+    done = spawn("g-done", "work that lands")
+    commit_in(done, "landed.txt")
+    sh(["git", "merge", "--no-ff", "-q", "-m", "merge", done["branch"]], cfg.root)
+
+    # MERGED BUT DIRTY — the tree holds work that exists nowhere else.
+    dirty = spawn("g-dirty", "work with something uncommitted")
+    commit_in(dirty, "committed.txt")
+    sh(["git", "merge", "--no-ff", "-q", "-m", "merge", dirty["branch"]], cfg.root)
+    with open(os.path.join(dirty["worktree"], "UNCOMMITTED.txt"), "w") as fh:
+        fh.write("the only copy of this\n")
+
+    # CLEAN BUT NOT MERGED — removing it would be that work's only copy leaving.
+    unmerged = spawn("g-unmerged", "work that has not landed")
+    commit_in(unmerged, "not-landed.txt")
+
+    take, held = campaign.reclaimable(cfg, g)
+    names = {r["crawler"] for r in take}
+    held_by = {r["crawler"]: r["why"] for r in held}
+
+    ok("a MERGED and CLEAN tree is reclaimable", done["crawler"] in names, sorted(names))
+    ok("a merged tree with UNCOMMITTED work is held back — it is the only copy of it",
+       dirty["crawler"] in held_by, held_by)
+    ok("...and the reason says so rather than merely refusing",
+       "uncommitted" in held_by.get(dirty["crawler"], ""), held_by)
+    ok("a clean tree whose branch is NOT merged is held back",
+       unmerged["crawler"] in held_by, held_by)
+    ok("...and the reason names what would be lost",
+       "only remaining copy" in held_by.get(unmerged["crawler"], ""), held_by)
+    ok("...and neither held-back tree is in the reclaim list, which is the pair that stops "
+       "'reclaimable' meaning 'every tree'",
+       dirty["crawler"] not in names and unmerged["crawler"] not in names, sorted(names))
+
+    # UNKNOWN IS NOT CLEAN, and this is the assertion the whole design turns on. `reconcile`
+    # answers clean/dirty/UNKNOWN; a failed read collapsing into "clean" would delete somebody's
+    # only copy on the strength of not having looked.
+    src = open(os.path.join(ROOT, "lib", "showrunner", "campaign.py")).read()
+    body = src[src.index("def reclaimable("):src.index("def reconcile(")]
+    ok("reclaimable refuses an UNKNOWN tree explicitly, rather than letting it fall through to "
+       "the clean branch", 'tree") == "unknown"' in body, body[:200])
+
+    # A LIVE SESSION'S TREE IS ITS WORKSPACE.
+    live_rec = spawn("g-live", "work in progress")
+    commit_in(live_rec, "wip.txt")
+    sh(["git", "merge", "--no-ff", "-q", "-m", "merge", live_rec["branch"]], cfg.root)
+    data = campaign.load(cfg)
+    for entry in data["crawlers"]:
+        if entry.get("crawler") == live_rec["crawler"]:
+            entry["pid"] = os.getpid()
+            entry["boot"] = util.boot_token()
+    campaign.save(cfg, data)
+    take2, held2 = campaign.reclaimable(cfg, g)
+    ok("a tree whose session is ALIVE is held back even when merged and clean",
+       live_rec["crawler"] in {r["crawler"] for r in held2},
+       {r["crawler"]: r["why"] for r in held2})
+
+    # THE VERB IS DRY-RUN BY DEFAULT, because it deletes directories.
+    sr = os.path.join(ROOT, "bin", "showrunner")
+    p = subprocess.run([sys.executable, sr, "gc"], capture_output=True, text=True, cwd=cfg.root)
+    eq("gc exits 0", p.returncode, 0)
+    ok("...and says it is a dry run", "dry run" in p.stdout, p.stdout[:200])
+    ok("...and the tree is STILL THERE afterwards, which is what dry-run has to mean",
+       os.path.isdir(done["worktree"]), done["worktree"])
+    ok("...and it reports what it would remove", "would remove" in p.stdout, p.stdout[:300])
+    ok("...and prints the held-back trees WITH reasons, so a dirty tree announces itself rather "
+       "than being silently skipped", "HELD" in (p.stdout + p.stderr), (p.stdout + p.stderr)[:400])
+
+    # THE SIZE IS THE WHOLE REASON ANYONE ACTS ON THIS. The report that prompted #75 was 133 GB;
+    # a reclaim that cannot say how much it frees is a chore with no stated payoff, and one that
+    # silently says 0 makes a real backlog look absent.
+    ok("...and states how much would be reclaimed, rather than only how many trees",
+       "would reclaim" in p.stdout, p.stdout[:400])
+    ok("...as a real size and not a silent zero",
+       not re.search(r"would reclaim \d+ tree\(s\), 0B", p.stdout), p.stdout[:400])
+    measured = campaign.tree_bytes(done["worktree"])
+    ok("a tree that exists measures greater than zero", (measured or 0) > 0, measured)
+    # UNMEASURABLE IS NOT EMPTY, the identity element again: a path that cannot be walked has to
+    # answer None so the reporter can print `?`, because 0 would read as "nothing to reclaim".
+    eq("a path that cannot be walked answers None, never 0",
+       campaign.tree_bytes(os.path.join(cfg.root, "no-such-tree-here")), None)
+    # IT MEASURES CONTENT, NOT EXISTENCE. Without this pair, a stub returning any constant
+    # satisfies every size assertion above — and the number's whole job is to say how much a
+    # reclaim is worth, which a constant answers wrongly in a way nobody would question.
+    before = campaign.tree_bytes(unmerged["worktree"])
+    with open(os.path.join(unmerged["worktree"], "big.bin"), "wb") as fh:
+        fh.write(b"x" * 50000)
+    after = campaign.tree_bytes(unmerged["worktree"])
+    ok("...and the measurement TRACKS the bytes actually there, so it is a size and not a "
+       "constant", after is not None and before is not None and after - before >= 50000,
+       (before, after))
+
+    # --apply REMOVES, AND ONLY THE RIGHT ONE.
+    p = subprocess.run([sys.executable, sr, "gc", "--apply"], capture_output=True, text=True,
+                       cwd=cfg.root)
+    eq("gc --apply exits 0", p.returncode, 0)
+    ok("the merged, clean tree is gone", not os.path.isdir(done["worktree"]), done["worktree"])
+    ok("the DIRTY tree survives — the uncommitted file is the only copy of that work",
+       os.path.isfile(os.path.join(dirty["worktree"], "UNCOMMITTED.txt")))
+    ok("the UNMERGED tree survives", os.path.isdir(unmerged["worktree"]))
+    ok("the LIVE session's tree survives", os.path.isdir(live_rec["worktree"]))
+
+    # THE REMOVAL IS LOSSLESS, which is the entire argument for doing it automatically.
+    rc, out, _ = util.git(["rev-parse", "--verify", done["branch"]], cwd=cfg.root)
+    eq("the branch of the removed tree still exists, so nothing was lost with the directory",
+       rc, 0)
+    ok("...and its commit is still reachable", bool(out.strip()), out)
+
+
 def test_a_compacted_agent_is_told_what_it_forgot():
     group("What a compacted agent gets back: the campaign's STATE and the whole verb list — "
           "an agent that cannot remember the tool reaches for what it already knows")
@@ -11723,6 +11856,7 @@ def main():
                test_hook_registration,
                test_corpus_tool,
                test_spawn_refuses_a_base_missing_a_dependency,
+               test_a_worktree_is_reclaimed_when_its_work_lands,
                test_a_compacted_agent_is_told_what_it_forgot,
                test_reaching_for_the_wrong_thing_names_the_right_one,
                test_only_guards_may_anchor_to_their_own_checkout,

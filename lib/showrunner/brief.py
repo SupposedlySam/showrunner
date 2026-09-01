@@ -196,8 +196,9 @@ upstream, and a tree carrying an older harness still has the quiet version.
 
 **Put every non-repo file in your own scratch dir above, by the ABSOLUTE path given** — commit
 messages, captured output, before/after artifacts, fixtures. Never at a path relative to this
-worktree: your tree is deleted once your work is integrated and everything inside it goes too,
-including the artifact you cite as `--proof`. The scratch dir named above is in the main
+worktree: your tree is removed once your work is integrated and everything inside it goes too,
+including the artifact you cite as `--proof`. (It is kept only if it still holds uncommitted
+changes, which yours should not once you have closed.) The scratch dir named above is in the main
 checkout and survives. Not a shared temp dir either. Two Crawlers in a real
 run both reached for `commitmsg.txt` in one shared directory; the second noticed the first
 one's file only because it happened to list the directory first. Had it not, one Crawler

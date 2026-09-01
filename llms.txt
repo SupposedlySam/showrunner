@@ -71,6 +71,9 @@ off — so if you are running unattended, say that it is unarmed rather than pro
 ## If you are the ORCHESTRATOR
 
 ```
+showrunner gc                        # remove worktrees whose branch is MERGED and whose tree is
+                                     # CLEAN. Dry-run by default; --apply performs it. Dirty,
+                                     # unreadable and unmerged trees are reported and KEPT
 showrunner reach                     # PreToolUse: reads a tool payload and names the showrunner
                                      # mechanism for what it reached for. ADVICE ONLY, exit 0
                                      # always, silent when it has nothing specific to say

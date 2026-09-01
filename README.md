@@ -183,6 +183,27 @@ quiet, `reap` correctly proposes nothing. Chat is load-bearing for **correctness
 `--launch`, not a convenience. Without it, prefer `spawn` without `--launch` and drive the
 Crawlers yourself.
 
+**A worktree is reclaimed when its work lands.** `spawn` makes one tree per leaf and nothing ever
+removed one: `integrate` left them, and `reap` only handles claims and locks whose owners are
+dead. One reported checkout carried 178 worktrees and 133 GB with a single live Crawler — and the
+cost that actually hurt was not disk. An AV suite sat at ~64% CPU across four processes
+continuously rescanning a duplicated monorepo, on a machine reported as "running slow" while
+almost nothing was running.
+
+Every brief already promised otherwise, which is what made it a defect rather than a missing
+feature: Crawlers are told their tree is removed once the work integrates, and that sentence is
+the justification for the whole scratch-dir discipline. Leaving the trees meant the rule survived
+on an argument that did not hold.
+
+`integrate` now reclaims a tree at the moment it becomes provably redundant — the branch is
+merged, so every commit survives and `spawn` can recreate the tree. `showrunner gc` does the same
+retroactively and is **dry-run by default**. Three conditions are all required, and `unknown` is
+not one of them: merged, clean, and not alive. `reconcile` answers clean/dirty/**unknown**, and a
+failed read must never license a delete — that is the identity element this repo keeps finding,
+with somebody's only copy of their work on the other side of it. Everything held back is printed
+with its reason, and `doctor` reports how many trees exist, because 178 is not a number anyone
+discovers on purpose.
+
 **What a compacted agent gets back.** An agent several compactions deep had lost which campaign
 it was on and what verbs existed, and stopped using the tool at all — doing the work by hand in a
 repo carrying a live campaign. `whoami`, which runs on SessionStart **and PostCompact**, now

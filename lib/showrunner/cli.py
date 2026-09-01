@@ -464,6 +464,27 @@ def cmd_doctor(args):
               "watchdog that never fired." % (RED + "ERROR" + OFF, rel(_wj, cfg.root), _e))
         bad += 1
 
+    # HOW MANY WORKTREES EXIST, because 178 is not a number anybody discovers on purpose (#75).
+    # The reported checkout had 178 trees and 133 GB with ONE live Crawler, and what hurt was
+    # not disk: an AV suite rescanning a duplicated monorepo at ~64% CPU, on a machine reported
+    # as "running slow" while almost nothing was running. A count beside the campaign would have
+    # caught it weeks earlier, which is the operator's own reading of it.
+    try:
+        _trees = [d for d in os.listdir(cfg.worktree_root)
+                  if os.path.isdir(os.path.join(cfg.worktree_root, d))]
+    except OSError:
+        _trees = None
+    if _trees is None:
+        print("  %s the worktree root (%s) could not be listed, so how many trees exist is "
+              "UNKNOWN — not none" % (YEL + "warn " + OFF, rel(cfg.worktree_root, cfg.root)))
+    elif _trees:
+        _bytes = campaign.tree_bytes(cfg.worktree_root)
+        print("  %s %d worktree(s) under %s%s. `showrunner gc` reports which are merged AND "
+              "clean, and removes them with --apply; the branch and its commits survive."
+              % (GRN + "ok   " + OFF if len(_trees) < 12 else YEL + "warn " + OFF,
+                 len(_trees), rel(cfg.worktree_root, cfg.root),
+                 "" if _bytes is None else " (%s)" % _human(_bytes)))
+
     # HOW MANY CALLS WENT UNCHECKED, because until now nothing downstream ever asked. A guard
     # that fails open says so — correctly — as hook output beside a SUCCESSFUL tool result, and
     # an agent concentrating on something else skims it. The reporter said exactly that about
@@ -1516,6 +1537,64 @@ def cmd_dispatch_guard(args):
         return 0
     eprint(message)
     return 2
+
+
+def _human(n):
+    """Bytes, or '?' — never 0 for a size that could not be measured."""
+    if n is None:
+        return "?"
+    for unit in ("B", "K", "M", "G"):
+        if n < 1024 or unit == "G":
+            return "%.0f%s" % (n, unit)
+        n /= 1024.0
+    return "%.0fG" % n
+
+
+def _report_reclaim(take, held, applied):
+    """What was (or would be) reclaimed, and everything held back WITH ITS REASON."""
+    total = sum(r["bytes"] or 0 for r in take)
+    unknown_size = any(r["bytes"] is None for r in take)
+    for r in held:
+        eprint("  %sHELD%s %-22s %s" % (YEL, OFF, r["crawler"] or "?", r["why"]))
+    for r in take:
+        print("  %s %-22s %s (%s)" % ("removed" if applied else "would remove",
+                                      r["crawler"] or "?", r["worktree"], _human(r["bytes"])))
+    if take:
+        print("  %s %d tree(s), %s%s" % ("reclaimed" if applied else "would reclaim",
+                                         len(take), _human(total),
+                                         " (at least — one tree could not be measured)"
+                                         if unknown_size else ""))
+    elif not held:
+        print("  no worktrees to reclaim, and none held back — nothing was found to look at")
+
+
+def cmd_gc(args):
+    """Remove worktrees whose branch is merged and whose tree is clean (#75).
+
+    DRY RUN BY DEFAULT, like `reap`, because this deletes directories. `--apply` performs it.
+
+    The branch and every commit on it survive: that is what makes a merged, clean tree
+    redundant rather than valuable, and `spawn` can recreate it. A tree that is dirty, or whose
+    state could not be read, or whose branch is not merged, is REPORTED and kept — the same
+    discrimination `reap` already makes, applied to the trees of leaves that succeeded.
+    """
+    cfg = _cfg(args)
+    take, held = campaign.reclaimable(cfg, _graph(cfg), base=args.base)
+    print("%sWorktree reclaim%s%s" % (BOLD, OFF, "" if args.apply else " (dry run — use --apply)"))
+    removed = []
+    if args.apply:
+        for r in take:
+            try:
+                worktree.remove(cfg, r["crawler"])
+                removed.append(r)
+            except SystemExit:
+                raise
+            except Exception as exc:                            # noqa: BLE001
+                eprint("  %sFAILED%s %s: %s" % (RED, OFF, r["crawler"], exc))
+        _report_reclaim(removed, held, True)
+    else:
+        _report_reclaim(take, held, False)
+    return 0
 
 
 def cmd_reach(args):
@@ -2702,6 +2781,34 @@ def cmd_integrate(args):
                "A branch is integrated only when the checks pass on the MERGED result.")
         return 2
     integrated = [r for r in results if r["status"] == "integrated"]
+
+    # THE TREE GOES WHEN THE WORK LANDS (#75), which is the moment it becomes provably
+    # redundant: the branch is merged, so every commit survives, and `spawn` can recreate the
+    # tree from it. Nothing removed one before — one reported checkout carried 178 trees and
+    # 133 GB, of which ONE belonged to a live Crawler, and the cost that hurt was an AV suite
+    # rescanning a duplicated monorepo at ~64% CPU on a machine reported as "running slow".
+    #
+    # AND EVERY BRIEF ALREADY PROMISED IT. brief.py tells each Crawler its tree is deleted once
+    # the work integrates — the justification for the whole scratch-dir discipline. Leaving the
+    # trees made that sentence false, so the rule survived on an argument that did not hold.
+    #
+    # Dirty, unknown and unmerged trees are held back and REPORTED, never removed; `reclaimable`
+    # owns that discrimination. `--keep-trees` skips this entirely.
+    if integrated and not getattr(args, "keep_trees", False):
+        take, held = campaign.reclaimable(cfg, _graph(cfg), base=args.base)
+        if take or held:
+            print("\n%sWorktrees%s" % (BOLD, OFF))
+            removed = []
+            for r in take:
+                try:
+                    worktree.remove(cfg, r["crawler"])
+                    removed.append(r)
+                except SystemExit:
+                    raise
+                except Exception as exc:                        # noqa: BLE001
+                    eprint("  %sFAILED%s %s: %s" % (RED, OFF, r["crawler"], exc))
+            _report_reclaim(removed, held, True)
+
     if integrated:
         print("%sThese merges auto-committed, so no provenance declaration was needed: the "
               "harness's commit gate matches `git commit`, which a clean merge never runs. "
@@ -3163,6 +3270,12 @@ def build_parser():
                         "stdout and its BLOCKED finding across both streams; build on this one")
     s.set_defaults(func=cmd_waiting)
 
+    s = sub.add_parser("gc", help="remove worktrees whose branch is merged and whose tree is "
+                                  "clean; dry-run by default")
+    s.add_argument("--base", default="HEAD")
+    s.add_argument("--apply", action="store_true", help="actually remove them")
+    s.set_defaults(func=cmd_gc)
+
     s = sub.add_parser("reach", help="PreToolUse: name the mechanism for what a call reached "
                                      "for; advice only, never refuses")
     s.set_defaults(func=cmd_reach)
@@ -3196,6 +3309,8 @@ def build_parser():
     s.add_argument("--base")
     s.add_argument("--only", action="append")
     s.add_argument("--dry-run", action="store_true")
+    s.add_argument("--keep-trees", action="store_true",
+                   help="do not reclaim merged, clean worktrees after integrating")
     s.set_defaults(func=cmd_integrate)
 
     s = sub.add_parser("integration-commit",

@@ -214,6 +214,84 @@ def live(entry):
     return pid_alive(entry.get("pid"))
 
 
+def tree_bytes(path):
+    """Bytes under a tree, or None if it cannot be walked. None is NOT zero."""
+    # `os.walk` DOES NOT RAISE ON A MISSING PATH — it yields nothing, so the naive version
+    # returned 0 for a directory that was not there. That is this file's own identity-element
+    # defect committed inside the function whose docstring warns about it: 0 reads as "nothing
+    # to reclaim" and None reads as "could not measure", and the caller prints `?` for one and a
+    # size for the other. Caught by the assertion written for exactly this, which failed first.
+    if not os.path.isdir(path):
+        return None
+    failed = []
+    total = 0
+    for root, _dirs, files in os.walk(path, onerror=failed.append):
+        for name in files:
+            try:
+                total += os.lstat(os.path.join(root, name)).st_size
+            except OSError:
+                # One unreadable FILE is not an unreadable tree; the walk carries on and the
+                # total is a floor. A directory that could not be opened is different, and
+                # `onerror` catches that below.
+                continue
+    return None if failed else total
+
+
+def reclaimable(cfg, graph, base="HEAD"):
+    """Worktrees that are provably redundant, and — separately — every one held back and why.
+
+    NOTHING EVER REMOVED A TREE (#75). `spawn` makes one per leaf, `integrate` leaves it,
+    `reap` handles claims and locks whose owners are DEAD, and there was no gc. One reported
+    checkout carried 178 trees and 133 GB, of which one belonged to a live Crawler. The cost
+    that actually hurt was not disk: an AV suite at ~64% CPU across four processes continuously
+    rescanning a duplicated monorepo, plus Spotlight, on a machine reported as "running slow"
+    while almost nothing was running.
+
+    AND EVERY BRIEF PROMISED OTHERWISE. brief.py tells each Crawler "your tree is deleted once
+    your work is integrated and everything inside it goes too" — the justification for the whole
+    scratch-dir discipline, and it was not true. A false sentence in a brief is worse than a
+    missing feature: it is the reason a Crawler puts its `--proof` somewhere else, so the rule
+    survives on an argument that does not hold.
+
+    THREE CONDITIONS, ALL REQUIRED, AND `unknown` IS NOT ONE OF THEM.
+      merged  — the branch is in `base`, so every commit survives the tree's removal. This is
+                what makes the removal lossless: `spawn` can recreate the tree from the branch.
+      clean   — no uncommitted changes. `reconcile` answers clean/dirty/UNKNOWN, and unknown is
+                a failed read, not an empty one. It must never license a delete: the identity
+                element this repo keeps finding, with somebody's only copy of their work on the
+                other side of it.
+      not alive — a live session's tree is its workspace.
+
+    Returns (reclaimable, held_back). BOTH, because a gc that lists only what it will remove
+    invites the reading that everything else is gone already — and the held-back list is where
+    a dirty tree carrying real work announces itself.
+    """
+    take, held = [], []
+    for f in reconcile(cfg, graph, base):
+        if not f.get("worktree_exists"):
+            continue
+        row = {"crawler": f.get("crawler"), "leaf": f.get("leaf"),
+               "branch": f.get("branch"), "worktree": f.get("worktree"),
+               "bytes": tree_bytes(cfg.abspath(f.get("worktree")))}
+        if f.get("alive"):
+            row["why"] = "its session is ALIVE — this is somebody's workspace right now"
+        elif f.get("tree") == "unknown":
+            row["why"] = ("git could not be read in it, so whether it holds uncommitted work is "
+                          "UNKNOWN — which is not the same as clean, and the difference is "
+                          "somebody's only copy")
+        elif f.get("tree") == "dirty":
+            row["why"] = ("%d uncommitted change(s) — SURFACED, never deleted"
+                          % len(f.get("uncommitted") or []))
+        elif not f.get("merged"):
+            row["why"] = ("its branch is not merged into %s, so removing the tree would be the "
+                          "only remaining copy of that work leaving" % base)
+        else:
+            take.append(row)
+            continue
+        held.append(row)
+    return take, held
+
+
 def reconcile(cfg, graph, base="HEAD"):
     """Answer the first question a resumed orchestrator has to ask.
 

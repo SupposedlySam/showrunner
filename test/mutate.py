@@ -82,6 +82,18 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # #75. Answering ([], []) restores the exact reported state: every tree stays forever, and
+    # nothing says so — 178 trees and 133 GB in one real checkout, with the brief telling every
+    # Crawler the opposite. A producer whose death returns the tool to its previous,
+    # working-looking behaviour dies invisibly, which is why this needs a mutant.
+    ("worktrees whose work has landed", "campaign.reclaimable", "lib/showrunner/campaign.py",
+     r"(def reclaimable\([^)]*\):\n)",
+     "    return [], []\ndef _neutered_reclaimable(cfg, graph, base='HEAD'):\n"),
+    # Answering None means "could not measure", which the reporter must print as `?` and never
+    # as 0. A size that silently reads zero makes a reclaim look free and a backlog look absent.
+    ("how big a tree actually is", "campaign.tree_bytes", "lib/showrunner/campaign.py",
+     r"(def tree_bytes\([^)]*\):\n)",
+     "    return None\ndef _neutered_tree_bytes(path):\n"),
     # Answering [] is the SAFE-looking direction: every call still proceeds, nothing errors, and
     # the tool returns to exactly the state that was reported — an agent reaching for what it
     # already knows and nothing naming the mechanism. A producer whose death restores the
