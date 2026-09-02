@@ -7642,6 +7642,56 @@ def test_a_seat_survives_a_window_reload():
     ok("...and that session gets the fallback, which is the honest answer",
        "unassigned" in said, said[:300])
 
+    # AND THE HOOK MUST ACTUALLY SUPPLY THE SESSION, or every assertion above is about a
+    # function nothing calls with a usable argument. `whoami.sh` invoked `whoami` with no
+    # `--session`, and the rule that an EMPTY session matches nothing then made the whole feature
+    # unreachable from the one channel a reloaded session is guaranteed to read. Built and
+    # unfired — caught here rather than by an operator reloading and seeing nothing happen.
+    # THE HOOK RESOLVES THROUGH CLAUDE_PROJECT_DIR, so the seat has to be claimed in the SAME
+    # place the hook will look. Claiming it in the scratch repo while the hook read the real one
+    # made this fail for a reason that had nothing to do with the feature — a fixture mismatch
+    # wearing a defect's clothes. The roles file and the campaign are still isolated, so this
+    # writes only throwaway campaign state.
+    # A UNIQUE CAMPAIGN PER RUN, because this assertion CHANGES the state it reads. The first
+    # run rebinds the dead seat to a LIVE pid — that is the feature working — so a second run in
+    # the same campaign correctly takes the still-alive branch and reports no RE-SEATED. It
+    # passed alone and failed under `verify`, which is the order-dependence a suite must not
+    # have: the second answer was right and the fixture was wrong.
+    shim = os.path.join(ROOT, ".showrunner", "hooks", "whoami.sh")
+    hook_campaign = "reseat-hook-%d" % os.getpid()
+    subprocess.run([sys.executable, sr, "role", "claim", "lead", "--who", "bot",
+                    "--session", "S-HOOK", "--pid", "999993"],
+                   capture_output=True, text=True, cwd=ROOT,
+                   env=dict(os.environ, XDG_CONFIG_HOME=home,
+                            SHOWRUNNER_CAMPAIGN=hook_campaign))
+    hp = subprocess.run(["bash", shim],
+                        input=json.dumps({"session_id": "S-HOOK",
+                                          "hook_event_name": "SessionStart"}),
+                        capture_output=True, text=True, cwd=ROOT,
+                        env=dict(os.environ, XDG_CONFIG_HOME=home,
+                                 SHOWRUNNER_CAMPAIGN=hook_campaign,
+                                 CLAUDE_PROJECT_DIR=ROOT))
+    try:
+        ctx = json.loads(hp.stdout)["hookSpecificOutput"]["additionalContext"]
+    except Exception:                                            # noqa: BLE001
+        ctx = hp.stdout
+    ok("the SessionStart hook passes the session id through, so the re-seat can fire from the "
+       "channel a reload actually reaches", "RE-SEATED" in ctx, ctx[:300])
+
+    # AND IT MUST STILL ANNOUNCE WITH NO PAYLOAD AT ALL. The hook's one forbidden outcome is
+    # silence, and reading stdin is new — an empty or unparseable payload must cost the session
+    # id and nothing else.
+    hp2 = subprocess.run(["bash", shim], input="", capture_output=True, text=True, cwd=ROOT,
+                         env=dict(os.environ, XDG_CONFIG_HOME=home,
+                                  SHOWRUNNER_CAMPAIGN=hook_campaign, CLAUDE_PROJECT_DIR=ROOT))
+    ok("...and an EMPTY payload still produces an announcement rather than silence",
+       bool(hp2.stdout.strip()), hp2.stdout[:200])
+    hp3 = subprocess.run(["bash", shim], input="not json at all", capture_output=True,
+                         text=True, cwd=ROOT,
+                         env=dict(os.environ, XDG_CONFIG_HOME=home,
+                                  SHOWRUNNER_CAMPAIGN=hook_campaign, CLAUDE_PROJECT_DIR=ROOT))
+    ok("...and so does an UNPARSEABLE one", bool(hp3.stdout.strip()), hp3.stdout[:200])
+
     # A DIFFERENT SESSION IS A STRANGER. Same dead pid, different id: no rebind, because the
     # discriminator is the session and not merely that something died.
     run(["role", "claim", "lead", "--who", "bot", "--session", "S-MINE", "--pid", "999996"],
