@@ -7575,6 +7575,84 @@ def test_reach_is_registered_by_the_verb_that_registers_hooks():
     ok("install.sh ships the shim it registers", "reach-gate.sh" in installer)
 
 
+def test_a_seat_survives_a_window_reload():
+    group("A seat whose SESSION still matches but whose pid is gone is rebound — a reload "
+          "should not cost the seat, and must not become a way to take somebody else's")
+    if not have("git"):
+        skip("the reseat group", "git is not installed")
+        return
+
+    # THE REPORTED PROBLEM. Reloading a VS Code window loses the seat every time. Nothing was
+    # broken: a seat's liveness is a pid discovered by walking the ancestry, the reload restarts
+    # the extension host under a NEW pid, `locks` correctly reports STALE, and the resolver skips
+    # it. Correct, and useless — the same logical session comes back and cannot see its own seat.
+    #
+    # THE DISCRIMINATOR WORKS BECAUSE THE TWO FACTS AGE DIFFERENTLY, measured before building:
+    # the Claude session id is unchanged across a reload while the pid is not. So "same session,
+    # dead pid" IS a reload.
+    home = tmpdir("reseat-home")
+    os.makedirs(os.path.join(home, "showrunner"), exist_ok=True)
+    with open(os.path.join(home, "showrunner", "roles.json"), "w") as fh:
+        json.dump({"roles": {"lead": {"acquire": "claim", "may_create": ["worker"]},
+                             "unassigned": {"acquire": "claim"}},
+                   "fallback": "unassigned"}, fh)
+    cfg = make_repo()
+    sr = os.path.join(ROOT, "bin", "showrunner")
+
+    def run(args, campaign):
+        return subprocess.run([sys.executable, sr] + args, capture_output=True, text=True,
+                              cwd=cfg.root,
+                              env=dict(os.environ, XDG_CONFIG_HOME=home,
+                                       SHOWRUNNER_CAMPAIGN=campaign))
+
+    # A DEAD pid is what a reload leaves behind. 999998 is not running.
+    run(["role", "claim", "lead", "--who", "bot", "--session", "S-RELOAD", "--pid", "999998"],
+        "reseat-dead")
+    said = run(["whoami", "--session", "S-RELOAD"], "reseat-dead").stdout
+    ok("the seat comes back to the same session after its pid dies", "RE-SEATED" in said,
+       said[:300])
+    ok("...and the role resolves rather than falling back, which is the whole point",
+       "role: lead" in said, said[:300])
+    ok("...and it says a reload happened, so the caller can redo setup it did when it first "
+       "took the seat — a silent re-seat is indistinguishable from never having lost it",
+       "do it again" in said, said[:400])
+
+    # THE CONTROL THAT MATTERS MOST: a LIVE holder is never displaced. Two live processes on one
+    # session id is what `claude --resume` produces, and taking a seat from a process that is
+    # demonstrably running is the reading this repo never permits.
+    run(["role", "claim", "lead", "--who", "bot", "--session", "S-RESUME", "--pid", "1"],
+        "reseat-live")
+    said = run(["whoami", "--session", "S-RESUME"], "reseat-live").stdout
+    ok("a seat whose recorded pid is ALIVE is not rebound", "RE-SEATED" not in said, said[:300])
+    ok("...and the note says so, naming the resume case rather than failing silently",
+       "STILL ALIVE" in said and "resume" in said, said[:400])
+    # THE MESSAGE MUST MATCH THE BEHAVIOUR. The first wording said "the seat was NOT taken" and
+    # the next line announced the role — two true statements arranged to read as a denial that
+    # had not happened. Both processes DO resolve, because the session is the unit of identity.
+    ok("...and does not claim the caller was denied the role, which it was not",
+       "NOT taken" not in said, said[:400])
+
+    # AN EMPTY SESSION MUST NOT BE A KEY. A seat claimed with no session id records "", and
+    # matching "" to "" would let any unidentified session inherit any unidentified seat — a
+    # rebind rule that hands out other people's seats is worse than one that never fires.
+    run(["role", "claim", "lead", "--who", "bot", "--pid", "999997"], "reseat-empty")
+    said = run(["whoami"], "reseat-empty").stdout
+    ok("a seat recorded with NO session id is not rebound to a session with no id either",
+       "RE-SEATED" not in said, said[:300])
+    ok("...and that session gets the fallback, which is the honest answer",
+       "unassigned" in said, said[:300])
+
+    # A DIFFERENT SESSION IS A STRANGER. Same dead pid, different id: no rebind, because the
+    # discriminator is the session and not merely that something died.
+    run(["role", "claim", "lead", "--who", "bot", "--session", "S-MINE", "--pid", "999996"],
+        "reseat-other")
+    said = run(["whoami", "--session", "S-NOT-MINE"], "reseat-other").stdout
+    ok("a DIFFERENT session does not inherit a dead seat just because the pid is gone",
+       "RE-SEATED" not in said, said[:300])
+    ok("...it gets the fallback, and the seat stays where it was for its owner to reclaim",
+       "unassigned" in said, said[:300])
+
+
 def test_a_seat_that_may_not_dispatch_is_refused_at_the_sanctioned_path():
     group("`spawn --launch` asks whether the seat may dispatch — the guard was on the path "
           "whoami tells you NOT to use, and not on the one it tells you to (#77)")
@@ -12697,6 +12775,7 @@ def main():
                test_an_untracked_registration_still_reaches_the_worktree,
                test_a_claim_never_names_the_process_that_is_about_to_exit,
                test_reach_is_registered_by_the_verb_that_registers_hooks,
+               test_a_seat_survives_a_window_reload,
                test_a_seat_that_may_not_dispatch_is_refused_at_the_sanctioned_path,
                test_the_announcement_does_not_claim_enforcement_it_has_not_got,
                test_waiting_does_not_scale_with_the_campaign,

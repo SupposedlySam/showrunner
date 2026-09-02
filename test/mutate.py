@@ -82,6 +82,13 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # Answering "" restores the reported behaviour exactly: every window reload loses the seat,
+    # the session announces the fallback, and the operator re-claims by hand. Nothing errors and
+    # the tool looks correct — a producer whose death returns it to the previous, working-looking
+    # state dies invisibly.
+    ("a seat surviving a reload", "roles.reseat_after_reload", "lib/showrunner/roles.py",
+     r"(def reseat_after_reload\([^)]*\):\n)",
+     "    return \"\"\ndef _neutered_reseat(cfg, session):\n"),
     # Answering [] restores the pre-boundary behaviour in the direction that matters: every rule
     # falls back to matching anywhere in the command, so prose about `git worktree add` fires the
     # advice again. Nothing errors and every real use still fires, which is exactly why a false

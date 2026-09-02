@@ -540,6 +540,22 @@ same warning for the same reason; the roles path shared its mechanism and not it
 that cannot be resolved is REFUSED rather than recorded, following `lease`: a claim with no
 liveness is not a weaker claim, it is a lock nothing can ever reclaim.
 
+**A WINDOW RELOAD NO LONGER COSTS THE SEAT.** Reloading a VS Code window restarts the extension
+host under a new pid, so the recorded holder is dead, `locks` correctly reports STALE, and the
+resolver skips it — correct, and useless, because the same logical session comes back and cannot
+see its own seat. The two facts age differently, which is what makes this decidable: the Claude
+session id is unchanged across a reload while the pid is not. So a seat whose SESSION matches and
+whose PID is gone is rebound, and `whoami` SAYS a reload happened — a silent re-seat is
+indistinguishable from never having lost it, and the caller may owe setup it did the first time.
+
+Three answers, not two. A recorded pid that is **still alive** is never displaced: two live
+processes under one session id is what `claude --resume` produces, and both resolve to the seat
+because the session is the unit of identity — what does not happen is the pid moving, and the
+note says so rather than implying a refusal. An **empty** session id matches nothing on either
+side: a seat claimed without one records `""`, and treating absent-as-equal would let any
+unidentified session inherit any unidentified seat. A **different** session inherits nothing, no
+matter how dead the pid — the discriminator is the session, not that something died.
+
 `role roster` exists because that state had nowhere to be seen. The only way to notice a dead
 claim was calling `roles.roster()` from Python, and a state nothing surfaces is a state nobody
 debugs.

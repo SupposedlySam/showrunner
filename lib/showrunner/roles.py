@@ -51,7 +51,7 @@ import json
 import os
 
 from . import locks
-from .util import session_pid, short_session, slug, user_config_dir
+from .util import pid_alive, session_pid, short_session, slug, user_config_dir
 
 # PRECEDENCE HERE IS THE OPPOSITE OF `config.json`'s, AND THAT IS DELIBERATE. Both files live in
 # `user_config_dir()` and both are overlaid by the project, so a reader standing at either one
@@ -541,6 +541,76 @@ _SEAT_MANIFEST = {
 }
 
 
+def reseat_after_reload(cfg, session):
+    """A seat whose SESSION still matches but whose PID is gone: rebind it. Returns a note or "".
+
+    THE PROBLEM, reported by an operator. Reloading a VS Code window loses the seat every time.
+    Nothing is broken — a seat's liveness is a pid discovered by walking the ancestry, the
+    reload restarts the extension host under a NEW pid, the old one is dead, so `locks` correctly
+    reports STALE and the resolver skips it. Correct, and useless: the same logical session comes
+    back, cannot see its own seat, and has to re-claim by hand every time.
+
+    THE DISCRIMINATOR IS THE SESSION ID, and it works because the two facts age differently —
+    measured on this machine: the Claude session id is unchanged across a window reload while the
+    pid is not. So "same session, dead pid" is exactly a reload, and it is safe to rebind: the
+    only party that could hold that seat is the session asking for it.
+
+    THREE ANSWERS, NOT TWO, and the third is why this cannot be a blind swap:
+
+      old pid DEAD      rebind, and SAY a reload happened — the caller may owe setup it did
+                        before, and a silent re-seat is indistinguishable from never losing it.
+      old pid ALIVE     REFUSE. Two live processes carrying one session id is what
+                        `claude --resume` produces, and taking the seat from one of them is
+                        acting on the reading this repo never permits — that a resource whose
+                        owner is demonstrably running can be reassigned. Reported, never taken.
+      session EMPTY     refuse, on either side. A seat claimed without a session id records "",
+                        and matching "" to "" would let any session with no id inherit any
+                        unidentified seat. The absent value must not be a key.
+
+    Best-effort and never raises: this runs inside the announcement path, whose one forbidden
+    outcome is silence.
+    """
+    if not session:
+        return ""
+    try:
+        for entry in roster(cfg):
+            holder = entry.get("holder") or {}
+            if (holder.get("session") or "") != session:
+                continue
+            recorded = str(holder.get("pid") or "")
+            mine, basis = session_pid()
+            if not mine or basis != "ancestor-claude" or recorded == str(mine):
+                return ""
+            if pid_alive(recorded):
+                # NOT REBOUND, and the message must not imply you were denied the ROLE — you
+                # were not. `resolved_role` matches on the session id, so both processes
+                # resolve to this seat; what does not happen is the recorded pid moving. The
+                # first wording said "the seat was NOT taken" and the very next line announced
+                # the role, which is two true statements arranged to read as a contradiction.
+                return ("NOTE: seat %s records pid %s, which is STILL ALIVE, and you are a "
+                        "different process under the same session id — which is what "
+                        "`claude --resume` produces. You BOTH resolve to this role, because the "
+                        "session is the unit of identity here. The recorded pid was left alone: "
+                        "a seat whose holder is demonstrably running is not reassignable, and a "
+                        "reload is the case this rebinds for. If two live processes acting as "
+                        "%s is not what you want, release it from one of them."
+                        % (entry.get("role"), recorded, holder.get("role") or entry.get("role")))
+            role = holder.get("role") or entry.get("role")
+            ok, _ = claim(cfg, role, session, who=holder.get("who"),
+                          seat=int(holder.get("seat") or 0))
+            if ok:
+                return ("RE-SEATED after a reload: %s was held by pid %s, which is gone, and "
+                        "this session's id is the same — so the seat came back to you rather "
+                        "than needing a re-claim. If you did setup when you first took it, do "
+                        "it again: the process changed even though the session did not."
+                        % (role, recorded))
+            return ("seat %s could not be re-taken after a reload (its pid %s is gone). "
+                    "Claim it by hand." % (role, recorded))
+    except Exception:                                           # noqa: BLE001
+        return ""
+    return ""
+
+
 def resolution(cfg, session=None):
     """Everything a guard needs in order to enforce, as DATA. Returns a dict.
 
@@ -591,10 +661,22 @@ def whoami(cfg, session=None):
     from .brief import sr_bin
 
     sr = sr_bin(cfg)
+    # BEFORE RESOLVING, because a reload's whole symptom is that resolution answers `fallback`
+    # while the seat is sitting there with a dead pid. Doing it here means the seat is back
+    # before the announcement describes it, so the session is not told it is unassigned and then
+    # separately told it was re-seated.
+    #
+    # THE ANNOUNCEMENT IS THE RIGHT CHANNEL and not a convenience: SessionStart and PostCompact
+    # are the two moments a reloaded session is guaranteed to read, which is the same argument
+    # that put `whoami` on both seams. A re-seat that only `doctor` mentioned would be a notice
+    # in a channel nobody reads on the turn it matters — the #71 shape.
+    reseat = reseat_after_reload(cfg, session)
     r = resolution(cfg, session)
     where = r["seat"]
 
     out = ["showrunner: you are the %s here." % where.upper(), "  %s." % r["evidence"]]
+    if reseat:
+        out.append("  %s" % reseat)
     if r["campaign"]:
         out.append("  campaign: %s" % r["campaign"])
 
