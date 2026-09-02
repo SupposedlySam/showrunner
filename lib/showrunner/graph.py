@@ -416,7 +416,11 @@ class SqliteGraph:
                     % (leaf_id, current.get("actor")), code=2)
             die("%s could not be claimed (status is %s)" % (leaf_id, current["status"]), code=2)
 
-        self._event(leaf_id, "claim", "%s pid=%s tree=%s" % (actor, pid or os.getpid(), tree))
+        # THE JOURNAL MUST NAME WHAT WAS STORED. This logged `pid or os.getpid()` while the row
+        # now records the resolved session, so a viewer reading the event saw a pid the claim
+        # never held — two statements of one fact, and the readable one was the wrong one.
+        self._event(leaf_id, "claim",
+                    "%s pid=%s tree=%s" % (actor, self.show(leaf_id).get("claim_pid"), tree))
         self.db.commit()
         return self.show(leaf_id)
 
@@ -537,9 +541,22 @@ class SqliteGraph:
         self.db.commit()
 
     def unpark(self, leaf_id):
+        """Return a parked leaf to its claim — with a pid that names a SESSION, not this process.
+
+        THE FOURTH PLACE THE SAME RULE APPLIES, found by enumerating rather than by reading.
+        `claim` was fixed to discover the pid instead of recording `os.getpid()`; this method
+        REWRITES the same column and kept the old default, so a leaf parked at a usage limit and
+        unparked came back holding the pid of the `showrunner unpark` process — gone the instant
+        the command returned. The bug would have reappeared on the exact workflow parking exists
+        for, in a sibling method, days after the fix.
+
+        A consumer named the shape after hitting it twice in one day: a rule that holds in three
+        places and not the fourth is invisible to REVIEW, because every file you open is correct.
+        What finds it is asking where else the rule applies and enumerating the answers.
+        """
         self.db.execute(
             "UPDATE leaves SET parked=0, park_reason=NULL, claim_pid=?, claim_boot=?, heartbeat_ts=? "
-            "WHERE id=?", (os.getpid(), boot_token(), now(), leaf_id))
+            "WHERE id=?", (_claim_pid(), boot_token(), now(), leaf_id))
         self._event(leaf_id, "unpark", "")
         self.db.commit()
 

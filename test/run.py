@@ -7245,6 +7245,46 @@ def test_a_claim_never_names_the_process_that_is_about_to_exit():
        "is not a blanket silencing of the reaper",
        "cl3" in [l["id"] for l, _ in stale3], [l["id"] for l, _ in stale3])
 
+    # EVERY WRITER OF THE COLUMN, ENUMERATED — not just the one that was reported.
+    #
+    # A consumer named the shape after hitting it twice in a day: a rule that holds in three
+    # places and not the fourth is invisible to REVIEW, because every file you open is correct.
+    # llms.txt already said a claim's pid is DISCOVERED not handed over; `lock acquire` and
+    # `role claim` both walked the ancestry; the leaf claim did not. Fixing the reported site and
+    # stopping is how the fourth one survives — and there WAS a fourth: `unpark` rewrites
+    # claim_pid and kept `os.getpid()`, so a leaf parked at a usage limit came back holding the
+    # pid of the `unpark` process. The workflow parking exists for would have reintroduced it.
+    #
+    # So this asserts over the SET of writers, derived from the source, rather than over the one
+    # that was reported. Reading finds the site you are looking at; enumerating finds the rest.
+    gsrc = open(os.path.join(ROOT, "lib", "showrunner", "graph.py")).read()
+    writers = [m for m in re.finditer(r"claim_pid=\?", gsrc)]
+    ok("more than one statement writes claim_pid, so enumerating them is a real question",
+       len(writers) >= 2, len(writers))
+    for m in writers:
+        # The values tuple follows the SQL; `os.getpid()` inside it is the defect.
+        following = gsrc[m.end():m.end() + 400]
+        args_blob = following.split("))", 1)[0]
+        ok("a statement writing claim_pid at offset %d does not hand it this process's own pid"
+           % m.start(), "os.getpid()" not in args_blob, args_blob[:160])
+
+    # AND BEHAVIOURALLY, through the verb, because the structural check above cannot see a pid
+    # that arrives from somewhere else.
+    g4 = new_graph(cfg)
+    g4.add("parked then resumed", leaf_id="cl4", labels=["backend"])
+    sr2 = os.path.join(ROOT, "bin", "showrunner")
+    subprocess.run([sys.executable, sr2, "claim", "cl4", "--actor", "a"],
+                   capture_output=True, text=True, cwd=cfg.root)
+    subprocess.run([sys.executable, sr2, "park", "cl4", "--reason", "usage limit"],
+                   capture_output=True, text=True, cwd=cfg.root)
+    p4 = subprocess.run([sys.executable, sr2, "unpark", "cl4"],
+                        capture_output=True, text=True, cwd=cfg.root)
+    eq("unpark succeeds", p4.returncode, 0)
+    resumed = new_graph(cfg).show("cl4").get("claim_pid")
+    ok("...and the resumed claim does not name the `unpark` process, which exited when it "
+       "returned — the same defect in the sibling method",
+       resumed is None or util.pid_alive(resumed), resumed)
+
     # DISCOVERED, NOT HANDED OVER — the rule llms.txt already states for role claims and
     # `lock acquire`, which the LEAF claim was not following.
     src = open(os.path.join(ROOT, "lib", "showrunner", "graph.py")).read()
