@@ -115,6 +115,40 @@ def _strip_heredocs(command):
     return _HEREDOC.sub("", command)
 
 
+_QUOTED = re.compile(r"\"[^\"]*\"|'[^']*'")
+_SPLIT = re.compile(r"[;\n]|&&|\|\||\|")
+
+
+def _command_segments(command):
+    """The COMMANDS in a shell string — not every place a phrase appears in it.
+
+    THE SECOND DOOR ON MENTION-VERSUS-USE, reported from a real hit rather than a probe. Matching
+    named payload fields fixed the case where a rule fired on a heredoc BODY. It does not fix a
+    phrase inside a quoted ARGUMENT of a genuine command:
+
+        dart run tool/kb.dart add URL --body "a note mentioning git worktree add in prose"
+
+    The field is `command`, correctly. The phrase is data being passed to another program, and
+    nothing in the payload says otherwise except the substring. The reporter hit it writing a
+    knowledge-base entry whose body quoted `git worktree add` as the example of what NOT to do —
+    the advice firing on prose about the advice.
+
+    Two cheap discriminators, both theirs: the phrase was inside quotes, and it was not at a
+    COMMAND BOUNDARY. So quoted contents are emptied and the string is split on `;`, `&&`, `||`,
+    `|` and newlines; a rule then has to match at the START of a segment. `git` as the third word
+    of somebody else's command line is not somebody running git.
+
+    WHAT THIS DELIBERATELY CANNOT SEE, named here rather than left to be discovered: a real
+    command inside quotes — `bash -c "git worktree add x"` — is now a miss. That is the right
+    trade for a channel whose entire value is being worth reading: a false positive teaches a
+    reader to skim, and this gate is depended on precisely for the turns when they are not
+    reading carefully. `lease.command_paths` makes the same call for the same reason, and
+    neither executes anything to find out.
+    """
+    text = _QUOTED.sub('""', _strip_heredocs(command or ""))
+    return [seg.strip() for seg in _SPLIT.split(text) if seg.strip()]
+
+
 def _searchable(tool, tool_input):
     """The text a rule matches against — the fields an intent actually shows up in.
 
@@ -143,13 +177,22 @@ def advise(tool, tool_input, root=None):
     text = _searchable(tool, tool_input)
     if not text:
         return []
+    segments = _command_segments((tool_input or {}).get("command")
+                                 if isinstance(tool_input, dict) else "")
     out = []
     for name, tools, pattern, _verb, requires, message in RULES:
         if tools and tool not in tools:
             continue
         if requires and not (root and os.path.exists(os.path.join(root, requires))):
             continue
-        if re.search(pattern, text, re.I | re.M):
+        # A COMMAND RULE MUST MATCH AT A COMMAND BOUNDARY; a path rule matches its field
+        # anywhere, because a path is not a sequence of commands and has no boundaries to
+        # respect. Which one a rule is is decided by whether it fired on the command text.
+        if segments and re.search(pattern, "\n".join(segments), re.I | re.M):
+            if any(re.match(pattern, seg, re.I) for seg in segments):
+                out.append((name, message))
+            continue
+        if re.search(pattern, text, re.I | re.M) and not segments:
             out.append((name, message))
     return out
 

@@ -8012,6 +8012,38 @@ def test_reaching_for_the_wrong_thing_names_the_right_one():
     ok("reading a file about worktrees is not creating one — the reach is the COMMAND, not the "
        "subject", fires("Bash", {"command": "cat docs/git-worktree-add.md"}) == [])
 
+    # THE SECOND DOOR, reported from a REAL HIT rather than a probe. Field scoping fixed the
+    # heredoc case; it does not fix a phrase inside a quoted ARGUMENT of a genuine command. The
+    # reporter was writing a knowledge-base entry whose body quoted `git worktree add` as the
+    # example of what NOT to do, and the advice fired on prose about the advice.
+    kb = ('dart run tool/kb.dart add URL --body '
+          '"a note mentioning git worktree add in prose"')
+    ok("a phrase inside a QUOTED ARGUMENT is a mention, not a use — this is the reporter's "
+       "exact command", fires("Bash", {"command": kb}) == [], fires("Bash", {"command": kb}))
+
+    # THE PAIRS, or the fix is indistinguishable from switching the rule off. Each of these is a
+    # real invocation and must still fire.
+    for label, cmd in (("bare", "git worktree add .worktrees/x -b y"),
+                       ("after &&", "cd /repo && git worktree add x"),
+                       ("after ;", "echo hi; git worktree add x"),
+                       ("after a pipe", "true | git worktree add x")):
+        ok("...while a real invocation %s still fires, so this is a boundary test and not a "
+           "silencing" % label,
+           "worktree-by-hand" in fires("Bash", {"command": cmd}), cmd)
+
+    # AND THE OTHER HALF OF THE BOUNDARY: not first, not after a separator, unquoted.
+    ok("a phrase mid-command is a mention too — `git` as somebody else's third word is not "
+       "somebody running git",
+       fires("Bash", {"command": "echo please do not run git worktree add"}) == [])
+
+    # WHAT IT NOW CANNOT SEE, asserted so the limitation is a decision on the record rather than
+    # a surprise: a real command inside quotes is a MISS. That is the deliberate trade — a false
+    # positive teaches a reader to skim, and this channel is depended on exactly when they are
+    # not reading carefully.
+    ok("a genuine command inside quotes is knowingly missed, and this assertion is where that "
+       "trade is written down",
+       fires("Bash", {"command": 'bash -c "git worktree add x"'}) == [])
+
     # THE FIELD SCOPING IS THE CONTROL THAT MATTERS. Matching a dumped payload would fire on the
     # CONTENT of a write, so a commit message mentioning a memory file would trip the memory
     # rule. A rule about a path has to stay a rule about a path.

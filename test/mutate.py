@@ -82,6 +82,13 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # Answering [] restores the pre-boundary behaviour in the direction that matters: every rule
+    # falls back to matching anywhere in the command, so prose about `git worktree add` fires the
+    # advice again. Nothing errors and every real use still fires, which is exactly why a false
+    # positive of this shape survives — it looks like the guard working.
+    ("the commands in a shell string", "reach._command_segments", "lib/showrunner/reach.py",
+     r"(def _command_segments\([^)]*\):\n)",
+     "    return []\ndef _neutered_segments(command):\n"),
     # Answering None everywhere is the SAFE-looking direction: every integration record simply
     # reports that git could not be asked, which reads as caution rather than as a defect. What
     # dies with it is the only signal that an integration's evidence will NOT survive a clone —

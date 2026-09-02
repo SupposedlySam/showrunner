@@ -607,8 +607,19 @@ specific**, because a notice on every call is an alarm that is always on. Rules 
 foreign mechanism (game_loop's `harden`) carry a `requires` path and stay quiet where that
 project is absent, and every verb a rule names is checked against the parser's own list by the
 suite, so a rule pointing at a renamed verb fails the run rather than teaching that the tool
-cannot do the thing. Heredoc bodies are stripped before matching: text *about* `git worktree add`
-is not somebody running it.
+cannot do the thing.
+
+**Mention versus use has TWO doors, and both are shut.** Heredoc bodies are stripped, and a rule
+must match at a COMMAND BOUNDARY — the start of the string or just after `;`, `&&`, `||`, `|` or
+a newline — with quoted contents emptied first. The second one came from a real hit: a consumer
+writing a knowledge-base entry whose body quoted `git worktree add` as the example of what not to
+do, and the advice fired on prose about the advice. `git` as the third word of somebody else's
+command line is not somebody running git.
+
+The deliberate cost: a real command INSIDE quotes (`bash -c "git worktree add x"`) is now a miss,
+and the suite asserts that so the trade is on the record rather than a surprise. For a channel
+whose whole value is being worth reading, a false positive is the expensive direction — it teaches
+a reader to skim exactly the turns this is depended on for.
 
 ### Where a ZERO is trustworthy here, and where you are on your own
 
