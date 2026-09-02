@@ -183,6 +183,21 @@ quiet, `reap` correctly proposes nothing. Chat is load-bearing for **correctness
 `--launch`, not a convenience. Without it, prefer `spawn` without `--launch` and drive the
 Crawlers yourself.
 
+**A watchdog probe has a cost budget, and blowing it disarms the watchdog.** `waiting` is the
+command a consumer's idle watchdog runs, under a fixed timeout — and game_loop reads a timeout as
+"the probe did not run at all", reports a broken watchdog, and then stops scheduling re-checks. A
+slow probe does not degrade that mechanism, it switches it off. Measured on a real campaign: 869
+git subprocesses and 20 seconds against a 15s budget, six days with no verdict logged, three
+Crawlers dead without committing in that window and each found only because a human went looking.
+
+Branch questions now come from one `for-each-ref` per pass instead of a `rev-parse` per branch —
+544 of those 869 — and `waiting` asks for a shallow pass, because it reads alive/parked/blocked
+and never touches merged, empty, uncommitted, harness or model. Its cost is bounded by how many
+Crawlers are *alive*, not by how many the campaign has recorded. The suite asserts that shape
+rather than a wall-clock time: a timing assertion measures the machine, and the reporting machine
+was slow for a reason no code change fixes — four security suites intercepting every process
+spawn, at ~23ms per `git`.
+
 **A worktree is reclaimed when its work lands.** `spawn` makes one tree per leaf and nothing ever
 removed one: `integrate` left them, and `reap` only handles claims and locks whose owners are
 dead. One reported checkout carried 178 worktrees and 133 GB with a single live Crawler — and the

@@ -82,6 +82,15 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # #76. Answering None sends every caller back to a `rev-parse` PER BRANCH — the exact shape
+    # that cost 869 subprocesses and 20 seconds, blew a consumer's 15s probe timeout, and left
+    # its watchdog reporting "the probe did not run" for six days while three Crawlers died. The
+    # tool still works under the mutant; it is just slow again, which is why this needs a mutant
+    # rather than a test that reads the function.
+    ("every local branch, in one call", "campaign.existing_branches",
+     "lib/showrunner/campaign.py",
+     r"(def existing_branches\([^)]*\):\n)",
+     "    return None\ndef _neutered_existing_branches(cfg):\n"),
     # #75. Answering ([], []) restores the exact reported state: every tree stays forever, and
     # nothing says so — 178 trees and 133 GB in one real checkout, with the brief telling every
     # Crawler the opposite. A producer whose death returns the tool to its previous,
@@ -637,8 +646,10 @@ TARGETS = [
      "        return None\n    def _neutered_claim_next(self, actor, pid=None, tree=None,\n"
      "                                 session=None, prefer=None):\n"),
     ("campaign reconcile (resume)", "campaign.reconcile", "lib/showrunner/campaign.py",
-     r'(def reconcile\(cfg, graph, base="HEAD"\):\n)',
-     "    return []\ndef _neutered_reconcile(cfg, graph, base='HEAD'):\n"),
+     # WIDENED TO THE PARAMETER LIST, not pinned to a signature: this anchor went stale the
+     # moment `deep=` was added, and a stale anchor is a target that silently measures nothing.
+     r'(def reconcile\([^)]*\):\n)',
+     "    return []\ndef _neutered_reconcile(cfg, graph, base='HEAD', deep=True):\n"),
     ("shared-state audit", "worktree.audit_shared", "lib/showrunner/worktree.py",
      r"(def audit_shared\(cfg\):\n)",
      "    return []\ndef _neutered_audit(cfg):\n"),

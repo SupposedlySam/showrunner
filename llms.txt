@@ -68,6 +68,27 @@ watchdog with a sibling's liveness.
 You cannot do this for the operator — a probe an agent can set is a watchdog an agent can switch
 off — so if you are running unattended, say that it is unarmed rather than proceeding quietly.
 
+**A probe's COST is part of its contract (#76).** game_loop runs `waiting` under a hardcoded 15s
+timeout and reads a timeout as *"the probe did not run at all"* — which it reports as a broken
+watchdog and then **stops scheduling re-checks**. So a slow probe does not degrade the watchdog,
+it disarms it, silently. Measured on a real campaign: 869 git subprocesses, 20 seconds, six days
+with no verdict logged, and three Crawlers dead without committing inside that window, each found
+only because a human went to look.
+
+`waiting` therefore costs a number of subprocesses bounded by how many Crawlers are **alive**,
+never by how many the campaign has ever recorded. Two things get it there, and the suite asserts
+the shape rather than a wall-clock time — a timing assertion measures the machine, and the
+reporter's machine was slow for a reason no code change fixes (four security suites intercepting
+every process spawn, ~23ms per `git` against the usual 2-3ms):
+
+* branch questions are answered from ONE `for-each-ref` per pass, not a `rev-parse` per branch —
+  that alone was 544 of the 869;
+* `waiting` asks `reconcile` for a SHALLOW pass. It reads alive, parked, blocked and the ids; it
+  never touches merged, empty, uncommitted, tree, harness, model or session_health, and it was
+  paying for all of them on every Crawler in the record. The skipped keys are **absent** from a
+  shallow finding rather than `None`, so a caller that reads one gets a KeyError instead of a
+  quiet wrong answer.
+
 ## If you are the ORCHESTRATOR
 
 ```
@@ -805,6 +826,9 @@ Supported. Do NOT read `ready` and claim its first entry — everyone gets the s
 ```
 showrunner claim --next --actor <you>    # atomically take any free leaf; exit 1 when dry
 showrunner waiting                       # exit 0 waiting · 1 not waiting · 3 a Crawler is BLOCKED
+                                         # COST IS PART OF THE CONTRACT: bounded by how many
+                                         # Crawlers are ALIVE, never by how many the campaign
+                                         # has ever recorded. Safe under a fixed probe timeout
                                          # A Crawler refused at a turn-end is live and counts as
                                          # NEITHER waiting nor parked — only a message restarts
                                          # it. 3 is its own code so a caller treating non-zero as

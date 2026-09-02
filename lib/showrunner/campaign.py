@@ -123,14 +123,47 @@ def set_state(cfg, crawler, state, **extra):
 
 
 # ----------------------------------------------------------- reconciliation
-def branch_exists(cfg, branch):
+def existing_branches(cfg):
+    """Every local branch name, in ONE git call. None when git could not be asked (#76).
+
+    `branch_exists` spawns a `rev-parse` per branch, and `reconcile` asks it three times per
+    Crawler — 544 subprocesses of a 869-subprocess, 20-second `waiting` on a real campaign, with
+    essentially all the wall time spent waiting on processes. One `for-each-ref` answers all 544
+    in 0.035s against 10.2s, measured by the reporter.
+
+    THE CONSEQUENCE WAS NOT SLOWNESS. game_loop runs `waiting` as its watchdog probe under a
+    hardcoded 15s timeout and reads a timeout as "the probe did not run at all" — which it
+    reports as a broken watchdog and then STOPS SCHEDULING RE-CHECKS. Six days with no verdict
+    logged, three Crawlers dead without committing in that window, each found by a human going
+    to look. The watchdog was configured, armed, pointed at the documented command, and mute.
+
+    None, never an empty set, when git fails. Empty means "this repo has no branches", which is
+    a real and different answer, and collapsing them would make every branch read as missing —
+    turning a failed read into a confident report that every Crawler's work had vanished.
+    """
+    rc, out, _ = git(["for-each-ref", "--format=%(refname:short)", "refs/heads/"], cwd=cfg.root)
+    if rc != 0:
+        return None
+    return {line.strip() for line in out.splitlines() if line.strip()}
+
+
+def branch_exists(cfg, branch, known=None):
+    """`known` is a set from `existing_branches`, so a caller asking many times pays ONE call.
+
+    Threaded explicitly rather than cached in a module global: a cache would need a lifetime,
+    and the only honest lifetime is "this pass", which is exactly what a parameter says without
+    anything to invalidate. A stale cache here reports a branch that exists as gone, which is
+    the reading that makes a Crawler's work look lost.
+    """
+    if known is not None:
+        return branch in known
     rc, _, _ = git(["rev-parse", "--verify", "--quiet", "refs/heads/%s" % branch], cwd=cfg.root)
     return rc == 0
 
 
-def commits_ahead(cfg, branch, base):
+def commits_ahead(cfg, branch, base, known=None):
     """How many commits `branch` has that `base` does not."""
-    if not branch_exists(cfg, branch):
+    if not branch_exists(cfg, branch, known):
         return 0
     rc, out, _ = git(["rev-list", "--count", "%s..%s" % (base, branch)], cwd=cfg.root)
     if rc != 0:
@@ -141,15 +174,15 @@ def commits_ahead(cfg, branch, base):
         return 0
 
 
-def is_merged(cfg, branch, base):
+def is_merged(cfg, branch, base, known=None):
     """True when `base` already contains every commit on `branch`."""
-    if not branch_exists(cfg, branch):
+    if not branch_exists(cfg, branch, known):
         return None
     rc, _, _ = git(["merge-base", "--is-ancestor", branch, base], cwd=cfg.root)
     return rc == 0
 
 
-def is_empty(cfg, branch, base_sha):
+def is_empty(cfg, branch, base_sha, known=None):
     """Did this branch ever receive a commit?
 
     A branch with no commits of its own is not merged work — it is an **empty** branch,
@@ -163,7 +196,7 @@ def is_empty(cfg, branch, base_sha):
     Returns None when the answer is unknowable (no recorded base), so callers can say
     "unknown" rather than guess.
     """
-    if not base_sha or not branch_exists(cfg, branch):
+    if not base_sha or not branch_exists(cfg, branch, known):
         return None
     rc, _, _ = git(["cat-file", "-e", "%s^{commit}" % base_sha], cwd=cfg.root)
     if rc != 0:
@@ -173,7 +206,7 @@ def is_empty(cfg, branch, base_sha):
     # refs/heads/<sha>, missed, and returned 0, so this read True for every branch ever spawned.
     # It survived because the only assertion over it covered the genuinely-empty branch, which is
     # the case a constant True gets right.
-    return commits_ahead(cfg, branch, base_sha) == 0
+    return commits_ahead(cfg, branch, base_sha, known) == 0
 
 
 def lingering_crawlers(cfg):
@@ -292,13 +325,77 @@ def reclaimable(cfg, graph, base="HEAD"):
     return take, held
 
 
-def reconcile(cfg, graph, base="HEAD"):
+def _shallow_tail(cfg, graph, entry, f, wt):
+    """Leaf status, parked and blocked — the fields BOTH modes need (#76).
+
+    Extracted rather than copied into the shallow path. Two computations of "is this Crawler
+    blocked" are two statements of one policy, free to disagree, and this one decides whether a
+    watchdog rings — the failure would be a `waiting` that says one thing and a `reconcile`
+    that says another about the same live session.
+
+    The blocked question costs a `stop_gate` call, but only for a Crawler that is ALIVE, so it
+    is bounded by how many are running rather than by how many the campaign ever had. That is
+    the distinction that makes the shallow mode worth having.
+    """
+    leaf = None
+    try:
+        leaf = graph.show(entry["leaf"]) if entry.get("leaf") else None
+    except Exception:
+        pass
+    f["leaf_status"] = leaf.get("status") if leaf else "unknown"
+    f["parked"] = bool(leaf.get("parked")) if leaf else False
+
+    # BLOCKED IS NOT WORKING (issue #24). Asked only of a tree that is still alive, because
+    # a refused turn-end matters exactly while the process is up: that is the state where
+    # every other signal here reads healthy and the Crawler is doing nothing.
+    f["blocked"], f["blocked_detail"] = (None, "")
+    if f["alive"] and f["worktree_exists"]:
+        from . import harness as _h
+        f["blocked"], f["blocked_detail"] = _h.stop_gate(cfg, wt, entry.get("session"))
+        # JOURNALLED AS A TRANSITION, not as a state. reconcile computes `blocked` fresh on
+        # every call and a watchdog may call it every few seconds, so emitting the state
+        # would give a viewer one identical line per poll — the signal drowning in its own
+        # repetition. Only a CHANGE is an event.
+        #
+        # This makes a read verb write, which is worth naming: reconcile documents itself as
+        # reporting rather than acting, and that still holds — an observation of a campaign
+        # is not a mutation of it, and `waiting` already appends its own verdict log for the
+        # same reason. What reconcile still never does is change a claim, a branch or a tree.
+        if f["blocked"] is not None:
+            kind = "crawler.blocked" if f["blocked"] else "crawler.unblocked"
+            prev = events.latest(cfg, ("crawler.blocked", "crawler.unblocked"),
+                                 "crawler", f["crawler"])
+            if (prev or {}).get("kind") != kind:
+                events.emit(cfg, kind, {"crawler": f["crawler"], "leaf": f["leaf"],
+                                        "why": f["blocked_detail"] or None})
+    return f
+
+
+def reconcile(cfg, graph, base="HEAD", deep=True):
     """Answer the first question a resumed orchestrator has to ask.
 
     Returns a list of per-Crawler findings. Nothing here mutates anything: reconciliation
     reports, and `reap` acts.
+
+    `deep=False` SKIPS the per-tree git work — dirty, merged, empty, harness, model,
+    session_health, scratch listing — and is what `waiting` uses (#76). Those are questions
+    about history and drift; `waiting` asks only whether anything is alive, parked or blocked,
+    and it paid for the rest on every Crawler a campaign has ever had. On a real campaign that
+    was 869 subprocesses and 20 seconds, against a consumer's hardcoded 15s probe timeout — and
+    a timeout there is read as "the probe did not run", which stops the watchdog re-checking
+    entirely. Six days mute, three Crawlers dead without committing inside that window.
+
+    THE SKIPPED KEYS ARE ABSENT, NOT None. A caller that reads `merged` off a shallow finding
+    gets a KeyError, which is loud and immediate; None would be indistinguishable from "not
+    merged" and would quietly invert the answer. This file spends most of its comments on
+    exactly that class of mistake, so the shallow mode must not introduce one.
     """
     data = load(cfg)
+    # ONE ref read for the whole pass (#76). Three branch questions per Crawler, each its own
+    # `rev-parse`, was 544 of the 869 subprocesses that made `waiting` take 20s and silently
+    # disarm a consumer's watchdog. None means git could not be asked, and every callee falls
+    # back to asking per-branch rather than treating "could not look" as "no branches".
+    known = existing_branches(cfg)
     findings = []
     for entry in data.get("crawlers", []):
         wt = cfg.abspath(entry.get("worktree"))
@@ -311,13 +408,21 @@ def reconcile(cfg, graph, base="HEAD"):
             "scratch": entry.get("scratch"),
             "state": entry.get("state"),
             "alive": live(entry),
-            "branch_exists": branch_exists(cfg, entry.get("branch") or ""),
+            "branch_exists": branch_exists(cfg, entry.get("branch") or "", known),
             "worktree_exists": bool(wt and os.path.isdir(wt)),
-            "scratch_files": [],
-            "uncommitted": [],
         }
-        f["merged"] = is_merged(cfg, entry.get("branch") or "", base)
-        f["empty"] = is_empty(cfg, entry.get("branch") or "", entry.get("base_sha"))
+        if not deep:
+            # SHALLOW STOPS HERE. Everything below asks git about a tree or a branch's history,
+            # which is what made `waiting` cost a subprocess fan-out proportional to every
+            # Crawler the campaign ever had. The keys are left ABSENT on purpose — see the
+            # docstring — so reading one is a KeyError rather than a quiet wrong answer.
+            f["scratch_files"] = []
+            findings.append(_shallow_tail(cfg, graph, entry, f, wt))
+            continue
+        f["scratch_files"] = []
+        f["uncommitted"] = []
+        f["merged"] = is_merged(cfg, entry.get("branch") or "", base, known)
+        f["empty"] = is_empty(cfg, entry.get("branch") or "", entry.get("base_sha"), known)
         # What was DISPATCHED against what actually RAN. Imported here rather than at module
         # scope because dispatch imports campaign — the comparison lives with reconciliation,
         # which is where every other "recorded vs real" question in this file is answered.
@@ -327,7 +432,7 @@ def reconcile(cfg, graph, base="HEAD"):
         # are two different facts, and reporting only the first calls an errored Crawler
         # healthy. Observed doing exactly that.
         f["session_health"] = _dispatch.session_health(cfg, entry)
-        if f["worktree_exists"]:
+        if f["worktree_exists"] and deep:
             # `dirty` returns None when git itself failed, and `or []` turned that into "no
             # uncommitted work" — a positive claim about somebody's tree derived from a read
             # that did not happen, and the one that decides whether a dead Crawler's tree is
@@ -353,38 +458,7 @@ def reconcile(cfg, graph, base="HEAD"):
         else:
             f["harness"], f["harness_detail"], f["harness_mis_certified"] = None, "", False
 
-        leaf = None
-        try:
-            leaf = graph.show(entry["leaf"]) if entry.get("leaf") else None
-        except Exception:
-            pass
-        f["leaf_status"] = leaf.get("status") if leaf else "unknown"
-        f["parked"] = bool(leaf.get("parked")) if leaf else False
-
-        # BLOCKED IS NOT WORKING (issue #24). Asked only of a tree that is still alive, because
-        # a refused turn-end matters exactly while the process is up: that is the state where
-        # every other signal here reads healthy and the Crawler is doing nothing.
-        f["blocked"], f["blocked_detail"] = (None, "")
-        if f["alive"] and f["worktree_exists"]:
-            from . import harness as _h
-            f["blocked"], f["blocked_detail"] = _h.stop_gate(cfg, wt, entry.get("session"))
-            # JOURNALLED AS A TRANSITION, not as a state. reconcile computes `blocked` fresh on
-            # every call and a watchdog may call it every few seconds, so emitting the state
-            # would give a viewer one identical line per poll — the signal drowning in its own
-            # repetition. Only a CHANGE is an event.
-            #
-            # This makes a read verb write, which is worth naming: reconcile documents itself as
-            # reporting rather than acting, and that still holds — an observation of a campaign
-            # is not a mutation of it, and `waiting` already appends its own verdict log for the
-            # same reason. What reconcile still never does is change a claim, a branch or a tree.
-            if f["blocked"] is not None:
-                kind = "crawler.blocked" if f["blocked"] else "crawler.unblocked"
-                prev = events.latest(cfg, ("crawler.blocked", "crawler.unblocked"),
-                                     "crawler", f["crawler"])
-                if (prev or {}).get("kind") != kind:
-                    events.emit(cfg, kind, {"crawler": f["crawler"], "leaf": f["leaf"],
-                                            "why": f["blocked_detail"] or None})
-
+        f = _shallow_tail(cfg, graph, entry, f, wt)
         if f["harness"] == "drifted" and (f["alive"] or f["blocked"]):
             # Louder than LIVE: this tree's gate is answering a different question than the
             # orchestrator's, so anything it certifies means less than it appears to.
@@ -835,7 +909,12 @@ def waiting(cfg, graph, base="HEAD"):
     silences a watchdog that exists to catch a genuinely wedged run.
     """
     live, parked, blocked = [], [], []
-    for f in reconcile(cfg, graph, base):
+    # SHALLOW (#76). `waiting` reads alive, parked, blocked and the ids; it never touches
+    # merged, empty, uncommitted, tree, harness, model or session_health. It was paying for all
+    # of them on every Crawler the campaign had ever recorded, which is what put it past the 15s
+    # probe timeout a consumer runs it under — and a timeout there reads as "the probe did not
+    # run at all", which stops the watchdog scheduling any further re-check.
+    for f in reconcile(cfg, graph, base, deep=False):
         worked, why_worked = (False, "")
         if f["blocked"]:
             worked, why_worked = work_since_block(cfg, f["crawler"], f.get("branch"),

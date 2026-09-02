@@ -7162,6 +7162,112 @@ def test_spawn_refuses_a_base_missing_a_dependency():
 
 
 
+def test_waiting_does_not_scale_with_the_campaign():
+    group("`waiting` costs a bounded number of git subprocesses — a consumer runs it under a "
+          "fixed timeout, and a timeout there DISARMS the watchdog (#76)")
+    if not have("git"):
+        skip("the waiting cost group", "git is not installed")
+        return
+
+    # WHY THIS IS COUNTED AND NOT TIMED. A wall-clock assertion measures the machine, so it is
+    # flaky on a busy one and silent on a fast one — and the reporter's machine was slow for a
+    # reason the code cannot fix: four security suites intercepting every process spawn, ~23ms
+    # per `git` against the usual 2-3ms. The count is the thing showrunner controls, and it is
+    # what turns a constant into 20 seconds. A design that spawns hundreds of processes to answer
+    # "am I waiting?" is one scanner away from breaking wherever it is installed.
+    #
+    # THE COST WAS NOT SLOWNESS, IT WAS SILENCE. game_loop runs `waiting` as its watchdog probe
+    # under a hardcoded 15s timeout and reads a timeout as "the probe did not run at all", which
+    # it reports as a broken watchdog and then stops scheduling re-checks. Six days with no
+    # verdict logged; three Crawlers died without committing inside that window, each found only
+    # because a human went looking.
+    def campaign_of(n, tag):
+        cfg = make_repo()
+        g = new_graph(cfg)
+        for i in range(n):
+            leaf_id = "%s%02d" % (tag, i)
+            g.add("leaf %d" % i, leaf_id=leaf_id, labels=["backend"])
+            rec = worktree.spawn(cfg, g.show(leaf_id), actor="c-%s%02d" % (tag, i))
+            campaign.record_spawn(cfg, rec)
+        return cfg, g
+
+    def git_calls(fn):
+        """Count real git subprocesses, by wrapping the one helper they all go through."""
+        calls = []
+        real = campaign.git
+
+        def counting(*a, **kw):
+            calls.append(a[0][0] if a and a[0] else "?")
+            return real(*a, **kw)
+        campaign.git = counting
+        try:
+            fn()
+        finally:
+            campaign.git = real
+        return calls
+
+    small_cfg, small_g = campaign_of(3, "w")
+    big_cfg, big_g = campaign_of(12, "v")
+
+    small = git_calls(lambda: campaign.waiting(small_cfg, small_g))
+    big = git_calls(lambda: campaign.waiting(big_cfg, big_g))
+
+    ok("a 3-Crawler campaign costs waiting only a handful of git calls", len(small) <= 6, small)
+    # THE SHAPE, NOT A MAGIC NUMBER. Quadrupling the Crawlers must not multiply the cost: before
+    # this, each Crawler cost ~7 subprocesses, so the total tracked the campaign's whole history.
+    ok("...and 4x the Crawlers does not cost 4x the subprocesses — the cost is bounded by what "
+       "is ALIVE, not by everything the campaign ever recorded",
+       len(big) <= len(small) + 2, (len(small), len(big), big[:8]))
+
+    # THE TWO-SIDED CONTROL. Everything above is satisfied by a `waiting` that stopped looking at
+    # anything at all, which would be a watchdog probe that always answers the same thing. The
+    # deep path must still do the per-Crawler work it exists to do.
+    deep = git_calls(lambda: campaign.reconcile(big_cfg, big_g))
+    ok("...while the DEEP reconcile still pays per Crawler, so the saving came from not asking "
+       "questions `waiting` never reads — not from asking nothing",
+       len(deep) > len(big) * 3, (len(deep), len(big)))
+
+    # ONE REF READ ANSWERS EVERY BRANCH QUESTION. 544 of the reporter's 869 subprocesses were a
+    # `rev-parse` per branch; `for-each-ref` answers all of them in one call.
+    names = [c for c in deep if c == "rev-parse"]
+    ok("no branch question is answered by a per-branch `rev-parse` any more", not names, names)
+    ok("...and the ref list is read exactly once per pass",
+       len([c for c in deep if c == "for-each-ref"]) == 1,
+       [c for c in deep if c == "for-each-ref"])
+
+    # `waiting`'s ANSWER MUST BE UNCHANGED, or this is a speedup that broke the verb.
+    deep_verdict = campaign.waiting(big_cfg, big_g, base="HEAD")
+    ok("waiting still returns a verdict and a detail", isinstance(deep_verdict, tuple)
+       and len(deep_verdict) == 2, deep_verdict)
+
+    # AND THE SKIPPED FIELDS ARE ABSENT, NOT None. A caller reading `merged` off a shallow
+    # finding must get a KeyError — loud and immediate — because None would be indistinguishable
+    # from "not merged" and would invert the answer silently.
+    shallow_findings = campaign.reconcile(big_cfg, big_g, deep=False)
+    ok("a shallow finding still carries what waiting reads",
+       all(k in shallow_findings[0] for k in ("alive", "parked", "blocked", "crawler", "leaf")),
+       sorted(shallow_findings[0]))
+    for absent in ("merged", "empty", "uncommitted", "harness"):
+        ok("...and OMITS %s rather than answering None, so reading it is a KeyError and never a "
+           "quiet wrong answer" % absent, absent not in shallow_findings[0],
+           sorted(shallow_findings[0]))
+    ok("...while the deep finding carries them",
+       all(k in campaign.reconcile(big_cfg, big_g)[0]
+           for k in ("merged", "empty", "uncommitted", "harness")))
+
+    # existing_branches: EMPTY IS NOT UNREADABLE. A repo with no branches is a real answer; a git
+    # that could not be asked is not, and collapsing them would make every branch read as gone.
+    ok("existing_branches answers a set for a real repo",
+       isinstance(campaign.existing_branches(big_cfg), set))
+    # A Config whose root is NOT a git repo: git answers non-zero, and the function must say
+    # None rather than "this repo has no branches".
+    class _NoRepo(object):
+        root = tmpdir("not-a-git-repo")
+    ok("...and None — never an empty set — when git cannot be asked, because 'no branches' and "
+       "'could not look' would otherwise both read as every Crawler's work having vanished",
+       campaign.existing_branches(_NoRepo()) is None)
+
+
 def test_a_worktree_is_reclaimed_when_its_work_lands():
     group("A merged, clean worktree is reclaimed — and nothing else is, because the branch "
           "surviving is what makes the removal lossless (#75)")
@@ -11856,6 +11962,7 @@ def main():
                test_hook_registration,
                test_corpus_tool,
                test_spawn_refuses_a_base_missing_a_dependency,
+               test_waiting_does_not_scale_with_the_campaign,
                test_a_worktree_is_reclaimed_when_its_work_lands,
                test_a_compacted_agent_is_told_what_it_forgot,
                test_reaching_for_the_wrong_thing_names_the_right_one,
