@@ -1204,11 +1204,23 @@ def _integrate_locked(cfg, graph, base=None, only=None, dry_run=False):
         # a consumer measuring the correspondence got two plausible wrong numbers before a right
         # one. A convention the reader has to rediscover is not a link.
         #
-        # AND IT SAYS WHETHER THE EVIDENCE WILL TRAVEL. Consumers gitignore these — reasonably,
-        # they are large and local — so on any other machine the record is present and the proof
-        # is not, and the record still reads as a completed, proved leaf. That is the silent
-        # direction. `proof_tracked` is False when git does not carry it, None when git could
-        # not be asked, because "not tracked" and "could not look" are different answers.
+        # AND IT SAYS WHETHER THE EVIDENCE WILL TRAVEL. A consumer may not carry these, and then
+        # on another machine the record is present and the proof is not — while the record still
+        # reads as a completed, proved leaf. That is the silent direction, and it is the whole
+        # reason for the field. `proof_tracked` is False when git does not carry it, None when
+        # git could not be asked, because "not tracked" and "could not look" are different
+        # answers.
+        #
+        # THIS COMMENT USED TO SAY "reasonably, they are large and local", which was the
+        # reporter's own gloss and which they then MEASURED and retracted: 69 proofs totalled
+        # 15 KB, the largest was 247 bytes, and one ordinary source file in the same repo was
+        # three times the whole set. "Large" had come from the count, never from the bytes. They
+        # dropped their ignore rule and tracked all 69.
+        #
+        # Kept as a correction rather than deleted, because the field is right for a reason the
+        # wrong gloss obscured: showrunner cannot know what a consumer will carry, so the record
+        # has to be honest about absence. Where a consumer measures and finds it costs nothing,
+        # PRESENT beats honest-about-absent — this is the floor, not the ceiling.
         data.setdefault("integrated", []).append(
             {"crawler": entry["crawler"], "branch": branch, "ts": now(),
              "merged_proof": rel(proof_path, cfg.root) if proof_path else None,
