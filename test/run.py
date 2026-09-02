@@ -7176,6 +7176,83 @@ def test_spawn_refuses_a_base_missing_a_dependency():
 
 
 
+def test_a_claim_never_names_the_process_that_is_about_to_exit():
+    group("A claim's liveness must name a session, not the CLI process that took it — "
+          "`spawn` without --launch recorded a pid that was gone seconds later")
+    if not have("git"):
+        skip("the claim liveness group", "git is not installed")
+        return
+
+    # REPRODUCED TWICE BY A CONSUMER, and this asserts their exact shape: `spawn <leaf> --actor X`
+    # with NO --launch, then starting a session in the prepared tree by hand. The claim recorded
+    # `os.getpid()` — the `showrunner` process itself, which exits as soon as spawn returns — so
+    # `stale_claims` called the leaf abandoned and `reap --apply` offered to release it while the
+    # real session worked in that worktree. Two leaves, both reading as abandoned, work fine.
+    #
+    # `--launch` ALREADY HAD THE REMEDY. `rebind_claim` is called once the launched pid is known,
+    # and its docstring describes this failure in these words. The path that does not launch had
+    # the identical defect and nothing to correct it.
+    #
+    # THE CLI MUST BE A SEPARATE PROCESS or the bug cannot appear: in-process, `os.getpid()` is
+    # the test runner, which is alive, and the old code looks correct. That is why this shells
+    # out rather than calling the library.
+    cfg = make_repo()
+    g = new_graph(cfg)
+    g.add("prepared and started by hand", leaf_id="cl1", labels=["backend"])
+    sr = os.path.join(ROOT, "bin", "showrunner")
+
+    p = subprocess.run([sys.executable, sr, "spawn", "cl1", "--actor", "crawler-cl"],
+                       capture_output=True, text=True, cwd=cfg.root)
+    eq("spawn without --launch succeeds", p.returncode, 0)
+
+    leaf = new_graph(cfg).show("cl1")
+    claimed_pid = leaf.get("claim_pid")
+    eq("the leaf is claimed", leaf.get("status"), "in_progress")
+
+    # THE DEFECT, STATED AS THE ASSERTION: whatever pid is recorded must not be the CLI process
+    # that has already exited. It is either a live enclosing session, or None — never a corpse.
+    ok("the claim does not name the `showrunner` process, which exited when spawn returned",
+       claimed_pid is None or util.pid_alive(claimed_pid), claimed_pid)
+
+    # AND THE CONSEQUENCE, which is the thing that actually cost the consumer: the leaf must not
+    # be offered for release while somebody is working the tree.
+    stale = new_graph(cfg).stale_claims()
+    ok("...so `reap` does NOT report the leaf abandoned — the failure was `reap --apply` "
+       "releasing a leaf whose Crawler was still working",
+       "cl1" not in [l["id"] for l, _ in stale], [(l["id"], w) for l, w in stale])
+
+    # A CLAIM WITH NO PROVABLE OWNER IS SURFACED, NOT RELEASED. None is the honest record for a
+    # tree prepared before its session exists, and `stale_claims` already treats an unreadable
+    # pid as unprovable rather than dead — releasing it would end with two Crawlers on one leaf.
+    g2 = new_graph(cfg)
+    g2.add("no owner at all", leaf_id="cl2", labels=["backend"])
+    g2.claim("cl2", "crawler-none", pid=None, tree=cfg.root)
+    g2.db.execute("UPDATE leaves SET claim_pid=NULL WHERE id=?", ("cl2",))
+    g2.db.commit()
+    stale2 = new_graph(cfg).stale_claims()
+    ok("a claim with NO pid is not reported abandoned, because a claim whose owner cannot be "
+       "named cannot be proved abandoned", "cl2" not in [l["id"] for l, _ in stale2],
+       [l["id"] for l, _ in stale2])
+
+    # THE TWO-SIDED CONTROL. Everything above is satisfied by a `stale_claims` that reports
+    # nothing at all — which would be worse than the bug, since an abandoned leaf would never
+    # come back. A provably dead pid MUST still be reported.
+    g3 = new_graph(cfg)
+    g3.add("really abandoned", leaf_id="cl3", labels=["backend"])
+    g3.claim("cl3", "crawler-dead", pid=999999, tree=cfg.root)
+    stale3 = new_graph(cfg).stale_claims()
+    ok("...while a claim on a pid that is provably NOT running is still reported stale, so this "
+       "is not a blanket silencing of the reaper",
+       "cl3" in [l["id"] for l, _ in stale3], [l["id"] for l, _ in stale3])
+
+    # DISCOVERED, NOT HANDED OVER — the rule llms.txt already states for role claims and
+    # `lock acquire`, which the LEAF claim was not following.
+    src = open(os.path.join(ROOT, "lib", "showrunner", "graph.py")).read()
+    ok("the leaf claim resolves its pid rather than trusting the calling process",
+       "os.getpid()" not in src.split("def _claim_pid")[0].split("claim_pid=?")[-1][:400],
+       "still defaults to the caller's own pid")
+
+
 def test_reach_is_registered_by_the_verb_that_registers_hooks():
     group("The verb built so an agent need not already know the tool must not itself require "
           "knowing it exists — `worktree register` wires `reach`")
@@ -12182,6 +12259,7 @@ def main():
                test_hook_registration,
                test_corpus_tool,
                test_spawn_refuses_a_base_missing_a_dependency,
+               test_a_claim_never_names_the_process_that_is_about_to_exit,
                test_reach_is_registered_by_the_verb_that_registers_hooks,
                test_a_seat_that_may_not_dispatch_is_refused_at_the_sanctioned_path,
                test_the_announcement_does_not_claim_enforcement_it_has_not_got,

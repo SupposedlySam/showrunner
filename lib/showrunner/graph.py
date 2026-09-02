@@ -27,6 +27,7 @@ import sqlite3
 import time
 
 from .util import (Refused, boot_token, die, eprint, now, pid_alive, pid_readable, run,
+                   session_pid,
                    same_boot, slug, transcript_activity)
 
 # How long a LIVE claim's transcript must sit unchanged before `stalled_claims` says so.
@@ -121,6 +122,36 @@ CREATE TABLE IF NOT EXISTS events (
   detail TEXT NOT NULL DEFAULT ''
 );
 """
+
+
+def _claim_pid():
+    """The pid a claim should record when the caller did not name one — or None.
+
+    `pid or os.getpid()` recorded the CLI PROCESS, which exits seconds later. Every liveness
+    question then answers about a process that is already gone: `stale_claims` calls the leaf
+    abandoned and `reap --apply` releases it while somebody is working the tree. Reproduced
+    twice by a consumer with `spawn <leaf> --actor X` (no `--launch`) followed by starting a
+    session in the prepared tree by hand — two leaves read as abandoned while the work ran fine.
+
+    `--launch` already had a remedy: `rebind_claim`, called once the launched pid is known, and
+    its docstring describes exactly this failure. The path that does NOT launch had the same
+    defect and no remedy at all.
+
+    THE LESSON WAS ALREADY LEARNED ONE LAYER OVER. llms.txt states it for role claims: *a
+    claim's pid is DISCOVERED, not handed over* — `lock acquire` and `role claim` both walk the
+    ancestry rather than trusting the calling process. The LEAF claim kept `os.getpid()`.
+
+    NONE RATHER THAN A PID THAT IS ABOUT TO DIE. A claim with an unreadable pid is reported by
+    `stale_claims` as UNPROVABLE — surfaced with a note and never released — which is the honest
+    state for a tree prepared before its session exists. A pid that will be dead in a second is
+    not weaker evidence than none; it is evidence for the wrong answer, and it licenses a
+    release. Role claims REFUSE in this situation; a leaf claim cannot, because preparing a tree
+    before its session exists is the documented workflow.
+    """
+    pid, basis = session_pid()
+    # ONLY THE STRONG BASIS. `ppid-fallback` can be the very shell that is about to exit, which
+    # is the defect wearing a different hat.
+    return pid if basis == "ancestor-claude" else None
 
 
 class SqliteGraph:
@@ -356,7 +387,8 @@ class SqliteGraph:
             "UPDATE leaves SET status=?, actor=?, claim_pid=?, claim_boot=?, claim_host=?, "
             "claim_tree=?, claim_session=?, claim_ts=?, heartbeat_ts=?, parked=0, park_reason=NULL "
             "WHERE id=? AND status=?",
-            (IN_PROGRESS, actor, pid or os.getpid(), boot_token(), os.uname().nodename,
+            (IN_PROGRESS, actor, pid if pid is not None else _claim_pid(), boot_token(),
+             os.uname().nodename,
              # A CLAIM WITH NO TREE CANNOT BE ATTRIBUTED, and the turn-end gate is scoped by
              # exactly this column — so an unrecorded tree is a leaf nobody can be gated on.
              # `spawn` always passes the Crawler's worktree; every OTHER path (a manual claim,

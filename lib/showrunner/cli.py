@@ -13,6 +13,7 @@ import sys
 from . import (__version__, brief, campaign, collide, config, dispatch, events, gates,
                reach, graph as G, harness, lanes, lease, locks, pin, roles, worktree)
 from .util import (RESOLVED_BASIS, Refused, die, eprint, git, now, package_root,
+                   session_pid as util_session_pid,
                    rel, resolve_from_caller, run, short_session, slug, stamp)
 
 BOLD, DIM, RED, GRN, YEL, OFF = "\033[1m", "\033[2m", "\033[31m", "\033[32m", "\033[33m", "\033[0m"
@@ -1051,6 +1052,39 @@ def cmd_lock_status(args):
     return 0
 
 
+def _rebind_claim_to_this_session(cfg, tree, verdict):
+    """Point the leaf claimed for THIS worktree at the process now working in it.
+
+    Best-effort and silent on failure: `enter` is a SessionStart hook whose one job is to not
+    break a session's startup, and a claim that stays unprovable is surfaced by `stale_claims`
+    rather than released. Doing nothing here is the old behaviour, which is safe; raising is not.
+
+    Only for a tree the CAMPAIGN RECORD names, so `git worktree add` cannot rebind somebody
+    else's claim by entering a directory — the same rule `seat_roles` follows for exactly the
+    same reason.
+    """
+    if verdict not in ("acquired", "own") or not tree:
+        return
+    try:
+        entry = next((c for c in (campaign.load(cfg).get("crawlers") or [])
+                      if os.path.realpath(cfg.abspath(c.get("worktree") or "")) ==
+                      os.path.realpath(tree)), None)
+        if not entry or not entry.get("leaf"):
+            return
+        pid, basis = util_session_pid()
+        if basis != "ancestor-claude":
+            return
+        g = _graph(cfg)
+        leaf = g.show(entry["leaf"])
+        if (leaf or {}).get("status") != "in_progress":
+            return
+        if leaf.get("claim_pid") == pid:
+            return
+        g.rebind_claim(entry["leaf"], pid)
+    except Exception:                                            # noqa: BLE001
+        return
+
+
 def cmd_worktree_enter(args):
     """SessionStart hook shape. ALWAYS exits 0 — see below.
 
@@ -1068,6 +1102,13 @@ def cmd_worktree_enter(args):
 
     if verdict == "not-a-worktree":
         return 0
+    # THE SESSION HAS ARRIVED, so point the leaf's claim at it. `spawn` takes the claim before
+    # any session exists — it has to — so until the real process is known the claim names
+    # nothing that can be proved alive. `--launch` rebinds the moment it has a pid; the path
+    # that prepares a tree for you to start yourself had no such moment until this one. Entering
+    # the tree IS that moment, and it is the same remedy at the same instant of knowing.
+    _rebind_claim_to_this_session(cfg, tree, verdict)
+
     if verdict == "own":
         print("showrunner: you already hold worktree %s" % tree)
         return 0

@@ -82,6 +82,13 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # Answering None ALWAYS is the safe-looking direction — every claim becomes unprovable,
+    # nothing is falsely released, and the tool looks fine. What dies with it is the reaper's
+    # ability to reclaim a genuinely abandoned leaf, which is the failure this whole module
+    # exists to prevent, so the mutant proves the fix did not simply silence the question.
+    ("the pid a claim records", "graph._claim_pid", "lib/showrunner/graph.py",
+     r"(def _claim_pid\(\):\n)",
+     "    return None\ndef _neutered_claim_pid():\n"),
     # #77. Answering True always restores the exact reported hole: `spawn --launch` stops asking
     # whether the seat may dispatch, so a seat announcing "may dispatch: NOTHING" launches
     # Crawlers and nothing says otherwise — which is how two went out and the operator found
