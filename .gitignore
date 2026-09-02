@@ -42,3 +42,6 @@ __pycache__/
 .saggar/**/*.local.*
 .saggar/scratchpad.md
 .saggar/jobs/
+
+# game_loop, installed with --local: for this machine only, not the team.
+.game_loop/

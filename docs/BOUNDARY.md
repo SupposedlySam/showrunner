@@ -301,8 +301,8 @@ re-reading everything: the assumptions above cite `guard-writes-impl.sh`, `verif
 cannot have moved. That is the difference between a check being satisfied and a check being
 skipped, and it is worth writing down because the skip is the tempting one.
 
-<!-- game_loop-verified: 4104291e — payload digest. THIS is the gated value.
-     First carried by release fc0c301e. That release name changes ONLY when the digest above
+<!-- game_loop-verified: 292b7c8e — payload digest. THIS is the gated value.
+     First carried by release 40d47fd9. That release name changes ONLY when the digest above
      changes: the two describe the same event, and a release where the digest did not move did
      not re-verify anything. Overwriting it on every upgrade was done twice here by updating
      both fields together out of habit — an ungated number drifting beside a gated one, inside
@@ -312,14 +312,14 @@ skipped, and it is worth writing down because the skip is the tempting one.
 
 - The commit gate resolves **per target tree** — the resolution lands in `commit_root`, and the
   no-harness branch then carries it in `_gl_unharnessed` — and denies in two cases: when that
-  tree carries no harness (`guard-writes-impl.sh:871`, where the `undetermined:` resolution
+  tree carries no harness (`guard-writes-impl.sh:1519`, where the `undetermined:` resolution
   becomes `_gl_unharnessed`), and
   when the target is built from a **shell variable** so the gate cannot resolve it without
-  executing it (line 852). The second is newer than the first — it used to pass silently,
+  executing it (line 1500). The second is newer than the first — it used to pass silently,
   which is the default shape under fan-out.
 - A **FOURTH** denial, newest of all and the only one keyed on a *mandate* rather than on a
   path: a Bash `rm` carrying BOTH recursive and force, while an unparked mandate is live
-  (`guard-writes-impl.sh:689`). The reasoning is not about the delete — it is that an
+  (`guard-writes-impl.sh:1002`). The reasoning is not about the delete — it is that an
   interactive approval is the one hazard in an unattended run that fails SILENT: no timeout, no
   log line, and the watchdog cannot answer it because a run blocked on a prompt is not idle.
   Both flags are required, in any spelling (`-rf`, `-r -f`, `--recursive --force`), and the
@@ -332,11 +332,12 @@ skipped, and it is worth writing down because the skip is the tempting one.
   day it is written.
 
 - A **third** denial, newer than both and not on the commit path at all: a Write or Edit to
-  `config.json`, `INVARIANTS.md` or `verify.yaml` **when the file already exists** (line 432).
+  `config.json`, `INVARIANTS.md` or `verify.yaml` **when the file already exists** (line 560).
   The discriminator is existence, so seeding an absent one is provisioning and passes —
   verified here in a real tree by moving the file aside and re-running the same payload, since
   an orchestrator that provisions worktrees is the party that breaks if that arm is wrong.
-  It **now also covers `config.local.json`, and that one is denied whether or not it exists** —
+  It **now also covers `config.local.json`, and that one is denied whether or not it exists**
+  (line 607) —
   nothing seeds it, so creating one is the same act as editing one. Written down because the
   sentence here said the opposite for exactly one commit: showrunner found that file merged
   into the same policy with UNION semantics on the trust lists, reported it upstream rather
@@ -347,11 +348,11 @@ skipped, and it is worth writing down because the skip is the tempting one.
   calls, so showrunner writing that file into a worktree from its own process is unaffected.
   Verified here, same path both ways — the orchestrator's write lands, the session's is denied.
 - The edited-file set is scoped to the **session**, not the tree — one session is one session
-  however many trees it touches. (`EDITED_F` at line 263.)
+  however many trees it touches. (`EDITED_F` at line 350.)
 - The blast-radius check is a **warning, never a denial** — `blast_note` reaches `commit_note`
-  and nothing else (`blast_note` assigned at 969, consumed at 1464) — and is silent when the
-  session's `edited` set is empty, which is no evidence rather than a clean bill (line 984,
-  stated as design at 966).
+  and nothing else (`blast_note` assigned at 1647, consumed at 2699) — and is silent when the
+  session's `edited` set is empty, which is no evidence rather than a clean bill (line 1647,
+  stated as design at 443).
 **The two below cite `install.sh` by ANCHOR, not by line, and that is a correction.** It is
 the one file here that is not vendored — it lives in game_loop's own checkout — so the payload
 digest does not move when it changes and the cited-line check cannot read it. They carried line
@@ -365,8 +366,12 @@ only more confident.
   lines, re-measured rather than recopied. Verified end to end here, not read: a parent repo
   with a distinctive marker in its `verify.yaml`, a bare worktree, install, and the marker
   arrives — so the seed is the parent's rules and not the blank template.
-- Hooks are merged into `<project>/.claude/settings.json` — the block beginning `Merge the
-  hooks into .claude/settings.json` — so a worktree without one has no rails at all.
+- Hooks are merged into the project's settings file — the block beginning `Merge the hooks into
+  the settings file, idempotently` — so a worktree without one has no rails at all. WHICH file
+  is what `--local` decides: the tracked `settings.json` by default, the untracked
+  `settings.local.json` under `--local`. The anchor said `.claude/settings.json` and the
+  installer no longer says that, which is the anchor doing its job — it named a phrase that
+  changed rather than a line that slid, and the phrase changing is what a reader needs to know.
 - Adopting a parent also carries that parent's **own** `.game_loop/bin/` project scripts, with
   the executable bit, because a `verify.yaml` rule naming a command absent from the tree is a
   gate that cannot run. Extras only: a divergent parent payload does **not** overwrite the

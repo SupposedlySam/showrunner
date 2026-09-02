@@ -1011,11 +1011,20 @@ def mirror_local_registration(cfg, tree):
     except (OSError, ValueError) as exc:
         return "could not read %s to carry its hooks into the tree: %s" % (rel(src, cfg.root), exc)
 
+    # ANY HOOK THE PROJECT REGISTERS, not only showrunner's own. The first version carried
+    # `.showrunner/hooks/` entries and nothing else, which is the same defect one project over:
+    # a worktree would get showrunner's guards and NOT the harness's, while the main checkout
+    # reported both registered. A Crawler's tree needs every guard the project runs, and which
+    # of them showrunner happens to own is not a distinction the tree cares about.
+    #
+    # `$CLAUDE_PROJECT_DIR` is the test because it is what makes an entry portable: a hook named
+    # by an absolute path outside the project would be carried into a tree where it may not
+    # exist, and one named relative to the project resolves correctly wherever the tree is.
     ours = {}
     for event, entries in (data.get("hooks") or {}).items():
         for entry in entries or []:
             for hook in entry.get("hooks") or []:
-                if ".showrunner/hooks/" in str(hook.get("command") or ""):
+                if "$CLAUDE_PROJECT_DIR" in str(hook.get("command") or ""):
                     ours.setdefault(event, []).append(entry)
                     break
     if not ours:

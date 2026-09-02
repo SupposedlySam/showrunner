@@ -1769,12 +1769,29 @@ def test_harness_provisioning():
     # does not — theirs sat in a sweep file, mine in an exclusion list.
     _dr = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
                          cwd=ROOT, capture_output=True, text=True).stdout
-    ok("`doctor` says what a Crawler's harness actually IS — the lines vanish silently when the "
-       "producer dies, which is why nothing required them until now",
-       "harness .game_loop" in _dr, _dr[:200])
-    ok("...and whether that harness declares its OWN owned set or falls back, because the "
-       "fallback is conservative and noisier and a reader must know which they are getting",
-       ("declares its own owned set" in _dr) or ("exposes no `owned` verb" in _dr), _dr[:200])
+    # CONDITIONAL ON A HARNESS BEING PRESENT, because `.game_loop/` is no longer tracked here:
+    # it is installed per machine, so a stranger's clone has none and these two asked about
+    # lines that cannot exist there. showrunner does not require a harness — `harness.require`
+    # is config — so asserting one is present made the suite depend on a thing this repo
+    # deliberately does not ship. It stayed true only because the payload used to be committed.
+    #
+    # The property still worth pinning is the one the comment above names: doctor must not go
+    # SILENT about the harness. So it is asserted both ways — the lines when there is one, and a
+    # plain statement of absence when there is not, since an empty section reads as "nothing to
+    # report" and means the opposite.
+    if os.path.isdir(os.path.join(ROOT, ".game_loop")):
+        ok("`doctor` says what a Crawler's harness actually IS — the lines vanish silently when "
+           "the producer dies, which is why nothing required them until now",
+           "harness .game_loop" in _dr, _dr[:200])
+        ok("...and whether that harness declares its OWN owned set or falls back, because the "
+           "fallback is conservative and noisier and a reader must know which they are getting",
+           ("declares its own owned set" in _dr) or ("exposes no `owned` verb" in _dr),
+           _dr[:200])
+    else:
+        ok("`doctor` says a harness is ABSENT rather than printing nothing — this checkout has "
+           "none, and silence there reads as 'nothing to report' when it means the opposite",
+           ("harness" in _dr.lower()), _dr[:300])
+    # A SYNTHETIC REPO, so this arm does not depend on THIS checkout having a harness either.
     _off = make_repo(extra_config={"harness": {"provision": "off"}})
     _dr_off = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
                              cwd=_off.root, capture_output=True, text=True).stdout
@@ -7308,8 +7325,9 @@ def test_an_untracked_registration_still_reaches_the_worktree():
     # MERGED, NEVER COPIED. Carrying the whole file would hand the Crawler the project's
     # statusLine, permissions and unrelated hooks — the wholesale-copy mistake harness.py
     # documents. Only entries naming a showrunner shim may travel.
-    ok("...and the project's UNRELATED hook is not carried, because this merges rather than "
-       "copying the file", not any("my-own-guard" in c for c in commands), commands)
+    ok("...and a hook named by an ABSOLUTE path outside the project is not carried, because it "
+       "may not exist in the tree and copying the whole file is the mistake harness.py refuses",
+       not any("my-own-guard" in c for c in commands), commands)
     ok("...nor its statusLine", "statusLine" not in got, sorted(got))
 
     # IDEMPOTENT, or a second spawn into the same tree stacks a duplicate that runs twice.
@@ -7322,6 +7340,31 @@ def test_an_untracked_registration_still_reaches_the_worktree():
     eq("...and the entry count is unchanged",
        len([1 for e in (after.get("hooks") or {}).get("PreToolUse", [])
             for h in e.get("hooks") or []]), len(commands))
+
+    # EVERY PROJECT HOOK, NOT ONLY SHOWRUNNER'S. The first version carried `.showrunner/hooks/`
+    # entries alone, which is the same defect one project over: the tree would get showrunner's
+    # guards and not the harness's, while the main checkout reported both registered. A
+    # Crawler's tree needs every guard the project runs, and which of them showrunner owns is
+    # not a distinction the tree cares about.
+    with open(os.path.join(claude_dir, "settings.local.json")) as fh:
+        both = json.load(fh)
+    both["hooks"]["PreToolUse"].append(
+        {"matcher": "Bash", "hooks": [{"type": "command",
+                                       "command": '"$CLAUDE_PROJECT_DIR"/.game_loop/bin/'
+                                                  'guard-writes.sh'}]})
+    with open(os.path.join(claude_dir, "settings.local.json"), "w") as fh:
+        json.dump(both, fh)
+    tree_b = os.path.join(cfg.worktree_root, "mirror-probe-both")
+    os.makedirs(tree_b, exist_ok=True)
+    lease.mirror_local_registration(cfg, tree_b)
+    with open(os.path.join(tree_b, ".claude", "settings.local.json")) as fh:
+        carried = [str(h.get("command"))
+                   for e in (json.load(fh).get("hooks") or {}).get("PreToolUse", [])
+                   for h in e.get("hooks") or []]
+    ok("a harness hook the project registers is carried too, not just showrunner's own",
+       any("guard-writes.sh" in c for c in carried), carried)
+    ok("...and showrunner's is still carried alongside it",
+       any("dispatch-guard.sh" in c for c in carried), carried)
 
     # THE CONTROL. With no untracked registration there is nothing to carry, and this must do
     # NOTHING rather than manufacture a file — a tracked registration crosses by itself, and a
@@ -7647,6 +7690,46 @@ def test_the_announcement_does_not_claim_enforcement_it_has_not_got():
                         env=dict(os.environ, XDG_CONFIG_HOME=_home))
     eq("showrunner's own write-path guard ALLOWS a write the role's `writes` denies — which is "
        "what PUBLISHED means, demonstrated rather than asserted", _p.returncode, 0)
+
+    # DOCTOR PARSES THE HOOKS, because a consumer never runs this suite (reported by a consumer
+    # who had the check only as text in their own verify.yaml — where a quoting bug made it
+    # unable to pass, and an upgrade could not rewrite it because it was their copy). A check
+    # shipped as text is a check you cannot fix for anybody; a check inside `doctor` upgrades.
+    # They also could not patch their copy: that file is project policy and their write guard
+    # refused, correctly.
+    parse_cfg = make_repo()
+    hooks_dir = os.path.join(parse_cfg.root, ".showrunner", "hooks")
+    os.makedirs(hooks_dir, exist_ok=True)
+    shutil.copy(os.path.join(ROOT, ".showrunner", "hooks", "whoami.sh"),
+                os.path.join(hooks_dir, "whoami.sh"))
+
+    def parse_doctor():
+        p_ = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                            capture_output=True, text=True, cwd=parse_cfg.root)
+        return p_.returncode, p_.stdout + p_.stderr
+
+    _rc, said = parse_doctor()
+    ok("doctor reports that the hooks parse, rather than saying nothing when they do",
+       "parse" in said, said[-400:])
+
+    with open(os.path.join(hooks_dir, "whoami.sh"), "a") as fh:
+        fh.write('\nif [ -z "$x" ]; then\n')
+    rc_bad, said = parse_doctor()
+    ok("...and a hook that does NOT parse is an ERROR naming the file",
+       "DOES NOT PARSE" in said and "whoami.sh" in said, said[-400:])
+    eq("...and doctor exits non-zero on it, because this is the one failure that blocks its own "
+       "repair", rc_bad != 0, True)
+    ok("...and says how to fix it from OUTSIDE the session, since inside it every tool is "
+       "refused", "outside the session" in said, said[-300:])
+    ok("...and renders bash's message as prose, not a Python list repr",
+       "['" not in said.split("DOES NOT PARSE")[1][:200], said[-300:])
+
+    # A PYTHON HOOK IS PARSED AS PYTHON. The shebang decides, not the extension — guessing wrong
+    # reports a healthy file as broken, which is the crying-wolf direction.
+    with open(os.path.join(hooks_dir, "probe.py"), "w") as fh:
+        fh.write("#!/usr/bin/env python3\nthis is not python(\n")
+    _rc2, said = parse_doctor()
+    ok("a .py hook with broken Python is caught too", "probe.py" in said, said[-300:])
 
     # DOCTOR ANSWERS THE QUESTION showrunner CAN answer: is there a reader on Bash at all?
     cfg = make_repo()
@@ -9694,24 +9777,67 @@ def test_publishable():
     # A tracked config carrying the author's absolute paths is not a cosmetic leak: an
     # allow_write_roots entry is a RULE, and a stranger inherits a write permission they
     # never chose, aimed at a path that does not exist on their machine.
-    offenders = []
+    offenders, unscanned = [], []
     for rel_path in tracked:
         full = os.path.join(ROOT, rel_path)
         try:
-            if os.path.getsize(full) > 400_000:
+            # A SIZE GUARD THAT SILENTLY EXEMPTS IS A HOLE, and this one had swallowed the file
+            # directly below it. The limit was 400_000 bytes; THIS file is over 800_000, so the
+            # scan stopped covering its own source — while the comment a few lines down still
+            # said it did, "instead of quietly exempting the one place the patterns are
+            # guaranteed to appear". Found by accident: a fixture of mine put two fake home
+            # paths in here and the scan did not notice, which it should have.
+            #
+            # The guard exists for genuinely large blobs, so it stays — but a skip is now
+            # RECORDED and asserted on, because a file nobody scanned is not a file that came
+            # back clean. Raised to a size no text file here approaches.
+            if os.path.getsize(full) > 4_000_000:
+                unscanned.append(rel_path)
                 continue
             with open(full, errors="ignore") as fh:
                 text = fh.read()
-        except OSError:
+        except OSError as exc:
+            unscanned.append("%s (%s)" % (rel_path, exc))
             continue
         # Assembled rather than written literally, so this scan still covers its own file
         # instead of quietly exempting the one place the patterns are guaranteed to appear.
+        # A PLACEHOLDER IS NOT A HOME. `/Users/...` and `/Users/me` carry no identity and are
+        # what a careful author writes when redacting one — game_loop's comments use both, and
+        # this flagged four of them as leaks on an upgrade. What the check is FOR is a tracked
+        # file carrying somebody's real home, because a stranger cloning this repo inherits it.
+        #
+        # Narrowed rather than exempted by file: exempting the file would have turned off the
+        # check for the payload most likely to carry a real path, which is the direction that
+        # gets somebody's username published.
+        placeholder = re.compile(r"/(?:Users|home)/(?:\.\.\.|…|me|you|user|USER|<[^>]+>)(?:/|\b)")
         for pat in ("/" + "Users/", "/" + "home/", "/private/" + "tmp/claude-"):
             for line in text.splitlines():
+                if pat in line and placeholder.search(line):
+                    continue
                 if pat in line and "example" not in line.lower():
                     offenders.append("%s: %s" % (rel_path, line.strip()[:100]))
+    # THE NARROWING IS TWO-SIDED, or "placeholder" becomes a hole somebody drives a real path
+    # through. Asserted here rather than trusted, because this check is the only thing standing
+    # between a tracked file and somebody's published username.
+    _ph = re.compile(r"/(?:Users|home)/(?:\.\.\.|…|me|you|user|USER|<[^>]+>)(?:/|\b)")
+    for _line in ("/Users/.../development/x", "/Users/me/x.txt", "/Users/<user>/x"):
+        ok("a redacted placeholder is not treated as a leak: %s" % _line, bool(_ph.search(_line)))
+    # ASSEMBLED, NOT WRITTEN LITERALLY — the same trick the scan uses on its own patterns two
+    # screens up, and for the same reason. A literal fake home in this file is indistinguishable
+    # from a real leak to the very check being tested, and it tripped it the moment the size
+    # guard stopped exempting this file. The first draft also used a real username lifted from a
+    # bug report, in a tracked file, inside the assertion whose subject is not publishing one.
+    for _line in ("/" + "Users/" + "nobody-real/dev/repo", "/" + "home/" + "nobody-real/thing"):
+        ok("...while a REAL home is still caught: %s" % _line, not _ph.search(_line))
+
     ok("no tracked file hardcodes an absolute home or session path — this repo is public and "
        "a stranger inherits every tracked rule", not offenders, offenders[:6])
+    # A FILE NOBODY SCANNED IS NOT A FILE THAT CAME BACK CLEAN.
+    ok("...and every tracked file was actually scanned, so the verdict above covers the repo "
+       "rather than the part of it under a size limit", not unscanned, unscanned[:6])
+    ok("...including this file, which is the one place the patterns are guaranteed to appear "
+       "and the one a size guard silently exempted for as long as it was over the limit",
+       "test/run.py" not in unscanned, unscanned[:6])
 
     # The overlay is what makes the rule above LIVEABLE. Without somewhere untracked to put a
     # machine-specific path, it goes in the tracked config, and that is precisely how internal
@@ -9802,15 +9928,34 @@ def test_publishable():
     # My fixtures write model.json themselves, so they prove the reader can read what the test
     # wrote — not that it can read what the HARNESS writes. This is the missing half: the two
     # sides of that path, compared against the installed harness's own source.
-    gl_bin = os.path.join(ROOT, ".game_loop", "bin", "game_loop")
-    if os.path.exists(gl_bin):
-        with open(gl_bin, errors="ignore") as fh:
-            gl_src = fh.read()
+    # READ THE HARNESS'S WHOLE bin/, NOT ONE FILENAME. This opened `.game_loop/bin/game_loop`
+    # alone, and game_loop #155 moved its implementation into a sibling `_gl_impl.py` — so both
+    # assertions below went red on an upgrade that changed NOTHING about the layout. `sessions/`
+    # and `model.json` were sitting on disk exactly where this repo builds its path.
+    #
+    # A check pinned to a filename reports a refactor as a breakage, which is the crying-wolf
+    # direction: it costs a real investigation and, done twice, it teaches you to discount the
+    # check. Same lesson as the mutation anchors pinned to a signature — widen to the thing the
+    # rule is actually about, which is "the harness", not "that file".
+    gl_dir = os.path.join(ROOT, ".game_loop", "bin")
+    gl_src = ""
+    for _n in sorted(os.listdir(gl_dir)) if os.path.isdir(gl_dir) else []:
+        _f = os.path.join(gl_dir, _n)
+        if os.path.isfile(_f):
+            with open(_f, errors="ignore") as fh:
+                gl_src += fh.read()
+    if gl_src:
         ok("the harness still calls its per-session directory `sessions/` — the segment this "
            "repo builds its model.json path from", 'os.path.join(ROOT, "sessions")' in gl_src)
         ok("...and still names the file model.json, so a rename fails HERE loudly instead of "
            "turning every model verdict into a silent `unknown`",
            'MODEL_F = "model.json"' in gl_src)
+        # THE PATH IS ALSO CHECKED ON DISK, because a string in the harness's source and a
+        # directory it actually writes are different facts, and the source-grep is the weaker
+        # of the two. This is what proved the "rename" was a refactor rather than a break.
+        _sess = os.path.join(ROOT, ".game_loop", "sessions")
+        ok("...and the harness really does write that directory, which is the fact the grep "
+           "above is a proxy for", os.path.isdir(_sess), _sess)
         with open(os.path.join(ROOT, "lib", "showrunner", "dispatch.py")) as fh:
             disp = fh.read()
         ok("...and this repo builds that same path rather than a remembered one",
@@ -9956,12 +10101,23 @@ def test_publishable():
         for root in d.get("allow_write_roots") or []:
             if not os.path.abspath(root).startswith(ROOT):
                 granted.append("%s → %s" % (src, root))
-    ok("...and so does the EFFECTIVE config — the union game_loop actually reads, not just the "
-       "file this repo ships. showrunner's docs promise a Crawler cannot write outside the "
-       "repo, and a machine-wide layer can widen that without touching anything tracked",
-       not granted, granted)
-    ok("...checked against the layers that exist here, so this is a verdict rather than a file "
-       "that happened to be missing", bool(present), present)
+    # THREE STATES, NOT TWO. `present` is a positive control: "no grants found" must not come
+    # from having read nothing. But NO LAYERS AT ALL is a third answer — this checkout no longer
+    # tracks `.game_loop/`, so a clone has none, and asserting a layer exists made the control
+    # demand the very file the repo stopped shipping. Nothing can widen a write root when
+    # nothing configures one; that is a real verdict, and different from both "checked and
+    # clean" and "could not check".
+    if not present:
+        skip("the effective game_loop write-root check",
+             "no game_loop config layer exists in this checkout, so nothing could widen a write "
+             "root — which is a different statement from having looked and found none")
+    else:
+        ok("...and so does the EFFECTIVE config — the union game_loop actually reads, not just "
+           "the file this repo ships. showrunner's docs promise a Crawler cannot write outside "
+           "the repo, and a machine-wide layer can widen that without touching anything tracked",
+           not granted, granted)
+        ok("...checked against the layers that exist here, so this is a verdict rather than a "
+           "file that happened to be missing", bool(present), present)
 
     sr_cfg = os.path.join(ROOT, ".showrunner", "config.json")
     with open(sr_cfg) as fh:
@@ -10854,17 +11010,35 @@ def test_claims_about_the_layer_below():
     # change that touched none of the files these claims cite. A stamp that mostly cries wolf
     # is one somebody deletes — game_loop declined this very mechanism for that reason, and
     # was right. The digest fires when the thing the claims are ABOUT moves, and not before.
-    # `.game_loop/bin/` is tracked, so a stranger's clone recomputes the same number.
-    digest = hashlib.sha256()
+    # THE PAYLOAD IS NO LONGER TRACKED HERE, and this comment used to say the opposite —
+    # "a stranger's clone recomputes the same number" — which stopped being true the moment
+    # `.game_loop/` was gitignored to keep another project's payload out of a public history.
+    # A clone has no payload to hash, so there is nothing for these claims to be pinned to and
+    # the honest outcome is a SKIP with the reason, not a failure about a file that was never
+    # meant to be there. Corrected rather than deleted, because a comment asserting a property
+    # the repo has since dropped is the exact drift this file spends its length catching.
+    # SKIP THE STAMP, NOT THE GROUP. The first version returned here, which dropped the 21
+    # assertions that follow — they are about this repo's own claim files and do not need the
+    # payload at all. An early return is the bluntest possible skip and it silently reduces
+    # coverage in exactly the checkout least able to notice: a stranger's clone.
     bindir = os.path.join(ROOT, ".game_loop", "bin")
-    payload = sorted(f for f in os.listdir(bindir) if os.path.isfile(os.path.join(bindir, f)))
+    have_payload = os.path.isdir(bindir)
+    digest = hashlib.sha256()
+    payload = (sorted(f for f in os.listdir(bindir) if os.path.isfile(os.path.join(bindir, f)))
+               if have_payload else [])
     for name in payload:
         digest.update(name.encode())
         with open(os.path.join(bindir, name), "rb") as fh:
             digest.update(fh.read())
-    installed = digest.hexdigest()[:8]
-    ok("the installed harness payload hashes to something these claims can be pinned to",
-       len(payload) > 3 and len(installed) == 8, "%d files → %s" % (len(payload), installed))
+    installed = digest.hexdigest()[:8] if have_payload else None
+    if not have_payload:
+        skip("the harness payload stamp",
+             "no .game_loop/bin in this checkout — the payload is installed per machine and is "
+             "not tracked, so there is nothing here to pin the claims against. Every other "
+             "assertion in this group is about THIS repo's files and still runs.")
+    else:
+        ok("the installed harness payload hashes to something these claims can be pinned to",
+           len(payload) > 3 and len(installed) == 8, "%d files → %s" % (len(payload), installed))
     ok("...and the release is recorded too, so a human can say WHICH game_loop this was",
        len(release) == 8, release)
 
@@ -10951,10 +11125,11 @@ def test_claims_about_the_layer_below():
             stamp = m.group(1)
     ok("docs/BOUNDARY.md carries the harness payload its claims were verified against",
        stamp is not None)
-    ok("...and it is the payload actually installed — when this fails, the %d files above "
-       "state game_loop's behaviour as fact and NONE of them has been re-read against the "
-       "guards running here" % len(claim_files),
-       stamp == installed, "stamped %s, installed %s" % (stamp, installed))
+    if have_payload:
+        ok("...and it is the payload actually installed — when this fails, the %d files above "
+           "state game_loop's behaviour as fact and NONE of them has been re-read against the "
+           "guards running here" % len(claim_files),
+           stamp == installed, "stamped %s, installed %s" % (stamp, installed))
 
     # The comparison is the whole check, so prove it can fail rather than trusting that it
     # would: a stamp that does not match must be rejected. Without this, a regex that quietly

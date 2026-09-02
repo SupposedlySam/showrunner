@@ -602,7 +602,21 @@ def report(cfg):
         return ["harness provisioning is OFF — a Crawler's worktree carries whatever git brings "
                 "across, and its commit gate may owe nothing."]
     if not sp["dirs"]:
-        return []
+        # SILENCE WAS THE BUG. This returned [] and doctor printed nothing, so "no harness here"
+        # and "the harness section is fine" produced identical output — the exact failure the
+        # harness lines exist to prevent, in the branch where there is nothing to describe.
+        #
+        # It survived because THIS repo tracked its own harness, so the empty case never ran
+        # where anyone would see it. Untracking the payload — it is installed per machine and
+        # another project's code does not belong in this history — made a clean clone take this
+        # branch, and an assertion written for the absent case is what found it.
+        #
+        # Not an error: showrunner does not require a harness, `harness.require` is config, and a
+        # repo may legitimately run without one. It is a fact a reader has to be told.
+        return ["no harness directory found — a Crawler's worktree gets no per-session rails "
+                "from one, and nothing here owes a commit gate. showrunner does not require one; "
+                "this is stated because an empty harness section reads as 'nothing to report' "
+                "and means the opposite."]
     tracked = tracked_top_levels(cfg)
     lines = []
     for dirname in sp["dirs"]:

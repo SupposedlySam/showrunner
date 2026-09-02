@@ -5,9 +5,11 @@ Every subcommand that can refuse does so with exit code 2 — the Claude Code Pr
 """
 
 import argparse
+import ast
 import json
 import os
 import shutil
+import subprocess
 import sys
 
 from . import (__version__, brief, campaign, collide, config, dispatch, events, gates,
@@ -464,6 +466,67 @@ def cmd_doctor(args):
               "what stops is the record of what it answered, and an empty journal reads as a "
               "watchdog that never fired." % (RED + "ERROR" + OFF, rel(_wj, cfg.root), _e))
         bad += 1
+
+    # DO THE HOOKS PARSE? The one failure that blocks its own repair (reported by a consumer).
+    # These are PreToolUse hooks: bash failing to PARSE one refuses Bash, Edit and Write alike,
+    # so no tool can fix the file doing the refusing. Measured here the hard way — an unclosed
+    # `if` in worktree-guard.sh ended with a human running `git checkout` by hand. Every
+    # fail-open path in those scripts is downstream of parsing and none of them get to run.
+    #
+    # AND IT TRAVELS FURTHEST. These hooks run inside Crawler worktrees, so an unparseable one
+    # arrives everywhere the campaign reaches.
+    #
+    # IN THE TOOL RATHER THAN IN A RULE FILE, which is the reporter's argument and the better
+    # half of it: a check shipped as text in each consumer's verify.yaml is a check you cannot
+    # fix for anybody — theirs had a quoting bug that made it unable to pass, and an upgrade did
+    # not rewrite it because it was their copy. A check inside `doctor` upgrades. They also
+    # could not patch their own copy: that file is project policy and their write guard refused,
+    # correctly.
+    _hookdir = os.path.join(cfg.root, ".showrunner", "hooks")
+    _bad, _seen = [], 0
+    for _name in sorted(os.listdir(_hookdir)) if os.path.isdir(_hookdir) else []:
+        _hp = os.path.join(_hookdir, _name)
+        if not os.path.isfile(_hp):
+            continue
+        try:
+            with open(_hp) as _fh:
+                _first = _fh.readline()
+        except OSError as _exc:
+            _bad.append((_name, "could not be read (%s)" % _exc))
+            continue
+        _seen += 1
+        # THE SHEBANG DECIDES THE PARSER, not the extension: a hook without a suffix would
+        # otherwise be guessed at, and guessing wrong reports a healthy file as broken.
+        if _name.endswith(".py") or "python" in _first:
+            try:
+                with open(_hp) as _fh:
+                    ast.parse(_fh.read())
+            except (SyntaxError, ValueError) as _exc:
+                _bad.append((_name, str(_exc)))
+        else:
+            _pr = subprocess.run(["bash", "-n", _hp], capture_output=True, text=True)
+            if _pr.returncode != 0:
+                # THE LAST LINE, AS A STRING. `splitlines()[-1:]` is a LIST, and `%s` on it
+                # printed a Python repr into the one message whose job is to be actionable —
+                # the same repr-not-rendering defect `enforced_lines` had, in the reporter it
+                # would be read from.
+                _lines = (_pr.stderr or "").strip().splitlines()
+                _bad.append((_name, _lines[-1].strip() if _lines else "bash -n exited non-zero"))
+    if _bad:
+        # `bad` IS THE VARIABLE THIS FUNCTION RETURNS ON — `return 2 if bad else 0`. My first
+        # version assigned `rc = 2` here, which is a local nothing reads: doctor has no `rc`.
+        # It printed the ERROR and exited 0, so the check reported a lockout-class failure and
+        # told the caller everything was fine. Caught by asserting on the exit code rather than
+        # on the text, which is the only reason it did not ship that way.
+        bad = True
+        for _name, _why in _bad:
+            print("  %s hook %s DOES NOT PARSE: %s" % (RED + "ERROR" + OFF, _name, _why))
+        print("        A PreToolUse hook that cannot parse refuses Bash, Edit AND Write, so "
+              "nothing can repair the file doing the refusing. Fix it from outside the session "
+              "(`git checkout` it, or edit it in another editor), then `bash -n` it.")
+    elif _seen:
+        print("  %s all %d hook file(s) under .showrunner/hooks parse — the one failure that "
+              "blocks its own repair" % (GRN + "ok   " + OFF, _seen))
 
     # A `writes` POLICY WITH NOTHING ON BASH TO ENFORCE IT (#77). showrunner publishes `writes`
     # and does not enforce it — no write guard ships here — so the only thing it can honestly
