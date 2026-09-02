@@ -7176,6 +7176,58 @@ def test_spawn_refuses_a_base_missing_a_dependency():
 
 
 
+def test_reach_is_registered_by_the_verb_that_registers_hooks():
+    group("The verb built so an agent need not already know the tool must not itself require "
+          "knowing it exists — `worktree register` wires `reach`")
+    if not have("git"):
+        skip("the reach registration group", "git is not installed")
+        return
+
+    # MEASURED BY A CONSUMER, not reasoned about here. `reach` shipped wired by hand, on the
+    # reasoning that advice should be opt-in. In one session they hand-rolled a worktree wrapper,
+    # a dispatch script and a layer guard — with zero references to it in either settings layer —
+    # then piped a payload in by hand and got the sentence they had needed hours earlier. That is
+    # the defect dispatch-guard.sh's own header names, arriving in the verb whose job is to name
+    # it: a guard is exactly as present as its registration.
+    cfg = make_repo()
+    p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"),
+                        "worktree", "register"], capture_output=True, text=True, cwd=cfg.root)
+    eq("register exits 0", p.returncode, 0)
+    with open(os.path.join(cfg.root, ".claude", "settings.json")) as fh:
+        data = json.load(fh)
+    entries = [(e.get("matcher") or "", h.get("command") or "")
+               for e in (data.get("hooks") or {}).get("PreToolUse", []) or []
+               for h in e.get("hooks") or []]
+    reach = [(m, c) for m, c in entries if "reach-gate" in c]
+    ok("`worktree register` registers the reach gate", bool(reach), entries)
+    if reach:
+        matcher = reach[0][0]
+        # THE MATCHER IS THE FIX, the same argument dispatch-guard makes for Bash: a worktree by
+        # hand and a branch arrive as Bash, a memory write as Write/Edit/NotebookEdit, and a
+        # private work list as TodoWrite. Registered on a subset, the rules covering the rest
+        # are present and unreachable.
+        for tool in ("Write", "Edit", "NotebookEdit", "Bash", "TodoWrite"):
+            ok("...on %s, which one of its rules actually fires on" % tool, tool in matcher,
+               matcher)
+
+    # AND IT IS IDEMPOTENT, or a second `register` stacks a duplicate hook that runs twice.
+    before = len(entries)
+    subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"),
+                    "worktree", "register"], capture_output=True, text=True, cwd=cfg.root)
+    with open(os.path.join(cfg.root, ".claude", "settings.json")) as fh:
+        again = json.load(fh)
+    after = len([1 for e in (again.get("hooks") or {}).get("PreToolUse", []) or []
+                 for h in e.get("hooks") or []])
+    eq("...and registering twice does not duplicate it", after, before)
+
+    # THE SHIM MUST SHIP, or the registration names a file that is not there — and
+    # "registered-and-absent is worse than unregistered, because the registration is what makes
+    # it look present" is this suite's own sentence about the other hooks.
+    with open(os.path.join(ROOT, "install.sh")) as fh:
+        installer = fh.read()
+    ok("install.sh ships the shim it registers", "reach-gate.sh" in installer)
+
+
 def test_a_seat_that_may_not_dispatch_is_refused_at_the_sanctioned_path():
     group("`spawn --launch` asks whether the seat may dispatch — the guard was on the path "
           "whoami tells you NOT to use, and not on the one it tells you to (#77)")
@@ -12130,6 +12182,7 @@ def main():
                test_hook_registration,
                test_corpus_tool,
                test_spawn_refuses_a_base_missing_a_dependency,
+               test_reach_is_registered_by_the_verb_that_registers_hooks,
                test_a_seat_that_may_not_dispatch_is_refused_at_the_sanctioned_path,
                test_the_announcement_does_not_claim_enforcement_it_has_not_got,
                test_waiting_does_not_scale_with_the_campaign,

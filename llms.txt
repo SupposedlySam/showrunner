@@ -221,10 +221,10 @@ showrunner worktree guard            # PreToolUse: DENY a write into a tree anot
 showrunner worktree register         # put the hooks it owns in .claude/settings.json (idempotent).
                                      # --local writes settings.local.json (UNTRACKED) instead,
                                      # for a repo that keeps showrunner out of its history:
-                                     # the worktree guard and the dispatch guard on PreToolUse,
-                                     # the inert-Crawler gate on Stop, and the seat announcement
-                                     # on SessionStart AND PostCompact. The list is the claim; a
-                                     # COUNT here rots the day the verb gains one.
+                                     # the worktree guard, the dispatch guard and the REACH gate
+                                     # on PreToolUse, the inert-Crawler gate on Stop, and the
+                                     # seat announcement on SessionStart AND PostCompact. The
+                                     # list is the claim; a COUNT here rots the day it gains one.
 showrunner whoami                    # what this session IS — a seat DERIVED from where it stands
 showrunner whoami --porcelain        # the SAME resolution as JSON, for a guard to consume
 showrunner role claim <role>         # take an open seat (a role declaring acquire=claim)
@@ -564,6 +564,16 @@ parser rather than a second list that would go stale. Naming only the dispatch v
 "how do I dispatch" and nothing else, so an agent needing anything else had no reason to think
 the tool could do it.
 
+**`reach` is REGISTERED BY DEFAULT, and the argument for not doing so did not survive contact.**
+It shipped wired by hand, reasoning that advice should be opt-in. A consumer measured the cost:
+zero references in either settings layer, and in one session they hand-rolled a worktree wrapper,
+a dispatch script and a layer guard — then piped a payload in by hand and got the sentence they
+had needed hours earlier. The verb that exists so an agent need not already know about showrunner
+was the one verb an agent had to already know about, which is the defect `dispatch-guard.sh`'s own
+header names — *a guard is exactly as present as its registration* — arriving in the verb whose
+job is to name it. Registering costs near nothing: it never refuses and is silent unless it has
+something specific to say. Opting out is deleting the entry; opting in was knowing it existed.
+
 **`reach` names the mechanism at the moment of reach.** An agent that cannot remember a tool does
 not stop working — it reaches for what it already knows: `git worktree add`, a private todo list,
 a note in a memory file. Each of those produces a plausible result, which is why nothing ever
@@ -769,7 +779,7 @@ verb gaining one, and the table below is the thing that has to stay right. It do
 |---|---|---|
 | `future-tense-gate.sh` | by hand | added after the verb; registering it is a one-line settings edit |
 | `pipeline-status-gate.sh` | by hand | same |
-| `reach-gate.sh` | by hand | same — and it is ADVICE, so a repo that does not want the nudges simply leaves it unregistered and loses nothing enforced |
+
 | `waiting-probe.sh` | **NOBODY — deliberately** | arming an idle watchdog is a human decision, stated forty lines above this one: *a probe an agent can set is a watchdog an agent can switch off* |
 
 The old sentence contradicted that earlier warning while sitting six hundred lines away from it,

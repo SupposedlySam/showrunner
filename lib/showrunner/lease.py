@@ -834,6 +834,46 @@ def register_dispatch_guard(cfg, local=False):
             lambda p: _registration(p, "PreToolUse", "dispatch-guard"), "dispatch guard")
 
 
+REACH_SHIM = os.path.join(".showrunner", "hooks", "reach-gate.sh")
+
+
+def register_reach(cfg, local=False):
+    """Register the reach gate on PreToolUse. Returns (changed, message).
+
+    REGISTERED BY DEFAULT, AND THE ARGUMENT FOR NOT DOING SO DID NOT SURVIVE CONTACT (#reach).
+    It shipped wired by hand on the reasoning that it is ADVICE, so a repo that does not want the
+    nudges could simply leave it out. A consumer measured the cost of that: zero references in
+    either settings layer, and across one session they hand-rolled a worktree wrapper, a dispatch
+    script and a layer guard — then piped a payload into `reach` and got the sentence they had
+    needed hours earlier. The verb built so that an agent need not already know this tool was
+    itself reachable only by an agent who already did.
+
+    That is the defect `dispatch-guard.sh`'s own header names — a guard is exactly as present as
+    its registration — arriving in the verb whose whole job is to name it.
+
+    THE COST OF REGISTERING IT IS NEAR ZERO, which is what makes the trade one-sided: it never
+    refuses, and it is silent unless it has something specific to say. An opt-out is removing the
+    entry; an opt-in is knowing it exists, which is the thing being fixed.
+
+    ALL FIVE TOOLS, matching what the rules actually cover: a worktree by hand and a branch are
+    Bash, a memory write is Write/Edit/NotebookEdit, and a private work list is TodoWrite.
+    """
+    import json
+    from .util import atomic_write_json, file_lock
+
+    path = settings_target(cfg.root, local)
+    entry = {"matcher": "Write|Edit|NotebookEdit|Bash|TodoWrite",
+             "hooks": [{"type": "command",
+                        "command": "\"$CLAUDE_PROJECT_DIR\"/" + REACH_SHIM,
+                        "timeout": 10,
+                        "statusMessage": "showrunner: is there a verb for what this is doing?"}]}
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with file_lock(_register_lock(cfg)):
+        return _register_locked(
+            cfg, path, entry, json, atomic_write_json, "PreToolUse",
+            lambda p: _registration(p, "PreToolUse", "reach-gate"), "reach gate")
+
+
 def register_whoami(cfg, local=False):
     """Announce the seat on SessionStart AND PostCompact (#36). Returns (changed, message).
 

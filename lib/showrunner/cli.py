@@ -1294,16 +1294,28 @@ def cmd_worktree_register(args):
     # would have committed five showrunner hooks into a file shared with other developers.
     local = bool(getattr(args, "local", False))
     settings = rel(lease.settings_target(cfg.root, local), cfg.root)
-    # BOTH OF SHOWRUNNER'S HOOKS, from one verb. They are registered together because they are
-    # installed together and a reader has no way to know there are two — and the second one
-    # existing but unregistered is precisely the state this verb was built to end.
+    # EVERY HOOK SHOWRUNNER OWNS, from one verb. They are registered together because they are
+    # installed together and a reader has no way to know how many there are — and one existing
+    # but unregistered is precisely the state this verb was built to end.
+    #
+    # (This said "BOTH OF SHOWRUNNER'S HOOKS" over a list of four, which is the ungated count in
+    # prose this repo keeps correcting. No number now: the list is the claim.)
+    #
+    # `reach` JOINED THE LIST AFTER A CONSUMER MEASURED ITS ABSENCE. It shipped wired by hand,
+    # on the reasoning that advice should be opt-in — and a consumer then hand-rolled a worktree
+    # wrapper, a dispatch script and a layer guard in one session, with zero references to it in
+    # either settings layer, before piping a payload in by hand and getting the sentence they
+    # had needed hours earlier. A verb whose job is to say "the tool already does this" is
+    # useless to anyone who does not already know it exists.
     rc = 0
     for register_fn, what in ((lease.register_guard, "worktree guard"),
                               (lease.register_stop_trigger, "inert-Crawler stop trigger"),
                               (lease.register_whoami,
                                "seat announcement (SessionStart+PostCompact)"),
                               (lease.register_dispatch_guard,
-                               "dispatch guard (PreToolUse on Bash)")):
+                               "dispatch guard (PreToolUse on Bash)"),
+                              (lease.register_reach,
+                               "reach gate (PreToolUse; advice, never refuses)")):
         register = (lambda c, f=register_fn: f(c, local))
         changed, note = register(cfg)
         if changed:
