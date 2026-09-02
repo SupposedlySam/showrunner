@@ -563,6 +563,16 @@ def spawn(cfg, leaf, actor="crawler", base="HEAD", branch=None):
     # on purpose. One mechanism, one answer, whoever's files they are.
     from . import lease as _lease
     provisioned = _lease.provision_hooks(cfg, path)
+    # AND THE REGISTRATION THAT ACTIVATES THEM. The shim FILES were provisioned here; the
+    # settings entry naming them was not, and an untracked one cannot cross on its own —
+    # `git worktree add` copies tracked files only. Measured: a `--local` install produced
+    # worktrees with no `.claude` directory at all, so every hook showrunner owns was absent
+    # from every Crawler while the main checkout reported them all registered and healthy. A
+    # provisioned shim nothing registers has never once run, which is this file's own sentence
+    # about the guard one layer up.
+    _mirrored = _lease.mirror_local_registration(cfg, path)
+    if _mirrored:
+        provisioned.append(_mirrored)
 
     from . import harness
     hp2, harness_problems, harness_warnings = harness.provision(cfg, path)

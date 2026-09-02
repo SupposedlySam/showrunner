@@ -35,7 +35,7 @@ import re
 import shutil
 
 from . import locks
-from .util import now, session_pid, short_session, stamp
+from .util import now, rel, session_pid, short_session, stamp
 
 PREFIX = "worktree:"
 INTERACTIVE = "interactive"
@@ -972,6 +972,80 @@ def _registration(settings_path, event, marker):
                 if isinstance(hook, dict) and marker in str(hook.get("command") or ""):
                     return True, entry.get("matcher") or ""
     return (False, None) if any_readable else (None, None)
+
+
+def mirror_local_registration(cfg, tree):
+    """Carry an UNTRACKED registration into a worktree. Returns a note, or "".
+
+    `git worktree add` copies TRACKED files only. So a registration written to
+    `.claude/settings.local.json` — the only place hooks can go in a repo that excludes this
+    tool from its history, and the arrangement `doctor` explicitly endorses — does not cross
+    into a single Crawler tree. Measured: a `--local` install produces worktrees with no
+    `.claude` directory at all, so the worktree guard, the dispatch guard, the seat announcement
+    and the reach gate are ALL absent from every Crawler, while the main checkout reports every
+    one of them registered and healthy.
+
+    That is this repo's own sentence — a guard is exactly as present as its registration — with
+    the registration in a file that cannot reach the thing it guards. The tracked arrangement was
+    never affected, which is why it survived: every check reads the main checkout, and the main
+    checkout is correct.
+
+    MERGED, NEVER COPIED. `harness.py` refuses to copy a hook-registration file for exactly this
+    reason: the file carries the project's own statusLine, permissions and unrelated hooks, and a
+    wholesale copy discards them. Only entries whose command names a showrunner shim are carried,
+    and an entry already present is left alone.
+
+    Best-effort: a spawn must not fail because a settings file could not be merged. The tree is
+    still created, and the note says what did not happen rather than leaving it silent.
+    """
+    import json
+
+    from .util import atomic_write_json
+
+    src = os.path.join(cfg.root, ".claude", "settings.local.json")
+    if not os.path.isfile(src):
+        return ""
+    try:
+        with open(src) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return "could not read %s to carry its hooks into the tree: %s" % (rel(src, cfg.root), exc)
+
+    ours = {}
+    for event, entries in (data.get("hooks") or {}).items():
+        for entry in entries or []:
+            for hook in entry.get("hooks") or []:
+                if ".showrunner/hooks/" in str(hook.get("command") or ""):
+                    ours.setdefault(event, []).append(entry)
+                    break
+    if not ours:
+        return ""
+
+    dest = os.path.join(tree, ".claude", "settings.local.json")
+    try:
+        existing = {}
+        if os.path.isfile(dest):
+            with open(dest) as fh:
+                existing = json.load(fh)
+        hooks = existing.setdefault("hooks", {})
+        added = 0
+        for event, entries in ours.items():
+            have = hooks.setdefault(event, [])
+            seen = {str(h.get("command")) for e in have for h in (e.get("hooks") or [])}
+            for entry in entries:
+                cmds = {str(h.get("command")) for h in (entry.get("hooks") or [])}
+                if cmds - seen:
+                    have.append(entry)
+                    added += 1
+        if not added:
+            return ""
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        atomic_write_json(dest, existing)
+        return ("carried %d untracked hook registration(s) into the tree — `git worktree add` "
+                "copies tracked files only, so a --local registration would not have reached it"
+                % added)
+    except (OSError, ValueError) as exc:
+        return "could not write %s: %s" % (rel(dest, cfg.root), exc)
 
 
 def settings_target(root, local=False):

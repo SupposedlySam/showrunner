@@ -7176,6 +7176,118 @@ def test_spawn_refuses_a_base_missing_a_dependency():
 
 
 
+def test_an_untracked_registration_still_reaches_the_worktree():
+    group("A `--local` registration cannot cross on its own — `git worktree add` copies tracked "
+          "files only, so every hook showrunner owns was absent from every Crawler")
+    if not have("git"):
+        skip("the local-registration mirror group", "git is not installed")
+        return
+
+    # MEASURED BEFORE BUILDING. A `--local` install produced worktrees with NO `.claude`
+    # directory at all: the worktree guard, the dispatch guard, the seat announcement and the
+    # reach gate were absent from every Crawler tree, while the main checkout reported all of
+    # them registered and healthy. That is this repo's own sentence — a guard is exactly as
+    # present as its registration — with the registration in a file that cannot reach the thing
+    # it guards. The tracked arrangement was never affected, which is why it survived review:
+    # every check reads the main checkout, and the main checkout is correct.
+    #
+    # The shim FILES were already provisioned into the tree. Only the settings entry naming them
+    # was missing, and a provisioned shim nothing registers has never once run.
+    cfg = make_repo()
+    claude_dir = os.path.join(cfg.root, ".claude")
+    os.makedirs(claude_dir, exist_ok=True)
+
+    # The project's own unrelated settings, which must survive untouched: `harness.py` refuses to
+    # copy a hook-registration file wholesale for exactly this reason.
+    with open(os.path.join(claude_dir, "settings.local.json"), "w") as fh:
+        json.dump({"statusLine": {"type": "command", "command": "mine"},
+                   "hooks": {"PreToolUse": [
+                       {"matcher": "Bash",
+                        "hooks": [{"type": "command",
+                                   "command": "\"$CLAUDE_PROJECT_DIR\"/.showrunner/hooks/"
+                                              "dispatch-guard.sh"}]},
+                       {"matcher": "Write",
+                        "hooks": [{"type": "command", "command": "/opt/mine/my-own-guard.sh"}]}]}},
+                  fh)
+
+    tree = os.path.join(cfg.worktree_root, "mirror-probe")
+    os.makedirs(tree, exist_ok=True)
+    note = lease.mirror_local_registration(cfg, tree)
+    ok("it reports what it carried, rather than doing it silently", bool(note), note)
+
+    dest = os.path.join(tree, ".claude", "settings.local.json")
+    ok("the worktree receives a settings file it would otherwise not have",
+       os.path.isfile(dest), dest)
+    # `or {}` so a producer that stopped producing FAILS these rather than raising out of the
+    # group and taking the assertions after it down — a crash makes a mutant look like thinner
+    # coverage than it has, which is how a sweep under-reports the thing it is measuring.
+    got = {}
+    if os.path.isfile(dest):
+        with open(dest) as fh:
+            got = json.load(fh)
+    commands = [str(h.get("command")) for e in (got.get("hooks") or {}).get("PreToolUse", [])
+                for h in e.get("hooks") or []]
+    ok("showrunner's own hook is carried", any("dispatch-guard.sh" in c for c in commands),
+       commands)
+
+    # MERGED, NEVER COPIED. Carrying the whole file would hand the Crawler the project's
+    # statusLine, permissions and unrelated hooks — the wholesale-copy mistake harness.py
+    # documents. Only entries naming a showrunner shim may travel.
+    ok("...and the project's UNRELATED hook is not carried, because this merges rather than "
+       "copying the file", not any("my-own-guard" in c for c in commands), commands)
+    ok("...nor its statusLine", "statusLine" not in got, sorted(got))
+
+    # IDEMPOTENT, or a second spawn into the same tree stacks a duplicate that runs twice.
+    again = lease.mirror_local_registration(cfg, tree)
+    eq("carrying it a second time adds nothing and says nothing", again, "")
+    after = {}
+    if os.path.isfile(dest):
+        with open(dest) as fh:
+            after = json.load(fh)
+    eq("...and the entry count is unchanged",
+       len([1 for e in (after.get("hooks") or {}).get("PreToolUse", [])
+            for h in e.get("hooks") or []]), len(commands))
+
+    # THE CONTROL. With no untracked registration there is nothing to carry, and this must do
+    # NOTHING rather than manufacture a file — a tracked registration crosses by itself, and a
+    # second copy in the untracked layer would be a hook registered twice.
+    plain = make_repo()
+    tree2 = os.path.join(plain.worktree_root, "mirror-probe2")
+    os.makedirs(tree2, exist_ok=True)
+    eq("a repo with no untracked registration carries nothing",
+       lease.mirror_local_registration(plain, tree2), "")
+    ok("...and no settings file is invented in the tree",
+       not os.path.exists(os.path.join(tree2, ".claude", "settings.local.json")))
+
+    # AND A FILE THAT CANNOT BE READ SAYS SO. Silence here would look exactly like "there was
+    # nothing to carry", which is the one reading that leaves a Crawler unguarded.
+    broken = make_repo()
+    os.makedirs(os.path.join(broken.root, ".claude"), exist_ok=True)
+    with open(os.path.join(broken.root, ".claude", "settings.local.json"), "w") as fh:
+        fh.write("{ not json")
+    tree3 = os.path.join(broken.worktree_root, "mirror-probe3")
+    os.makedirs(tree3, exist_ok=True)
+    said = lease.mirror_local_registration(broken, tree3)
+    ok("an unreadable registration is reported, not passed over as nothing to do",
+       "could not read" in said, said)
+
+    # END TO END, through `spawn`, because the function being right is not the same as it being
+    # called — which is the defect this whole group is about, one layer up.
+    p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"),
+                        "worktree", "register", "--local"],
+                       capture_output=True, text=True, cwd=cfg.root)
+    eq("register --local succeeds", p.returncode, 0)
+    g = new_graph(cfg)
+    g.add("carried into its tree", leaf_id="mir1", labels=["backend"])
+    p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"),
+                        "spawn", "mir1", "--actor", "mirror", "--no-claim"],
+                       capture_output=True, text=True, cwd=cfg.root)
+    eq("spawn succeeds", p.returncode, 0)
+    spawned = os.path.join(cfg.worktree_root, "mirror-mir1", ".claude", "settings.local.json")
+    ok("a spawned worktree carries the untracked registration, so its guards are actually "
+       "registered where they run", os.path.isfile(spawned), p.stdout[-400:])
+
+
 def test_a_claim_never_names_the_process_that_is_about_to_exit():
     group("A claim's liveness must name a session, not the CLI process that took it — "
           "`spawn` without --launch recorded a pid that was gone seconds later")
@@ -12299,6 +12411,7 @@ def main():
                test_hook_registration,
                test_corpus_tool,
                test_spawn_refuses_a_base_missing_a_dependency,
+               test_an_untracked_registration_still_reaches_the_worktree,
                test_a_claim_never_names_the_process_that_is_about_to_exit,
                test_reach_is_registered_by_the_verb_that_registers_hooks,
                test_a_seat_that_may_not_dispatch_is_refused_at_the_sanctioned_path,

@@ -399,6 +399,20 @@ refuses it from a session whose role may not create one. Registered on **Bash**,
 mechanism actually used: an earlier version matched `Agent`, guarded the in-process subagent tool,
 and reported nothing while 42 real dispatches went past it.
 
+**A hook is only as present as its registration — and an untracked registration does not cross
+into a worktree.** `git worktree add` copies tracked files only, which is why the shim must be
+either tracked or provisioned. The same is true of the settings file that *registers* it, and
+that half was missing: a `--local` install produced worktrees with no `.claude` directory at all,
+so every hook showrunner owns was absent from every Crawler while the main checkout reported them
+all registered and healthy. The shim files were already provisioned; a provisioned shim nothing
+registers has never run. `spawn` now merges showrunner's own entries into the tree — merged, not
+copied, because the file also carries your statusLine, permissions and unrelated hooks.
+
+The ordering is the other half, and a consumer lost three files to it: Claude Code reads settings
+at **startup**, so a hook registered after `spawn --launch` returns is not read by the Crawler
+that spawn just started. If a guard of yours must be live for a Crawler's first tool call, it has
+to be registered before the spawn — and in the tracked layer if you want git to carry it for you.
+
 **A line that says ENFORCED has to be one showrunner refuses.** The seat announcement printed one
 `ENFORCED` banner over every policy line, and one of them was not: showrunner publishes `writes`
 and ships no write guard at all. A reporter worked for half an hour from a seat announcing both

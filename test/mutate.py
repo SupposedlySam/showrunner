@@ -82,6 +82,14 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # Answering "" always restores the measured state exactly: the shim files are provisioned,
+    # the main checkout reports every hook registered and healthy, and every Crawler tree has no
+    # `.claude` at all. Nothing errors, nothing is slower, and every guard is absent — a producer
+    # whose death returns the tool to a working-looking state dies invisibly.
+    ("carrying an untracked registration into a tree", "lease.mirror_local_registration",
+     "lib/showrunner/lease.py",
+     r"(def mirror_local_registration\([^)]*\):\n)",
+     "    return \"\"\ndef _neutered_mirror(cfg, tree):\n"),
     # Answering None ALWAYS is the safe-looking direction — every claim becomes unprovable,
     # nothing is falsely released, and the tool looks fine. What dies with it is the reaper's
     # ability to reclaim a genuinely abandoned leaf, which is the failure this whole module

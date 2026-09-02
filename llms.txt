@@ -265,6 +265,26 @@ committed this tool's hooks into a file shared with a developer running their ow
     showrunner init --local              # register into the untracked layer from the start
     showrunner worktree register --local # and afterwards
 
+**AN UNTRACKED REGISTRATION CANNOT CROSS ON ITS OWN, and `spawn` now carries it.** `git worktree
+add` copies TRACKED files only — that is the same sentence that explains why the shim needs one
+of the two arrangements above, applied to the file that REGISTERS it. Measured: a `--local`
+install produced worktrees with no `.claude` directory at all, so the worktree guard, the
+dispatch guard, the seat announcement and the reach gate were absent from every Crawler while the
+main checkout reported all of them registered and healthy. The shim files were already
+provisioned; a provisioned shim nothing registers has never once run.
+
+`spawn` merges showrunner's own entries into the tree's `settings.local.json` and says it did.
+MERGED, never copied: the file carries your statusLine, your permissions and your unrelated
+hooks, and a wholesale copy discards them — the mistake the harness section names for the same
+file.
+
+**THE ORDERING IS THE OTHER HALF, and a consumer lost three files to it.** Claude Code reads
+settings at STARTUP, so a hook registered AFTER `spawn --launch` returns is not read by the
+Crawler that spawn just started — the guard sits in the file, unread, while the session works.
+If a hook of yours must be live for a Crawler's first tool call, it has to be registered before
+the spawn, and in the TRACKED layer if you want `git worktree add` to carry it without showrunner
+doing anything.
+
 `init` needs it too: it registers the guard before `register` ever runs, so `--local` on the
 later verb alone still left one hook in the tracked file. The error now NAMES the files it read,
 because *"registers no worktree-guard hook"* reads as **you have not registered it** when the
