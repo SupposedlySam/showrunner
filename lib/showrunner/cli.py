@@ -2946,8 +2946,19 @@ def cmd_integrate(args):
         proofs = [r["merged_proof"] for r in integrated if r.get("merged_proof")]
         if proofs:
             print("\n%sChecks on the MERGED result, written out so they can be cited:%s" % (BOLD, OFF))
+            # SAY WHETHER THE EVIDENCE WILL TRAVEL. The integration record now names the
+            # artifact, which closes the "which file proves this leaf" question for anyone
+            # standing where the files are. It does not make the file survive a clone: consumers
+            # gitignore these — reasonably, they are large and local — and then the record
+            # arrives on another machine reading as a completed, proved leaf with nothing behind
+            # it. Silent in the direction that matters, so it is said at the moment it is true.
             for p_ in proofs:
-                print("  %s" % rel(p_, cfg.root))
+                tracked = campaign._is_tracked(cfg, p_)
+                mark = ("" if tracked else
+                        "   — LOCAL ONLY: git does not carry this, so the record will outlive it "
+                        "on any other machine" if tracked is False else
+                        "   — cannot tell whether git carries this")
+                print("  %s%s" % (rel(p_, cfg.root), mark))
             print("%sA fix proved on a branch does NOT transfer: the harness scopes a proved fix "
                   "to the session that proved it, so a Crawler's proof cannot satisfy your "
                   "handback — by design. Branch-green is not trunk-green. If a leaf claimed a "

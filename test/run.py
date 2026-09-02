@@ -7176,6 +7176,81 @@ def test_spawn_refuses_a_base_missing_a_dependency():
 
 
 
+def test_the_integration_record_names_its_evidence():
+    group("The durable integration record must name the artifact that proves it — the record "
+          "outlived the evidence, and still read as a proved leaf")
+    if not have("git"):
+        skip("the integration evidence group", "git is not installed")
+        return
+
+    # REPORTED FROM A CONSUMER'S REPO. The record was {crawler, branch, ts} — the durable half of
+    # an integration, and what a reviewer reads months later to answer "was this leaf actually
+    # proved, or did a Crawler assert it was?" It carried no reference to the artifact that
+    # answers that, while the path was known at the exact moment the record was written.
+    #
+    # RECONSTRUCTING THE LINK IS NOT OBVIOUS, which is what makes it expensive rather than
+    # untidy: the filename derives from the BRANCH and not the crawler, and is truncated. The
+    # consumer measuring the correspondence produced two plausible wrong numbers before a right
+    # one. A convention the reader has to rediscover is not a link.
+    cfg = make_repo()
+    g = new_graph(cfg)
+    g.add("work that integrates", leaf_id="ev1", labels=["backend"])
+    rec = worktree.spawn(cfg, g.show("ev1"), actor="crawler-ev")
+    campaign.record_spawn(cfg, rec)
+    with open(os.path.join(rec["worktree"], "landed.txt"), "w") as fh:
+        fh.write("work\n")
+    sh(["git", "add", "-A"], rec["worktree"])
+    sh(["git", "commit", "-q", "-m", "the work"], rec["worktree"])
+    g.claim("ev1", "crawler-ev", tree=rec["worktree"])
+    g.close("ev1", G.CLOSED, os.path.join(rec["worktree"], "landed.txt"), "done")
+
+    results, ok_flag = campaign.integrate(cfg, new_graph(cfg))
+    integrated = [r for r in results if r.get("status") == "integrated"]
+    ok("a leaf integrates, so there is a record to examine", bool(integrated), results)
+
+    records = campaign.load(cfg).get("integrated") or []
+    ok("the campaign carries an integration record", bool(records), records)
+    row = records[-1]
+    for key in ("crawler", "branch", "ts"):
+        ok("the record still carries %s, so this is additive and does not break a reader" % key,
+           key in row, sorted(row))
+    ok("...and it NAMES the merged proof, rather than leaving the reader to reconstruct a "
+       "filename convention", row.get("merged_proof"), row)
+
+    # THE NAMED PATH MUST BE THE REAL ONE. A record naming a file that is not there is worse
+    # than one naming nothing: it reads as evidence.
+    named = os.path.join(cfg.root, row["merged_proof"] or "")
+    ok("...and the artifact it names actually exists", os.path.isfile(named), named)
+    with open(named) as fh:
+        body = fh.read()
+    ok("...and is non-empty, because an empty proof is the identity element again", body.strip())
+
+    # WHETHER IT WILL TRAVEL IS PART OF THE RECORD. Consumers gitignore these, reasonably — they
+    # are large and local. Then the record arrives on another machine reading as a completed,
+    # proved leaf with nothing behind it, which is the silent direction.
+    ok("the record says whether git carries the proof", "proof_tracked" in row, sorted(row))
+    eq("...and in a repo that does not track it, that is False and not None — None is reserved "
+       "for 'git could not be asked'", row.get("proof_tracked"), False)
+
+    # THE PAIR: a tracked artifact reports True, or the field is a constant and says nothing.
+    tracked_probe = os.path.join(cfg.root, "tracked-proof.txt")
+    with open(tracked_probe, "w") as fh:
+        fh.write("evidence\n")
+    sh(["git", "add", "tracked-proof.txt"], cfg.root)
+    sh(["git", "commit", "-q", "-m", "track a proof"], cfg.root)
+    eq("a tracked artifact reports True", campaign._is_tracked(cfg, tracked_probe), True)
+    eq("an untracked one reports False",
+       campaign._is_tracked(cfg, os.path.join(cfg.root, "never-added.txt")), False)
+
+    # CANNOT-TELL IS ITS OWN ANSWER. "git does not carry this" and "I could not find out" lead to
+    # opposite readings of whether the evidence survives a clone, and a bare False on failure
+    # would quietly assert the first.
+    class _NoRepo(object):
+        root = tmpdir("proof-no-repo")
+    eq("outside a git repo it answers None, never False",
+       campaign._is_tracked(_NoRepo(), os.path.join(_NoRepo.root, "x.txt")), None)
+
+
 def test_an_untracked_registration_still_reaches_the_worktree():
     group("A `--local` registration cannot cross on its own — `git worktree add` copies tracked "
           "files only, so every hook showrunner owns was absent from every Crawler")
@@ -12411,6 +12486,7 @@ def main():
                test_hook_registration,
                test_corpus_tool,
                test_spawn_refuses_a_base_missing_a_dependency,
+               test_the_integration_record_names_its_evidence,
                test_an_untracked_registration_still_reaches_the_worktree,
                test_a_claim_never_names_the_process_that_is_about_to_exit,
                test_reach_is_registered_by_the_verb_that_registers_hooks,

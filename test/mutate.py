@@ -82,6 +82,13 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # Answering None everywhere is the SAFE-looking direction: every integration record simply
+    # reports that git could not be asked, which reads as caution rather than as a defect. What
+    # dies with it is the only signal that an integration's evidence will NOT survive a clone —
+    # and the record still reads as a completed, proved leaf, which is the silent direction.
+    ("does git carry this proof", "campaign._is_tracked", "lib/showrunner/campaign.py",
+     r"(def _is_tracked\([^)]*\):\n)",
+     "    return None\ndef _neutered_is_tracked(cfg, path):\n"),
     # Answering "" always restores the measured state exactly: the shim files are provisioned,
     # the main checkout reports every hook registered and healthy, and every Crawler tree has no
     # `.claude` at all. Nothing errors, nothing is slower, and every guard is absent — a producer

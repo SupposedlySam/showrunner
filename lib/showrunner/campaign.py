@@ -371,6 +371,19 @@ def _shallow_tail(cfg, graph, entry, f, wt):
     return f
 
 
+def _is_tracked(cfg, path):
+    """True/False/None — does git carry this file? None means git could not be asked.
+
+    Never a bare False on failure: "git does not track this" and "I could not find out" lead to
+    opposite readings of whether the evidence survives a clone.
+    """
+    rc, out, _ = git(["ls-files", "--error-unmatch", path], cwd=cfg.root)
+    if rc == 0:
+        return True
+    rc2, _, _ = git(["rev-parse", "--git-dir"], cwd=cfg.root)
+    return False if rc2 == 0 else None
+
+
 def reconcile(cfg, graph, base="HEAD", deep=True):
     """Answer the first question a resumed orchestrator has to ask.
 
@@ -1181,7 +1194,24 @@ def _integrate_locked(cfg, graph, base=None, only=None, dry_run=False):
         })
         set_state(cfg, entry["crawler"], "integrated", integrated_ts=now())
         data = load(cfg)
+        # THE RECORD MUST NAME ITS EVIDENCE. This was {crawler, branch, ts} — the durable half
+        # of an integration, the thing a reviewer reads months later to answer "was this leaf
+        # actually proved, or did a Crawler assert it was?" — and it carried no reference to the
+        # artifact that answers it. The path was known right here and dropped.
+        #
+        # RECONSTRUCTING IT IS NOT OBVIOUS, which is what makes the omission expensive rather
+        # than untidy. The filename derives from the BRANCH, not the crawler, and is truncated;
+        # a consumer measuring the correspondence got two plausible wrong numbers before a right
+        # one. A convention the reader has to rediscover is not a link.
+        #
+        # AND IT SAYS WHETHER THE EVIDENCE WILL TRAVEL. Consumers gitignore these — reasonably,
+        # they are large and local — so on any other machine the record is present and the proof
+        # is not, and the record still reads as a completed, proved leaf. That is the silent
+        # direction. `proof_tracked` is False when git does not carry it, None when git could
+        # not be asked, because "not tracked" and "could not look" are different answers.
         data.setdefault("integrated", []).append(
-            {"crawler": entry["crawler"], "branch": branch, "ts": now()})
+            {"crawler": entry["crawler"], "branch": branch, "ts": now(),
+             "merged_proof": rel(proof_path, cfg.root) if proof_path else None,
+             "proof_tracked": _is_tracked(cfg, proof_path) if proof_path else None})
         save(cfg, data)
     return results, True
