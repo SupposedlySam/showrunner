@@ -654,13 +654,49 @@ def dispatch_guard(cfg, session=None, tool=None, tool_input=None):
     if not defs:
         return True, "", {"checked": False, "why": "no roles configured — no policy to enforce"}
 
-    role, seat = resolved_role(cfg, session, defs)
-    if (defs.get(role) or {}).get("may_create"):
-        return True, "", {"checked": True, "role": role, "why": "role may create"}
+    allowed, role, seat, why = may_dispatch(cfg, session, defs)
+    if allowed:
+        return True, "", {"checked": True, "role": role, "why": why}
 
     return False, DISPATCH_DENIED.format(
         role=role, session=short_session(session) if session else "?",
         seat=seat or "unresolved"), {"checked": True, "role": role}
+
+
+def may_dispatch(cfg, session, defs=None):
+    """May THIS session start another one? (allowed, role, seat, why) — #77.
+
+    EXTRACTED SO THE SANCTIONED PATH CAN ASK IT TOO. This lived inside `dispatch_guard`, which
+    watches a raw `claude -p` — the path `whoami` steers people AWAY from. `spawn --launch`, the
+    path it steers them TOWARD two lines earlier, never asked. So a seat announcing
+    "may dispatch: NOTHING — `dispatch guard` refuses a raw `claude -p` from this seat" was
+    telling the exact truth and restricting only the behaviour it was already discouraging: two
+    Crawlers were launched from that seat, and the operator found out half an hour later when an
+    unrelated Write was refused.
+
+    ONE FUNCTION, TWO CALLERS, because a second copy of "may this seat dispatch" is two
+    statements of one policy free to disagree — and this file's own DISPATCH_DENIED text argues
+    that the sanctioned path is the one that must hold.
+    """
+    from . import roles as _roles
+    if defs is None:
+        defs, problems = _roles.spec(cfg)
+        if problems:
+            # UNREADABLE DEFINITIONS ALLOW, matching `dispatch_guard`. A policy that cannot be
+            # read is not a policy that denies; refusing here would make a malformed roles.json
+            # stop every dispatch in the campaign.
+            return True, _roles.FALLBACK, "unresolved", "role definitions could not be read"
+    if not defs:
+        # NO ROLES CONFIGURED MEANS NO POLICY, and this escape is the whole reason the suite
+        # caught the first version of this check: without it, `spawn --launch` refused every
+        # dispatch in every repo that had never written a roles.json. "With no roles defined, no
+        # dispatch policy is enforced for anybody" is stated in llms.txt as deliberate —
+        # inventing one would refuse the dispatches of every consumer who never wrote any.
+        return True, _roles.FALLBACK, "no roles", "no roles configured — no policy to enforce"
+    role, seat = resolved_role(cfg, session, defs)
+    if (defs.get(role) or {}).get("may_create"):
+        return True, role, seat, "role may create"
+    return False, role, seat, "role may not create"
 
 
 def resolved_role(cfg, session, defs=None):

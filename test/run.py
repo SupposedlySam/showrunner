@@ -5043,10 +5043,23 @@ def test_seat_and_whoami():
     # a session told something no guard enforces has been given a rule that is not one.
     gen = R.enforced_lines({"acquire": "claim", "may_create": ["worker"],
                             "reports_to": "lead", "writes": ["src/**"], "notes": "prose"})
-    ok("every ENFORCED line comes from a field a guard actually reads",
-       any("worker" in l for l in gen) and any("src/**" in l for l in gen), gen)
+    # PAIRS NOW, because the promise above was not true of every line (#77): showrunner ships no
+    # write guard, so `writes` is PUBLISHED — stated here for a hook of YOURS to act on — while
+    # may_create is ENFORCED by `spawn --launch` and `dispatch guard` both. Printing one label
+    # over both is the sentence that stops somebody checking, and it cost a reporter half an
+    # hour of unguarded work from a seat that said ENFORCED twice.
+    gen_text = [t for _, t in gen]
+    ok("every line still comes from a field a guard or a consumer's hook actually reads",
+       any("worker" in t for t in gen_text) and any("src/**" in t for t in gen_text), gen)
     ok("...and `notes` is NOT among them, because it is consumer prose and nothing checks it",
-       not any("prose" in l for l in gen), gen)
+       not any("prose" in t for t in gen_text), gen)
+    ok("may_create is labelled ENFORCED, because showrunner itself refuses it at BOTH paths",
+       any(lab == "ENFORCED" and "may dispatch" in t for lab, t in gen), gen)
+    ok("...while `writes` is labelled PUBLISHED, because showrunner has no write guard and "
+       "announcing enforcement it does not perform is worse than announcing nothing",
+       any(lab == "PUBLISHED" and "src/**" in t for lab, t in gen), gen)
+    ok("...so no line claims ENFORCED for writes",
+       not any(lab == "ENFORCED" and "write" in t for lab, t in gen), gen)
     # `or [""]` so a producer that stopped producing FAILS this rather than raising out of the
     # group — an IndexError here made the mutant unscoreable and the sweep reported a floor from
     # a truncated run as though it were coverage.
@@ -5057,13 +5070,14 @@ def test_seat_and_whoami():
     # and neither may raise, since a renderer that raises takes the whole announcement down.
     listed = R.enforced_lines({"acquire": "claim", "writes": ["src/**", "docs/**"]})
     ok("a `writes` LIST renders as paths a reader can act on, not as a Python literal",
-       any("src/**, docs/**" in l for l in listed) and not any("[" in l for l in listed), listed)
+       any("src/**, docs/**" in t for _, t in listed)
+       and not any("[" in t for _, t in listed), listed)
     mapped = R.enforced_lines({"acquire": "claim", "writes": {"deny": ["app/**", "backend/**"]}})
     ok("a `writes` MAPPING renders its denials in words, and does not leak brace syntax",
-       any("may NOT write: app/**, backend/**" in l for l in mapped)
-       and not any("{" in l for l in mapped), mapped)
+       any("may NOT write: app/**, backend/**" in t for _, t in mapped)
+       and not any("{" in t for _, t in mapped), mapped)
 
-    none_line = (R.enforced_lines({"acquire": "claim"}) or [""])[0]
+    none_line = (R.enforced_lines({"acquire": "claim"}) or [("", "")])[0][1]
     ok("a role that may create NOTHING says so in the terms the guard will use, rather than "
        "omitting the line and leaving the reader to infer permission",
        "NOTHING" in none_line, none_line)
@@ -7160,6 +7174,160 @@ def test_spawn_refuses_a_base_missing_a_dependency():
     ok("...but it is still said out loud, rather than passing silently",
        "NOT CHECKED" in (p.stdout + p.stderr), p.stdout + p.stderr)
 
+
+
+def test_a_seat_that_may_not_dispatch_is_refused_at_the_sanctioned_path():
+    group("`spawn --launch` asks whether the seat may dispatch — the guard was on the path "
+          "whoami tells you NOT to use, and not on the one it tells you to (#77)")
+    if not have("git"):
+        skip("the seat dispatch group", "git is not installed")
+        return
+
+    home = tmpdir("seat-home")
+    env = dict(os.environ, XDG_CONFIG_HOME=home, SHOWRUNNER_SESSION="sess-under-test")
+    rolesdir = os.path.join(home, "showrunner")
+    os.makedirs(rolesdir, exist_ok=True)
+
+    def write_roles(spec):
+        with open(os.path.join(rolesdir, "roles.json"), "w") as fh:
+            json.dump(spec, fh)
+
+    cfg = make_repo()
+    g = new_graph(cfg)
+    g.add("work", leaf_id="s1", labels=["backend"])
+    g.add("more work", leaf_id="s2", labels=["backend"])
+    sr = os.path.join(ROOT, "bin", "showrunner")
+
+    def spawn(leaf, *extra, **kw):
+        return subprocess.run([sys.executable, sr, "spawn", leaf, "--no-claim"] + list(extra),
+                              capture_output=True, text=True, cwd=cfg.root,
+                              env=kw.get("env", env))
+
+    # NO ROLES CONFIGURED MEANS NO POLICY, and this pair is why the first version of the check
+    # was wrong: without it, `spawn --launch` refused every dispatch in every repo that had never
+    # written a roles.json. llms.txt states that escape as deliberate — inventing a policy would
+    # refuse the dispatches of every consumer who never wrote one. The existing suite caught it.
+    p = spawn("s1", "--dry-run", "--launch")
+    ok("with no roles configured, a launch is NOT refused for the seat",
+       "may not" not in (p.stdout + p.stderr).lower(), (p.stdout + p.stderr)[:200])
+
+    # A ROLE THAT MAY NOT CREATE. This is the reported seat: the fallback, announcing
+    # "may dispatch: NOTHING", from which two Crawlers were launched.
+    write_roles({"roles": {"unassigned": {"acquire": "claim", "writes": {"deny": ["**"]}},
+                           "lead": {"acquire": "claim", "may_create": ["worker"]}},
+                 "fallback": "unassigned"})
+    p = spawn("s1", "--launch")
+    eq("a seat that may not dispatch is REFUSED at `spawn --launch`", p.returncode, 3)
+    said = p.stdout + p.stderr
+    ok("...and names the role and the seat, not merely that something was refused",
+       "unassigned" in said, said[:300])
+    ok("...and says how to get a seat that may dispatch",
+       "role claim" in said, said[:400])
+    ok("...and creates NOTHING, because the check runs before the worktree exists",
+       not os.path.isdir(os.path.join(cfg.worktree_root, "crawler-s1")), said[:200])
+
+    # THE PAIR THAT MATTERS MOST. Without --launch nothing is dispatched, and `may_create` names
+    # what a role may START. Refusing the preparation too would be a wider rule than the field
+    # says — invented here rather than declared by the operator.
+    p = spawn("s2")
+    eq("...while `spawn` WITHOUT --launch is allowed, since it starts no session", p.returncode, 0)
+    ok("...and really did prepare the room",
+       os.path.isdir(os.path.join(cfg.worktree_root, "crawler-s2")), p.stdout[:200])
+
+    # THE OTHER SIDE: a seat that MAY create is not refused, or the check is a blanket denial.
+    write_roles({"roles": {"unassigned": {"acquire": "claim", "may_create": ["worker"]}},
+                 "fallback": "unassigned"})
+    p = spawn("s1", "--dry-run", "--launch")
+    ok("a seat that MAY create is not refused", "may not" not in (p.stdout + p.stderr).lower(),
+       (p.stdout + p.stderr)[:200])
+
+    # ONE FUNCTION, TWO CALLERS. A second copy of "may this seat dispatch" is two statements of
+    # one policy free to disagree — and the whole defect was the two paths disagreeing.
+    src = open(os.path.join(ROOT, "lib", "showrunner", "dispatch.py")).read()
+    eq("the seat decision is defined exactly once", src.count("def may_dispatch("), 1)
+    cli_src = open(os.path.join(ROOT, "lib", "showrunner", "cli.py")).read()
+    ok("...and spawn calls it rather than re-deriving the answer",
+       "dispatch.may_dispatch(" in cli_src)
+
+
+def test_the_announcement_does_not_claim_enforcement_it_has_not_got():
+    group("A line saying ENFORCED must be one showrunner refuses; `writes` is PUBLISHED, "
+          "because showrunner ships no write guard (#77)")
+    if not have("git"):
+        skip("the enforcement labelling group", "git is not installed")
+        return
+
+    # THE SENTENCE THAT STOPS SOMEBODY CHECKING. The reported seat printed ENFORCED over both
+    # "may dispatch: NOTHING" and "may NOT write: **". The first was true only of a path the same
+    # announcement steers you away from; the second was enforced by a hook of the consumer's,
+    # registered for Write|Edit|NotebookEdit and not Bash. Half an hour of unguarded work.
+    pairs = roles.enforced_lines({"acquire": "claim", "writes": {"deny": ["**"]},
+                                  "may_create": []})
+    ok("every entry carries its own label rather than one banner over all of them",
+       all(isinstance(x, tuple) and len(x) == 2 for x in pairs), pairs)
+    ok("`writes` is PUBLISHED, never ENFORCED",
+       all(lab == "PUBLISHED" for lab, t in pairs if "write" in t), pairs)
+    ok("...and `may dispatch` IS enforced, so the split is real and not a downgrade of "
+       "everything", any(lab == "ENFORCED" and "may dispatch" in t for lab, t in pairs), pairs)
+
+    # PROVED BY BEHAVIOUR, NOT BY GREPPING FOR THE FIELD. The first version of this scanned the
+    # modules for `writes` and failed on doctor's own REPORT of it — reading a field to say
+    # something about it is not enforcing it, and a source scan cannot tell those apart. So the
+    # claim is demonstrated instead: showrunner's own write-path guard ALLOWS a write that the
+    # role's `writes` denies. If that ever stops being true, PUBLISHED has become a lie and this
+    # is where it surfaces.
+    _cfg = make_repo()
+    _home = tmpdir("seat-home-behaviour")
+    os.makedirs(os.path.join(_home, "showrunner"), exist_ok=True)
+    with open(os.path.join(_home, "showrunner", "roles.json"), "w") as fh:
+        json.dump({"roles": {"unassigned": {"acquire": "claim", "writes": {"deny": ["**"]}}},
+                   "fallback": "unassigned"}, fh)
+    _p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"),
+                         "worktree", "guard"],
+                        input=json.dumps({"tool_name": "Write",
+                                          "tool_input": {"file_path":
+                                                         os.path.join(_cfg.root, "x.txt")}}),
+                        capture_output=True, text=True, cwd=_cfg.root,
+                        env=dict(os.environ, XDG_CONFIG_HOME=_home))
+    eq("showrunner's own write-path guard ALLOWS a write the role's `writes` denies — which is "
+       "what PUBLISHED means, demonstrated rather than asserted", _p.returncode, 0)
+
+    # DOCTOR ANSWERS THE QUESTION showrunner CAN answer: is there a reader on Bash at all?
+    cfg = make_repo()
+    home = tmpdir("seat-home2")
+    os.makedirs(os.path.join(home, "showrunner"), exist_ok=True)
+    with open(os.path.join(home, "showrunner", "roles.json"), "w") as fh:
+        json.dump({"roles": {"unassigned": {"acquire": "claim", "writes": {"deny": ["**"]}}},
+                   "fallback": "unassigned"}, fh)
+    env = dict(os.environ, XDG_CONFIG_HOME=home)
+    settings = os.path.join(cfg.root, ".claude", "settings.json")
+    os.makedirs(os.path.dirname(settings), exist_ok=True)
+
+    def doctor():
+        p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                           capture_output=True, text=True, cwd=cfg.root, env=env)
+        return p.stdout + p.stderr
+
+    with open(settings, "w") as fh:
+        json.dump({"hooks": {"PreToolUse": [
+            {"matcher": "Write|Edit|NotebookEdit",
+             "hooks": [{"type": "command", "command": "/bin/true"}]}]}}, fh)
+    said = doctor()
+    ok("a `writes` policy with NO Bash matcher is an ERROR — this is the reported install "
+       "exactly, and it is the shape a heredoc walks past",
+       "NO PreToolUse hook matches Bash" in said, said[-600:])
+
+    # THE PAIR. Adding Bash must clear it, or the check is a permanent complaint nobody can act
+    # on — which is the alarm that is always on.
+    with open(settings, "w") as fh:
+        json.dump({"hooks": {"PreToolUse": [
+            {"matcher": "Write|Edit|NotebookEdit|Bash",
+             "hooks": [{"type": "command", "command": "/bin/true"}]}]}}, fh)
+    said = doctor()
+    ok("...and a matcher that DOES include Bash clears it", "does match Bash" in said,
+       said[-400:])
+    ok("...while still refusing to say WHICH hook enforces it, because attributing another "
+       "tool's job would be a guess", "cannot tell WHICH" in said, said[-400:])
 
 
 def test_waiting_does_not_scale_with_the_campaign():
@@ -11962,6 +12130,8 @@ def main():
                test_hook_registration,
                test_corpus_tool,
                test_spawn_refuses_a_base_missing_a_dependency,
+               test_a_seat_that_may_not_dispatch_is_refused_at_the_sanctioned_path,
+               test_the_announcement_does_not_claim_enforcement_it_has_not_got,
                test_waiting_does_not_scale_with_the_campaign,
                test_a_worktree_is_reclaimed_when_its_work_lands,
                test_a_compacted_agent_is_told_what_it_forgot,

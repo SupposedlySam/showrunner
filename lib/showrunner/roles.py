@@ -399,13 +399,29 @@ def enforced_lines(role_def):
     a rule that is not one. So every line here is derived from a field a guard actually reads.
     `notes` is deliberately NOT included: it is consumer prose and is announced separately as
     unchecked.
+
+    AND THE LABEL HAD TO SPLIT, because that promise was not true of every line (#77). This
+    block printed `ENFORCED` over `may NOT write: **` — and showrunner ships NO write guard.
+    `writes` appears in exactly three places here: the field list, this printer, and the
+    porcelain a CONSUMER'S hook reads. So the strongest thing showrunner can honestly say about
+    it is that it published the policy; whether anything enforces it is a fact about the
+    consumer's registration, which showrunner does not perform and cannot see.
+
+    A reporter lost half an hour to that: the seat said ENFORCED on both lines, they worked
+    normally, and the write guard turned out to be registered for Write|Edit|NotebookEdit and
+    not Bash — so every heredoc, `sed -i`, `tee` and redirection went through. Announcing
+    enforcement you do not perform is worse than announcing nothing, because it is the sentence
+    that stops somebody checking.
+
+    Returns (label, text) pairs. `ENFORCED` means a showrunner guard refuses it; `PUBLISHED`
+    means showrunner states it and something of yours has to act on it.
     """
     d = role_def or {}
     out = []
     may = d.get("may_create") or []
-    out.append("may dispatch: %s" % (", ".join(may) if may else
-                                     "NOTHING — `dispatch guard` refuses a raw `claude -p` from "
-                                     "this seat"))
+    out.append(("ENFORCED", "may dispatch: %s"
+                % (", ".join(may) if may else
+                   "NOTHING — `spawn --launch` and `dispatch guard` both refuse from this seat")))
     w = d.get("writes")
     # This printed `writes: {'deny': ['**']}` — a Python repr in the block whose entire job is to
     # be the readable, generated statement of what a guard enforces. Rendered per shape rather
@@ -413,18 +429,20 @@ def enforced_lines(role_def):
     # hand a mapping. Anything else is printed as-is rather than crashed on, because a renderer
     # that raises takes the whole announcement down and silence is the one unacceptable outcome.
     if isinstance(w, (list, tuple)) and w:
-        out.append("may write: %s" % ", ".join(str(x) for x in w))
+        out.append(("PUBLISHED", "may write: %s" % ", ".join(str(x) for x in w)))
     elif isinstance(w, dict):
         if w.get("deny"):
-            out.append("may NOT write: %s" % ", ".join(str(x) for x in w["deny"]))
+            out.append(("PUBLISHED", "may NOT write: %s"
+                        % ", ".join(str(x) for x in w["deny"])))
         if w.get("allow") and not w.get("deny"):
-            out.append("may write: %s" % ", ".join(str(x) for x in w["allow"]))
+            out.append(("PUBLISHED", "may write: %s"
+                        % ", ".join(str(x) for x in w["allow"])))
     elif w:
-        out.append("writes: %s" % w)
+        out.append(("PUBLISHED", "writes: %s" % w))
     if d.get("reports_to"):
-        out.append("reports to: %s" % d["reports_to"])
+        out.append(("ENFORCED", "reports to: %s" % d["reports_to"]))
     if d.get("acquire"):
-        out.append("acquired by: %s" % d["acquire"])
+        out.append(("ENFORCED", "acquired by: %s" % d["acquire"]))
     return out
 
 
@@ -626,8 +644,17 @@ def whoami(cfg, session=None):
         # see says otherwise, with nothing connecting the two.
         for msg in r["ignored_seat_mappings"]:
             out.append("  SEAT MAPPING IGNORED: %s" % msg)
-        for line in enforced_lines(r["policy"]):
-            out.append("    ENFORCED  " + line)
+        for label, line in enforced_lines(r["policy"]):
+            out.append("    %-9s %s" % (label, line))
+        if any(label == "PUBLISHED" for label, _ in enforced_lines(r["policy"])):
+            # SAID EVERY TIME, beside the line it qualifies. showrunner has no write guard: it
+            # publishes `writes` and a hook of YOURS enforces it. The reporter's was registered
+            # for Write|Edit|NotebookEdit and not Bash, so every heredoc, `sed -i`, `tee` and
+            # `>` redirection went through while this block said ENFORCED.
+            out.append("    PUBLISHED means showrunner STATES it and does not enforce it — a "
+                       "hook of yours must,")
+            out.append("    and it must cover Bash or a heredoc walks straight past it. "
+                       "`showrunner doctor` checks.")
         if r["notes"]:
             # `%s` on a list prints a Python repr on one line, so a multi-line note arrives as an
             # unreadable wall — and an announcement nobody can read is one that did not happen.

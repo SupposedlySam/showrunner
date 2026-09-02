@@ -399,6 +399,20 @@ refuses it from a session whose role may not create one. Registered on **Bash**,
 mechanism actually used: an earlier version matched `Agent`, guarded the in-process subagent tool,
 and reported nothing while 42 real dispatches went past it.
 
+**A line that says ENFORCED has to be one showrunner refuses.** The seat announcement printed one
+`ENFORCED` banner over every policy line, and one of them was not: showrunner publishes `writes`
+and ships no write guard at all. A reporter worked for half an hour from a seat announcing both
+"may dispatch: NOTHING" and "may NOT write: **" — launching two Crawlers through `spawn --launch`,
+which never asked, and writing repo files through a heredoc, past a guard their install had
+registered for `Write|Edit|NotebookEdit` and not `Bash`. Announcing enforcement you do not perform
+is worse than announcing nothing: it is the sentence that stops somebody checking.
+
+`may_create` is now enforced at **both** paths — the sanctioned `spawn --launch` as well as the raw
+`claude -p` the announcement steers you away from, from one shared function so the two cannot
+disagree. `writes` is labelled **PUBLISHED**, and `doctor` reports whether any PreToolUse hook
+matches Bash when a role declares one; it will not say *which* hook enforces it, because
+attributing another tool's job would be a guess.
+
 **Roles are yours; showrunner checks the shape.** It never learns what a role *means* — the way
 lane rules already work. It knows two acquisition modes, `claim` (a session takes an open seat,
 exclusive, with pid+boot liveness) and `assign` (written by whoever created the session), and it

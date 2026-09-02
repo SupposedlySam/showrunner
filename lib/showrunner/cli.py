@@ -464,6 +464,52 @@ def cmd_doctor(args):
               "watchdog that never fired." % (RED + "ERROR" + OFF, rel(_wj, cfg.root), _e))
         bad += 1
 
+    # A `writes` POLICY WITH NOTHING ON BASH TO ENFORCE IT (#77). showrunner publishes `writes`
+    # and does not enforce it — no write guard ships here — so the only thing it can honestly
+    # check is whether a reader exists at all. The reported install had one registered for
+    # Write|Edit|NotebookEdit and NOT Bash, while `whoami` said ENFORCED, so every heredoc,
+    # `sed -i`, `tee`, `cp` and `>` redirection went through unrefused for half an hour.
+    #
+    # THIS IS THE WORST GAP TO HAVE, because of where agents are pushed: an operating
+    # instruction to "make file changes with sed, heredocs, or short scripts rather than the
+    # Write tool" routes the default authoring path around a Write-only matcher. The agent
+    # following its instructions is unguarded and the one ignoring them is caught.
+    #
+    # It CANNOT say which hook enforces `writes` — attribution would be a guess about somebody
+    # else's tool. It says whether ANY PreToolUse hook sees Bash, which is checkable and is the
+    # question that was answered wrongly.
+    try:
+        _pol = roles.resolution(cfg, os.environ.get("SHOWRUNNER_SESSION") or "")
+        _declares_writes = bool((_pol.get("policy") or {}).get("writes"))
+    except Exception:                                            # noqa: BLE001
+        _declares_writes = False
+    if _declares_writes:
+        _bash_seen, _read_any = False, False
+        for _sf in lease.settings_candidates(cfg.root):
+            try:
+                with open(_sf) as _fh:
+                    _data = json.load(_fh)
+            except (OSError, ValueError):
+                continue
+            _read_any = True
+            for _entry in (_data.get("hooks") or {}).get("PreToolUse", []) or []:
+                if "Bash" in (_entry.get("matcher") or ""):
+                    _bash_seen = True
+        if not _read_any:
+            print("  %s a role here declares `writes`, and no settings file could be read, so "
+                  "whether anything enforces it is UNKNOWN — not none"
+                  % (YEL + "warn " + OFF))
+        elif not _bash_seen:
+            print("  %s a role here declares `writes` and NO PreToolUse hook matches Bash. "
+                  "showrunner publishes that policy and does not enforce it; a hook of yours "
+                  "must, and one registered only for Write|Edit|NotebookEdit is walked past by "
+                  "every heredoc, `sed -i`, `tee` and `>` redirection. Add Bash to its matcher."
+                  % (RED + "ERROR" + OFF))
+        else:
+            print("  %s a role declares `writes`, and a PreToolUse hook does match Bash — "
+                  "showrunner cannot tell WHICH hook enforces it, only that a reader exists"
+                  % (GRN + "ok   " + OFF))
+
     # HOW MANY WORKTREES EXIST, because 178 is not a number anybody discovers on purpose (#75).
     # The reported checkout had 178 trees and 133 GB with ONE live Crawler, and what hurt was
     # not disk: an AV suite rescanning a duplicated monorepo at ~64% CPU, on a machine reported
@@ -2170,6 +2216,37 @@ def cmd_spawn(args):
     # right in isolation.
     base_seen = worktree.base_report(cfg, g, leaf, args.base or "HEAD",
                                      explicit=args.base is not None)
+    # MAY THIS SEAT DISPATCH AT ALL (#77)? Asked at the SANCTIONED path, not only at the raw one.
+    # `dispatch guard` watches `claude -p` — which `whoami` tells you not to use — while
+    # `spawn --launch`, which it tells you to use two lines earlier, never asked. A seat
+    # announcing "may dispatch: NOTHING" launched two Crawlers, and the operator found out half
+    # an hour later when an unrelated Write was refused. A restriction enforced only on the
+    # discouraged path restricts nothing.
+    #
+    # ONLY WHEN IT ACTUALLY DISPATCHES. Without `--launch`, spawn prepares a room and starts no
+    # session, and `may_create` names what a role may START. Refusing the preparation too would
+    # be a wider rule than the field says, invented here rather than declared by the operator.
+    if getattr(args, "launch", False):
+        _me = args.session or os.environ.get("SHOWRUNNER_SESSION") or ""
+        _ok, _role, _seat, _ = dispatch.may_dispatch(cfg, _me)
+        if not _ok:
+            msg = ("%s would START a session, and this seat may not.\n"
+                   "  role     %s (%s)\n"
+                   "  session  %s\n"
+                   "A seat announcing `may dispatch: NOTHING` was refusing only a raw "
+                   "`claude -p`, so the path this tool tells you to use went unchecked.\n"
+                   "Take a seat that may dispatch:\n"
+                   "    showrunner role claim <role> --who <you>\n"
+                   "or give this role a `may_create` naming what it may start. Roles are yours "
+                   "to define — showrunner checks the shape, never the meaning.\n"
+                   "`showrunner spawn %s` without --launch prepares the room and starts nothing."
+                   % (leaf["id"], _role, _seat or "unresolved",
+                      short_session(_me) if _me else "?", leaf["id"]))
+            if getattr(args, "dry_run", False):
+                eprint("%sWOULD REFUSE: %s%s" % (RED, msg, OFF))
+            else:
+                die(msg, code=3)
+
     _implicit_base_check(cfg, leaf, base_seen,
                          rehearsing=bool(getattr(args, "dry_run", False)))
     _base_dependency_check(leaf, base_seen, getattr(args, "despite_base", None) or [],

@@ -478,6 +478,21 @@ and one typo would otherwise buy the whole write denial back, silently.
 **With no roles defined, no dispatch policy is enforced for anybody.** That is deliberate:
 inventing one would refuse the dispatches of every consumer who never wrote any.
 
+**ENFORCED and PUBLISHED are different labels, and the block says which (#77).** `may_create` is
+ENFORCED: `spawn --launch` AND `dispatch guard` both refuse from a seat that may not create.
+`writes` is PUBLISHED: showrunner states it and **ships no write guard** — a hook of yours has to
+enforce it, and it must cover **Bash** or every heredoc, `sed -i`, `tee`, `cp` and `>` redirection
+walks past it. `showrunner doctor` reports whether ANY PreToolUse hook matches Bash when a role
+declares `writes`; it cannot say which hook enforces it, because attributing another tool's job
+would be a guess.
+
+This printed one `ENFORCED` banner over both. A reporter's seat announced *"may dispatch: NOTHING"*
+and *"may NOT write: **"*, both labelled ENFORCED, and they did half an hour of real work from it:
+two Crawlers launched through `spawn --launch`, which never asked, and repo files written through
+a heredoc, past a guard registered for `Write|Edit|NotebookEdit` only. Announcing enforcement you
+do not perform is worse than announcing nothing, because it is the sentence that stops somebody
+checking. The guard had been built around the path the same announcement steers you AWAY from.
+
 ### Getting a seat, and keeping it
 
 Both modes had to become reachable before either worked. `assign` had no reader until a seat could

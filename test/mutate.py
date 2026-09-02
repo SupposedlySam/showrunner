@@ -82,6 +82,14 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # #77. Answering True always restores the exact reported hole: `spawn --launch` stops asking
+    # whether the seat may dispatch, so a seat announcing "may dispatch: NOTHING" launches
+    # Crawlers and nothing says otherwise — which is how two went out and the operator found
+    # out half an hour later from an unrelated refused Write. The tool keeps working under the
+    # mutant, which is why it needs one.
+    ("may this seat dispatch", "dispatch.may_dispatch", "lib/showrunner/dispatch.py",
+     r"(def may_dispatch\([^)]*\):\n)",
+     "    return True, 'x', 'y', 'z'\ndef _neutered_may_dispatch(cfg, session, defs=None):\n"),
     # #76. Answering None sends every caller back to a `rev-parse` PER BRANCH — the exact shape
     # that cost 869 subprocesses and 20 seconds, blew a consumer's 15s probe timeout, and left
     # its watchdog reporting "the probe did not run" for six days while three Crawlers died. The
