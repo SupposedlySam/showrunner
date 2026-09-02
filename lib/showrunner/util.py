@@ -467,6 +467,25 @@ def repo_root(start=None):
     return out.strip()
 
 
+def caller_session():
+    """This session's id, DISCOVERED rather than demanded. "" when nothing names one.
+
+    A seat's re-seat-after-reload keys on the session id, and a seat claimed without one records
+    `""` — which that feature deliberately refuses to match, because treating absent-as-equal
+    would let any unidentified session inherit any unidentified seat. So a `role claim` run the
+    obvious way produced a seat the feature could never rebind, and the operator had to know to
+    pass `--session` for a mechanism whose whole purpose is that they should not have to think
+    about it. Documenting that would have been documenting a footgun.
+
+    ORDER IS EXPLICIT-FIRST. `SHOWRUNNER_SESSION` is showrunner's own override and stays ahead of
+    the harness's variable, so a caller that sets it deliberately is never second-guessed.
+    """
+    return (os.environ.get("SHOWRUNNER_SESSION")
+            or os.environ.get("CLAUDE_CODE_SESSION_ID")
+            or os.environ.get("CLAUDE_SESSION_ID")
+            or "")
+
+
 def package_root():
     """The checkout this code is running out of. ONLY the guards may anchor to it (#74).
 

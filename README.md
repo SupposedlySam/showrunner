@@ -365,6 +365,25 @@ being made. A repo with no `origin/HEAD`, `main` or `master`, or a detached HEAD
 cannot-tell must not refuse. `showrunner show <leaf>` reports `crawler_base` — what
 was asked for, the resolved sha, the branch — which was recorded from the start and had no surface.
 
+**A window reload does not cost the seat.** Reloading a VS Code window restarts the extension
+host under a new pid, so the recorded holder is dead, the lock correctly reports STALE, and the
+resolver correctly skips it — every step right and the outcome useless, because the same logical
+session comes back and cannot see its own seat. Reported by an operator whose bot re-claimed on
+every reload.
+
+The two facts age differently, which is what makes it decidable: the Claude session id is
+unchanged across a reload while the pid is not. So a seat whose **session matches** and whose
+**pid is gone** is rebound, and the announcement SAYS a reload happened — a silent re-seat is
+indistinguishable from never having lost it, and the caller may owe setup it did the first time.
+
+Three answers, not two. A pid that is **still alive** is never displaced: two live processes under
+one session id is what `claude --resume` produces, and both resolve to the seat because the
+session is the unit of identity — what does not happen is the pid moving. An **empty** session id
+matches nothing on either side, or any unidentified session would inherit any unidentified seat. A
+**different** session inherits nothing however dead the pid. The id itself is discovered from the
+environment rather than demanded as a flag, because a mechanism nobody should have to think about
+must not require knowing about it.
+
 **Claims carry liveness.** A claim records the owning PID and a boot token. Without that, a Crawler
 that dies leaves its leaf claimed forever — `ready` means unblocked *and unclaimed*, so the work
 silently leaves the queue, `ready` goes dry, and the loop terminates **reporting success** on work

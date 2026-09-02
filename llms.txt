@@ -556,6 +556,15 @@ side: a seat claimed without one records `""`, and treating absent-as-equal woul
 unidentified session inherit any unidentified seat. A **different** session inherits nothing, no
 matter how dead the pid — the discriminator is the session, not that something died.
 
+**The session id is DISCOVERED, not demanded.** `role claim` reads `SHOWRUNNER_SESSION` first,
+then the harness's own `CLAUDE_CODE_SESSION_ID`, so a seat claimed the obvious way — no flag —
+already carries what the re-seat needs. It did not at first: a plain claim recorded `""`, the
+feature refused to match it, and the operator had to know to pass `--session` for a mechanism
+whose whole point is that nobody should have to think about it. That would have been documenting
+a footgun instead of closing it. The SessionStart hook reads `session_id` from its payload for
+the same reason, falling back to those variables; an empty or unparseable payload costs the
+session id and nothing else.
+
 `role roster` exists because that state had nowhere to be seen. The only way to notice a dead
 claim was calling `roles.roster()` from Python, and a state nothing surfaces is a state nobody
 debugs.

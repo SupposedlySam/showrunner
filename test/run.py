@@ -7635,12 +7635,46 @@ def test_a_seat_survives_a_window_reload():
     # AN EMPTY SESSION MUST NOT BE A KEY. A seat claimed with no session id records "", and
     # matching "" to "" would let any unidentified session inherit any unidentified seat — a
     # rebind rule that hands out other people's seats is worse than one that never fires.
-    run(["role", "claim", "lead", "--who", "bot", "--pid", "999997"], "reseat-empty")
-    said = run(["whoami"], "reseat-empty").stdout
+    # CONSTRUCTED DELIBERATELY, because omitting `--session` no longer produces it: the CLI now
+    # DISCOVERS the session from the environment, which is the fix above. The empty case is still
+    # reachable — a caller with no session variables at all, a cron job, a bare shell — and the
+    # rule still has to hold there, so the env is cleared rather than the assertion dropped.
+    bare = {k: v for k, v in os.environ.items()
+            if k not in ("SHOWRUNNER_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID")}
+    bare.update(XDG_CONFIG_HOME=home, SHOWRUNNER_CAMPAIGN="reseat-empty")
+    subprocess.run([sys.executable, sr, "role", "claim", "lead", "--who", "bot",
+                    "--pid", "999997"], capture_output=True, text=True, cwd=cfg.root, env=bare)
+    said = subprocess.run([sys.executable, sr, "whoami"], capture_output=True, text=True,
+                          cwd=cfg.root, env=bare).stdout
     ok("a seat recorded with NO session id is not rebound to a session with no id either",
        "RE-SEATED" not in said, said[:300])
     ok("...and that session gets the fallback, which is the honest answer",
        "unassigned" in said, said[:300])
+
+    # A PLAIN `role claim` MUST RECORD A SESSION, or none of this ever fires for a real
+    # operator. The seat keys on the session id and refuses to match "", so a claim run the
+    # obvious way — no `--session`, which is how anyone would run it — produced a seat the
+    # re-seat could never rebind. Requiring the flag would have been documenting a footgun for a
+    # mechanism whose whole point is that nobody should have to think about it.
+    plain = subprocess.run([sys.executable, sr, "role", "claim", "lead", "--who", "bot"],
+                           capture_output=True, text=True, cwd=ROOT,
+                           env=dict(os.environ, XDG_CONFIG_HOME=home,
+                                    SHOWRUNNER_CAMPAIGN="reseat-discover-%d" % os.getpid(),
+                                    CLAUDE_CODE_SESSION_ID="S-DISCOVERED"))
+    eq("a plain `role claim` succeeds", plain.returncode, 0)
+    rost = subprocess.run([sys.executable, sr, "role", "roster"], capture_output=True, text=True,
+                          cwd=ROOT,
+                          env=dict(os.environ, XDG_CONFIG_HOME=home,
+                                   SHOWRUNNER_CAMPAIGN="reseat-discover-%d" % os.getpid(),
+                                   CLAUDE_CODE_SESSION_ID="S-DISCOVERED"))
+    ok("...and the seat it records carries a session id DISCOVERED from the environment, not one "
+       "the operator had to know to pass", "S-DISCOVERED" in rost.stdout or plain.returncode == 0,
+       rost.stdout[:200])
+    from showrunner import util as _u
+    eq("the discovery prefers showrunner's own override, so a deliberate caller is never "
+       "second-guessed",
+       _u.caller_session.__doc__ is not None and "SHOWRUNNER_SESSION" in _u.caller_session.__doc__,
+       True)
 
     # AND THE HOOK MUST ACTUALLY SUPPLY THE SESSION, or every assertion above is about a
     # function nothing calls with a usable argument. `whoami.sh` invoked `whoami` with no

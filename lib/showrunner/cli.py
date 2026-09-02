@@ -14,7 +14,8 @@ import sys
 
 from . import (__version__, brief, campaign, collide, config, dispatch, events, gates,
                reach, graph as G, harness, lanes, lease, locks, pin, roles, worktree)
-from .util import (RESOLVED_BASIS, Refused, die, eprint, git, now, package_root,
+from .util import (RESOLVED_BASIS, Refused, caller_session, die, eprint, git, now,
+                   package_root,
                    session_pid as util_session_pid,
                    rel, resolve_from_caller, run, short_session, slug, stamp)
 
@@ -1158,7 +1159,7 @@ def cmd_worktree_enter(args):
     actually maps onto the event.
     """
     cfg = _cfg(args)
-    session = args.session or os.environ.get("SHOWRUNNER_SESSION") or ""
+    session = args.session or caller_session()
     verdict, detail = lease.enter(cfg, session, path=args.path, who=args.holder)
     tree = detail.get("tree")
     h = detail.get("holder") or {}
@@ -1236,7 +1237,7 @@ def cmd_worktree_enter(args):
 def cmd_worktree_fork(args):
     """Your own tree, from the same commit the held one started at. Exit 2 on refusal."""
     cfg = _cfg(args)
-    session = args.session or os.environ.get("SHOWRUNNER_SESSION") or ""
+    session = args.session or caller_session()
     try:
         path, d = lease.fork(cfg, getattr(args, "from"), session, base=args.base, name=args.name)
     except Refused as exc:
@@ -1541,7 +1542,7 @@ def cmd_whoami(args):
     isolation 42 times — because nothing fired at a session boundary, so every compaction
     refreshed the harness that owned those seams and eroded the tool that did not.
     """
-    session = args.session or os.environ.get("SHOWRUNNER_SESSION") or ""
+    session = args.session or caller_session()
     try:
         cfg = _cfg(args, required=False)
         # ONE RESOLVER, TWO RENDERINGS. The porcelain is not a second answer computed a second
@@ -1594,7 +1595,7 @@ def cmd_role_claim(args):
         die("role %r declares acquire=%r, so it cannot be claimed — it is assigned by whoever "
             "creates the session, through `seat_roles`" % (args.role, acquire), code=2)
 
-    session = args.session or os.environ.get("SHOWRUNNER_SESSION") or ""
+    session = args.session or caller_session()
     ok, holder = roles.claim(cfg, args.role, session, pid=args.pid, who=args.who, seat=args.seat)
     if not ok and holder.get("pid_basis") == "unresolved":
         print("showrunner: %s.\n  Nothing was claimed; that is said out loud rather than left to "
