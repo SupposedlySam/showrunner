@@ -2344,7 +2344,12 @@ def cmd_spawn(args):
     # session, and `may_create` names what a role may START. Refusing the preparation too would
     # be a wider rule than the field says, invented here rather than declared by the operator.
     if getattr(args, "launch", False):
-        _me = args.session or os.environ.get("SHOWRUNNER_SESSION") or ""
+        # DISCOVERED, like every other session lookup here. This one was missed when the
+        # rest were converted — it reads `SHOWRUNNER_SESSION` only, so the refusal it
+        # prints said `session ?` for a session that is perfectly identifiable. A seat
+        # check that cannot name the session it is refusing is harder to act on, and the
+        # inconsistency is the kind that survives because four call sites looked right.
+        _me = args.session or caller_session()
         _ok, _role, _seat, _ = dispatch.may_dispatch(cfg, _me)
         if not _ok:
             msg = ("%s would START a session, and this seat may not.\n"
