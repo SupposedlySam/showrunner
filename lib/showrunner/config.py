@@ -74,7 +74,8 @@ USER_PATH = os.path.join(user_config_dir(), CONFIG_NAME)
 # regenerates by running.
 STATE_IGNORE_SECTIONS = [
     ("# showrunner runtime state — not source",
-     ["graph.db", "graph.db-*", "locks/", "scratch/", "campaign.json", "routing.jsonl",
+     ["graph.db", "graph.db-*", "locks/", "scratch/", "campaigns/", "campaign.json",
+      "routing.jsonl",
       "waiting.jsonl", "events.jsonl", "hook-heartbeat.jsonl", "fail-open.jsonl",
       "*.lock", "baseline.json",
       "integration-commit.json"]),

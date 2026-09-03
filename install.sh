@@ -138,6 +138,7 @@ graph.db
 graph.db-*
 locks/
 scratch/
+campaigns/
 campaign.json
 routing.jsonl
 waiting.jsonl
@@ -185,7 +186,8 @@ sr_added=0
 # Ensure-present rather than rewrite: these are the TOOL's policy about its own runtime files,
 # so converging a consumer's file to the full set is correct, while clobbering the file would
 # discard entries they added. `grep -qxF` makes it idempotent, so re-running adds nothing.
-for entry in "bin/" "lib/" "graph.db" "graph.db-*" "locks/" "scratch/" "campaign.json" \
+for entry in "bin/" "lib/" "graph.db" "graph.db-*" "locks/" "scratch/" "campaigns/" \
+             "campaign.json" \
              "routing.jsonl" "waiting.jsonl" "events.jsonl" "*.lock" "baseline.json" \
              "integration-commit.json" "config.local.json" "seen-issues.json" \
              "hook-heartbeat.jsonl" "fail-open.jsonl"; do
