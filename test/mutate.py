@@ -82,6 +82,15 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # NOT A STUB — the EXACT pre-fix logic, host compared before scheme. This is the rarer and
+    # better mutation: it restores a real historical defect rather than a plausible one, and it
+    # is invisible on any machine whose hostname never changes, which is why it survived. On one
+    # that renames itself — macOS flipping between `Mac` and `MacbookPro.local` with network
+    # state — every seat, claim and lock written before the flip reads as a different machine,
+    # and `False` is the answer that LICENSES taking them from a live holder.
+    ("boot identity when the machine renames itself", "util.same_boot", "lib/showrunner/util.py",
+     r"(def same_boot\(theirs, ours\):\n)",
+     "    h1, s1, v1 = _boot_parts(theirs)\n    h2, s2, v2 = _boot_parts(ours)\n    if not s1 or not s2 or 'unknown' in (s1, s2):\n        return None\n    if h1 != h2:\n        return False\n    if s1 != s2:\n        return None\n    if s1 == 'uuid':\n        return v1 == v2\n    try:\n        return abs(int(v1) - int(v2)) <= 1\n    except (TypeError, ValueError):\n        return None\ndef _neutered_host_first(theirs, ours):\n"),
     # Reporting "joined" and doing nothing restores the reported failure EXACTLY, in its
     # invisible direction: the room opens, the dispatch report says wired, the brief tells the
     # Crawler it is already reachable — and every correction sent to it comes back `nobody else

@@ -143,7 +143,8 @@ atexit.register(shutil.rmtree, _CFG_HOME, True)
 # group is exactly the line a sweep skips, and every sweep left two more directories behind in
 # the live campaign list. The group still removes them and asserts it, because the assertion is
 # what keeps the intent visible; this is the net under it.
-for _c in ("reseat-discover-%d" % os.getpid(), "reseat-hook-%d" % os.getpid()):
+for _c in ("reseat-discover-%d" % os.getpid(), "reseat-hook-%d" % os.getpid(),
+           "reseat-rename-%d" % os.getpid()):
     atexit.register(_shutil.rmtree, os.path.join(ROOT, ".showrunner", "campaigns", _c), True)
 
 from showrunner import brief, campaign, collide, config, dispatch, gates, graph as G, harness, lanes, lease, locks, pin, reach, roles, util, worktree  # noqa: E402
@@ -512,11 +513,39 @@ def test_locks():
     device.release(force=True)
 
     # PID reuse: a pid recorded on a previous boot cannot still be running.
+    #
+    # THE TOKEN HERE IS A REAL DIFFERENT BOOT, in the SAME scheme this machine reports. It used
+    # to be the legacy `some-host:1` — the SECONDS scheme, against a darwin token in the UUID
+    # scheme, two schemes this module has always called incomparable. The assertion passed for a
+    # reason it did not intend: the host mismatch was compared BEFORE the scheme, so "different
+    # host" answered STALE before "incomparable" could answer nothing. Once the host check was
+    # scoped to the seconds scheme — a boot uuid identifies a machine, a hostname does not, and
+    # macOS renames itself between `Mac` and `MacbookPro.local` without rebooting — this fixture
+    # stopped describing a different boot at all. Same scheme, same host, different value.
     device.acquire(os.getpid(), "agent-D")
+    _host, _scheme, _val = util._boot_parts(locks.boot_token())
+    other_boot = ("%s:%s:%s" % (_host, _scheme, "0" if _val != "0" else "1") if _scheme == "sec"
+                  else "%s:uuid:00000000-0000-0000-0000-000000000000" % _host)
     with open(os.path.join(device.dir, "boot"), "w") as fh:
-        fh.write("some-host:1\n")
+        fh.write(other_boot + "\n")
     state, _ = device.state()
     eq("a claim from a different boot is STALE even when the pid is alive", state, locks.STALE)
+
+    # AND A RENAMED MACHINE IS NOT A PREVIOUS BOOT — the pair that matters. The assertion above
+    # is equally satisfied by a comparison that calls EVERYTHING different, which is precisely
+    # what was happening to every seat and lock on this machine after a hostname flip: the
+    # orchestrator's own live seat read STALE, and False here is the answer that licenses taking
+    # a live holder's lock.
+    if _scheme == "uuid":
+        with open(os.path.join(device.dir, "boot"), "w") as fh:
+            fh.write("a-different-name:uuid:%s\n" % _val)
+        renamed, _ = device.state()
+        eq("...while the SAME boot uuid under a different hostname is still HELD, because a "
+           "machine renaming itself is not a reboot", renamed, locks.HELD)
+    else:
+        skip("the renamed-host lock assertion",
+             "this machine reports boot SECONDS, where the hostname is the only discriminator "
+             "between two machines and therefore must still count")
 
     # A BOOT TOKEN NOBODY COULD READ IS NOT A DIFFERENT BOOT. `boot_token` degrades to
     # `<host>:unknown` when the boot time is undiscoverable, and comparing THAT against a real
@@ -6284,8 +6313,25 @@ def test_boot_token_does_not_drift():
     eq("the same token is the same boot", util.same_boot(H + ":uuid:A", H + ":uuid:A"), True)
     eq("a genuinely different boot uuid is a different boot",
        util.same_boot(H + ":uuid:A", H + ":uuid:B"), False)
-    eq("a different HOST is a different boot, and that IS knowable",
-       util.same_boot("other:uuid:A", H + ":uuid:A"), False)
+    # THIS ASSERTION USED TO READ "a different HOST is a different boot, and that IS knowable",
+    # for BOTH schemes, and it was wrong for the uuid one — wrong in the direction that licenses
+    # action. Measured on this machine: a seat recorded `Mac:uuid:6FA135C9-…` and the same live
+    # session later read `MacbookPro.local:uuid:6FA135C9-…`, because macOS flips between the
+    # short name and the `.local` mDNS name with network state. The host was compared first, the
+    # identical uuid never was, and the orchestrator's own live seat went STALE — with `reap`
+    # ready to release claims whose owners were running and `locks._live` ready to hand a live
+    # holder's lock to somebody else.
+    eq("the same boot uuid under a DIFFERENT hostname is the same boot — a machine renaming "
+       "itself is not a reboot, and the uuid is the identity",
+       util.same_boot("other:uuid:A", H + ":uuid:A"), True)
+    eq("...while a different uuid is still a different boot, whatever the host says",
+       util.same_boot("other:uuid:A", H + ":uuid:B"), False)
+    # THE HOST CHECK IS NOT GONE, it is scoped to the scheme that needs it: boot SECONDS are not
+    # identifying, since two machines boot in the same second often enough, so there the host is
+    # the only thing separating them.
+    eq("a different HOST on the SECONDS scheme is still a different boot, because seconds alone "
+       "do not identify a machine",
+       util.same_boot("other:sec:1787677144", H + ":sec:1787677144"), False)
 
     # THE DRIFT ITSELF, on the fallback scheme. One second is exactly the size of the clock
     # adjustment being repaired, and the field's own precision is the problem.
@@ -7916,6 +7962,47 @@ def test_a_seat_survives_a_window_reload():
                 if d in ("reseat-discover-%d" % os.getpid(), hook_campaign)]
     ok("...and the group removes the campaigns it had to create in the REAL checkout, so a "
        "suite run does not leave residue in the live campaign list", not leftover, leftover)
+
+    # A RENAMED MACHINE MUST NOT COST THE SEAT EITHER. This is the SECOND cause of the reported
+    # "the bot loses its campaign seat", and fixing the reload did not end it — which is why it
+    # is asserted here, beside the reload case, rather than left to the lock tests.
+    #
+    # MEASURED, not imagined: this orchestrator's own seat recorded `Mac:uuid:6FA135C9-…` and
+    # the same live session later read `MacbookPro.local:uuid:6FA135C9-…`. macOS flips between
+    # the short name and the `.local` mDNS name with network state, and none of that is a
+    # reboot. `same_boot` compared the HOST before the scheme, so an identical boot uuid was
+    # never reached: the answer was False — "a different machine, knowably" — the seat read
+    # STALE, `whoami` announced the fallback, and `spawn --launch` refused to dispatch from a
+    # seat that was alive the whole time.
+    #
+    # THE SEAT PATH IS A DIFFERENT CONSUMER from the lock path, and the mutation sweep asked
+    # for exactly this: restoring the host-first comparison was noticed by two assertions, both
+    # about locks. A live claim released by `reap` and a live seat announcing the fallback are
+    # different costs of one comparison.
+    seat_campaign = "reseat-rename-%d" % os.getpid()
+    run(["role", "claim", "lead", "--who", "bot", "--session", "S-RENAME",
+         "--pid", str(os.getpid())], seat_campaign)
+    seat_dir = os.path.join(cfg.state_dir, "campaigns", seat_campaign, "roles")
+    if not os.path.isdir(seat_dir):
+        seat_dir = os.path.join(cfg.state_dir, "roles")
+    boots = [os.path.join(dirpath, "boot")
+             for dirpath, _d, files in os.walk(seat_dir) if "boot" in files]
+    ok("the seat records a boot token at all, or the rename assertion below measures nothing",
+       bool(boots), (seat_dir, boots))
+    for bp in boots:
+        with open(bp) as fh:
+            token = fh.read().strip()
+        host, scheme, val = util._boot_parts(token)
+        if scheme != "uuid":
+            continue
+        with open(bp, "w") as fh:
+            fh.write("a-different-name:uuid:%s\n" % val)
+    said = run(["whoami", "--session", "S-RENAME"], seat_campaign).stdout
+    ok("a seat whose machine RENAMED itself still resolves — the boot uuid is the identity, and "
+       "a hostname flip is not a reboot",
+       "role: lead" in said, said[:400])
+    shutil.rmtree(os.path.join(ROOT, ".showrunner", "campaigns", seat_campaign),
+                  ignore_errors=True)
 
 
 def test_a_seat_that_may_not_dispatch_is_refused_at_the_sanctioned_path():

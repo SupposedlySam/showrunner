@@ -182,12 +182,32 @@ def same_boot(theirs, ours):
     h2, s2, v2 = _boot_parts(ours)
     if not s1 or not s2 or "unknown" in (s1, s2):
         return None
-    if h1 != h2:
-        return False                      # a different machine is a different boot, knowably
     if s1 != s2:
         return None                       # seconds vs uuid: incomparable, not different
     if s1 == "uuid":
+        # THE UUID IS THE IDENTITY; THE HOSTNAME BESIDE IT IS DECORATION. A boot session uuid
+        # is unique to one boot of one machine, so two tokens carrying the SAME uuid are the
+        # same boot however the host string reads.
+        #
+        # MEASURED HERE, ON THIS MACHINE, AND IT COST A SEAT. A seat recorded
+        # `Mac:uuid:6FA135C9-…`; the same live session, same boot, later read
+        # `MacbookPro.local:uuid:6FA135C9-…`. macOS flips between the short name and the
+        # `.local` mDNS name with network state, and nothing about that is a reboot. The host
+        # check ran FIRST, so an identical uuid never got compared: `same_boot` answered False —
+        # "a different machine, knowably" — and False is the answer that LICENSES ACTION. Every
+        # seat, claim and lock written before the flip read as belonging to a dead machine, so
+        # the orchestrator's own live seat went STALE and `reap` would have proposed releasing
+        # claims whose owners were running. `locks._live` shares this rule, which is the
+        # dangerous half: a lock could be taken from a demonstrably live holder.
+        #
+        # This is the same complaint as the reload one and a DIFFERENT cause, which is why
+        # fixing the reload did not end it.
         return v1 == v2
+    if h1 != h2:
+        # SECONDS ARE NOT IDENTIFYING. Two machines boot in the same second often enough, so
+        # here the host is the only thing separating them and a mismatch really is knowably a
+        # different boot. The check stays — scoped to the scheme that needs it.
+        return False
     try:
         return abs(int(v1) - int(v2)) <= 1
     except (TypeError, ValueError):
