@@ -82,6 +82,40 @@ os.environ["XDG_CONFIG_HOME"] = _CFG_HOME
 # so an unset var here has the suite stat the DEVELOPER's own sessions. An env var rather than a
 # patch, again, so the subprocess CLI assertions inherit it.
 os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(_CFG_HOME, "claude-home")
+# SAME RULE, THIRD VARIABLE (#39). SHOWRUNNER_CAMPAIGN selects where every state path lives, and
+# it is EXPORTED INTO EVERY CRAWLER by design -- a session dispatched into a campaign inherits it
+# and so do its children, this suite among them. So a suite run from inside a campaign was
+# measuring a different layout from a suite run outside one: `init` writes its .gitignore under
+# .showrunner/campaigns/<slug>/, `doctor` reads that campaign's waiting journal, and every fixture
+# here builds the repo-wide path. Measured on one commit, one machine, one variable apart: 1739
+# passed / 1 failed with it unset, 1731 / 9 with it set, and the eight extra failures are all the
+# suite reading the machine it runs on rather than anything about the code.
+#
+# EIGHT UNDERSTATED IT, and the reason is worth knowing before anyone re-measures. test_campaign_scoping
+# ended with a bare `del os.environ["SHOWRUNNER_CAMPAIGN"]`, so it silently disinfected the
+# environment for every group that ran after it — the eight were the contamination visible UP TO
+# that point. That `del` now restores the prior value instead, and neutering this clear shows the
+# real figure: 26 failed. A cleanup that hides the defect downstream of itself is the same shape
+# as the defect.
+#
+# THE COST IS NOT THE RED. `showrunner baseline` recorded "suite rc=1, 8 failure line(s)" from
+# inside a campaign, and `check` tolerates a recorded failure by construction -- so those eight
+# assertions stopped gating exactly where the campaign runs. An instrument its own environment
+# can move measures nothing.
+#
+# CLEARED RATHER THAN SCOPED. Two of the eight assert the NO-CAMPAIGN default itself ("state
+# lives where it always has"), which no amount of path-scoping can satisfy: they need the
+# variable unset. The other six merely trip over it. The tests that are about campaigns pass
+# SHOWRUNNER_CAMPAIGN themselves, explicitly, so clearing the ambient one removes contamination
+# without removing coverage -- see test_campaign_scoping, which proves both halves.
+_AMBIENT_CAMPAIGN = os.environ.pop("SHOWRUNNER_CAMPAIGN", None)
+if _AMBIENT_CAMPAIGN:
+    # ANNOUNCED, because a suite that silently ignores the variable you set is its own trap:
+    # somebody running it from inside a campaign to see how that campaign behaves would read a
+    # green run as an answer about their campaign.
+    print("note: SHOWRUNNER_CAMPAIGN=%s cleared for this run — the suite asserts the repo-wide "
+          "layout, and the campaign-scoped tests select their own campaign explicitly"
+          % _AMBIENT_CAMPAIGN)
 import atexit
 import shutil as _shutil
 for _leaky in (_HB_ROOT, _CFG_HOME):
@@ -2916,9 +2950,26 @@ def test_guards_anchor_off_cwd():
         env_blind = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
         in_repo = subprocess.run(["bash", shim], cwd=outside, input=payload,
                                  capture_output=True, text=True, env=env_blind)
+        # MATCHED ON THE ANCHOR FAILURE, NOT ON "DID NOT RUN". This assertion is about whether the
+        # shim RESOLVED its project, and "DID NOT RUN" is the opening phrase of every fail-open
+        # notice these guards print — several of which have nothing to do with anchoring. It read
+        # as a proxy and worked only while anchoring was the sole way to reach that phrase.
+        #
+        # It stopped being true and this suite could not see it from the primary checkout: in a
+        # LINKED WORKTREE the anchoring SUCCEEDS — the guard names the tree correctly — and then
+        # hits `lease.py`'s `if not session` branch, a deliberate and correct degrade that says
+        # "no session id reached it" using the same opening words. So the assertion failed in
+        # every Crawler's tree and passed in the orchestrator's, which is the direction that goes
+        # unnoticed longest. Measured by running the shim by hand, CLAUDE_PROJECT_DIR stripped:
+        # "allow: not inside a managed worktree" from the main checkout, the no-session notice
+        # from a worktree.
+        #
+        # The discriminator is the anchor notice's OWN words, which no other branch prints and
+        # which live in the guard rather than in lease.py. Both shims carry them verbatim.
+        anchor_failed = "neither the working directory nor CLAUDE_PROJECT_DIR"
         ok("%s resolves from its OWN LOCATION when cwd and the harness both answer nothing — "
            "the shim was inside the project the entire time" % name,
-           "DID NOT RUN" not in (in_repo.stdout + in_repo.stderr),
+           anchor_failed not in (in_repo.stdout + in_repo.stderr),
            (in_repo.stdout + in_repo.stderr)[:170])
 
         loose_dir = os.path.join(tmpdir("guard-anchor-loose"), "sub", "hooks")
@@ -2934,8 +2985,14 @@ def test_guards_anchor_off_cwd():
         ok("...and with NO anchor at all — a shim outside any repo — it still fails open and "
            "SAYS it was not checked; the fix narrows when that happens, it does not remove it",
            "ALLOWED WITHOUT BEING CHECKED" in blind_said, blind_said[:170])
-        ok("...and the notice names BOTH things it tried, so the remedy is not a guess",
-           "CLAUDE_PROJECT_DIR" in blind_said, blind_said[:170])
+        # THE SAME STRING, DELIBERATELY — this is now the companion that makes the assertion above
+        # falsifiable, not merely a second nicety. That one passes on the ABSENCE of
+        # `anchor_failed`, and an absence is also what a reworded notice produces: reword it and
+        # the negative assertion goes quiet and stays green forever. Binding both to one variable
+        # means a rewording fails HERE, loudly, in the case where the phrase must appear.
+        ok("...and the notice names BOTH things it tried, so the remedy is not a guess — and so "
+           "the check above is measuring a phrase this guard still prints",
+           anchor_failed in blind_said, blind_said[:170])
 
 
 def test_waiting():
@@ -5870,6 +5927,71 @@ def test_campaign_scoping():
        cfg.state_dir, os.path.join(cfg.root, ".showrunner"))
     eq("...and the campaign is None rather than a campaign named ''", cfg.campaign, None)
 
+    # THE CONTROL FOR THE TWO ASSERTIONS ABOVE, which read as facts about the code and were
+    # partly facts about the environment. SHOWRUNNER_CAMPAIGN is exported into every Crawler by
+    # design, this suite included, so a run from inside a campaign saw cfg.state_dir under
+    # .showrunner/campaigns/<slug>/ and both of them failed — along with six more that merely
+    # build the repo-wide path. run.py clears the ambient variable at import; what follows is
+    # why that clear is not a line of setup nothing checks.
+    ok("the suite process carries no selected campaign, so every fixture here describes the "
+       "repo-wide layout whoever runs it and from wherever",
+       config._campaign_from_env() is None,
+       {"ambient value cleared at import": _AMBIENT_CAMPAIGN,
+        "still set": os.environ.get("SHOWRUNNER_CAMPAIGN")})
+    # AND THE CHILDREN, which is where six of the eight lived. Those assertions run the real
+    # binary with `dict(os.environ, ...)`, so the selection travelled: `init` wrote its .gitignore
+    # under .showrunner/campaigns/<slug>/ while the assertion asked git about .showrunner/, and
+    # `doctor` read a waiting journal the test had appended to at the repo-wide path. Clearing it
+    # in this process is only worth anything if the children see the clear too.
+    #
+    # BEFORE the block below that sets the variable, not after, and that ordering is the whole
+    # value of these two lines. Written the other way round they ran downstream of a `pop` and
+    # passed against a neutered clear — a control that had already cleaned up the condition it
+    # was supposed to detect. Found by neutering the import-time clear and watching only ONE of
+    # the three new assertions fail.
+    _bare = tmpdir("campaign-ambient")
+    sh(["git", "init", "-q", "-b", "main"], _bare)
+    _ini = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "init"],
+                          cwd=_bare, capture_output=True, text=True, env=dict(os.environ))
+    ok("`init` succeeds in a bare repo, so the two checks below read a real run and not a "
+       "failed one", _ini.returncode == 0, _ini.stderr.strip()[-300:])
+    ok("a child launched the way every subprocess assertion here launches one inherits NO "
+       "campaign, so it writes the repo-wide state dir",
+       os.path.isfile(os.path.join(_bare, ".showrunner", ".gitignore")),
+       sorted(glob.glob(os.path.join(_bare, ".showrunner", "**", ".gitignore"), recursive=True)))
+    _bare2 = tmpdir("campaign-ambient-set")
+    sh(["git", "init", "-q", "-b", "main"], _bare2)
+    _ini2 = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "init"],
+                           cwd=_bare2, capture_output=True, text=True,
+                           env=dict(os.environ, SHOWRUNNER_CAMPAIGN="ambient-probe"))
+    ok("...while a child that DOES inherit one writes under .showrunner/campaigns/ instead — the "
+       "divergence those eight failures were reporting, and what stops the check above from "
+       "passing on a binary that ignores the variable entirely",
+       _ini2.returncode == 0
+       and os.path.isfile(os.path.join(_bare2, ".showrunner", "campaigns", "ambient-probe",
+                                       ".gitignore")),
+       _ini2.stderr.strip()[-300:])
+
+    # PAIRED WITH THE CASE WHERE IT HAPPENS, because "carries no selected campaign" is also
+    # satisfied by a machine that simply never had the variable — which is most machines, and is
+    # indistinguishable from a clear that stopped working. Worse, it would keep passing with
+    # campaign scoping deleted outright. So manufacture the contamination and show the path MOVES.
+    _prev_ambient = os.environ.get("SHOWRUNNER_CAMPAIGN")
+    os.environ["SHOWRUNNER_CAMPAIGN"] = "ambient-probe"
+    try:
+        eq("...and a config loaded while one IS selected moves — which is what the two "
+           "assertions at the top of this group were reading inside a campaign",
+           config.load(start=cfg.root).state_dir,
+           os.path.join(cfg.root, ".showrunner", "campaigns", "ambient-probe"))
+    finally:
+        # RESTORED, not deleted. Popping unconditionally would hand the rest of the suite a
+        # different environment from the one it inherited, which is the same class of defect
+        # this group is about — a test that quietly changes the world it measures.
+        if _prev_ambient is None:
+            os.environ.pop("SHOWRUNNER_CAMPAIGN", None)
+        else:
+            os.environ["SHOWRUNNER_CAMPAIGN"] = _prev_ambient
+
     # The name is a placeholder ON PURPOSE, and its SHAPE is load-bearing: mixed case, a space,
     # a digit and a run of non-alphanumerics are what `slug` has to fold, and this fixture is the
     # only place that is observed. Rename it and keep those, or the slug assertions below stop
@@ -5902,6 +6024,7 @@ def test_campaign_scoping():
     # A CONFIG IS A STABLE ANSWER ABOUT ONE CAMPAIGN. The first version read the environment
     # lazily inside each path property, so two configs loaded for two campaigns both reported
     # whichever was selected LAST — a value that changes after you hold it.
+    _prev_env_cfg = os.environ.get("SHOWRUNNER_CAMPAIGN")
     os.environ["SHOWRUNNER_CAMPAIGN"] = "something-else-entirely"
     try:
         ok("a loaded config does not change its answers when the environment moves under it",
@@ -5910,7 +6033,12 @@ def test_campaign_scoping():
         eq("...while a config loaded AFTER the change reads the new value, so the env var is "
            "still the selector and not a one-shot", env_cfg.campaign, "something-else-entirely")
     finally:
-        del os.environ["SHOWRUNNER_CAMPAIGN"]
+        # RESTORED rather than deleted, for the reason recorded above: `del` here would leave the
+        # rest of the suite in an environment this test invented.
+        if _prev_env_cfg is None:
+            os.environ.pop("SHOWRUNNER_CAMPAIGN", None)
+        else:
+            os.environ["SHOWRUNNER_CAMPAIGN"] = _prev_env_cfg
 
 
 def _hook_wiring(hook_dir, settings_files, excused):
