@@ -1,4 +1,9 @@
 # showrunner runtime state — not source
+# Campaign-scoped state. Every file below this line is also listed flat, from before campaigns
+# had their own directories; the list was never widened when the layout moved, so a checkout
+# carrying a campaign reported as permanently dirty and `--version` answered "dirty — this sha
+# overstates what is here" on a clean tree. A warning that is always on is one nobody reads.
+campaigns/
 graph.db
 graph.db-*
 locks/
