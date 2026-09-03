@@ -82,6 +82,14 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # Answering False always is the state this was written to end, and it is invisible: every
+    # tree reports as safely branch-backed, `gc` reclaims exactly as it did before, and the one
+    # tree in a checkout whose HEAD sits in no ref is deleted along with the commit only it was
+    # holding. Nothing errors, and the loss shows up at the next `git gc`, long after.
+    ("is this tree the only thing holding its HEAD", "campaign.head_in_no_ref",
+     "lib/showrunner/campaign.py",
+     r"(def head_in_no_ref\(cfg, tree\):\n)",
+     "    return False\ndef _neutered_head_in_no_ref(cfg, tree):\n"),
     # Answering None restores the reported behaviour EXACTLY, in the direction that looks like
     # caution: every squash-merged tree reads as unintegrated, `gc` holds all of them, and it
     # prints a reason for doing so. A consumer measured that as 0 of 48 trees reclaimed, ~24 GB,

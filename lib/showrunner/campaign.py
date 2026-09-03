@@ -209,6 +209,42 @@ def is_merged(cfg, branch, base, known=None):
     return rc == 0
 
 
+def head_in_no_ref(cfg, tree):
+    """Is this tree's HEAD commit reachable from NO ref? True / False / None.
+
+    THE ONE CASE THAT ACTUALLY LOSES COMMITTED WORK (#79). Refs live in the SHARED store, so
+    removing a branch-backed worktree never removes its commits — which is what makes the whole
+    reclaim lossless. A DETACHED tree is different: its HEAD is reachable only from
+    `.git/worktrees/<name>/HEAD`, and once the tree is gone the commit is unreachable and dies at
+    the next `git gc`.
+
+    IT REACHES SHOWRUNNER'S OWN TREES, which I had assumed it could not. `spawn` always creates a
+    branch, so I expected every recorded tree to be branch-backed and the case to be somebody
+    else's problem. Measured instead: detach a recorded tree, commit in it, and `gc` reports it
+    RECLAIMABLE — because `is_merged` asks about the recorded BRANCH, which is merged, and
+    nothing looked at where the tree's HEAD actually was. `gc --apply` would have deleted it.
+
+    None IS "CANNOT TELL" AND HOLDS THE TREE, per this module's rule that a failed read must
+    never license a delete. The caller says so out loud rather than holding silently: if this
+    query ever stops working, `gc` becomes a no-op again, and a no-op that explains itself is
+    recoverable where a quiet one is the bug this file just finished fixing.
+    """
+    if not tree or not os.path.isdir(tree):
+        return None
+    rc, sha, _ = git(["rev-parse", "HEAD"], cwd=tree)
+    sha = (sha or "").strip()
+    if rc != 0 or not sha:
+        return None
+    # `for-each-ref --contains` answers with the refs that contain the commit; empty means none.
+    # `branch --contains` was the obvious query and is the wrong one — in a detached tree it
+    # prints a "(HEAD detached from ...)" pseudo-entry, so the orphan looks contained.
+    rc, out, _ = git(["for-each-ref", "--contains", sha, "--count=1", "--format=%(refname)"],
+                     cwd=tree)
+    if rc != 0:
+        return None
+    return not (out or "").strip()
+
+
 def content_in_base(cfg, branch, base, known=None):
     """Does `base` already contain every byte this branch changed? True / False / None.
 
@@ -368,6 +404,7 @@ def reclaimable(cfg, graph, base="HEAD"):
         row = {"crawler": f.get("crawler"), "leaf": f.get("leaf"),
                "branch": f.get("branch"), "worktree": f.get("worktree"),
                "bytes": tree_bytes(cfg.abspath(f.get("worktree")))}
+        orphan = head_in_no_ref(cfg, cfg.abspath(f.get("worktree")))
         if f.get("alive"):
             row["why"] = "its session is ALIVE — this is somebody's workspace right now"
         elif f.get("tree") == "unknown":
@@ -377,6 +414,18 @@ def reclaimable(cfg, graph, base="HEAD"):
         elif f.get("tree") == "dirty":
             row["why"] = ("%d uncommitted change(s) — SURFACED, never deleted"
                           % len(f.get("uncommitted") or []))
+        elif orphan is not False:
+            # BEFORE the merge question, because it outranks it: the branch being merged says
+            # the BRANCH's commits are safe, and says nothing about a HEAD sitting somewhere
+            # else. This is the only state in the list where removing the tree destroys
+            # committed work rather than merely inconveniencing somebody.
+            row["why"] = ("its HEAD is on no branch and no ref contains it, so this tree is the "
+                          "only thing keeping that commit alive — removing it loses the work"
+                          if orphan else
+                          "whether any ref contains its HEAD could not be determined, and an "
+                          "unreadable answer must not license a delete. If this persists, `gc` "
+                          "is holding everything for a reason you can fix: check `git "
+                          "for-each-ref --contains` works in that tree")
         elif not (f.get("merged") or f.get("content_in_base")):
             # THE WORDING WAS FALSE FOR EVERY BRANCH-BACKED TREE, and the reporter was right to
             # say so: refs live in the SHARED store, so removing a worktree never removes its

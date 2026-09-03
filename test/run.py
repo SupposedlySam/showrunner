@@ -14082,6 +14082,48 @@ def test_gc_sees_a_squash_merge():
        "never license a removal", campaign.content_in_base(cfg, "showrunner/no-such", "main"),
        None)
 
+    # THE CASE THAT ACTUALLY LOSES COMMITTED WORK, and I had assumed it could not reach a tree
+    # showrunner made. `spawn` always creates a branch, so every recorded tree "is" branch-backed
+    # — but nothing kept it that way. Detach a recorded tree, commit in it, and `is_merged` still
+    # answers about the recorded BRANCH, which is merged, while the tree's HEAD sits in no ref at
+    # all. Measured before this guard existed: `gc` reported it RECLAIMABLE and `--apply` would
+    # have destroyed the commit. The reporter's third row was not somebody else's problem.
+    cfg3 = make_repo()
+    g3 = new_graph(cfg3)
+    rec3 = worktree.spawn(cfg3, g3.show(g3.add("detached", leaf_id="dt1")), actor="dt")
+    campaign.record_spawn(cfg3, rec3)
+    wt3 = cfg3.abspath(rec3["worktree"])
+    with open(os.path.join(wt3, "onbranch.txt"), "w") as fh:
+        fh.write("committed on the branch\n")
+    sh(["git", "add", "-A"], wt3)
+    sh(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "on branch"], wt3)
+    sh(["git", "merge", "-q", "--no-edit", rec3["branch"]], cfg3.root)
+
+    eq("a tree sitting on its branch is NOT an orphan — the control, and without it the "
+       "assertion below is satisfied by a guard that holds every tree",
+       campaign.head_in_no_ref(cfg3, wt3), False)
+
+    sh(["git", "checkout", "-q", "--detach"], wt3)
+    with open(os.path.join(wt3, "orphan.txt"), "w") as fh:
+        fh.write("only this tree holds it\n")
+    sh(["git", "add", "-A"], wt3)
+    sh(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "orphan"], wt3)
+
+    eq("a DETACHED tree whose HEAD is in no ref is an orphan", campaign.head_in_no_ref(cfg3, wt3),
+       True)
+    take3, held3 = campaign.reclaimable(cfg3, new_graph(cfg3), base="main")
+    ok("...and it is HELD even though its recorded branch IS merged — the branch being merged "
+       "says the BRANCH's commits are safe and says nothing about a HEAD sitting elsewhere",
+       rec3["crawler"] not in [t["crawler"] for t in take3],
+       ([t["crawler"] for t in take3], [(h["crawler"], h.get("why")) for h in held3]))
+    _why3 = " ".join(h.get("why") or "" for h in held3)
+    ok("...and the reason says the tree is the only thing keeping that commit alive, which is "
+       "the one place in this list where that sentence is TRUE",
+       "only thing keeping that commit alive" in _why3, _why3[:300])
+
+    eq("a tree that is not there yields None, which holds rather than reclaims",
+       campaign.head_in_no_ref(cfg3, os.path.join(cfg3.root, "no-such-tree")), None)
+
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
