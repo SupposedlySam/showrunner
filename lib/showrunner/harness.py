@@ -639,7 +639,19 @@ def report(cfg):
             lines.append("  %s is untracked; the configured installer provisions it per worktree"
                          % dirname)
         else:
-            lines.append("  %s is untracked and no harness.installer is configured — spawn will "
-                         "refuse rather than hand over a Crawler with no registered hooks"
-                         % dirname)
+            # A REFUSAL THAT DOES NOT HAPPEN. This said "spawn will refuse rather than hand over
+            # a Crawler with no registered hooks", and spawn does not refuse: with no installer
+            # it COPIES the harness minus whatever the harness declares as runtime state, which
+            # is the fallback llms.txt documents and what four consecutive spawns did while this
+            # line was on screen calling itself `ok`.
+            #
+            # IT IS THE MIRROR OF THE FAILURE THIS REPO USUALLY HUNTS. The usual one is something
+            # that claims to check and does not; this claimed to REFUSE and did not, and the cost
+            # is the same shape — a reader in this state concludes an installer is a precondition
+            # for dispatching at all, and configures one they never needed.
+            lines.append("  %s is untracked and no harness.installer is configured, so `spawn` "
+                         "COPIES it into each worktree minus whatever the harness declares as "
+                         "runtime state, and the harness verifies that copy itself. A fallback, "
+                         "not a refusal — an installer is the configurable path, not a "
+                         "precondition for dispatching." % dirname)
     return lines

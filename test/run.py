@@ -13599,9 +13599,82 @@ def test_a_stale_self_pin_says_so_where_it_is_read():
        "self_pin_state" in doctor_src and "commit(s) BEHIND " not in doctor_src, "cli.py")
 
 
+def test_doctor_does_not_promise_a_refusal_that_never_comes():
+    group("`doctor` claimed `spawn` would refuse an untracked harness with no installer — it "
+          "does not refuse, it copies")
+    if not have("git"):
+        skip("the doctor-refusal group", "git is not installed")
+        return
+
+    # THE MIRROR OF THE FAILURE THIS REPO USUALLY HUNTS. The usual one is something that claims
+    # to check and does not. This claimed to REFUSE and did not, and it cost the same thing: a
+    # reader in this state concludes an installer is a precondition for dispatching at all and
+    # configures one they never needed. Measured on four consecutive real spawns in exactly this
+    # state, every one of which provisioned and reported the harness copied and verified, while
+    # the line calling itself `ok` on screen said they would be refused.
+    # THE FIXTURE IS THE REAL STATE, and getting there is the interesting part. A bare directory
+    # is NOT this state: spawn refuses it, correctly, for two reasons that have nothing to do
+    # with an installer — the harness is neither tracked nor ignored (so `git add -A` in the
+    # worktree would commit it onto the Crawler's branch), and it does not answer
+    # `worktree --porcelain` (so showrunner would have to guess which of its files are rules).
+    # Asserting against that fixture would have "refuted" the leaf on a configuration nobody is
+    # in. The reported state is an untracked-but-IGNORED harness that answers its contract, which
+    # is what this checkout has and what four real spawns ran against tonight.
+    cfg = make_repo()
+    hd = os.path.join(cfg.root, harness.KNOWN_HARNESS_DIRS[0])
+    os.makedirs(os.path.join(hd, "bin"), exist_ok=True)
+    with open(os.path.join(hd, "rules.md"), "w") as fh:
+        fh.write("the harness's own rules\n")
+    hb = os.path.join(hd, "bin", harness.KNOWN_HARNESS_DIRS[0].lstrip("."))
+    with open(hb, "w") as fh:
+        fh.write('#!/bin/sh\n'
+                 'case "$1" in\n'
+                 '  worktree) echo \'{"status":"clean"}\'; exit 0;;\n'
+                 '  owned) echo \'{"rule_files":["rules.md"],"notes_files":[]}\'; exit 0;;\n'
+                 'esac\n'
+                 'exit 0\n')
+    os.chmod(hb, 0o755)
+    with open(os.path.join(cfg.root, ".gitignore"), "a") as fh:
+        fh.write("%s/\n" % harness.KNOWN_HARNESS_DIRS[0])
+    sh(["git", "add", "-A"], cfg.root)
+    sh(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "ignore it"],
+       cfg.root)
+
+    sp = harness.spec(cfg)
+    ok("the fixture IS the reported state — untracked harness, no installer — or the assertions "
+       "below describe a configuration nobody is in",
+       harness.KNOWN_HARNESS_DIRS[0] in (sp.get("dirs") or []) and not sp.get("installer"), sp)
+
+    said = "\n".join(harness.report(cfg))
+    ok("`doctor` does not promise a refusal", "will refuse" not in said, said[:400])
+    ok("...and says what actually happens instead, because deleting the sentence would leave a "
+       "reader with no answer at all about a state the tool handles fine",
+       "COPIES" in said, said[:400])
+
+    # AND THE BEHAVIOUR ITSELF, in the same group, so the claim and the thing it claims about
+    # cannot drift apart again. An assertion about wording alone is satisfied by a tool that
+    # changed its mind and started refusing.
+    g = new_graph(cfg)
+    leaf = g.show(g.add("work needing a harness copy", leaf_id="dr1"))
+    try:
+        rec = worktree.spawn(cfg, leaf, actor="dr")
+        refused = None
+    except SystemExit as exc:                                       # noqa: BLE001
+        rec, refused = None, exc
+    except Exception as exc:                                        # noqa: BLE001
+        rec, refused = None, exc
+    ok("`spawn` in that exact state SUCCEEDS rather than refusing — which is what makes the old "
+       "sentence false", rec is not None, refused)
+    if rec:
+        ok("...and the harness actually arrived in the tree, so 'copies' is the right word for "
+           "what it did", os.path.isdir(os.path.join(cfg.abspath(rec["worktree"]),
+                                                     harness.KNOWN_HARNESS_DIRS[0])),
+           rec["worktree"])
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,
