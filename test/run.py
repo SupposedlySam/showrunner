@@ -12898,9 +12898,60 @@ def test_cli():
     ok("every FLAG this repo documents on a showrunner command is one the CLI accepts — the "
        "verb check's own argument, one word to the right",
        not ghost_flags, sorted(set(ghost_flags)))
-    ok("...and it actually looked at flags, rather than passing because it found none — an "
-       "empty denominator is the way this check would go quiet if the spans stopped matching",
+    # THE DENOMINATOR IS REPORTED ON EVERY RUN, not just when it fails — game_loop's sharpening
+    # of the same lesson, and it is the better half: this check was calibrated once, as a
+    # throwaway script, and a script that ran once in somebody's terminal is not there the second
+    # time the corpus drifts. Putting the count in the LABEL means every green run states the
+    # population it judged, so a scan that quietly stops matching spans shows up as a shrinking
+    # number rather than as continued silence.
+    ok("...and it looked at %d flag(s) to say so — an empty denominator is how this check would "
+       "go quiet if the spans stopped matching, and a green line reporting nothing measured is "
+       "indistinguishable from one reporting nothing wrong" % flags_seen,
        flags_seen > 30, flags_seen)
+
+    # THE OTHER DIRECTION, WITH A KNOWN TOTAL BEHIND IT. Counting documented flags the parser
+    # accepts is a size; it cannot tell 78-of-78 documented from 78-of-140 documented, and the
+    # second is a docs defect that prints the same green line. The parser already knows the full
+    # set, so this denominator needs nobody to declare it.
+    #
+    # REPORTED, NEVER REFUSED, and that is deliberate: an undocumented flag is a legitimate state
+    # — internal, deprecated, or about to land — so a gate here would cry wolf on a normal
+    # condition and get switched off, taking the honest half with it. A ratio on every green run
+    # costs nothing and cannot.
+    #
+    # SCOPED TO TOP-LEVEL VERB OPTIONS, said plainly rather than left to be discovered: options
+    # that belong to a SUBcommand (`lock run --holder`) are not counted on either side, so this
+    # ratio is about the verbs' own flags and understates the total surface.
+    documented_pairs = set()
+    for rel_path in scanned:
+        try:
+            with open(os.path.join(ROOT, rel_path), errors="ignore") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        for span in spans_of(text):
+            m = re.match(r"\s*%s ([a-z][a-z-]+)" % BINARY, span)
+            if not m or m.group(1) not in verbs:
+                continue
+            head_ = re.split(r"(?<!\S)--(?!\S)", span)[0]
+            for flag in re.findall(r"(?<![\w-])(--[a-z][a-z0-9-]*)", head_):
+                documented_pairs.add((m.group(1), flag))
+
+    every_pair, undocumented = set(), []
+    for verb in sorted(verbs):
+        for flag in options_of(verb):
+            if flag in top_opts:
+                continue          # --help and friends belong to every verb; documenting them
+                                  # once is not a gap in each of the other thirty-eight
+            every_pair.add((verb, flag))
+            if (verb, flag) not in documented_pairs:
+                undocumented.append("%s %s" % (verb, flag))
+
+    ok("%d of %d parser flags appear somewhere in the docs — REPORTED, not refused, because an "
+       "undocumented flag is a legitimate state and a gate here would cry wolf on a normal one. "
+       "The count is the point: this and the check above are the same green line at 78-of-78 "
+       "and 78-of-140" % (len(every_pair) - len(undocumented), len(every_pair)),
+       bool(every_pair), sorted(undocumented)[:20])
 
     # THE EXTENSION NEEDS ITS OWN CONTROL. Widening a scan and watching the suite stay green
     # proves nothing — a pattern that matches nothing looks exactly like a repo with no ghosts.
@@ -13740,9 +13791,75 @@ def test_doctor_does_not_promise_a_refusal_that_never_comes():
            rec["worktree"])
 
 
+def test_a_dependency_can_be_removed():
+    group("A wrong dependency had no way back, and it HIDES work — `ready` means unblocked")
+    if not have("git"):
+        skip("the undep group", "git is not installed")
+        return
+
+    # FOUND BY DOING IT. Setting up this campaign I added an edge on a reason that did not
+    # survive one sentence of scrutiny. `dep --help` had no removal, `edit` takes title, body,
+    # paths and labels but not dependencies, and the only routes left were editing the graph
+    # database by hand or closing a leaf that is not done — which spends the proof-of-done gate
+    # on a decision nobody made.
+    #
+    # THE ARGUMENT WAS ALREADY WRITTEN, for `edit`: "the body IS the brief, so a wrong one
+    # dispatches a wrong task, and before this verb there was no way back". Every clause applies
+    # to an edge, which does something WORSE than mis-describe work.
+    cfg = make_repo()
+    g = new_graph(cfg)
+    g.add("the child", leaf_id="uc1", labels=["backend"])
+    g.add("the parent", leaf_id="up1", labels=["backend"])
+
+    def ready_ids():
+        return {leaf["id"] for leaf in g.ready()}
+
+    ok("both leaves start ready", {"uc1", "up1"} <= ready_ids(), sorted(ready_ids()))
+
+    # THE HIDING IS THE COST, and it is what makes this worse than a wrong title. A leaf with a
+    # false parent is not merely mislabelled — it is absent from the one surface that answers
+    # "what can be worked on now".
+    g.dep("uc1", "up1")
+    ok("a dependency HIDES the child from `ready`, which is why a wrong one is expensive",
+       "uc1" not in ready_ids(), sorted(ready_ids()))
+
+    removed = g.undep("uc1", "up1")
+    eq("removing the edge reports that one was actually there", removed, True)
+    ok("...and the child comes back to `ready`, so the removal reached the discovery surface "
+       "and not just a table", "uc1" in ready_ids(), sorted(ready_ids()))
+
+    # THE IDENTITY ELEMENT, which is the whole reason this returns a value at all. DELETE
+    # succeeds identically whether it removed a row or matched nothing, so a verb reporting
+    # "removed" either way tells an operator their graph changed when it did not — and somebody
+    # who mistyped an id walks away believing a leaf was freed.
+    eq("removing an edge that was never there reports False rather than claiming a change",
+       g.undep("uc1", "up1"), False)
+
+    # AND IT MUST NOT REQUIRE THE OTHER END TO EXIST. Refusing to clean up after a leaf that has
+    # since been deleted would strand the edge forever — the exact trap this verb exists to open.
+    g.dep("uc1", "up1")
+    eq("an edge naming an id that is gone can still be removed",
+       g.undep("uc1", "up1"), True)
+
+    # THROUGH THE CLI, because the graph method is not what an operator reaches for, and the
+    # not-there case has to SAY so rather than print a success line.
+    sr = os.path.join(ROOT, "bin", "showrunner")
+
+    def run_sr(*argv):
+        return subprocess.run([sys.executable, sr] + list(argv), cwd=cfg.root,
+                              capture_output=True, text=True, env=dict(os.environ))
+
+    run_sr("dep", "uc1", "up1")
+    said = run_sr("dep", "uc1", "up1", "--remove").stdout
+    ok("`dep --remove` says the block is gone", "no longer blocked" in said, said[:200])
+    said = run_sr("dep", "uc1", "up1", "--remove").stdout
+    ok("...and says NOTHING WAS REMOVED when there was no such edge, rather than reporting a "
+       "success that did not happen", "nothing removed" in said, said[:200])
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

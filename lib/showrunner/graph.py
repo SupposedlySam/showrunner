@@ -351,6 +351,26 @@ class SqliteGraph:
         self._event(child, "dep", "blocked by %s" % parent)
         self.db.commit()
 
+    def undep(self, child, parent):
+        """Remove an edge. Returns True when one was there, False when none was.
+
+        THE RETURN VALUE IS THE POINT. `DELETE` succeeds identically whether it removed an edge
+        or matched nothing, so a verb that reported "removed" either way would tell an operator
+        their graph changed when it did not — and a wrong edge HIDES work, because `ready` means
+        unblocked and a false parent keeps a leaf out of the discovery surface entirely. Somebody
+        who mistyped an id would go on believing the leaf was freed.
+
+        No cycle check, and no `show` on either id: removing an edge cannot create a cycle, and
+        refusing to clean up after a leaf that has since been deleted would strand the edge
+        forever — the exact trap this verb exists to open.
+        """
+        cur = self.db.execute("DELETE FROM deps WHERE child = ? AND parent = ?", (child, parent))
+        removed = bool(cur.rowcount)
+        if removed:
+            self._event(child, "undep", "no longer blocked by %s" % parent)
+        self.db.commit()
+        return removed
+
     def _would_cycle(self, child, parent):
         seen, stack = set(), [parent]
         while stack:
@@ -811,6 +831,19 @@ class BrGraph:
 
     def dep(self, child, parent):
         self._br(["dep", "add", child, parent])
+
+    def undep(self, child, parent):
+        """Mirror of `dep`, through br's own verb.
+
+        ANSWERS True RATHER THAN MEASURING, and says so here rather than implying more: `_br`
+        raises on a non-zero exit, so reaching this line means br accepted the removal, but br
+        reports no count and this adapter will not invent one. The vendored backend can tell
+        "removed one" from "there was none" and does; here the honest answer is "br did not
+        refuse". NOT EXERCISED against a real br in this checkout — the suite skips those
+        assertions when the binary is absent, and it is absent here.
+        """
+        self._br(["dep", "remove", child, parent])
+        return True
 
     def events(self, limit=50):
         return []

@@ -82,6 +82,14 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # Answering False always is the reported state restored EXACTLY: the verb exists, the CLI
+    # accepts it, and every removal reports "nothing removed" while the edge stays. An operator
+    # who mistyped nothing at all is told their correct command found no such dependency — and
+    # the leaf they were trying to free stays hidden from `ready`, which is the cost the whole
+    # feature exists to remove. Anchored per backend, per the two-backends note below.
+    ("removing a dependency (SqliteGraph)", "graph.SqliteGraph.undep", "lib/showrunner/graph.py",
+     r"(class SqliteGraph:(?:.|\n)*?    def undep\(self, child, parent\):\n)",
+     "        return False\n    def _neutered_undep(self, child, parent):\n"),
     # Answering None restores the reported behaviour exactly: `doctor` prints nothing about the
     # pin, the session announcement prints nothing about the pin, every guard goes on enforcing
     # whatever commit was vendored, and the checkout reads as current. Nothing errors. That is

@@ -940,7 +940,24 @@ def cmd_add(args):
 
 def cmd_dep(args):
     cfg = _cfg(args)
-    _graph(cfg).dep(args.child, args.parent)
+    g = _graph(cfg)
+    if getattr(args, "remove", False):
+        # A WRONG EDGE HAD NO WAY BACK. `edit` exists because "the body IS the brief, so a wrong
+        # one dispatches a wrong task, and before this verb there was no way back" — every clause
+        # of that applies to an edge, which does something worse than mis-describe work: it HIDES
+        # it. `ready` means unblocked, so a false parent keeps a leaf out of the discovery surface
+        # entirely. The only routes left were editing the graph database by hand or closing a leaf
+        # that is not done, which spends the proof-of-done gate on a decision nobody made.
+        if not g.undep(args.child, args.parent):
+            # NOT AN ERROR, AND NOT A SHRUG. The end state the caller asked for is the end state
+            # they have. But reporting "removed" would tell them their graph changed when it did
+            # not, and somebody who mistyped an id would walk away believing a leaf was freed.
+            print("no such dependency: %s was not blocked by %s — nothing removed"
+                  % (args.child, args.parent))
+            return 0
+        print("%s is no longer blocked by %s" % (args.child, args.parent))
+        return 0
+    g.dep(args.child, args.parent)
     print("%s is blocked by %s" % (args.child, args.parent))
     return 0
 
@@ -3110,6 +3127,11 @@ def build_parser():
     s = sub.add_parser("dep", help="declare that CHILD is blocked by PARENT")
     s.add_argument("child")
     s.add_argument("parent")
+    s.add_argument("--remove", action="store_true",
+                   help="remove the edge instead of adding it. An edge added on a reason that "
+                        "does not survive scrutiny had no way back: `edit` takes title, body, "
+                        "paths and labels but not dependencies, and a wrong parent HIDES the "
+                        "leaf, because `ready` means unblocked.")
     s.set_defaults(func=cmd_dep)
 
     s = sub.add_parser("list", help="list leaves")
