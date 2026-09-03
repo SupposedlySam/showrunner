@@ -1107,7 +1107,7 @@ mistake this paragraph exists to prevent.
 ```
 showrunner add "<title>" [--id X] [--body-file F] [--label L] [--after <blocking-leaf>]
 showrunner dep <child> <parent>      # child is blocked by parent
-showrunner edit <leaf> [--title T] [--body-file F] [--paths P]
+showrunner edit <leaf> [--title T] [--body-file F] [--path P ...]
                        [--label L] [--add-label L] [--remove-label L]
 showrunner list|show|ready|claim|release|park|unpark
 ```

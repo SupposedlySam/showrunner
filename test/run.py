@@ -12763,13 +12763,19 @@ def test_cli():
         pattern below stopped at the newline that the interpreter does not see."""
         return re.sub(r"(['\"])\s*\n\s*(['\"])", "", text)
 
-    def commands_in(text):
+    def spans_of(text):
+        """Every span that could hold a command. SHARED with the flag check below, because the
+        two would otherwise be two copies of one extraction rule — free to disagree about which
+        text counts as a command, which is the drift this file spends its comments removing."""
         text = joined(text)
         spans = re.findall(r"`([^`\n]+)`", text)
         for block in re.findall(r"```[a-z]*\n(.*?)```", text, re.S):
             spans.extend(block.splitlines())
         spans.extend(re.findall(r"^ {2,}(%s [a-z].*)$" % BINARY, text, re.M))
-        for span in spans:
+        return spans
+
+    def commands_in(text):
+        for span in spans_of(text):
             m = re.match(r"\s*%s ([a-z][a-z-]+)((?: [a-z][a-z-]+)?)" % BINARY, span)
             if m:
                 held = re.match(r"\s*\{([a-z_][a-z_0-9]*)\}", span)
@@ -12833,6 +12839,68 @@ def test_cli():
        "remedies deep here and only its first word was ever checked",
        "run" in subverbs_of("lock") and "guard" in subverbs_of("lock"),
        sorted(subverbs_of("lock")))
+
+    # AND THE FLAGS. The verb check above justified itself with "a remedy naming a command that
+    # does not exist is worse than no remedy", and that argument applies unchanged one word to
+    # the right: `llms.txt` documented `showrunner edit ... [--paths P]` while the CLI has
+    # `--path`, and argparse answers a usage dump. Found by USING the front-door doc to set the
+    # blast radius on this campaign's own leaves — four times in one command, every one rejected.
+    #
+    # DERIVED FROM THE PARSER, never a hand-written list, for the same reason the verb inventory
+    # is: a list of flags maintained by hand is the staleness this check exists to catch.
+    #
+    # TWO DISCRIMINATIONS THE FIRST DRAFT GOT WRONG, both found by measuring before asserting —
+    # it reported 13 failures and 12 were mine:
+    #   * options belong to the SUBCOMMAND when there is one. `lock run --holder` and
+    #     `role claim --who` are real; asking `lock --help` about `--holder` says otherwise.
+    #   * everything after a bare `--` is positional. `showrunner add -- --starts-with-a-dash`
+    #     documents an escape hatch, and reading its argument as a flag condemns the very line
+    #     that exists to explain it.
+    # A check that cries wolf on twelve true lines is one somebody switches off on the thirteenth.
+    opt_cache = {}
+
+    def options_of(verb, sub=""):
+        key = (verb, sub)
+        if key not in opt_cache:
+            argv = [sys.executable, exe, verb] + ([sub] if sub else []) + ["--help"]
+            p_ = subprocess.run(argv, capture_output=True, text=True)
+            opt_cache[key] = set(re.findall(r"(--[a-z][a-z0-9-]*)",
+                                            p_.stdout if p_.returncode == 0 else ""))
+        return opt_cache[key]
+
+    top_opts = set(re.findall(r"(--[a-z][a-z0-9-]*)",
+                              subprocess.run([sys.executable, exe, "--help"],
+                                             capture_output=True, text=True).stdout))
+
+    ghost_flags, flags_seen = [], 0
+    for rel_path in scanned:
+        try:
+            with open(os.path.join(ROOT, rel_path), errors="ignore") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        for span in spans_of(text):
+            m = re.match(r"\s*%s ([a-z][a-z-]+)((?: [a-z][a-z-]+)?)" % BINARY, span)
+            if not m:
+                continue
+            verb, sub = m.group(1), m.group(2).strip()
+            if verb not in verbs:
+                continue                      # already reported as a dead verb above
+            head_ = re.split(r"(?<!\S)--(?!\S)", span)[0]
+            opts = options_of(verb, sub) or options_of(verb)
+            if not opts:
+                continue
+            for flag in re.findall(r"(?<![\w-])(--[a-z][a-z0-9-]*)", head_):
+                flags_seen += 1
+                if flag not in opts and flag not in top_opts:
+                    ghost_flags.append("%s: showrunner %s %s" % (rel_path, verb, flag))
+
+    ok("every FLAG this repo documents on a showrunner command is one the CLI accepts — the "
+       "verb check's own argument, one word to the right",
+       not ghost_flags, sorted(set(ghost_flags)))
+    ok("...and it actually looked at flags, rather than passing because it found none — an "
+       "empty denominator is the way this check would go quiet if the spans stopped matching",
+       flags_seen > 30, flags_seen)
 
     # THE EXTENSION NEEDS ITS OWN CONTROL. Widening a scan and watching the suite stay green
     # proves nothing — a pattern that matches nothing looks exactly like a repo with no ghosts.
