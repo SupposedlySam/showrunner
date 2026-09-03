@@ -2446,6 +2446,78 @@ def test_work_since_block():
        "must never be the one place where failing to read something TIGHTENS a gate",
        got is False, (got, why))
 
+    # COMPANIONS, added because the mutation sweep scored this producer THIN at exactly one
+    # assertion. Everything above except one line expects False, so a producer neutered to answer
+    # "no evidence, ever" satisfies all of them — and what dies with it is the entire reason the
+    # signal exists. Companions, never a replacement: the False cases are not wrong, they are the
+    # restraint claim this signal rests on.
+
+    # THE BRANCH PATH HAD NEVER RUN. Every call above passes branch=None, so the first of the two
+    # evidence kinds — a commit landing after the block — was unexercised code in a producer that
+    # decides whether a watchdog rings.
+    os.utime(tracked, (blocked_at - 60, blocked_at - 60))
+    with open(os.path.join(wt, "owned.txt"), "a") as fh:
+        fh.write("more work nobody was told about\n")
+    sh(["git", "add", "owned.txt"], wt)
+    # THE COMMITTER DATE IS SET, not slept for. `work_since_block` compares `%ct > since`, and a
+    # commit made in the same second as the recorded block is not AFTER it — so the natural
+    # fixture fails for a timing reason that has nothing to do with the behaviour under test.
+    _cdate = "%d +0000" % (blocked_at + 60)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "after"],
+                   cwd=wt, capture_output=True, text=True,
+                   env=dict(os.environ, GIT_COMMITTER_DATE=_cdate, GIT_AUTHOR_DATE=_cdate))
+    got, why = campaign.work_since_block(cfg, "c-work", "showrunner/c-work", wt)
+    ok("a COMMIT on the branch after the block is evidence — the other half of this signal, and "
+       "the half no assertion had ever reached", got is True, (got, why))
+    ok("...and the reason NAMES the branch, so an operator reading a released gate can tell "
+       "which evidence released it rather than being told only that something did",
+       "showrunner/c-work" in (why or ""), why)
+
+    # THE TWO EVIDENCE KINDS MUST BE DISTINGUISHABLE. Both answer True; a `why` that did not say
+    # which would leave the operator to guess, and guessing wrong here means looking for a commit
+    # that is not there.
+    os.utime(tracked, (blocked_at + 60, blocked_at + 60))
+    _got_tree, why_tree = campaign.work_since_block(cfg, "c-work", None, wt)
+    ok("the tree-evidence reason is different text from the branch-evidence reason",
+       why_tree and why_tree != why, (why_tree, why))
+
+    # AND THE CONSUMER, which is what this leaf is actually about: the signal decides whether
+    # `waiting` reports a Crawler as blocked, and a producer that answers correctly into a caller
+    # that ignores it is the registered-never-fired shape. Driven through `waiting` rather than
+    # by searching campaign.py for the guard — a source search is satisfied by the line appearing
+    # in a comment about why the guard was removed, which is the failure this suite spends its
+    # comments on.
+    g_w = new_graph(cfg)
+    g_w.add("the blocked leaf", leaf_id="L1")
+    finding = [{"crawler": "c-work", "leaf": "L1", "branch": None, "worktree": wt,
+                "blocked": True, "blocked_detail": "refused at turn-end", "alive": True,
+                "parked": False, "uncommitted": []}]
+    real_reconcile = campaign.reconcile
+    campaign.reconcile = lambda *a, **k: finding
+
+    def blocked_names():
+        try:
+            _w, d = campaign.waiting(cfg, g_w)
+        finally:
+            campaign.reconcile = real_reconcile
+        return [c["crawler"] for c in d["blocked_crawlers"]]
+
+    os.utime(tracked, (blocked_at + 60, blocked_at + 60))
+    campaign.reconcile = lambda *a, **k: finding
+    worked_names = blocked_names()
+    ok("`waiting` does NOT report a Crawler as blocked while its own tree shows work since the "
+       "block — the whole point of the signal, and the gate whose only other remedies were 'use "
+       "the broken bus' or 'destroy the work'", "c-work" not in worked_names, worked_names)
+
+    # THE PAIR. Without it the assertion above is equally satisfied by a `waiting` that reports
+    # nobody as blocked ever, which would silence the watchdog on exactly the run that needs it.
+    os.utime(tracked, (blocked_at - 60, blocked_at - 60))
+    campaign.reconcile = lambda *a, **k: finding
+    quiet_names = blocked_names()
+    ok("...while a tree with NO work since the block still reports blocked, so the release is a "
+       "measurement and not a `waiting` that has stopped reporting anybody",
+       "c-work" in quiet_names, quiet_names)
+
 
 def test_path_problem():
     group("A config path that will not mean what its author thinks")
@@ -12947,11 +13019,32 @@ def test_cli():
             if (verb, flag) not in documented_pairs:
                 undocumented.append("%s %s" % (verb, flag))
 
-    ok("%d of %d parser flags appear somewhere in the docs — REPORTED, not refused, because an "
-       "undocumented flag is a legitimate state and a gate here would cry wolf on a normal one. "
-       "The count is the point: this and the check above are the same green line at 78-of-78 "
-       "and 78-of-140" % (len(every_pair) - len(undocumented), len(every_pair)),
+    ok("%d of %d parser flags appear somewhere in the docs — the count is the point: without a "
+       "denominator this and the check above are the same green line at 78-of-78 and 78-of-140"
+       % (len(every_pair) - len(undocumented), len(every_pair)),
        bool(every_pair), sorted(undocumented)[:20])
+
+    # A RATCHET, NOT A TARGET, and on the COUNT rather than the ratio. Reporting alone was the
+    # wrong answer and game_loop said so before it cost anything: a figure that opens at 52 is
+    # too big to fix in an afternoon, so it becomes wallpaper — three months on it reads 57,
+    # every run in between was green, and nobody decided anything. That is the switched-off
+    # failure arriving slowly, which is worse than arriving at once because there is no moment
+    # somebody chooses it.
+    #
+    # THE RATIO WOULD LIE HERE and the count cannot. Add five flags and document none: 33/85
+    # becomes 33/90, coverage fell, and the fraction still reads "about a third". 52 -> 57 has
+    # no other reading. Adding a flag without a doc raises it; documenting one lowers it;
+    # deleting a dead one lowers it. Every direction points where it should.
+    #
+    # LOWER IT IN THE SAME COMMIT that legitimately removes documentation, so a reduction in
+    # coverage is a decision on the record rather than a number quietly following the code down.
+    # It is a tripwire: it never asks for zero, only that this does not get worse by accident.
+    UNDOCUMENTED_FLAG_CEILING = 52
+    ok("no MORE than %d parser flags are undocumented (currently %d) — a tripwire, not a target: "
+       "documenting one lowers it, adding a flag without a doc raises it, and slack in a "
+       "tripwire is just the number of things that can vanish before anything says so"
+       % (UNDOCUMENTED_FLAG_CEILING, len(undocumented)),
+       len(undocumented) <= UNDOCUMENTED_FLAG_CEILING, sorted(undocumented))
 
     # THE EXTENSION NEEDS ITS OWN CONTROL. Widening a scan and watching the suite stay green
     # proves nothing — a pattern that matches nothing looks exactly like a repo with no ghosts.
