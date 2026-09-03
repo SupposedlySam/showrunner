@@ -82,6 +82,15 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # Answering None restores the reported behaviour exactly: `doctor` prints nothing about the
+    # pin, the session announcement prints nothing about the pin, every guard goes on enforcing
+    # whatever commit was vendored, and the checkout reads as current. Nothing errors. That is
+    # the state that cost a consumer a silent `reach` gate and cost this session a banner
+    # quoting wording replaced two issues earlier.
+    ("the pin the hooks run, said where it is read", "pin.self_pin_state",
+     "lib/showrunner/pin.py",
+     r"(def self_pin_state\(cfg, sr\):\n)",
+     "    return None\ndef _neutered_self_pin(cfg, sr):\n"),
     # THE EXACT PRE-FIX RESOLVER: re-root unconditionally, so a path that already carries the
     # campaign gets it a second time. Invisible without a campaign selected, which is why it
     # survived — and with one, it made the #69 stall detector answer None for every Crawler in

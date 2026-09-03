@@ -677,6 +677,25 @@ def whoami(cfg, session=None):
     out = ["showrunner: you are the %s here." % where.upper(), "  %s." % r["evidence"]]
     if reseat:
         out.append("  %s" % reseat)
+
+    # THE PIN THE HOOKS RUN, SAID HERE RATHER THAN ONLY IN `doctor`. The self-vendored pin goes
+    # stale silently, and it cost something twice in one day: a consumer's `reach` gate went
+    # quiet for every call because the pin predated the verb, and after a reload this very
+    # announcement printed wording replaced in #77 because the pin was sixteen commits behind.
+    # `doctor` reported both, accurately, to nobody — it is read only by somebody who runs it,
+    # and the moment that matters is the moment a session starts trusting its guards.
+    #
+    # Same argument as the re-seat line above, and the #71 shape it names: a notice in a channel
+    # nobody reads on the turn it matters is not a notice. Only the NOT-ok states print, because
+    # a line on every healthy session is how the one that matters gets skimmed.
+    try:
+        from . import pin as _pin
+        _state = _pin.self_pin_state(cfg, sr)
+    except Exception:                                               # noqa: BLE001
+        # A stale-pin notice must never be the thing that breaks the announcement it rides on.
+        _state = None
+    if _state and _state[0] != "ok":
+        out.append("  %s" % _state[1])
     if r["campaign"]:
         out.append("  campaign: %s" % r["campaign"])
 

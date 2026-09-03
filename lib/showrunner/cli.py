@@ -822,42 +822,16 @@ def cmd_doctor(args):
             repin = os.path.join(cfg.root, "bin", "showrunner")
             repin = rel(repin, cfg.root) if os.access(repin, os.X_OK) else (
                 "<from a showrunner checkout> bin/showrunner")
-            stamp_at = pin.read_pin(os.path.join(cfg.root, ".showrunner_self")) or {}
-            sha = stamp_at.get("sha")
-            rc_h, head, _ = git(["rev-parse", "HEAD"], cwd=cfg.root)
-            head = (head or "").strip() if rc_h == 0 else ""
-            if stamp_at.get("unreadable") or not sha:
-                print("  %s .showrunner_self is in force but its stamp is UNREADABLE — the "
-                      "plumbing is running code whose commit cannot be named. Re-pin it: "
-                      "`%s self --pin HEAD --dest .showrunner_self`"
-                      % (YEL + "warn " + OFF, repin))
-            elif head and sha == head:
-                print("  %s   ...from the self-vendored pin at %s, which IS this checkout's "
-                      "HEAD — your guards run the same rules you are reading"
-                      % (GRN + "ok   " + OFF, sha[:12]))
-            elif head:
-                rc_c, behind, _ = git(["rev-list", "--count", "%s..HEAD" % sha], cwd=cfg.root)
-                n = (behind or "").strip() if rc_c == 0 else "?"
-                print("  %s   ...from the self-vendored pin at %s, which is %s commit(s) BEHIND "
-                      "HEAD. Your guards are enforcing the rules as of that commit, not the ones "
-                      "you are editing — deliberate while you work, stale if you forget. Refresh: "
-                      "`%s self --pin HEAD --dest .showrunner_self`"
-                      % (YEL + "warn " + OFF, sha[:12], n, repin))
+            # ASKED OF THE ONE OWNER, not computed again here. This block and the session
+            # announcement answer the same question, and two copies of one rule is how they drift —
+            # the failure this file spends most of its comments removing.
+            state = pin.self_pin_state(cfg, sr)
+            if state is None:
+                pass
+            elif state[0] == "ok":
+                print("  %s   ...%s" % (GRN + "ok   " + OFF, state[1]))
             else:
-                # WHEN THE ANSWER IS UNDEFINED, MAKE IT THE LOUD ONE. Every branch above needs
-                # HEAD; without it none fired and THE LINE VANISHED ENTIRELY — a pin of unknown
-                # age reported as nothing at all, which reads exactly like a healthy one.
-                #
-                # llm_chat measured the opposite failure in their own equivalent: theirs always
-                # cried STALE when run from an old copy, which is annoying and safe. Mine went
-                # quiet, which is the direction that costs a week. A check that degrades badly
-                # is still worth having if it degrades toward alarm, and that is a choice
-                # available at the moment it is written.
-                print("  %s   ...from the self-vendored pin at %s, and this checkout WOULD NOT "
-                      "SAY WHAT HEAD IS, so whether your guards are current CANNOT BE "
-                      "DETERMINED. That is not the same as up to date. Refresh blind, or fix "
-                      "git here: `%s self --pin HEAD --dest .showrunner_self`"
-                      % (YEL + "warn " + OFF, sha[:12], repin))
+                print("  %s   ...%s" % (YEL + "warn " + OFF, state[1]))
     else:
         print("  %s %s does not exist or is not executable, and every Crawler brief tells its "
               "agent to run it. Run install.sh, or work from a checkout that carries "

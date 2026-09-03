@@ -6800,12 +6800,17 @@ def test_negative_text_assertions_flatten():
     # nothing today while the string was plainly there, split across two adjacent literals. The
     # honest reading of that empty result was CANNOT TELL; I nearly read it as ABSENT, an hour
     # after game_loop's auditor made the same error on a two-line subprocess call.
-    with open(os.path.join(ROOT, "lib", "showrunner", "cli.py")) as fh:
-        cli_src = fh.read()
-    joined = re.sub(r'"\s*\n\s*"', "", cli_src)
+    # READ FROM pin.py, WHERE THE STRING NOW LIVES. The anecdote is about cli.py, which is where
+    # it was when the grep came back empty; the sentence moved into `pin.self_pin_state` when
+    # `doctor` and the session announcement stopped keeping two copies of one rule. The example
+    # has to follow the string, or this demonstration quietly stops demonstrating anything —
+    # which is the very class it exists to show.
+    with open(os.path.join(ROOT, "lib", "showrunner", "pin.py")) as fh:
+        pin_src = fh.read()
+    joined = re.sub(r'"\s*\n\s*"', "", pin_src)
     ok("a string split across adjacent literals IS present once they are joined, even though a "
        "line-based search finds nothing — the empty result meant CANNOT TELL, never ABSENT",
-       "CANNOT BE DETERMINED" in joined and "CANNOT BE DETERMINED" not in cli_src)
+       "CANNOT BE DETERMINED" in joined and "CANNOT BE DETERMINED" not in pin_src)
 
 
 def test_a_rate_names_its_instrument():
@@ -13517,9 +13522,86 @@ def test_the_issue_waker_does_not_hold_a_crawler():
        {"seconds": round(took, 1), "stderr": p.stderr[-200:]})
 
 
+def test_a_stale_self_pin_says_so_where_it_is_read():
+    group("The pin the HOOKS run goes stale silently — `doctor` said so twice, accurately, to "
+          "nobody. The announcement every session and compaction reads now carries it")
+    if not have("git"):
+        skip("the stale-pin group", "git is not installed")
+        return
+
+    # IT COST SOMETHING TWICE IN ONE DAY. A consumer's `reach` gate went quiet for every call
+    # because the pin predated the `reach` verb; and after a window reload this very announcement
+    # printed the wording #77 replaced, because the pin was sixteen commits behind while the
+    # checkout read as current. Both times `doctor` was right and nobody had run `doctor`.
+    #
+    # CONFIRMED LIVE BEFORE BUILDING: this session's own SessionStart banner named no pin while
+    # the pin was six commits behind — the premise the leaf asserted, measured rather than
+    # assumed. The premise was NOT "doctor is silent"; doctor is loud and unread.
+    cfg = make_repo()
+    vendored = os.path.join(cfg.root, ".showrunner_self")
+    binp = os.path.join(vendored, "bin", "showrunner")
+    os.makedirs(os.path.dirname(binp), exist_ok=True)
+    with open(binp, "w") as fh:
+        fh.write("#!/bin/sh\nexit 0\n")
+    os.chmod(binp, 0o755)
+
+    def stamp(sha):
+        with open(os.path.join(vendored, "PINNED"), "w") as fh:
+            json.dump({"ref": "HEAD", "sha": sha, "at": 1}, fh)
+
+    rc, head, _ = util.git(["rev-parse", "HEAD"], cwd=cfg.root)
+    head = head.strip()
+
+    # A BINARY OUTSIDE THE PIN IS NOT THIS QUESTION AT ALL, and must answer None rather than a
+    # reassuring "ok" — most checkouts run bin/showrunner directly and have no self-pin.
+    eq("a checkout not running the vendored pin gets None, which is 'does not apply' and not "
+       "'it is fine'", pin.self_pin_state(cfg, os.path.join(cfg.root, "bin", "showrunner")), None)
+
+    stamp(head)
+    state = pin.self_pin_state(cfg, binp)
+    eq("a pin AT head reads ok", (state or ("?", ""))[0], "ok")
+
+    # THE ONE THAT MATTERS.
+    sh(["git", "commit", "-q", "--allow-empty", "-m", "move HEAD on"], cfg.root)
+    sh(["git", "commit", "-q", "--allow-empty", "-m", "and again"], cfg.root)
+    state = pin.self_pin_state(cfg, binp)
+    ok("a pin BEHIND head warns, and counts the commits so the reader can judge whether it is "
+       "deliberate", state and state[0] == "warn" and "2 commit(s) BEHIND" in state[1], state)
+
+    # AN UNREADABLE STAMP IS NOT A CURRENT ONE. The directory IS a pin; what cannot be read is
+    # which commit, and reporting silence there reads exactly like health.
+    with open(os.path.join(vendored, "PINNED"), "w") as fh:
+        fh.write("{not json")
+    state = pin.self_pin_state(cfg, binp)
+    ok("an UNREADABLE stamp warns rather than going quiet", state and state[0] == "warn"
+       and "UNREADABLE" in state[1], state)
+
+    # AND THE ANNOUNCEMENT CARRIES IT — the whole point of the leaf. `doctor` already knew.
+    #
+    # HEAD IS RE-READ HERE, not reused from the top of the group. The empty commits above moved
+    # it, so re-stamping the old sha produced a pin two commits behind and the "current" case
+    # asserted against a stale one — a fixture that had drifted out from under its own assertion.
+    _rc, head_now, _e = util.git(["rev-parse", "HEAD"], cwd=cfg.root)
+    stamp(head_now.strip())
+    lines = "\n".join(roles.whoami(cfg, session="S-PIN"))
+    ok("a CURRENT pin adds no line to the announcement, because a line on every healthy session "
+       "is how the one that matters gets skimmed", "BEHIND HEAD" not in lines, lines[:400])
+    sh(["git", "commit", "-q", "--allow-empty", "-m", "drift"], cfg.root)
+    lines = "\n".join(roles.whoami(cfg, session="S-PIN"))
+    ok("...while a STALE one is named in the announcement itself, which is the one message every "
+       "session and every compaction is guaranteed to read",
+       "BEHIND HEAD" in lines, lines[:600])
+
+    # ONE OWNER, NOT TWO. `doctor` used to compute this inline; two copies of one rule is how
+    # they drift, and this repo has repaired that shape repeatedly.
+    doctor_src = open(os.path.join(ROOT, "lib", "showrunner", "cli.py")).read()
+    ok("`doctor` asks the owner rather than recomputing the comparison itself",
+       "self_pin_state" in doctor_src and "commit(s) BEHIND " not in doctor_src, "cli.py")
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

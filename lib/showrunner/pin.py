@@ -195,6 +195,63 @@ def staleness(source_repo=None):
                     % (ref, behind, ref))
 
 
+def self_pin_state(cfg, sr):
+    """Is the SELF-VENDORED pin the hooks run behind this checkout's HEAD?
+
+    A DIFFERENT QUESTION FROM `staleness`, and the confusion between them is why this went
+    unowned. `staleness` asks whether the running COPY is behind the repo it was vendored from —
+    a consumer's question. This asks whether `.showrunner_self`, the copy every hook in THIS
+    checkout executes, is behind the working tree its developer is editing.
+
+    Returns (level, message) or None when no self-pin is in force — None meaning "this does not
+    apply here", never "it is fine".
+
+    IT COST SOMETHING TWICE IN ONE DAY, which is what makes it worth a function rather than a
+    line inside `doctor`:
+      * a consumer's `reach` gate went silent for every call, because the pin predated the
+        `reach` verb;
+      * after a window reload, the seat announcement printed wording replaced in #77, because
+        the pin was sixteen commits behind while the checkout read as current.
+    `doctor` said so accurately both times. Nobody had run `doctor`.
+    """
+    if not sr:
+        return None
+    root = cfg.root
+    vendored = os.path.join(root, ".showrunner_self")
+    try:
+        inside = os.path.realpath(sr).startswith(os.path.realpath(vendored) + os.sep)
+    except OSError:
+        return None
+    if not inside:
+        return None
+    stamp = read_pin(vendored) or {}
+    sha = stamp.get("sha")
+    if stamp.get("unreadable") or not sha:
+        return ("warn", "the plumbing runs .showrunner_self and its stamp is UNREADABLE, so the "
+                        "rules your hooks enforce cannot be named. `self --pin HEAD --dest "
+                        ".showrunner_self`")
+    rc, head, _ = git(["rev-parse", "HEAD"], cwd=root)
+    head = (head or "").strip() if rc == 0 else ""
+    if not head:
+        # THE UNDEFINED CASE IS THE LOUD ONE. Every branch here needs HEAD; without it the
+        # original inline version printed nothing at all, and a pin of unknown age reported as
+        # silence reads exactly like a current one.
+        return ("warn", "from the self-vendored pin at %s, and this checkout WOULD NOT SAY WHAT "
+                        "HEAD IS, so whether your guards are current CANNOT BE "
+                        "DETERMINED. That is not the same as up to date. Refresh blind, or fix "
+                        "git here: `bin/showrunner self --pin HEAD --dest .showrunner_self`"
+                        % sha[:12])
+    if sha == head:
+        return ("ok", "the plumbing runs .showrunner_self at %s, which IS this checkout's HEAD."
+                      % sha[:12])
+    rc_c, behind, _ = git(["rev-list", "--count", "%s..HEAD" % sha], cwd=root)
+    n = (behind or "").strip() if rc_c == 0 else "?"
+    return ("warn", "your hooks are running .showrunner_self pinned at %s, %s commit(s) BEHIND "
+                    "HEAD — they are enforcing the rules as of that commit, not the ones you "
+                    "are editing. Deliberate while you work, stale if you forget. Refresh: "
+                    "`bin/showrunner self --pin HEAD --dest .showrunner_self`" % (sha[:12], n))
+
+
 def describe():
     """One line for `--version`. Says which of the three it is, and never invents a commit."""
     d = running()
