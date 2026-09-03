@@ -7349,13 +7349,24 @@ def test_the_integration_record_names_its_evidence():
     g.claim("ev1", "crawler-ev", tree=rec["worktree"])
     g.close("ev1", G.CLOSED, os.path.join(rec["worktree"], "landed.txt"), "done")
 
-    results, ok_flag = campaign.integrate(cfg, new_graph(cfg))
+    # Caught rather than allowed to propagate: this group's remaining assertions are about the
+    # RECORD, and a crash here would leave every one of them unrun while the sweep reported the
+    # group as unscoreable. Failing keeps the measurement.
+    try:
+        results, ok_flag = campaign.integrate(cfg, new_graph(cfg))
+        why_int = None
+    except Exception as exc:                                        # noqa: BLE001
+        results, ok_flag, why_int = [], False, exc
     integrated = [r for r in results if r.get("status") == "integrated"]
-    ok("a leaf integrates, so there is a record to examine", bool(integrated), results)
+    ok("a leaf integrates, so there is a record to examine", bool(integrated),
+       why_int or results)
 
     records = campaign.load(cfg).get("integrated") or []
     ok("the campaign carries an integration record", bool(records), records)
-    row = records[-1]
+    # `or [{}]` so a missing record FAILS the assertions below instead of raising past them —
+    # an empty list here is a real outcome (nothing integrated), and the group's job is to say
+    # which fields are missing, not to die on the first one.
+    row = (records or [{}])[-1]
     for key in ("crawler", "branch", "ts"):
         ok("the record still carries %s, so this is additive and does not break a reader" % key,
            key in row, sorted(row))
@@ -7364,10 +7375,13 @@ def test_the_integration_record_names_its_evidence():
 
     # THE NAMED PATH MUST BE THE REAL ONE. A record naming a file that is not there is worse
     # than one naming nothing: it reads as evidence.
-    named = os.path.join(cfg.root, row["merged_proof"] or "")
-    ok("...and the artifact it names actually exists", os.path.isfile(named), named)
-    with open(named) as fh:
-        body = fh.read()
+    named = os.path.join(cfg.root, row.get("merged_proof") or "")
+    exists = bool(row.get("merged_proof")) and os.path.isfile(named)
+    ok("...and the artifact it names actually exists", exists, named)
+    body = ""
+    if exists:
+        with open(named) as fh:
+            body = fh.read()
     ok("...and is non-empty, because an empty proof is the identity element again", body.strip())
 
     # WHETHER IT WILL TRAVEL IS PART OF THE RECORD. Consumers gitignore these, reasonably — they
@@ -12948,9 +12962,101 @@ def test_optional():
 
 
 # ==========================================================================
+def test_reclaim_survives_an_unset_base():
+    group("A merged, clean tree is reclaimable when no --base was given — the default path, "
+          "which is the only path anybody runs")
+    if not have("git"):
+        skip("the reclaim-base group", "git is not installed")
+        return
+
+    # THE DEFECT, FOUND BY RUNNING THE TOOL RATHER THAN BY READING IT. `integrate` merged the
+    # branch and then died in `git merge-base --is-ancestor <branch> None` before reclaiming a
+    # single tree. Nine verbs declare `--base` with `default="HEAD"`; `integrate` declares it
+    # with none, correctly — it compares the base to the CHECKED-OUT BRANCH NAME and would
+    # refuse every ordinary run if the default were "HEAD" — and then handed the raw None to
+    # the reclaim pass. `reconcile` HAD a `base="HEAD"` default and it never fired, because an
+    # explicit None walks straight past a default argument.
+    #
+    # WHY IT SURVIVED SO LONG, which is the part worth pinning: the crash is AFTER the merge,
+    # so the work always landed. The only symptom was trees that never went away, against a
+    # `brief.py` sentence promising each Crawler exactly that reclaim — and every library-level
+    # test reaches `campaign.integrate`, whose PRIVATE `base or current` covered the hole. The
+    # reclaim call lives one layer up, in the CLI, and no assertion reached it.
+    cfg = make_repo()
+    g = new_graph(cfg)
+    g.add("work whose tree should go when it lands", leaf_id="rb1", labels=["backend"])
+    rec = worktree.spawn(cfg, g.show("rb1"), actor="crawler-rb")
+    campaign.record_spawn(cfg, rec)
+    with open(os.path.join(rec["worktree"], "landed.txt"), "w") as fh:
+        fh.write("work\n")
+    sh(["git", "add", "-A"], rec["worktree"])
+    sh(["git", "commit", "-q", "-m", "the work"], rec["worktree"])
+    g.claim("rb1", "crawler-rb", tree=rec["worktree"])
+    g.close("rb1", G.CLOSED, os.path.join(rec["worktree"], "landed.txt"), "done")
+    def reclaim(base):
+        """(take, held, why) — a RAISE HERE MEASURES NOTHING. A group that dies takes every
+        assertion below it down unrun, and the mutation sweep scores that as UNSCOREABLE, not
+        as coverage. The failure this pins is literally an exception out of subprocess, so it
+        has to arrive as a failed assertion carrying the exception, never as a crash."""
+        try:
+            take_, held_ = campaign.reclaimable(cfg, new_graph(cfg), base=base)
+            return take_, held_, None
+        except Exception as exc:                                    # noqa: BLE001
+            return [], [], exc
+
+    try:
+        campaign.integrate(cfg, new_graph(cfg))
+        landed = None
+    except Exception as exc:                                        # noqa: BLE001
+        landed = exc
+    ok("the branch merges, so there is a landed tree to reclaim", landed is None, landed)
+
+    # base=None is what the CLI passes on the default path. Before the fix this raised
+    # TypeError out of subprocess, so the assertion is that it ANSWERS at all — and answers
+    # the same thing the explicit form does.
+    take, held, why = reclaim(None)
+    names = [t["crawler"] for t in take]
+    ok("a merged, clean tree is reclaimable with NO base given — the default `integrate` path",
+       rec["crawler"] in names,
+       why or (names, [(h.get("crawler"), h.get("why")) for h in held]))
+
+    # THE CONTROL THAT KEEPS THIS HONEST. "Reclaimable" must not become the answer to every
+    # question just because the base now resolves; an unset base that swept up a LIVE or DIRTY
+    # tree would delete somebody's only copy, which is the exact trade this file argues about
+    # everywhere else. So a dirty tree must still be held back on the same unset-base path.
+    g.add("work still in progress", leaf_id="rb2", labels=["backend"])
+    rec2 = worktree.spawn(cfg, g.show("rb2"), actor="crawler-dirty")
+    campaign.record_spawn(cfg, rec2)
+    with open(os.path.join(rec2["worktree"], "landed.txt"), "w") as fh:
+        fh.write("committed\n")
+    sh(["git", "add", "-A"], rec2["worktree"])
+    sh(["git", "commit", "-q", "-m", "committed"], rec2["worktree"])
+    g.claim("rb2", "crawler-dirty", tree=rec2["worktree"])
+    g.close("rb2", G.CLOSED, os.path.join(rec2["worktree"], "landed.txt"), "done")
+    with open(os.path.join(rec2["worktree"], "landed.txt"), "a") as fh:
+        fh.write("uncommitted work nobody else has\n")
+    take2, held2, why2 = reclaim(None)
+    ok("...and a DIRTY tree is still held back on that same unset-base path, so resolving the "
+       "base did not turn the reclaim into a blanket yes",
+       rec2["crawler"] not in [t["crawler"] for t in take2],
+       why2 or ([t["crawler"] for t in take2],
+                 [(h.get("crawler"), h.get("why")) for h in held2]))
+
+    # THE RESOLVER ITSELF, both directions. An explicit base must survive untouched — a
+    # resolver that quietly overrode the caller's answer would be the same bug facing the
+    # other way.
+    ok("an explicit base is returned unchanged",
+       campaign.base_branch(cfg, "some-ref") == "some-ref",
+       campaign.base_branch(cfg, "some-ref"))
+    cur = sh(["git", "rev-parse", "--abbrev-ref", "HEAD"], cfg.root).stdout.strip()
+    ok("...and an absent one resolves to the branch actually checked out, which is what "
+       "`integrate` compared against all along",
+       campaign.base_branch(cfg, None) == cur, (campaign.base_branch(cfg, None), cur))
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

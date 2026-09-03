@@ -82,6 +82,15 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # Answering `base` unchanged restores the defect EXACTLY, in its safe-looking direction:
+    # every caller that passes an explicit base keeps working, every library-level test keeps
+    # passing, and only the unset-base path — the default `integrate` — dies, after the merge
+    # has already landed. A producer whose death leaves the work correctly merged and merely
+    # stops tidying up is the kind that survives for months.
+    ("the ref a merge question is asked against", "campaign.base_branch",
+     "lib/showrunner/campaign.py",
+     r"(def base_branch\([^)]*\):\n)",
+     "    return base\ndef _neutered_base_branch(cfg, base=None):\n"),
     # Answering "" restores the reported behaviour exactly: every window reload loses the seat,
     # the session announces the fallback, and the operator re-claims by hand. Nothing errors and
     # the tool looks correct — a producer whose death returns it to the previous, working-looking

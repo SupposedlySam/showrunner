@@ -174,6 +174,33 @@ def commits_ahead(cfg, branch, base, known=None):
         return 0
 
 
+def base_branch(cfg, base=None):
+    """The ref every "is this merged?" question is asked against.
+
+    A RESOLVER RATHER THAN A DEFAULT ARGUMENT, because the default was already there and was
+    already unreachable. `reconcile` declared `base="HEAD"`; an explicit `None` walks straight
+    past a default, and `integrate` handed it exactly that. `integrate` has no `--base` default
+    ON PURPOSE — alone among the ten verbs that take one — because it compares the base to the
+    CHECKED-OUT BRANCH NAME and dies when the two differ, so `default="HEAD"` would make every
+    ordinary run refuse. It resolved `base or current` internally and then passed the RAW `None`
+    to the reclaim pass afterwards.
+
+    WHAT THAT COST, which is why this is not merely a crash fix: the failure landed in
+    `git merge-base --is-ancestor <branch> None` AFTER the merge had already been committed, so
+    every default `integrate` merged the work and then died before reclaiming a single tree. The
+    trees accumulated silently, and `brief.py` went on telling each Crawler its worktree is
+    deleted once the work integrates — the promise the whole scratch-dir discipline rests on,
+    unkeepable on the only path anybody runs.
+    """
+    if base:
+        return base
+    _rc, out, _err = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=cfg.root)
+    # Detached HEAD abbreviates to "HEAD", which is the honest answer and the one the callers
+    # already handled; an empty read means git could not be asked, and "HEAD" is still the
+    # closest true statement about where we stand.
+    return (out or "").strip() or "HEAD"
+
+
 def is_merged(cfg, branch, base, known=None):
     """True when `base` already contains every commit on `branch`."""
     if not branch_exists(cfg, branch, known):
@@ -408,6 +435,7 @@ def reconcile(cfg, graph, base="HEAD", deep=True):
     # `rev-parse`, was 544 of the 869 subprocesses that made `waiting` take 20s and silently
     # disarm a consumer's watchdog. None means git could not be asked, and every callee falls
     # back to asking per-branch rather than treating "could not look" as "no branches".
+    base = base_branch(cfg, base)
     known = existing_branches(cfg)
     findings = []
     for entry in data.get("crawlers", []):
@@ -1049,7 +1077,7 @@ def integrate(cfg, graph, base=None, only=None, dry_run=False):
 def _integrate_locked(cfg, graph, base=None, only=None, dry_run=False):
     rc, out, _ = git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=cfg.root)
     current = out.strip()
-    base = base or current
+    base = base_branch(cfg, base)
 
     if current != base:
         die("integrate must run on the integration branch (%s); you are on %s" % (base, current),
