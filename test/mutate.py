@@ -852,10 +852,19 @@ NOT_PRODUCT = (
     ".claude/",
     # SITE WIRING, not product. `.showrunner/hooks/issue-waker.py` names ONE repo and ONE trusted
     # set of authors — this repo's, and its maintainer's. `install.sh` does not copy it for that
-    # reason, so no consumer receives it and no consumer's behaviour depends on it. Generalising
-    # it (repo and trust set from config, the way lane rules and the chat path already are) would
-    # make it product and bring it into the swept set; until then, declaring it is the honest
-    # state rather than letting a tracked Python file sit outside the denominator unnoticed.
+    # reason, so no consumer receives it. Generalising it (repo and trust set from config, the
+    # way lane rules and the chat path already are) would make it product and bring it into the
+    # swept set; until then, declaring it is the honest state rather than letting a tracked
+    # Python file sit outside the denominator unnoticed.
+    #
+    # THIS EXCLUSION USED TO SAY "and no consumer's behaviour depends on it". That was true of
+    # INSTALLED consumers and false of the ones this repo makes itself: it is tracked, and
+    # `git worktree add` copies tracked files, so every Crawler inherited it as a Stop hook with
+    # a 1860s budget and was held at the end of its work — an empty log, an established
+    # connection, no CPU, and nothing to distinguish it from a Crawler thinking hard. Two
+    # dispatches in a row died that way before it was bisected. The sentence is gone because it
+    # was the load-bearing half of the reason and it was wrong; what remains is true. The guard
+    # that fixed it is covered behaviourally in test/run.py, since nothing in here can reach it.
     ".showrunner/hooks/issue-waker.py",
 )
 

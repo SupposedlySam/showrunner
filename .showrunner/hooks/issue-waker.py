@@ -244,7 +244,52 @@ def _heartbeat():
         pass                   # a bell that cannot write its own stamp still has to ring
 
 
+def in_linked_worktree(root):
+    """Is this hook running in a CRAWLER's tree rather than the orchestrator's main checkout?
+
+    `git rev-parse --git-dir --git-common-dir` answers it in one call: they are the same path in
+    a primary checkout and different in a linked worktree. That is the same fact `config.load`
+    records as `root != tree`, asked here directly because this hook is deliberately bare stdlib
+    and imports no showrunner module.
+
+    CANNOT-TELL BEHAVES AS BEFORE. If git cannot be asked, this answers False and the waker runs
+    as it always did — an unreadable answer must not silently switch off the mechanism.
+    """
+    try:
+        p = subprocess.run(["git", "rev-parse", "--git-dir", "--git-common-dir"],
+                           cwd=root, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if p.returncode != 0:
+        return False
+    lines = [ln.strip() for ln in p.stdout.splitlines() if ln.strip()]
+    if len(lines) != 2:
+        return False
+    a, b = (os.path.realpath(os.path.join(root, ln)) for ln in lines)
+    return a != b
+
+
 def main():
+    # A CRAWLER MUST NOT WAIT FOR THE ORCHESTRATOR'S ISSUES, and until now every one of them did.
+    #
+    # MEASURED, after two dispatched Crawlers in a row produced nothing for half an hour. Both
+    # `.claude/settings.json` and these hooks are TRACKED, and `git worktree add` copies tracked
+    # files — so every Crawler inherits this Stop hook. `claude -p` does not exit until its Stop
+    # hooks return and only flushes its output then, so a Crawler that had finished its work sat
+    # here for up to the full 1860s budget with an empty session.log, an established connection
+    # and almost no CPU: indistinguishable, from outside, from a Crawler thinking hard. Bisected
+    # by running `claude -p 'Reply with exactly: OK'` inside the worktree — wedged with this hook
+    # registered, instant with it removed, and instant in a directory with no settings at all.
+    #
+    # WAITING FOR NEW ISSUES IS THE ORCHESTRATOR'S JOB. A Crawler is leaf-scoped: it finishes its
+    # leaf and ends, and there is nothing a new issue could tell it to do. Polling GitHub for
+    # half an hour per Crawler also multiplies the API calls by the fan-out.
+    #
+    # SELF-DISABLING RATHER THAN NOT-INSTALLED, because the settings file is tracked and copying
+    # it is what makes every Crawler carry the same rules — the property the repo relies on. A
+    # hook that knows where it applies is the only version that survives that copy.
+    if in_linked_worktree(_repo_root()):
+        return 0
     _heartbeat()
     seen = baseline()
     if seen is None:

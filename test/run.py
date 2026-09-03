@@ -29,6 +29,7 @@ import ast
 import filecmp
 import glob
 import hashlib
+import importlib.util
 import json
 import re
 import os
@@ -13464,9 +13465,61 @@ def test_the_stall_detector_can_actually_measure_under_a_campaign():
        "PRODUCED NOTHING" not in said2, said2[:600])
 
 
+def test_the_issue_waker_does_not_hold_a_crawler():
+    group("The issue waker is the orchestrator's, and every Crawler inherited it — a Stop hook "
+          "with a 1860s budget held each one at the end of its work")
+    if not have("git"):
+        skip("the issue-waker group", "git is not installed")
+        return
+
+    # MEASURED AFTER TWO DISPATCHED CRAWLERS IN A ROW PRODUCED NOTHING FOR HALF AN HOUR. Both
+    # `.claude/settings.json` and the hooks are TRACKED, and `git worktree add` copies tracked
+    # files — which is the property this repo relies on to give every Crawler the same rules, and
+    # is exactly what handed each of them the orchestrator's issue waker. `claude -p` does not
+    # exit until its Stop hooks return and only flushes its output then, so a Crawler that had
+    # already finished sat there with an empty session.log, an established connection and almost
+    # no CPU: from outside, indistinguishable from one thinking hard.
+    #
+    # BISECTED, not guessed: `claude -p 'Reply with exactly: OK'` wedged in the worktree with the
+    # hook registered, returned instantly with it removed, and returned instantly in a directory
+    # with no settings at all.
+    waker = os.path.join(ROOT, ".showrunner", "hooks", "issue-waker.py")
+    if not os.path.isfile(waker):
+        skip("the issue-waker group", "no issue-waker.py in this checkout")
+        return
+    spec = importlib.util.spec_from_file_location("_waker", waker)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    cfg = make_repo()
+    g = new_graph(cfg)
+    rec = worktree.spawn(cfg, g.show(g.add("work in a tree", leaf_id="wk1")), actor="wk")
+    tree = cfg.abspath(rec["worktree"])
+
+    eq("a Crawler's linked worktree is recognised as one", mod.in_linked_worktree(tree), True)
+    # THE CONTROL, and it is the half that matters: a guard that answered True everywhere would
+    # switch the waker off in the ONE checkout it exists for, and nothing would ever say so —
+    # the orchestrator would simply stop being told about issues.
+    eq("...while the orchestrator's own primary checkout is NOT, so the waker still runs where "
+       "it belongs", mod.in_linked_worktree(cfg.root), False)
+
+    # AND IT MUST RETURN, not merely answer a question about itself. Run as the harness runs it,
+    # from inside the tree, with a hard ceiling far below its 1860s budget: reaching that ceiling
+    # IS the defect.
+    started = time.time()
+    p = subprocess.run([sys.executable, waker], cwd=tree, capture_output=True, text=True,
+                       timeout=60, env=dict(os.environ, CLAUDE_PROJECT_DIR=tree),
+                       input="{}")
+    took = time.time() - started
+    eq("the waker exits 0 from inside a Crawler's tree", p.returncode, 0)
+    ok("...and returns promptly rather than holding the turn for its polling budget — the "
+       "budget is 1860s and the Crawler has nothing to be woken for", took < 30,
+       {"seconds": round(took, 1), "stderr": p.stderr[-200:]})
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,
