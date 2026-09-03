@@ -272,10 +272,35 @@ class Config:
         p = os.path.expanduser(p)
         if os.path.isabs(p):
             return p
+        rooted = os.path.join(self.root, p)
         prefix = STATE_DIR + os.sep
         if self.campaign and p.startswith(prefix):
+            # IDEMPOTENT, because the records this resolves ALREADY carry the campaign. A
+            # spawn record stores its scratch as `rel(<abs>, cfg.root)`, which for a
+            # campaign-scoped directory is `.showrunner/campaigns/<the campaign>/scratch/<name>`.
+            # Stripping `.showrunner/` off that and re-rooting at state_dir produced
+            # `.showrunner/campaigns/<c>/campaigns/<c>/scratch/<name>` — a path that never
+            # exists. `abspath(rel(x))` has to be x, and for state paths under a campaign it
+            # was not.
+            #
+            # WHAT IT COST, which is why this is not a tidy-up: `dispatch.session_health` reads
+            # `session.log` through this, could not find it, and returns None for "there is no
+            # log to read". So the #69 STALLED-CRAWLER DETECTOR was inert for every Crawler in
+            # every campaign — reported as None, which `reconcile` renders as nothing at all,
+            # beside a cheerful `LIVE — do not disturb` from the pid check. Measured on four
+            # Crawlers at once, including one whose session.log was sitting there with 2529
+            # bytes in it. The detector exists precisely because a live pid is not a working
+            # agent, and it was answering the reassuring absence for all of them.
+            #
+            # A path that ALREADY resolves inside state_dir is already campaign-resolved and is
+            # returned as-is. `.showrunner/graph.db` still re-roots, because rooted at the repo
+            # it lands beside the campaigns directory rather than inside this campaign.
+            sd = os.path.normpath(self.state_dir)
+            here = os.path.normpath(rooted)
+            if here == sd or here.startswith(sd + os.sep):
+                return rooted
             return os.path.join(self.state_dir, p[len(prefix):])
-        return os.path.join(self.root, p)
+        return rooted
 
     def resource(self, name):
         for r in self.get("resources") or []:

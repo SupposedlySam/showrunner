@@ -82,6 +82,14 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # THE EXACT PRE-FIX RESOLVER: re-root unconditionally, so a path that already carries the
+    # campaign gets it a second time. Invisible without a campaign selected, which is why it
+    # survived — and with one, it made the #69 stall detector answer None for every Crawler in
+    # the campaign while `reconcile` printed a green LIVE line above it.
+    ("a campaign state path resolving to itself", "config.Config.abspath",
+     "lib/showrunner/config.py",
+     r"(    def abspath\(self, p\):\n)",
+     "        if not p:\n            return None\n        p = os.path.expanduser(p)\n        if os.path.isabs(p):\n            return p\n        prefix = STATE_DIR + os.sep\n        if self.campaign and p.startswith(prefix):\n            return os.path.join(self.state_dir, p[len(prefix):])\n        return os.path.join(self.root, p)\n    def _neutered_abspath(self, p):\n"),
     # NOT A STUB — the EXACT pre-fix logic, host compared before scheme. This is the rarer and
     # better mutation: it restores a real historical defect rather than a plausible one, and it
     # is invisible on any machine whose hostname never changes, which is why it survived. On one

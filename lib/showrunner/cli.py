@@ -2649,6 +2649,23 @@ def cmd_reconcile(args):
         if f["scratch_files"]:
             print("    scratch holds %d file(s): %s" % (len(f["scratch_files"]),
                                                         ", ".join(f["scratch_files"][:5])))
+        # THE SECOND FACT, BESIDE LIVENESS — and until now nothing printed it. `reconcile` has
+        # computed `session_health` since #69 and NO caller read it: not this printer, not
+        # `waiting`, not `status`. A detector built because "a live PID is not a working agent"
+        # was rendering its verdict to nobody, directly beneath a green `LIVE — do not disturb`.
+        #
+        # ERRORED AND QUIET ARE THE WHOLE POINT, so they are the ones that print. `producing` is
+        # left silent deliberately: a line on every healthy Crawler is how the one that matters
+        # gets scrolled past, which is the same argument the idle-drift summary above makes.
+        _h = f.get("session_health") or {}
+        if _h.get("verdict") == "errored":
+            print("    %sSITTING ON AN ERROR%s — its log carries %s. The pid is alive and the "
+                  "work is not moving; read %s" % (RED, OFF, ", ".join(_h.get("errors") or []),
+                                                   _h.get("log")))
+        elif _h.get("verdict") == "quiet":
+            print("    %sPRODUCED NOTHING%s — %s is empty. A dispatched session that has written "
+                  "no output is not the same as one working quietly, and `LIVE` above is only "
+                  "about the pid." % (YEL, OFF, _h.get("log")))
         if f.get("harness_mis_certified"):
             # Retrospective and unrecoverable elsewhere: the harness verb is stateless, so once
             # a branch is merged nothing can be asked about the tree it was merged from.

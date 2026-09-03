@@ -13360,9 +13360,113 @@ def test_a_crawler_is_joined_to_its_own_room():
        ch3 and opened3 and joined3 is False, (ch3, opened3, joined3))
 
 
+def test_the_stall_detector_can_actually_measure_under_a_campaign():
+    group("A campaign-scoped state path resolves to itself, so the #69 stalled-Crawler detector "
+          "reads a log instead of reporting an absence")
+    if not have("git"):
+        skip("the stall-detector group", "git is not installed")
+        return
+
+    # FOUND BY DISPATCHING A REAL CRAWLER AND WATCHING IT PRODUCE NOTHING. `reconcile` said
+    # `LIVE — do not disturb`, which was true about the pid and useless about the work, and the
+    # second fact that exists to tell those apart was None.
+    #
+    # THE CAUSE WAS PATH RESOLUTION, NOT THE DETECTOR. A spawn record stores its scratch as
+    # `rel(<abs>, cfg.root)`, which under a campaign is already
+    # `.showrunner/campaigns/<c>/scratch/<name>`. `cfg.abspath` re-roots anything starting
+    # `.showrunner/` at state_dir, so it stripped the prefix and joined the rest onto a path
+    # that already contained it — `.showrunner/campaigns/<c>/campaigns/<c>/scratch/<name>`,
+    # which never exists. `session_health` opened that, failed, and returned None, and None is
+    # documented as "there is no log to read". So the detector was inert for EVERY Crawler in
+    # EVERY campaign, including ones whose session.log was sitting there with content in it.
+    #
+    # The property that was missing is that `abspath(rel(x))` must be x.
+    cfg = make_repo()
+    campaign_cfg = config.load(cfg.root, campaign="stall-probe")
+    scratch_abs = os.path.join(campaign_cfg.state_dir, "scratch", "c-1")
+    os.makedirs(scratch_abs, exist_ok=True)
+    stored = os.path.relpath(scratch_abs, campaign_cfg.root)
+    eq("a campaign state path resolves to ITSELF — abspath(rel(x)) is x, which is what every "
+       "record written by `spawn` depends on",
+       os.path.normpath(campaign_cfg.abspath(stored)), os.path.normpath(scratch_abs))
+
+    # THE RULE IT MUST NOT BREAK. A path that is NOT already campaign-resolved still follows the
+    # campaign — that is the whole point of the re-rooting, and a fix that disabled it would
+    # scatter every campaign's state back into the repo-wide directory.
+    eq("...while a bare state path still re-roots into the campaign, which is the rule this "
+       "resolver exists for",
+       os.path.normpath(campaign_cfg.abspath(".showrunner/graph.db")),
+       os.path.normpath(os.path.join(campaign_cfg.state_dir, "graph.db")))
+
+    # AND THE CONSEQUENCE, end to end, because the resolver assertions above are equally
+    # satisfied by a detector that still cannot read anything.
+    entry = {"crawler": "c-1", "scratch": stored}
+    eq("a Crawler with an EMPTY log reads `quiet` rather than None — 'produced nothing' and "
+       "'there is no log to read' are different answers and only one of them is health",
+       (dispatch.session_health(campaign_cfg, entry) or {}).get("verdict"), None)
+    with open(os.path.join(scratch_abs, "session.log"), "w") as fh:
+        fh.write("")
+    eq("...and once the log exists, empty reads `quiet`",
+       (dispatch.session_health(campaign_cfg, entry) or {}).get("verdict"), "quiet")
+    with open(os.path.join(scratch_abs, "session.log"), "w") as fh:
+        fh.write("working on it\n")
+    eq("...and a log with output in it reads `producing`, so `quiet` is a measurement and not "
+       "the only answer this can give under a campaign",
+       (dispatch.session_health(campaign_cfg, entry) or {}).get("verdict"), "producing")
+
+    # THE VERDICT MUST REACH A HUMAN. `reconcile` has computed session_health since #69 and NO
+    # caller read it — not this printer, not `waiting`, not `status`. A detector whose whole
+    # purpose is to contradict a green `LIVE` line was rendering to nobody.
+    # DRIVEN THROUGH THE REAL PRINTER, not by grepping cli.py for the phrase. A source search
+    # is satisfied by the string appearing in a comment explaining why the feature is absent,
+    # which is the shape this repo keeps catching; the only evidence that a reader would SEE it
+    # is running the command and reading what came out.
+    live = tmpdir("stall-render")
+    sh(["git", "init", "-q", "-b", "main"], live)
+    with open(os.path.join(live, "seed.txt"), "w") as fh:
+        fh.write("seed\n")
+    sh(["git", "add", "-A"], live)
+    sh(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "seed"], live)
+    env = dict(os.environ, SHOWRUNNER_CAMPAIGN="render-probe")
+    srb = os.path.join(ROOT, "bin", "showrunner")
+
+    def sr(*argv):
+        return subprocess.run([sys.executable, srb] + list(argv), cwd=live,
+                              capture_output=True, text=True, env=env)
+
+    init = sr("init")
+    ok("`init` succeeds, so the reconcile output below is a real run", init.returncode == 0,
+       init.stderr[-300:])
+    lcfg = config.load(live, campaign="render-probe")
+    lg = new_graph(lcfg)
+    lg.add("a leaf whose crawler says nothing", leaf_id="q1", labels=["backend"])
+    qrec = worktree.spawn(lcfg, lg.show("q1"), actor="quiet")
+    campaign.record_spawn(lcfg, qrec, pid=os.getpid(), session="S-QUIET")
+    lg.claim("q1", qrec["crawler"], pid=os.getpid(), tree=qrec["worktree"], session="S-QUIET")
+    qscratch = lcfg.abspath(qrec["scratch"])
+    os.makedirs(qscratch, exist_ok=True)
+    with open(os.path.join(qscratch, "session.log"), "w") as fh:
+        fh.write("")
+
+    said = sr("reconcile").stdout
+    ok("`reconcile` TELLS the reader the session produced nothing — the verdict has been "
+       "computed since #69 and no caller printed it, which to a reader is the same as never "
+       "having measured", "PRODUCED NOTHING" in said, said[:600])
+    ok("...and it says so beside the LIVE line rather than instead of it, because the pid IS "
+       "alive and both facts are true", "LIVE" in said, said[:600])
+
+    # THE PAIR: a producing Crawler must NOT get the warning, or the line means nothing.
+    with open(os.path.join(qscratch, "session.log"), "w") as fh:
+        fh.write("doing the work\n")
+    said2 = sr("reconcile").stdout
+    ok("...while a session that HAS written output gets no such line, so the warning is a "
+       "measurement and not decoration on every Crawler",
+       "PRODUCED NOTHING" not in said2, said2[:600])
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,
