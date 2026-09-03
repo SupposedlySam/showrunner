@@ -42,6 +42,21 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 
+# THE ANCHOR-FAILURE NOTICE, in the words only that branch prints. "DID NOT RUN" opens EVERY
+# fail-open notice these guards emit — eight producers at last count, most with nothing to do
+# with anchoring — so an assertion matching on it is a PROXY, true only while anchoring is the
+# sole route to the phrase. It stopped being the sole route: in a linked worktree the anchoring
+# SUCCEEDS and the guard then reaches lease.py's `if not session`, a deliberate and correct
+# degrade wearing the same opening words. Every such assertion passed in the primary checkout
+# and failed in every Crawler's tree — the direction that goes unnoticed longest.
+#
+# CUT TO THE SUBSTRING ALL THREE PRODUCERS SHARE VERBATIM. The two shims word the tail
+# differently ("this tool call was ALLOWED" vs "this call was ALLOWED"), so the full sentence
+# from cli.NO_REPO_FAIL_OPEN is not a common anchor. `test_guard_anchor_phrase_is_live` asserts
+# this string is still present in all three, because an absence assertion whose phrase has been
+# reworded away passes forever while measuring nothing.
+ANCHOR_FAILED = "neither the working directory nor CLAUDE_PROJECT_DIR resolves to a git repository"
+
 # NO BYTECODE DROPPINGS. Loading a .py hook as a module — which the waker tests do — makes the
 # import machinery write a __pycache__ INTO .showrunner/hooks/, and the wiring net then reports
 # that directory as a hook nobody registered. One check manufacturing the condition another
@@ -2940,7 +2955,7 @@ def test_guards_anchor_off_cwd():
         said = anchored.stdout + anchored.stderr
         ok("%s standing OUTSIDE any repo still CHECKS, by asking the harness where the session "
            "works rather than the shell where it stands" % name,
-           "DID NOT RUN" not in said, said[:170])
+           ANCHOR_FAILED not in said, said[:170])
 
         # #74 CHANGED WHAT "NO ANCHOR" MEANS. This used to run the IN-REPO shim with the
         # environment stripped and call that anchorless. It is not: the shim is sitting in the
@@ -8511,7 +8526,7 @@ def test_only_guards_may_anchor_to_their_own_checkout():
     p = run_verb("dispatch", "guard",
                  input='{"tool_name":"Bash","tool_input":{"command":"claude -p \\"w\\""}}')
     ok("a guard verb resolves from the checkout it runs out of, rather than failing open beside "
-       "a repo it is sitting in", "DID NOT RUN" not in (p.stdout + p.stderr),
+       "a repo it is sitting in", ANCHOR_FAILED not in (p.stdout + p.stderr),
        (p.stdout + p.stderr)[:170])
 
     # EVERY OTHER VERB IS ASKED A QUESTION IT MAY REFUSE, AND MUST. Making the anchor global
@@ -9373,10 +9388,15 @@ def test_self_vendored_pin():
                          capture_output=True, text=True)
     eq("a BROKEN working tree does not disarm the guard — the shim reaches the pin first",
        res.returncode, 0)
-    ok("...and the answer comes from the PIN, not from a fail-open notice about the broken one: "
-       "'allowed without being checked' and 'checked, and allowed' are different outcomes and "
-       "only one of them is a guard",
-       "DID NOT RUN" not in res.stdout, res.stdout[:200])
+    # ASSERTED ON WHAT THE PIN SAYS, not on the absence of a notice. The pin's script echoes a
+    # sentence nothing else in this fixture can produce, so its PRESENCE settles the question
+    # outright — where "DID NOT RUN" is absent" was satisfied by any of eight unrelated
+    # branches, and equally satisfied by a guard that had stopped saying anything at all.
+    ok("...and the answer comes from the PIN: its own words are in the output, which no other "
+       "branch of this fixture can produce", "the pin answered" in res.stdout, res.stdout[:200])
+    ok("...and NOT from a fail-open notice about the broken copy — 'allowed without being "
+       "checked' and 'checked, and allowed' are different outcomes and only one is a guard",
+       "instead of answering" not in res.stdout, res.stdout[:200])
 
     # THE REMEDY DOCTOR PRINTS MUST BE RUNNABLE BY THE THING IT IS PRINTED TO. `self --pin`
     # extracts from the checkout the RUNNING code lives in, and a pinned copy is NOT a checkout —
@@ -13069,9 +13089,52 @@ def test_reclaim_survives_an_unset_base():
        campaign.base_branch(cfg, None) == cur, (campaign.base_branch(cfg, None), cur))
 
 
+def test_guard_anchor_phrase_is_live():
+    group("The phrase every anchor assertion matches on still exists in every guard that "
+          "prints it — an absence assertion whose phrase was reworded away measures nothing")
+
+    # WHY THIS GROUP EXISTS AT ALL. Three assertions elsewhere say ANCHOR_FAILED is NOT in some
+    # output. Each of them passes for two very different reasons: the guard anchored correctly
+    # (the reason intended), or nothing anywhere says those words any more (the reason nobody
+    # would notice). The first spelling of those assertions matched "DID NOT RUN", which stayed
+    # true and stopped being SPECIFIC — this is the same failure one turn earlier, when the
+    # phrase stops existing rather than stops discriminating.
+    from showrunner import cli
+    producers = [os.path.join(ROOT, ".showrunner", "hooks", "worktree-guard.sh"),
+                 os.path.join(ROOT, ".showrunner", "hooks", "dispatch-guard.sh")]
+    for path in producers:
+        try:
+            with open(path) as fh:
+                body = fh.read()
+        except OSError as exc:                                      # noqa: BLE001
+            body = ""
+            ok("%s is readable, or the check below says nothing" % os.path.basename(path),
+               False, exc)
+        ok("%s still prints the anchor-failure phrase the suite matches on"
+           % os.path.basename(path), ANCHOR_FAILED in body, path)
+        # The other phrase an assertion depends on: the broken-candidate fail-open.
+        ok("...and still prints the broken-candidate phrase too, which a different assertion "
+           "reads as 'this was a fail-open, not an answer'",
+           "instead of answering" in body, path)
+
+    ok("and the CLI's own constant carries it, so the shim and the verb cannot drift into "
+       "wording the suite can no longer see", ANCHOR_FAILED in cli.NO_REPO_FAIL_OPEN,
+       cli.NO_REPO_FAIL_OPEN)
+
+    # THE DISCRIMINATION ITSELF, which is the whole point of moving off "DID NOT RUN": the
+    # benign degrade must NOT match the anchor phrase. If it ever does, the new anchor is a
+    # proxy too and this group says so before a Crawler discovers it in a worktree.
+    with open(os.path.join(ROOT, "lib", "showrunner", "lease.py")) as fh:
+        lease_src = fh.read()
+    ok("...and the no-session degrade — a correct, deliberate fail-open — does NOT contain the "
+       "anchor phrase, which is the entire reason the assertions moved off 'DID NOT RUN'",
+       ANCHOR_FAILED not in lease_src,
+       [ln for ln in lease_src.splitlines() if ANCHOR_FAILED in ln][:2])
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,
