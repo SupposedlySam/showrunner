@@ -7878,6 +7878,21 @@ def test_a_seat_survives_a_window_reload():
     ok("...it gets the fallback, and the seat stays where it was for its owner to reclaim",
        "unassigned" in said, said[:300])
 
+    # AND THE SUITE PUTS THE REAL CHECKOUT BACK. Two of the campaigns above are created in the
+    # REAL `.showrunner/campaigns/` on purpose — the hook resolves through CLAUDE_PROJECT_DIR,
+    # so the seat has to be claimed where the hook will look — and the comment above called
+    # that "throwaway campaign state". Nothing ever threw it away: 71 of them had piled up
+    # beside real campaigns, two per run, in the one directory an operator reads to find their
+    # own work. A test that cannot be sandboxed must clean up after itself instead, and must
+    # SAY SO with an assertion, or the cleanup is a line of code nobody notices rotting.
+    campdir = os.path.join(ROOT, ".showrunner", "campaigns")
+    for _c in ("reseat-discover-%d" % os.getpid(), hook_campaign):
+        shutil.rmtree(os.path.join(campdir, _c), ignore_errors=True)
+    leftover = [d for d in (os.listdir(campdir) if os.path.isdir(campdir) else [])
+                if d in ("reseat-discover-%d" % os.getpid(), hook_campaign)]
+    ok("...and the group removes the campaigns it had to create in the REAL checkout, so a "
+       "suite run does not leave residue in the live campaign list", not leftover, leftover)
+
 
 def test_a_seat_that_may_not_dispatch_is_refused_at_the_sanctioned_path():
     group("`spawn --launch` asks whether the seat may dispatch — the guard was on the path "
