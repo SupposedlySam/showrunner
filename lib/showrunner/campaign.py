@@ -209,6 +209,41 @@ def is_merged(cfg, branch, base, known=None):
     return rc == 0
 
 
+def content_in_base(cfg, branch, base, known=None):
+    """Does `base` already contain every byte this branch changed? True / False / None.
+
+    THE SQUASH-MERGE HOLE (#79). `is_merged` asks about ANCESTRY, and a squash-merge deliberately
+    creates a new commit with no parent link to the branch — so a branch whose every byte is
+    already in main reads as unmerged, forever. Reported from a checkout where `gc` reclaimed 0
+    of 48 trees, some five months old, ~24 GB. In any repo that squash-merges, the merge test
+    could never pass and `gc` was a no-op that printed a false reason.
+
+    MEASURED against showrunner's own implementation before building, because the report named
+    `git cherry` (patch-id matching) and showrunner uses `merge-base --is-ancestor`. Different
+    mechanism, identical outcome: squash the branch, main holds every byte, `--is-ancestor`
+    still answers no. The conclusion held even though the cause did not.
+
+    None IS "CANNOT TELL" AND MUST NEVER LICENSE A REMOVAL. Every git failure, and the
+    no-files-changed case, answers None rather than True — a branch that changed nothing is
+    `is_empty`'s question, and answering True here would let this stand in for it.
+    """
+    if not branch or not branch_exists(cfg, branch, known):
+        return None
+    rc, mb, _ = git(["merge-base", base, branch], cwd=cfg.root)
+    if rc != 0 or not (mb or "").strip():
+        return None
+    rc, out, _ = git(["diff", "--name-only", mb.strip(), branch], cwd=cfg.root)
+    if rc != 0:
+        return None
+    files = [f for f in (out or "").splitlines() if f.strip()]
+    if not files:
+        return None
+    # ONLY THE PATHS THE BRANCH TOUCHED. Comparing the whole trees would answer False for every
+    # branch the moment base moved on independently, which is most of them.
+    rc, _, _ = git(["diff", "--quiet", base, branch, "--"] + files, cwd=cfg.root)
+    return rc == 0
+
+
 def is_empty(cfg, branch, base_sha, known=None):
     """Did this branch ever receive a commit?
 
@@ -342,10 +377,24 @@ def reclaimable(cfg, graph, base="HEAD"):
         elif f.get("tree") == "dirty":
             row["why"] = ("%d uncommitted change(s) — SURFACED, never deleted"
                           % len(f.get("uncommitted") or []))
-        elif not f.get("merged"):
-            row["why"] = ("its branch is not merged into %s, so removing the tree would be the "
-                          "only remaining copy of that work leaving" % base)
+        elif not (f.get("merged") or f.get("content_in_base")):
+            # THE WORDING WAS FALSE FOR EVERY BRANCH-BACKED TREE, and the reporter was right to
+            # say so: refs live in the SHARED store, so removing a worktree never removes its
+            # branch, and the tree is not "the only remaining copy" of anything committed. A
+            # sentence asserted where it is provably untrue trains people to ignore it — and it
+            # is the exact sentence that would have mattered on the one tree in their checkout
+            # that really was irrecoverable, where it was never printed.
+            row["why"] = ("its branch is not in %s and %s does not already carry the bytes it "
+                          "changed, so the work is not integrated anywhere. The branch itself "
+                          "survives removing the tree — refs are shared — but nothing has "
+                          "picked this work up" % (base, base))
         else:
+            # SAY WHICH ANSWER MADE IT REDUNDANT. A squash-merge is reclaimed on a different
+            # fact from an ancestry merge, and an operator reading a deletion should be able to
+            # tell them apart without re-deriving it.
+            row["why"] = ("merged into %s" % base if f.get("merged") else
+                          "%s already carries every byte this branch changed (squash-merge)"
+                          % base)
             take.append(row)
             continue
         held.append(row)
@@ -463,6 +512,13 @@ def reconcile(cfg, graph, base="HEAD", deep=True):
         f["scratch_files"] = []
         f["uncommitted"] = []
         f["merged"] = is_merged(cfg, entry.get("branch") or "", base, known)
+        # SEPARATE FACT, NOT FOLDED INTO `merged`. "its commits are ancestors of base" and "base
+        # already has its bytes" are different statements, and an operator deciding whether to
+        # delete a tree deserves to be told which one is true. Deep mode only: this is two more
+        # git calls per Crawler, and the shallow path exists because that fan-out once put
+        # `waiting` past a consumer's probe timeout.
+        f["content_in_base"] = (True if f["merged"] else
+                                content_in_base(cfg, entry.get("branch") or "", base, known))
         f["empty"] = is_empty(cfg, entry.get("branch") or "", entry.get("base_sha"), known)
         # What was DISPATCHED against what actually RAN. Imported here rather than at module
         # scope because dispatch imports campaign — the comparison lives with reconciliation,

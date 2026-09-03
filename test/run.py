@@ -8474,8 +8474,19 @@ def test_a_worktree_is_reclaimed_when_its_work_lands():
        "uncommitted" in held_by.get(dirty["crawler"], ""), held_by)
     ok("a clean tree whose branch is NOT merged is held back",
        unmerged["crawler"] in held_by, held_by)
-    ok("...and the reason names what would be lost",
-       "only remaining copy" in held_by.get(unmerged["crawler"], ""), held_by)
+    # THIS ASSERTION USED TO REQUIRE THE PHRASE "only remaining copy", and that phrase was
+    # false for every branch-backed tree: refs live in the SHARED store, so removing a worktree
+    # never removes its branch. A consumer reported it after `gc` held 48 trees while printing
+    # it, and they were right that a sentence asserted where it is provably untrue trains people
+    # to ignore it — which matters most on the one tree in their checkout that really was
+    # irrecoverable, where it was never printed at all. The assertion still checks that the
+    # reason NAMES the risk; it now checks it names the true one.
+    _why_unmerged = held_by.get(unmerged["crawler"], "")
+    ok("...and the reason names what is actually at stake: the work is integrated nowhere",
+       "not integrated anywhere" in _why_unmerged, held_by)
+    ok("...while NOT claiming the tree is the only copy, which is false whenever a branch backs "
+       "it — the branch survives the removal", "only remaining copy" not in _why_unmerged,
+       held_by)
     ok("...and neither held-back tree is in the reclaim list, which is the pair that stops "
        "'reclaimable' meaning 'every tree'",
        dirty["crawler"] not in names and unmerged["crawler"] not in names, sorted(names))
@@ -13989,9 +14000,92 @@ def test_a_dependency_can_be_removed():
        "success that did not happen", "nothing removed" in said, said[:200])
 
 
+def test_gc_sees_a_squash_merge():
+    group("`gc` reclaimed 0 of 48 trees in a squash-merging repo, and the reason it printed was "
+          "false (#79)")
+    if not have("git"):
+        skip("the squash-merge group", "git is not installed")
+        return
+
+    # REPORTED FROM A REAL CHECKOUT: 48 worktrees, ~24 GB, some five months old, every one HELD.
+    # `is_merged` asks about ANCESTRY, and a squash-merge deliberately creates a new commit with
+    # no parent link to the branch — so a branch whose every byte is already in main reads as
+    # unmerged forever, and in any repo that squash-merges the test can never pass.
+    #
+    # MEASURED AGAINST THIS IMPLEMENTATION BEFORE BUILDING, because the report named `git cherry`
+    # (patch-id matching) and showrunner uses `merge-base --is-ancestor`. Different mechanism,
+    # identical outcome — the conclusion held even though the cause did not, which is exactly the
+    # thing a premise check is for and would have been easy to wave away as "not our code".
+    cfg = make_repo()
+    g = new_graph(cfg)
+    rec = worktree.spawn(cfg, g.show(g.add("squashed", leaf_id="sq1")), actor="sq")
+    campaign.record_spawn(cfg, rec)
+    wt = cfg.abspath(rec["worktree"])
+    for name in ("f1.txt", "f2.txt"):
+        with open(os.path.join(wt, name), "w") as fh:
+            fh.write("content of %s\n" % name)
+        sh(["git", "add", "-A"], wt)
+        sh(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", name], wt)
+    branch = rec["branch"]
+
+    sh(["git", "merge", "--squash", "-q", branch], cfg.root)
+    sh(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "squashed"],
+       cfg.root)
+
+    eq("ancestry says the squashed branch is NOT merged — the fact the old test rested on, and "
+       "it is not wrong, it is answering a different question",
+       campaign.is_merged(cfg, branch, "main"), False)
+    eq("...while the base DOES already carry every byte the branch changed",
+       campaign.content_in_base(cfg, branch, "main"), True)
+
+    take, held = campaign.reclaimable(cfg, new_graph(cfg), base="main")
+    ok("so the tree is reclaimable — in a squash-merging repo the old test could never pass and "
+       "`gc` was a no-op that printed a false reason",
+       rec["crawler"] in [t["crawler"] for t in take],
+       ([t["crawler"] for t in take], [(h["crawler"], h.get("why")) for h in held]))
+    ok("...and it SAYS which fact reclaimed it, because a squash-merge is a different answer "
+       "from an ancestry merge and an operator reading a deletion should not have to re-derive "
+       "which one applied",
+       any("squash" in (t.get("why") or "") for t in take), [t.get("why") for t in take])
+
+    # THE CONTROL, and it is the whole safety case: work that is genuinely nowhere else must
+    # still be held. Without it the assertions above are equally satisfied by a `gc` that
+    # reclaims everything, which is the direction that deletes somebody's only copy.
+    cfg2 = make_repo()
+    g2 = new_graph(cfg2)
+    rec2 = worktree.spawn(cfg2, g2.show(g2.add("unintegrated", leaf_id="un1")), actor="un")
+    campaign.record_spawn(cfg2, rec2)
+    wt2 = cfg2.abspath(rec2["worktree"])
+    with open(os.path.join(wt2, "only.txt"), "w") as fh:
+        fh.write("work nobody integrated\n")
+    sh(["git", "add", "-A"], wt2)
+    sh(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "only"], wt2)
+    take2, held2 = campaign.reclaimable(cfg2, new_graph(cfg2), base="main")
+    ok("a branch whose work is in NO base is still held — the squash allowance must not become "
+       "a blanket yes", rec2["crawler"] not in [t["crawler"] for t in take2],
+       [t["crawler"] for t in take2])
+
+    # AND THE HELD REASON MUST NOT ASSERT SOMETHING FALSE. It claimed removing the tree would
+    # leave "the only remaining copy of that work" — untrue for every branch-backed tree, since
+    # refs live in the shared store and the branch survives. A sentence asserted where it is
+    # provably false trains people to ignore it, and it is the exact sentence that would have
+    # mattered on the one tree in the reporter's checkout that really was irrecoverable.
+    why2 = " ".join(h.get("why") or "" for h in held2)
+    ok("...and the reason does not claim the tree is the only remaining copy, which is false "
+       "whenever a branch backs it", "only remaining copy" not in why2, why2[:300])
+    ok("...and says what IS true instead — the branch survives, and nothing has picked the work "
+       "up", "branch itself survives" in why2, why2[:300])
+
+    # CANNOT TELL IS NOT YES. Every git failure and the changed-nothing case answer None, because
+    # this decides whether a directory is deleted.
+    eq("a branch that does not exist yields None rather than True — an unreadable answer must "
+       "never license a removal", campaign.content_in_base(cfg, "showrunner/no-such", "main"),
+       None)
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

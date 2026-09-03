@@ -82,6 +82,14 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # Answering None restores the reported behaviour EXACTLY, in the direction that looks like
+    # caution: every squash-merged tree reads as unintegrated, `gc` holds all of them, and it
+    # prints a reason for doing so. A consumer measured that as 0 of 48 trees reclaimed, ~24 GB,
+    # some five months old — and nothing errored the whole time.
+    ("does the base already carry these bytes", "campaign.content_in_base",
+     "lib/showrunner/campaign.py",
+     r"(def content_in_base\(cfg, branch, base, known=None\):\n)",
+     "    return None\ndef _neutered_content_in_base(cfg, branch, base, known=None):\n"),
     # Answering False always is the reported state restored EXACTLY: the verb exists, the CLI
     # accepts it, and every removal reports "nothing removed" while the edge stays. An operator
     # who mistyped nothing at all is told their correct command found no such dependency — and
