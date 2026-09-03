@@ -2743,6 +2743,45 @@ def test_prose_options():
     ok("...and adding them twice is a no-op, so the walk cannot corrupt a parser it already fixed",
        C._add_prose_twins(parser) == [], C._add_prose_twins(parser))
 
+    # COMPANIONS, because the sweep scored this producer THIN at 2. Its death is the SAFE-looking
+    # direction: every prose option simply loses its file twin, the CLI still works, and a caller
+    # with backticked prose has nowhere safe to put it — which is the whole failure the twins
+    # exist to prevent, since a backtick inside a double-quoted shell argument is executed and
+    # removed before the program sees it. Nothing errors, so nothing notices.
+    #
+    # THE PRODUCER ALREADY CARRIES A MARK — it returns what it added — which is the remedy the
+    # sweep prints for a producer that is silent when it permits. The assertion above reads ONE
+    # entry out of that mark; these read the whole thing, and check the parser rather than the
+    # report.
+    missing = []
+    pairs = 0
+    for _action in (parser._subparsers._group_actions if parser._subparsers else []):
+        for _name, _sub in getattr(_action, "choices", {}).items():
+            _have = {o for a in _sub._actions for o in a.option_strings}
+            for _opt in C.PROSE_OPTS:
+                if ("--%s" % _opt) in _have:
+                    pairs += 1
+                    if ("--%s-file" % _opt) not in _have:
+                        missing.append("%s --%s" % (_name, _opt))
+    ok("EVERY verb carrying a prose option has its --<name>-file twin, not just the one this "
+       "group happens to name — the producer walks the parser, so the assertion has to as well "
+       "or it only ever proves one verb was reached", not missing, missing)
+    ok("...and it found %d prose option(s) to check, so the assertion above cannot pass by "
+       "walking an empty parser — an empty denominator is how a derived check goes quiet when "
+       "the thing it derives from moves" % pairs, pairs > 3, pairs)
+
+    # AND THE TWIN MUST PARSE, not merely appear in the returned list. `seen` is a report, and a
+    # producer that appended to it without calling add_argument would satisfy every assertion
+    # above while leaving the flag as unrecognised as it was before — the reported-success shape
+    # this repo keeps catching, here in the report of a fix rather than of a check.
+    try:
+        _ns = parser.parse_args(["close", "SOME-LEAF", "--reason-file", "/dev/null"])
+        _parsed, _why_parse = getattr(_ns, "reason_file", None) == "/dev/null", None
+    except SystemExit as exc:                                       # noqa: BLE001
+        _parsed, _why_parse = False, "argparse refused the twin: %s" % exc
+    ok("...and the parser ACCEPTS the twin it reported adding, which is the difference between "
+       "a flag that exists and a list that says it does", _parsed, _why_parse)
+
     d = tmpdir("prose-file")
     rf = os.path.join(d, "reason.txt")
     with open(rf, "w") as fh:
