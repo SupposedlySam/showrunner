@@ -170,8 +170,22 @@ git clone https://github.com/SupposedlySam/llm_chat.git ../llm_chat
 }
 ```
 
-`spawn --launch` then opens a room per Crawler, installs the tool into its worktree, and tells
-it in its brief to join and to ask rather than guess.
+`spawn --launch` then opens a room per Crawler, installs the tool into its worktree, **joins the
+Crawler to that room on its behalf**, and tells it in its brief to ask rather than guess.
+
+**The join is not left to the Crawler**, because leaving it there did not work. The brief used to
+say "the orchestrator opened a channel for you and wired delivery into this worktree" and then ask
+it to join — and a Crawler goes straight to the work, which is what the brief's own task section
+is optimising for. Three in one session never joined; every correction sent to them came back
+`nobody else is in this room yet` and sat unread until after they had closed. One of those unread
+messages was the fix for a red check. With `showrunner edit` correctly refusing to rewrite a brief
+that is already in somebody's hands, a running Crawler could not be corrected by any means.
+
+Membership is keyed to the Crawler's session, so `spawn` generates that id before it opens the
+room, joins from inside the Crawler's own worktree, and then **verifies the membership actually
+got recorded** rather than trusting the exit code. If the join does not happen the brief says so
+and tells the Crawler to join — a Crawler wrongly told it is already reachable will not join, and
+will read the silence as the orchestrator having nothing to say.
 
 **This said "leave `chat` out entirely and dispatch works exactly the same, minus the
 conversation", and that was wrong.** A Crawler whose turn-end is refused by the stop gate stays

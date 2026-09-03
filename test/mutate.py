@@ -82,6 +82,14 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # Reporting "joined" and doing nothing restores the reported failure EXACTLY, in its
+    # invisible direction: the room opens, the dispatch report says wired, the brief tells the
+    # Crawler it is already reachable — and every correction sent to it comes back `nobody else
+    # is in this room yet` and sits unread until after it has closed. Nothing errors. The whole
+    # cost is paid by a message that never arrives, which is the hardest kind of absence to see.
+    ("joining a Crawler to its own room", "dispatch.join_crawler", "lib/showrunner/dispatch.py",
+     r"(def join_crawler\([^)]*\):\n)",
+     "    return True, channel\ndef _neutered_join(cfg, record, channel):\n"),
     # Answering `base` unchanged restores the defect EXACTLY, in its safe-looking direction:
     # every caller that passes an explicit base keeps working, every library-level test keeps
     # passing, and only the unset-base path — the default `integrate` — dies, after the merge

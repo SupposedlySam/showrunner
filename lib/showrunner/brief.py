@@ -233,15 +233,39 @@ ORCH_HEADER = """\
 
 """
 
+# TWO SPELLINGS OF "REACHABLE", BECAUSE THEY ARE DIFFERENT FACTS (#78). The room existing and
+# the Crawler being IN it are separate states, and the brief asserted the second while only the
+# first had happened. "The orchestrator opened a channel for you and wired delivery into this
+# worktree" read as already-done, so a Crawler that went straight to the work — the common case,
+# since the task section is what it is optimising for — never joined, and every correction sent
+# to it came back `nobody else is in this room yet` and sat unread until after it had closed.
+MEMBERSHIP_JOINED = """\
+The orchestrator opened a channel for you, wired delivery into this worktree, **and joined you
+to the room**. You are already a member: messages arrive in your context automatically, you do
+not poll, and there is nothing to join.
+
+If delivery ever stops, re-join — **run it by this exact path**:
+
+    {chat_cli} join {channel} --as {crawler}
+"""
+
+MEMBERSHIP_UNJOINED = """\
+The orchestrator opened a channel for you and wired delivery into this worktree, but could NOT
+join you to the room:
+
+    {reason}
+
+**Nothing reaches you until you join**, so do it before you start — the orchestrator may
+already be holding a correction for you. **Run it by this exact path**:
+
+    {chat_cli} join {channel} --as {crawler}
+"""
+
 CHAT_BLOCK = """\
 ## You are reachable
 
-The orchestrator opened a channel for you and wired delivery into this worktree. Join it
-once, as yourself, before you start — **run it by this exact path**:
-
-    {chat_cli} join {channel} --as {crawler}
-
-Messages arrive in your context automatically; you do not poll. INBOUND and OUTBOUND are wired
+{membership}
+INBOUND and OUTBOUND are wired
 differently and only one of them is automatic: delivery hooks carry absolute paths, so you
 RECEIVE without doing anything, while sending needs the binary — and it is generally NOT on
 your PATH. A Crawler that reported this had received messages all session and could not answer
@@ -378,10 +402,10 @@ def build(cfg, leaf, spawn_record, decision=None, orchestrator_findings=None,
         # lying form cannot be expressed, and a string that unpacks by accident would put it
         # back.
         raise TypeError(
-            "brief.build takes the provisioning RESULT (channel, opened, detail), not a "
-            "channel name — a name is not a room. Use dispatch.open_channel(cfg, record).")
+            "brief.build takes the provisioning RESULT (channel, opened, detail, joined), not "
+            "a channel name — a name is not a room. Use dispatch.open_channel(cfg, record).")
     if chat is not None:
-        channel, opened, detail = chat
+        channel, opened, detail, joined = chat
         if channel and opened:
             # THE RESOLVED ABSOLUTE PATH, never the bare word. `llm_chat` is not on PATH for a
             # consumer who vendors it, and the bare name shipped in every brief: inbound worked
@@ -390,8 +414,12 @@ def build(cfg, leaf, spawn_record, decision=None, orchestrator_findings=None,
             # `doctor` already resolves it -- the same argument as `--version` answering from
             # where the code lives: the tool knows, so the tool should say.
             _cli = dispatch.chat_path(cfg, "cli") or "llm_chat"
+            _tmpl = MEMBERSHIP_JOINED if joined else MEMBERSHIP_UNJOINED
+            membership = _tmpl.format(channel=channel, crawler=spawn_record["crawler"],
+                                      chat_cli=_cli,
+                                      reason=detail or "no reason reported")
             chat_block = CHAT_BLOCK.format(channel=channel, crawler=spawn_record["crawler"],
-                                           chat_cli=_cli)
+                                           chat_cli=_cli, membership=membership)
         elif channel:
             # SAY IT, DO NOT OMIT IT. Silence here is indistinguishable from chat never having
             # been configured, and the two call for opposite behaviour: with chat off the

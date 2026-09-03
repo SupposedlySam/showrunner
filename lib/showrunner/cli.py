@@ -2405,18 +2405,25 @@ def cmd_spawn(args):
     # would mean two writers of one file and a window in which the version a Crawler can read
     # is the lying one — a window a failed launch leaves behind permanently, since a parked
     # leaf keeps its worktree. Opening first costs a reorder; there is nothing to patch.
-    chat = dispatch.open_channel(cfg, record) if getattr(args, "launch", False) else None
+    # Generated here, before the claim, so the claim, the campaign record and the process all
+    # name one session. Reading it back from a launched process would leave a window in which
+    # the claim names nothing and a live agent cannot be reaped.
+    #
+    # AND NOW BEFORE THE ROOM, TOO (#78). llm_chat keys room membership to the SESSION, so
+    # joining the Crawler to its own room on its behalf is only possible once we know which
+    # session it will be. This used to be generated after the brief was written, which put the
+    # one fact the join needs on the wrong side of the join — the reason the asymmetry could
+    # not simply have been fixed in place.
+    session = args.session
+    if getattr(args, "launch", False) and not session:
+        session = dispatch.new_session_id()
+
+    chat = (dispatch.open_channel(cfg, record, session=session)
+            if getattr(args, "launch", False) else None)
     text = brief.build(cfg, leaf, record, decision,
                        orchestrator_findings=args.finding or None,
                        chat=chat)
     brief_path = brief.write(cfg, record, text)
-
-    # Generated here, before the claim, so the claim, the campaign record and the process all
-    # name one session. Reading it back from a launched process would leave a window in which
-    # the claim names nothing and a live agent cannot be reaped.
-    session = args.session
-    if getattr(args, "launch", False) and not session:
-        session = dispatch.new_session_id()
 
     entry = campaign.record_spawn(cfg, record, pid=args.pid, session=session)
 

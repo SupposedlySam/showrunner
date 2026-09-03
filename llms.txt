@@ -327,6 +327,15 @@ nothing here can prompt it — `reap` correctly proposes nothing and every other
 healthy. Send it something in its room. If chat is disabled you have no way to reach it, which is
 why the room is not optional under `--launch`.
 
+**That remedy only works because `spawn` joins the Crawler itself.** It used to tell the Crawler
+to join, in a brief sentence that read as already-done, and a Crawler that goes straight to the
+work never ran it — so the message you sent was accepted by the server, answered `nobody else is
+in this room yet`, and sat unread until after the leaf closed. Delivery that depends on the
+recipient volunteering is not delivery. Membership is keyed to the SESSION, so the session id is
+generated before the room is opened, the join runs from inside the Crawler's worktree, and the
+recorded membership is read back rather than inferred from an exit code — a join that returns 0
+and records nothing is the same "reported success" this project keeps finding.
+
 **A STALLED Crawler is the same family and a different detector (#69).** It was not refused by
 anything — it simply stopped producing, and a live pid cannot tell you so: `ps` reports `Ss` for a
 session parked at a prompt and one mid-computation alike, and `%CPU` is a lifetime average, so a

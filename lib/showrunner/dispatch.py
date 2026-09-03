@@ -124,7 +124,7 @@ def chat_path(cfg, key):
     return raw if os.path.isabs(raw) else os.path.join(cfg.root, raw)
 
 
-def provision_chat(cfg, record, channel):
+def provision_chat(cfg, record, channel, session=None):
     """Install llm_chat into the Crawler's worktree so it can be talked to while it works.
 
     Its hooks live in `.claude/settings.local.json`, which is deliberately UNTRACKED because
@@ -168,11 +168,113 @@ def provision_chat(cfg, record, channel):
                        capture_output=True, text=True, timeout=60, cwd=cfg.root)
     out = (p.stdout + p.stderr).lower()
     if p.returncode != 0 and "exists" not in out and "already" not in out:
-        return False, "channel not opened: %s" % (p.stderr or p.stdout).strip()[:160]
+        return False, "channel not opened: %s" % (p.stderr or p.stdout).strip()[:160], False
+    # THE ROOM IS NOT THE MEMBERSHIP. Opening it made the orchestrator a member; the Crawler is
+    # still outside it until somebody joins it, and #78 is the whole cost of leaving that to
+    # the Crawler. Reported separately because a room that opened with the Crawler NOT in it is
+    # a real, distinct state the brief has to describe honestly.
+    joined, join_detail = join_crawler(cfg, record, channel, session)
+    if not joined:
+        return True, "joined: no — %s" % join_detail, False
+    return True, channel, True
+
+
+def join_crawler(cfg, record, channel, session=None):
+    """Join the Crawler to its OWN room, from the Crawler's project, before it starts (#78).
+
+    THE REPORTED FAILURE. Three Crawlers in one session, every correction the orchestrator sent
+    answered with `nobody else is in this room yet`, and `read --peek` later confirmed each
+    message sat unread until after the Crawler had closed its leaf. One of those unread messages
+    was the fix for a red check, which then survived into the PR and cost a full extra dispatch.
+    Meanwhile `showrunner edit` refuses while a leaf is `in_progress` — correctly, since editing
+    a brief under a Crawler working from it changes instructions already acted on. With chat
+    also undelivered there was no correction path at all.
+
+    WHY THE BRIEF DID NOT PREVENT IT. The brief told the Crawler to join. A Crawler goes
+    straight to the work — the brief's own task section is what it is optimising for — and
+    membership was the one part of "wired delivery into this worktree" that was not actually
+    wired. Delivery that depends on the recipient volunteering is not delivery, and the
+    asymmetry was ours: `spawn` already joined the room on the ORCHESTRATOR's behalf.
+
+    WHY THE ORCHESTRATOR CAN DO THIS AT ALL, and WHERE — MEASURED against the real tool rather
+    than read off its docs. llm_chat keys identity and membership to CLAUDE_CODE_SESSION_ID
+    ("you are a SESSION, not a project") and records them under the calling project, in
+    `.llm_chat/sessions/<the session>/joined.json`. The project-level `joined.json` is
+    documented too, and is a READ-TIME FALLBACK that `join` does not write.
+
+    AN EARLIER DRAFT OF THIS FUNCTION VERIFIED THAT PROJECT FILE, which the real `llm_chat join`
+    leaves absent. Every real spawn would have reported the Crawler un-joined while the join had
+    in fact succeeded, and every brief would have told an already-joined Crawler to join — a
+    regression worse than the defect, arrived at by believing a paragraph. Caught by running the
+    real binary against a throwaway room and looking at what appeared on disk.
+
+    So the join needs BOTH the Crawler's project and the Crawler's session id, which showrunner
+    already generates before launch — the same id `build_command` hands the process, so the
+    membership lands exactly where that session's delivery hook looks. It must not be recorded
+    under the ORCHESTRATOR's project or session: llm_chat warns that a shared record makes the
+    delivery hook send one agent's messages to the other, and has the incident to go with it.
+
+    AND THE MOMENT IS LAUNCH, not later. Joining starts you at the CURRENT END of the room, so a
+    Crawler joined at spawn receives everything sent after it; one joined later silently misses
+    whatever arrived in between, which is the same unread-correction failure wearing a
+    different hat.
+
+    Returns (joined, detail).
+    """
+    cli = chat_path(cfg, "cli")
+    if not cli or not os.path.exists(cli):
+        return False, "no chat CLI configured"
+    wt = cfg.abspath(record["worktree"])
+    if not wt or not os.path.isdir(wt):
+        return False, "the Crawler has no worktree to join from"
+    if not session:
+        # NAMED, NOT GUESSED. Without the Crawler's session id the membership would land under
+        # whatever session the ORCHESTRATOR is running as — the exact collision llm_chat warns
+        # about, delivering this Crawler's messages to another agent. Refusing is the only safe
+        # answer, and it is reported rather than swallowed.
+        return False, ("no session id for the Crawler, so a join would record membership under "
+                       "the orchestrator's session and deliver its messages to the wrong agent")
+    env = dict(os.environ, CLAUDE_PROJECT_DIR=wt, CLAUDE_CODE_SESSION_ID=session)
+    try:
+        p = subprocess.run([cli, "join", channel, "--as", record["crawler"]],
+                           capture_output=True, text=True, timeout=60, cwd=wt, env=env)
+    except (OSError, subprocess.SubprocessError) as exc:            # noqa: BLE001
+        return False, "join could not be run: %s" % exc
+    said = (p.stdout + p.stderr).strip()
+    # BOTH, NOT EITHER. The exit code alone cannot see a join that returns 0 and records
+    # nothing; the record alone cannot see a join that FAILED beside a membership some earlier
+    # spawn into this tree had already written. Requiring both fails closed, and the direction
+    # matters: a Crawler wrongly reported as joined is told in its brief that it is already
+    # reachable, will not join, and will read the resulting silence as the orchestrator having
+    # nothing to say — which is worse than being told to join something it already joined.
+    if p.returncode != 0 and "already" not in said.lower():
+        return False, "join exited %d: %s" % (p.returncode, said[:140])
+    # VERIFIED AGAINST THE RECORD, NOT THE EXIT CODE, for the same reason `provision_chat`
+    # reads settings.local.json instead of trusting its installer: the thing that matters is a
+    # membership the delivery hook will find, and that is a fact we can read. A join that
+    # exits 0 and records nothing is precisely the "reported success" this repo keeps catching.
+    # The SESSION file is where `join` writes; the project file is the documented read-time
+    # fallback a pre-session checkout may still carry. Both are read, so this keeps answering if
+    # llm_chat moves back, and NEITHER being present is a real "not joined" rather than an error.
+    rooms = {}
+    for candidate in (os.path.join(wt, ".llm_chat", "sessions", session, "joined.json"),
+                      os.path.join(wt, ".llm_chat", "joined.json")):
+        try:
+            with open(candidate) as fh:
+                rooms = json.load(fh)
+            break
+        except (OSError, ValueError):
+            continue
+    if not rooms:
+        return False, "no membership recorded in the worktree: %s" % (said[:120] or "no output")
+    got = (rooms.get(channel) or {}).get("identity")
+    if got != record["crawler"]:
+        return False, ("the worktree records %r in %s, not %r"
+                       % (got, channel, record["crawler"]))
     return True, channel
 
 
-def open_channel(cfg, record):
+def open_channel(cfg, record, session=None):
     """Name the room AND open it, and return WHICH of those actually happened.
 
     Returns `(channel, opened, detail)`. `channel` is None when chat is switched off; otherwise
@@ -192,9 +294,9 @@ def open_channel(cfg, record):
     """
     channel = channel_for(cfg, record)
     if not channel:
-        return None, False, "disabled"
-    opened, detail = provision_chat(cfg, record, channel)
-    return channel, opened, detail
+        return None, False, "disabled", False
+    opened, detail, joined = provision_chat(cfg, record, channel, session)
+    return channel, opened, detail, joined
 
 
 def wire_stop_gate(cfg, record):
@@ -293,7 +395,7 @@ def new_session_id():
 def launch(cfg, record, decision, brief, session_id, dry_run=False, chat=None):
     """Record first, then start. See the module docstring for why that order is not cosmetic.
 
-    `chat` is an already-taken `open_channel` result, `(channel, opened, detail)`. The caller
+    `chat` is an already-taken `open_channel` result, `(channel, opened, detail, joined)`. The caller
     passes it when it opened the room ITSELF, before writing the brief — which `spawn` must do,
     because the brief asserts the room exists and the brief is authored once. Opening it again
     here would be a second `open` on a live room, and worse would let the brief and the dispatch
@@ -321,9 +423,9 @@ def launch(cfg, record, decision, brief, session_id, dry_run=False, chat=None):
 
     chat_ok, chat_detail = (False, "disabled")
     if chat is not None:
-        _, chat_ok, chat_detail = chat
+        _, chat_ok, chat_detail, _joined = chat
     elif channel:
-        chat_ok, chat_detail = provision_chat(cfg, record, channel)
+        chat_ok, chat_detail, _joined = provision_chat(cfg, record, channel, session_id)
 
     log = os.path.join(cfg.abspath(record["scratch"]), "session.log")
     os.makedirs(os.path.dirname(log), exist_ok=True)
@@ -336,8 +438,9 @@ def launch(cfg, record, decision, brief, session_id, dry_run=False, chat=None):
         raise Refused("could not start a session for %s: %s" % (record["crawler"], exc))
 
     campaign.set_state(cfg, record["crawler"], "running", pid=proc.pid, dispatched_at=now())
-    return {"session": session_id, "model": model, "channel": channel if chat_ok else None,
-            "chat": chat_detail, "cmd": cmd, "pid": proc.pid, "log": rel(log, cfg.root),
+    return {"session": session_id, "model": model,
+            "channel": channel if (chat_ok and _joined) else None,
+            "joined": bool(_joined), "chat": chat_detail, "cmd": cmd, "pid": proc.pid, "log": rel(log, cfg.root),
             "stop_gate": gate_detail if gate_ok else None, "launched": True}
 
 

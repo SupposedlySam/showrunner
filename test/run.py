@@ -137,6 +137,15 @@ for _leaky in (_HB_ROOT, _CFG_HOME):
     atexit.register(_shutil.rmtree, _leaky, True)
 atexit.register(shutil.rmtree, _CFG_HOME, True)
 
+# THE TWO CAMPAIGNS THE RESEAT GROUP MUST CREATE IN THE REAL CHECKOUT, registered for removal
+# HERE — at import — and not only at the end of that group. A cleanup that runs on the happy
+# path is not a cleanup: `mutate.py` exists to make groups fail, so the line at the end of that
+# group is exactly the line a sweep skips, and every sweep left two more directories behind in
+# the live campaign list. The group still removes them and asserts it, because the assertion is
+# what keeps the intent visible; this is the net under it.
+for _c in ("reseat-discover-%d" % os.getpid(), "reseat-hook-%d" % os.getpid()):
+    atexit.register(_shutil.rmtree, os.path.join(ROOT, ".showrunner", "campaigns", _c), True)
+
 from showrunner import brief, campaign, collide, config, dispatch, gates, graph as G, harness, lanes, lease, locks, pin, reach, roles, util, worktree  # noqa: E402
 from showrunner.util import Refused, boot_token as boot_token_for_test  # noqa: E402
 
@@ -10902,11 +10911,17 @@ def test_dispatch():
        "not mistaken for one nobody has messaged yet", out["channel"], "sr_crawler-a")
 
 
-def _fake_chat_tools(open_rc, stderr=""):
-    """An installer that works and a chat CLI whose `open` succeeds or fails, as asked.
+def _fake_chat_tools(open_rc, stderr="", join_rc=0, join_records=True):
+    """An installer that works and a chat CLI whose `open` and `join` succeed or fail, as asked.
 
     The failure is the one actually observed: `dispatch.chat` configured, the server down, so
     the installer lands the hooks and `open` returns non-zero.
+
+    `join` IS A SEPARATE VERB HERE because it is a separate fact (#78). The old fake answered
+    every verb with one exit code, which is exactly the conflation the defect was: a room that
+    opened was assumed to be a room the Crawler was in. `join_records=False` is the nastier
+    case — a join that exits 0 and records no membership — because that is the shape the
+    verification exists to catch, and an exit code alone cannot see it.
     """
     d = tmpdir("chattools")
     installer = os.path.join(d, "install")
@@ -10914,8 +10929,30 @@ def _fake_chat_tools(open_rc, stderr=""):
         fh.write('#!/bin/sh\nmkdir -p "$1/.claude" && printf "{}" > "$1/.claude/settings.local.json"\n')
     os.chmod(installer, 0o755)
     cli_path = os.path.join(d, "chat")
+    script = (
+        '#!/bin/sh\n'
+        'if [ "$1" = "join" ]; then\n'
+        '  channel="$2"; ident=""; shift 2\n'
+        '  while [ $# -gt 0 ]; do\n'
+        '    if [ "$1" = "--as" ]; then ident="$2"; fi\n'
+        '    shift\n'
+        '  done\n'
+        '  if [ "__RECORDS__" = "1" ]; then\n'
+        '    d="$CLAUDE_PROJECT_DIR/.llm_chat/sessions/$CLAUDE_CODE_SESSION_ID"\n'
+        '    mkdir -p "$d"\n'
+        '    printf \'{"%s":{"identity":"%s"}}\' "$channel" "$ident" '
+        '> "$d/joined.json"\n'
+        '  fi\n'
+        '  exit __JOINRC__\n'
+        'fi\n'
+        'printf "%s\\n" __STDERR__ >&2\n'
+        'exit __OPENRC__\n')
+    script = (script.replace("__RECORDS__", "1" if join_records else "0")
+                    .replace("__JOINRC__", str(join_rc))
+                    .replace("__STDERR__", json.dumps(stderr or "ok"))
+                    .replace("__OPENRC__", str(open_rc)))
     with open(cli_path, "w") as fh:
-        fh.write('#!/bin/sh\nprintf "%%s\\n" %s >&2\nexit %d\n' % (json.dumps(stderr or "ok"), open_rc))
+        fh.write(script)
     os.chmod(cli_path, 0o755)
     return installer, cli_path
 
@@ -10942,7 +10979,7 @@ def test_brief_never_asserts_an_unopened_room():
 
     failed = brief.build(cfg, leaf, rec,
                          chat=("sr_room1", False, "channel not opened: no llm_chat server at "
-                                                  "http://localhost:7717"))
+                                                  "http://localhost:7717", False))
     ok("a brief written after provisioning FAILED does not claim a channel was opened",
        "opened a channel for you" not in failed, failed[:0])
     ok("...and does not hand the Crawler a join command that cannot succeed",
@@ -10958,7 +10995,7 @@ def test_brief_never_asserts_an_unopened_room():
 
     # THE RESTRAINT CASE. A guard that fires on the good path is worse than the bug: it would
     # cut every Crawler off from a room that really is there.
-    opened = brief.build(cfg, leaf, rec, chat=("sr_room1", True, "sr_room1"))
+    opened = brief.build(cfg, leaf, rec, chat=("sr_room1", True, "sr_room1", True))
     ok("provisioning that SUCCEEDS leaves the join block exactly as it was",
        "The orchestrator opened a channel for you" in opened and "join sr_room1 --as" in opened,
        opened[:0])
@@ -10967,7 +11004,7 @@ def test_brief_never_asserts_an_unopened_room():
     # AND THE THIRD STATE, which is neither: chat switched off. Unchanged from before this
     # existed -- no block at all -- because a Crawler that was never going to have a room does
     # not need to be told one failed.
-    off = brief.build(cfg, leaf, rec, chat=(None, False, "disabled"))
+    off = brief.build(cfg, leaf, rec, chat=(None, False, "disabled", False))
     ok("chat.enabled false renders no chat block at all, as it always did",
        "NOT reachable" not in off and "opened a channel" not in off, off[:0])
     eq("...identically to passing nothing, so the two ways of saying 'no chat' agree",
@@ -10991,15 +11028,16 @@ def test_brief_never_asserts_an_unopened_room():
     g2 = new_graph(chatty)
     leaf2 = g2.show(g2.add("another", leaf_id="ROOM2"))
     rec2 = worktree.spawn(chatty, leaf2, actor="c")
-    ch, opened_ok, detail = dispatch.open_channel(chatty, rec2)
+    ch, opened_ok, detail, joined_ok = dispatch.open_channel(chatty, rec2)
     ok("open_channel names the room AND reports that opening it failed, separately",
        ch and opened_ok is False and "not opened" in detail, (ch, opened_ok, detail))
     ok("...and the brief built from that result carries the failure, not the name",
        "opened a channel for you" not in brief.build(chatty, leaf2, rec2,
-                                                     chat=(ch, opened_ok, detail)))
+                                                     chat=(ch, opened_ok, detail,
+                                                           joined_ok)))
     nochat = make_repo({"dispatch": {"chat": {"enabled": False}}})
     eq("...while chat switched off reports no channel rather than a failed one",
-       dispatch.open_channel(nochat, rec2), (None, False, "disabled"))
+       dispatch.open_channel(nochat, rec2), (None, False, "disabled", False))
 
 
 def test_the_brief_on_disk_is_the_one_that_tells_the_truth():
@@ -11087,7 +11125,7 @@ def test_filed_issues_15_to_21():
     # produced a finding, on the one session whose attention is not parallel.
     chatty_leaf = g.show(g.add("with a room", leaf_id="L25"))
     rec25 = worktree.spawn(cfg, chatty_leaf, actor="c25")
-    t25 = brief.build(cfg, chatty_leaf, rec25, chat=("sr_c25", True, "sr_c25"))
+    t25 = brief.build(cfg, chatty_leaf, rec25, chat=("sr_c25", True, "sr_c25", True))
     ok("the brief tells a Crawler NOT to post a start notice — the orchestrator wrote the brief "
        "and already has that content", "not post a start notice" in t25.lower(), t25[:0])
     ok("...while keeping the ask-rather-than-guess property that makes the room worth its cost",
@@ -13132,9 +13170,112 @@ def test_guard_anchor_phrase_is_live():
        [ln for ln in lease_src.splitlines() if ANCHOR_FAILED in ln][:2])
 
 
+def test_a_crawler_is_joined_to_its_own_room():
+    group("`spawn` joins the Crawler to its room, so a correction reaches a Crawler that never "
+          "volunteered to join (#78)")
+    if not have("git"):
+        skip("the crawler-join group", "git is not installed")
+        return
+
+    # THE REPORTED FAILURE. Three Crawlers, three corrections, every send answered `nobody else
+    # is in this room yet`, every message still unread when the Crawler closed its leaf. One was
+    # the fix for a red check, which survived into the PR. `showrunner edit` refuses while a leaf
+    # is in_progress — correctly — so with chat undelivered there was no correction path at all.
+    #
+    # THE ASYMMETRY WAS OURS: `spawn` already joined the room on the ORCHESTRATOR's behalf and
+    # left the Crawler to do its own, in a brief sentence that read as already-done.
+    installer, chat_cli = _fake_chat_tools(open_rc=0)
+    cfg = make_repo({"dispatch": {"chat": {"enabled": True, "channel_prefix": "sr",
+                                           "installer": installer, "cli": chat_cli}}})
+    g = new_graph(cfg)
+    leaf = g.show(g.add("a leaf whose crawler must be reachable", leaf_id="JOIN1"))
+    rec = worktree.spawn(cfg, leaf, actor="c")
+    sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    ch, opened, detail, joined = dispatch.open_channel(cfg, rec, session=sid)
+    ok("the room opens AND the Crawler is joined to it", ch and opened and joined,
+       (ch, opened, detail, joined))
+
+    # WHERE THE MEMBERSHIP LANDS IS THE WHOLE POINT. llm_chat keys identity per CALLING PROJECT
+    # in `$CLAUDE_PROJECT_DIR/.llm_chat/joined.json`, and warns that two agents sharing that
+    # file share an identity — the delivery hook then sends one agent's messages to the other.
+    # A join run from the orchestrator's root would do exactly that, so this asserts the record
+    # is in the CRAWLER's tree and names the CRAWLER.
+    wt = cfg.abspath(rec["worktree"])
+
+    def rooms_at(base, who=sid):
+        """The membership file's contents, or {} — READ, NOT ASSUMED. A missing file is a real
+        outcome here (nobody joined), and letting it raise would take every assertion below it
+        down unrun, which the mutation sweep scores as UNSCOREABLE rather than as coverage.
+
+        The path is the one the REAL llm_chat writes, measured against it: under the calling
+        project, keyed by session. An earlier draft of the code under test verified the
+        project-level file instead — which `join` does not write — and would have reported
+        every successful join as a failure.
+        """
+        try:
+            with open(os.path.join(base, ".llm_chat", "sessions", who, "joined.json")) as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return {}
+
+    eq("...and the membership is recorded in the CRAWLER's worktree, under the CRAWLER's name — "
+       "not in the orchestrator's checkout, where it would collide with the orchestrator's own",
+       (rooms_at(wt).get(ch) or {}).get("identity"), rec["crawler"])
+    ok("...and the orchestrator's own checkout did not acquire the Crawler's membership",
+       (rooms_at(cfg.root).get(ch) or {}).get("identity") != rec["crawler"], cfg.root)
+
+    # A JOIN WITH NO SESSION IS REFUSED, not guessed. llm_chat keys membership to the session,
+    # so a join run without the Crawler's id records it under whichever session the ORCHESTRATOR
+    # is — llm_chat's own warning, with an incident behind it: a question delivered to the wrong
+    # session, answered under the wrong name, while the session actually asked never woke.
+    rec_ns = worktree.spawn(cfg, g.show(g.add("no session", leaf_id="JOIN0")), actor="c0")
+    nojoin, why_ns = dispatch.join_crawler(cfg, rec_ns, "sr_join0", session=None)
+    ok("a join with no session id is REFUSED rather than recorded under the orchestrator's",
+       nojoin is False and "orchestrator" in why_ns, (nojoin, why_ns))
+
+    text = brief.build(cfg, leaf, rec, chat=(ch, opened, detail, joined))
+    ok("...and the brief says the Crawler is already in the room rather than telling it to join",
+       "joined you" in text and "nothing to join" in text, text[:600])
+
+    # A JOIN THAT EXITS 0 AND RECORDS NOTHING is the shape an exit code cannot see, and it is
+    # the same "reported success" this repo keeps catching — the installer that returns 0 and
+    # writes no settings file, the record that names a proof that is not there. Verified against
+    # the file llm_chat actually reads, so the answer is a membership and not a return value.
+    inst2, cli2 = _fake_chat_tools(open_rc=0, join_records=False)
+    cfg2 = make_repo({"dispatch": {"chat": {"enabled": True, "channel_prefix": "sr",
+                                            "installer": inst2, "cli": cli2}}})
+    g2 = new_graph(cfg2)
+    leaf2 = g2.show(g2.add("a leaf whose join silently does nothing", leaf_id="JOIN2"))
+    rec2 = worktree.spawn(cfg2, leaf2, actor="c")
+    ch2, opened2, detail2, joined2 = dispatch.open_channel(cfg2, rec2, session=sid)
+    ok("a join that exits 0 but records no membership is NOT reported as joined",
+       opened2 and joined2 is False, (ch2, opened2, detail2, joined2))
+
+    # AND THE BRIEF MUST SAY SO. A Crawler told it is already reachable, in a room it is not in,
+    # is worse off than one told to join: it will not join, and it will read the silence as the
+    # orchestrator having nothing to say.
+    text2 = brief.build(cfg2, leaf2, rec2, chat=(ch2, opened2, detail2, joined2))
+    ok("...and the brief tells that Crawler to join, because nothing reaches it until it does",
+       "could NOT" in text2 and "Nothing reaches you until you join" in text2, text2[:700])
+    ok("...and does not also claim it was joined, which would be both halves of the answer",
+       "joined you" not in text2, text2[:700])
+
+    # A FAILING JOIN IS THE ORDINARY FAILURE, and must not be mistaken for a failing room.
+    inst3, cli3 = _fake_chat_tools(open_rc=0, join_rc=1)
+    cfg3 = make_repo({"dispatch": {"chat": {"enabled": True, "channel_prefix": "sr",
+                                            "installer": inst3, "cli": cli3}}})
+    g3 = new_graph(cfg3)
+    leaf3 = g3.show(g3.add("a leaf whose join fails", leaf_id="JOIN3"))
+    rec3 = worktree.spawn(cfg3, leaf3, actor="c")
+    ch3, opened3, _d3, joined3 = dispatch.open_channel(cfg3, rec3, session=sid)
+    ok("a room that opened with a join that FAILED still reports the room as opened, and the "
+       "membership as absent — two facts, reported separately",
+       ch3 and opened3 and joined3 is False, (ch3, opened3, joined3))
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,
