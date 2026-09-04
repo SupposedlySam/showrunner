@@ -375,6 +375,10 @@ SHOWRUNNER_CAMPAIGN=my-campaign showrunner status    # state nests under a per-c
 
 ```
 showrunner campaign use my-campaign     # bind THIS session; its hooks resolve that campaign
+showrunner campaign use --repo-wide     # bind the unnamed repo-wide campaign. NOT the same as
+                                        # `clear`, which unbinds and then falls back to the
+                                        # CHECKOUT default — so in a checkout that has one,
+                                        # `clear` lands on that instead of the repo-wide seat
 showrunner campaign show                # what this session resolves, and which layer named it
 showrunner campaign clear               # unbind
 ```

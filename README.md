@@ -554,7 +554,9 @@ their own campaign without colliding.
 ```bash
 showrunner campaign use my-campaign   # bind this session
 showrunner campaign show              # what this session resolves, and what named it
-showrunner campaign clear             # unbind
+showrunner campaign use --repo-wide   # bind the unnamed repo-wide campaign
+showrunner campaign clear             # unbind (falls back to the checkout default, which is
+                                      # NOT the same as --repo-wide)
 ```
 
 Resolution is **explicit argument > environment > this session's binding > checkout config**. A

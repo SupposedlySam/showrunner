@@ -193,12 +193,18 @@ def _campaign_from_session(root):
     entry = read_session_bindings(root).get(session)
     if not isinstance(entry, dict):
         return None
+    if "campaign" not in entry:
+        return None
     try:
         if time.time() - float(entry.get("ts") or 0) > SESSION_BINDING_TTL:
             return None
     except (TypeError, ValueError):
         return None
-    return (str(entry.get("campaign") or "")).strip() or None
+    # "" IS AN ANSWER — the repo-wide campaign, named deliberately. Returning None for it would
+    # collapse "this session chose the repo-wide campaign" into "this session chose nothing",
+    # and the caller would fall through to the checkout default: the exact failure this binding
+    # exists to let an agent escape.
+    return (str(entry.get("campaign") or "")).strip()
 
 
 def bind_session(root, session, campaign):
@@ -220,12 +226,17 @@ def bind_session(root, session, campaign):
         now = int(time.time())
         data = {s: e for s, e in data.items()
                 if isinstance(e, dict) and now - int(e.get("ts") or 0) <= SESSION_BINDING_TTL}
-        if campaign:
-            data[session] = {"campaign": campaign, "ts": now}
-        else:
+        # None UNBINDS; "" BINDS TO THE REPO-WIDE CAMPAIGN. They were one branch, and that made
+        # the repo-wide campaign the one campaign `campaign use` could not name — the same hole
+        # the environment had until set-but-empty became an answer there. `clear` is not the
+        # escape either: it falls back to the CHECKOUT default, so in a checkout that has one it
+        # lands on the shadowing campaign rather than the repo-wide seat.
+        if campaign is None:
             data.pop(session, None)
+        else:
+            data[session] = {"campaign": campaign, "ts": now}
         atomic_write_json(path, data)
-    return campaign or None
+    return campaign
 
 
 def _campaign_from_config(data):
@@ -316,12 +327,12 @@ class Config:
             # `is not None`, NOT truthiness: "" is the environment explicitly naming the
             # repo-wide campaign, and treating it as "unset" is what made that unsayable.
             self._campaign, self._campaign_source = (_env_campaign or None), "environment"
-        elif _session_campaign:
+        elif _session_campaign is not None:
             # ABOVE the checkout default and BELOW the environment. A binding belongs to one
             # agent, so it must beat a file shared with every other agent here; and a Crawler
             # dispatched with SHOWRUNNER_CAMPAIGN set belongs to that campaign for its whole
             # life, so nothing an operator binds later may move it.
-            self._campaign, self._campaign_source = _session_campaign, "session"
+            self._campaign, self._campaign_source = (_session_campaign or None), "session"
         elif _cfg_campaign:
             self._campaign, self._campaign_source = _cfg_campaign, "config"
         else:

@@ -14554,6 +14554,7 @@ def test_many_agents_one_monorepo():
     after = run(A, "campaign", "show").stdout
     ok("a binding can be removed", "not bound" in after, after[:200])
 
+
     # COMPANIONS, because the sweep scored both producers THIN at 2: most assertions here expect
     # the quiet answer, which a resolver returning None or {} satisfies. The positive side:
 
@@ -14601,6 +14602,47 @@ def test_many_agents_one_monorepo():
             os.environ["CLAUDE_CODE_SESSION_ID"] = _saved
         if _savedc is not None:
             os.environ["SHOWRUNNER_CAMPAIGN"] = _savedc
+
+    # THE REPO-WIDE CAMPAIGN MUST BE NAMEABLE, and it was the one campaign this verb could not
+    # name. `use ""` was rejected as a missing argument, and `clear` is not the escape — it
+    # unbinds and falls back to the CHECKOUT default, so in a checkout that has one it lands on
+    # the shadowing campaign rather than the repo-wide seat. Exactly the hole the environment had
+    # until set-but-empty became an answer, one layer along, reported against the new surface.
+    #
+    # ORDER MATTERS IN THIS FIXTURE, and getting it wrong made the first version fail for a
+    # reason unrelated to the behaviour: the seat has to be claimed while there is NO checkout
+    # default, or the claim itself lands in the default and there is no repo-wide seat to find.
+    run(A, "campaign", "clear")
+    run(A, "role", "claim", "campaign-lead", "--who", "agent-a", "--session", A)
+    with open(os.path.join(cfg.root, ".showrunner", "config.local.json"), "w") as fh:
+        json.dump({"campaign": "shadowing"}, fh)
+    shadowed = run(A, "whoami", "--session", A).stdout
+    # ANCHORED ON THE RESOLVED ROLE, not on the absence of the string. The shadow NOTE this very
+    # session prints SAYS "you hold campaign-lead ... in the repo-wide default campaign", so an
+    # absence check on that name fails while the state is exactly right — the notice satisfying
+    # the assertion written to detect what the notice is about.
+    ok("the fixture IS the reported state: a checkout default is hiding a repo-wide seat",
+       "shadowing" in shadowed and "role: unassigned" in shadowed, shadowed[:300])
+
+    eq("`campaign use --repo-wide` is accepted",
+       run(A, "campaign", "use", "--repo-wide").returncode, 0)
+    said = run(A, "whoami", "--session", A).stdout
+    ok("...and it reaches the repo-wide seat THROUGH a checkout default pointing elsewhere — "
+       "which `clear` cannot do, because it falls back to that very default",
+       "campaign-lead" in said, said[:400])
+
+    run(A, "campaign", "clear")
+    eq("...and a literal empty name is the same act, so this reads like the environment, where "
+       "empty already names the repo-wide campaign",
+       run(A, "campaign", "use", "").returncode, 0)
+    ok("...with the same effect", "campaign-lead" in run(A, "whoami", "--session", A).stdout)
+
+    # AND `clear` STILL MEANS UNBIND, not "use the repo-wide one". Two different acts, and
+    # collapsing them is what made the repo-wide campaign unnameable in the first place.
+    run(A, "campaign", "clear")
+    cleared = run(A, "whoami", "--session", A).stdout
+    ok("`clear` still falls back to the checkout default — it is not a synonym for --repo-wide",
+       "shadowing" in cleared, cleared[:300])
 
 
 def main():

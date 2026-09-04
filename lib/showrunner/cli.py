@@ -1035,11 +1035,15 @@ def cmd_campaign(args):
         return 0
 
     name = getattr(args, "name", None)
-    if not name:
-        eprint("`campaign use` needs a name")
+    if getattr(args, "repo_wide", False):
+        name = ""
+    if name is None:
+        eprint("`campaign use` needs a name, or --repo-wide (equivalently a literal \"\") to "
+               "bind the repo-wide campaign")
         return 2
     config.bind_session(cfg.root, session, name)
-    print("bound this session to campaign %r" % name)
+    print("bound this session to %s"
+          % ("the repo-wide campaign" if name == "" else "campaign %r" % name))
     # SAY WHETHER IT WILL ACTUALLY TAKE EFFECT. A binding is BELOW the environment, so a session
     # launched with SHOWRUNNER_CAMPAIGN set keeps that campaign — and reporting "bound" while
     # every command goes on resolving something else is the claim-about-a-thing-that-did-not-
@@ -3525,8 +3529,14 @@ def build_parser():
     s = sub.add_parser("campaign", help="bind THIS session to a campaign, so its hooks resolve "
                                         "it — many agents, one monorepo, no shared file")
     csub = s.add_subparsers(dest="campcmd")
-    t = csub.add_parser("use", help="bind this session to a campaign")
-    t.add_argument("name")
+    t = csub.add_parser("use", help="bind this session to a campaign. `--repo-wide` (or a "
+                                    "literal \"\") binds the unnamed repo-wide one, which is "
+                                    "otherwise reachable only from the environment — and the "
+                                    "environment is what an already-running agent cannot change")
+    t.add_argument("name", nargs="?")
+    t.add_argument("--repo-wide", action="store_true",
+                   help="bind the repo-wide campaign rather than a named one. NOT the same as "
+                        "`clear`, which unbinds and then falls back to the CHECKOUT default")
     t.add_argument("--session", help="bind a session other than this one")
     t = csub.add_parser("show", help="what this session resolves, and what named it")
     t.add_argument("--session")
