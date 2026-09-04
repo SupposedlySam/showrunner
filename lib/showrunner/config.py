@@ -125,6 +125,36 @@ def _campaign_from_env():
     return (os.environ.get("SHOWRUNNER_CAMPAIGN") or "").strip() or None
 
 
+def _campaign_from_config(data):
+    """A default campaign from config, or None. LOWER precedence than the environment.
+
+    THE ENVIRONMENT WAS THE ONLY WAY TO NAME A CAMPAIGN, and a hook is not spawned from the shell
+    where an operator typed `export`. So a seat claimed under a named campaign was invisible to
+    every guard: `whoami` in the operator's terminal answered `campaign-lead`, and the identical
+    call from a PreToolUse hook — same repo, same session, same instant — answered `unassigned`
+    and denied the write. Reported with that measurement side by side (#82), and reproduced here
+    before this was written.
+
+    IT ONLY EVER WORKED WHEN THE CAMPAIGN HAPPENED TO BE THE DEFAULT ONE, which is why it
+    survived: this repo's own sessions hit both sides within an hour. And llms.txt calls several
+    campaigns in one checkout the ORDINARY case, with roles scoped per campaign — so the normal
+    way to take a seat produced a seat no guard could resolve.
+
+    BELOW THE ENVIRONMENT, DELIBERATELY. A Crawler is dispatched with SHOWRUNNER_CAMPAIGN in its
+    environment and belongs to that campaign for its whole life; a config default must not be
+    able to override the campaign a dispatch put an agent in. This only answers when nothing else
+    did.
+
+    `config.local.json` is the machine-local layer and is where this belongs — which campaign a
+    checkout is working in is a fact about this clone, not about the project. It is read from the
+    MERGED data, so a project that genuinely has one campaign forever can set it in the tracked
+    config.json instead and that is their call to make.
+    """
+    if not isinstance(data, dict):
+        return None
+    return (str(data.get("campaign") or "")).strip() or None
+
+
 class Config:
     def __init__(self, data, root, path, campaign=None, tree=None, user_path=None):
         self.data = data
@@ -158,7 +188,11 @@ class Config:
         # answers when os.environ moved — two configs loaded for two campaigns both reported the
         # second one's paths. A config object has to be a stable answer about ONE campaign, or
         # nothing downstream can hold one and trust it.
-        self._campaign = campaign if campaign is not None else _campaign_from_env()
+        # EXPLICIT > ENVIRONMENT > CONFIG. An argument is a caller who knows; the environment is
+        # a dispatch that placed this process in a campaign; config is what a checkout does when
+        # nobody said. A hook can only ever reach the third.
+        self._campaign = (campaign if campaign is not None
+                          else (_campaign_from_env() or _campaign_from_config(data)))
 
     # -- accessors ---------------------------------------------------------
     def get(self, key, default=None):

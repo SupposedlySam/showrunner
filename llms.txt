@@ -373,6 +373,14 @@ parallelism it buys. So more than one at a time in one checkout is the ORDINARY 
 SHOWRUNNER_CAMPAIGN=my-campaign showrunner status    # state nests under a per-campaign directory
 ```
 
+`.showrunner/config.local.json` can carry `{"campaign": "my-campaign"}` as the default when the
+environment names none. That layer exists because **a hook cannot read your shell**: PreToolUse
+hooks are spawned with the session's environment, so a seat claimed under a named campaign
+resolved as `unassigned` in every guard while the operator's own terminal reported it correctly —
+same repo, same session, same instant. It only ever worked when the campaign you claimed in
+happened to be the unnamed default. Precedence is explicit argument > environment > config, so a
+dispatched Crawler cannot have its campaign overridden by a checkout's default.
+
 Graph, campaign record, event journal and scratch all follow the campaign. **Locks deliberately do
 not.** A lock names a physical single-consumer resource — a device, a bound port — shared by the
 machine and not by a body of work, so two campaigns flashing the same TV must serialize against

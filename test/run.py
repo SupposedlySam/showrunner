@@ -14291,9 +14291,81 @@ def test_a_hook_registered_in_both_layers_is_reported():
        "registered in BOTH" not in _doc2, _doc2[-400:])
 
 
+def test_a_campaign_seat_is_visible_to_a_hook():
+    group("A seat claimed under a NAMED campaign was invisible to every hook, because the "
+          "environment was the only way to name one (#82)")
+    if not have("git"):
+        skip("the campaign-visibility group", "git is not installed")
+        return
+
+    # THE MEASUREMENT FROM THE REPORT, reproduced before anything was built: same repo, same
+    # session, same instant, the only variable being the environment.
+    #
+    #   SHOWRUNNER_CAMPAIGN=named  whoami -> role: campaign-lead
+    #   env -u SHOWRUNNER_CAMPAIGN whoami -> role: unassigned, and the guard denies the write
+    #
+    # A PreToolUse hook is spawned by the host with the SESSION's environment, not the shell
+    # where an operator typed `export`. So every hook resolved the unnamed default campaign
+    # whatever campaign the session was working in — and it only ever worked when the campaign
+    # you claimed in happened to BE the default. This checkout hit both sides within an hour.
+    cfg = make_repo()
+    eq("with no campaign named anywhere, the answer is None — the repo-wide default, and the "
+       "behaviour every existing checkout has", cfg.campaign, None)
+
+    # THE CONFIG FALLBACK. `config.local.json` is the machine-local layer, which is what "which
+    # campaign is this clone working in" is a fact about.
+    local = os.path.join(cfg.root, ".showrunner", "config.local.json")
+    with open(local, "w") as fh:
+        json.dump({"campaign": "from-config"}, fh)
+    eq("a campaign named in config is used when the environment names none — the only input a "
+       "hook can reach", config.load(cfg.root).campaign, "from-config")
+
+    # THE CONTROL THAT MATTERS MOST: a dispatched Crawler carries SHOWRUNNER_CAMPAIGN and belongs
+    # to that campaign for its whole life. A config default that could override it would put an
+    # agent in the wrong campaign for reasons nobody typed.
+    _saved = os.environ.get("SHOWRUNNER_CAMPAIGN")
+    os.environ["SHOWRUNNER_CAMPAIGN"] = "from-env"
+    try:
+        eq("the ENVIRONMENT still wins, so a dispatch cannot be overridden by a checkout's "
+           "default", config.load(cfg.root).campaign, "from-env")
+    finally:
+        if _saved is None:
+            os.environ.pop("SHOWRUNNER_CAMPAIGN", None)
+        else:
+            os.environ["SHOWRUNNER_CAMPAIGN"] = _saved
+
+    # AND AN EXPLICIT ARGUMENT BEATS BOTH — a caller who knows outranks a checkout that guessed.
+    eq("an explicit campaign outranks the config default",
+       config.load(cfg.root, campaign="explicit").campaign, "explicit")
+
+    # THE CONSUMER, end to end, through the CLI with the variable STRIPPED — which is the
+    # environment a hook actually gets, and the whole point of the report. A resolver that
+    # answers correctly in-process while `whoami` still says `unassigned` would fix nothing.
+    sr = os.path.join(ROOT, "bin", "showrunner")
+    home = tmpdir("camp-vis-home")
+    os.makedirs(os.path.join(home, "showrunner"), exist_ok=True)
+    with open(os.path.join(home, "showrunner", "roles.json"), "w") as fh:
+        json.dump({"roles": {"unassigned": {"acquire": "claim"},
+                             "campaign-lead": {"acquire": "claim"}},
+                   "fallback": "unassigned"}, fh)
+    env_named = dict(os.environ, XDG_CONFIG_HOME=home, SHOWRUNNER_CAMPAIGN="from-config")
+    subprocess.run([sys.executable, sr, "role", "claim", "campaign-lead", "--who", "me",
+                    "--session", "S-VIS"], cwd=cfg.root, capture_output=True, text=True,
+                   env=env_named)
+    blind = dict(os.environ, XDG_CONFIG_HOME=home)
+    blind.pop("SHOWRUNNER_CAMPAIGN", None)
+    said = subprocess.run([sys.executable, sr, "whoami", "--session", "S-VIS"], cwd=cfg.root,
+                          capture_output=True, text=True, env=blind).stdout
+    ok("`whoami` with the variable STRIPPED — a hook's environment — resolves the seat claimed "
+       "under the named campaign, instead of answering the fallback and denying the write",
+       "campaign-lead" in said, said[:400])
+    ok("...and names the campaign it resolved, so an operator can tell WHICH one a guard was "
+       "speaking for", "from-config" in said, said[:400])
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

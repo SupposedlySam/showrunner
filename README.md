@@ -546,6 +546,17 @@ campaigns in one checkout is the ordinary case. `SHOWRUNNER_CAMPAIGN` scopes gra
 and scratch. **Locks deliberately do not follow it:** a lock names a physical resource shared by
 the machine, so two campaigns flashing the same TV must serialize against each other.
 
+**Set `campaign` in `.showrunner/config.local.json` if you work in a named campaign.** Hooks are
+spawned with the *session's* environment, not the shell where you typed `export`, so a seat
+claimed under a named campaign is invisible to every guard unless something other than the
+environment can name it — the guard resolves the unnamed default campaign and denies writes the
+seat permits. The environment still wins where it is set, so a dispatched Crawler keeps the
+campaign it was dispatched into.
+
+```json
+{ "campaign": "my-campaign" }
+```
+
 **A run that could not measure anything is not a degraded comparison.** `check` already declined
 to let reduced resolution read as a clean comparison; it now refuses to let *no* resolution read
 as reduced. A suite that could not reach the world did not measure anything, and its failure count

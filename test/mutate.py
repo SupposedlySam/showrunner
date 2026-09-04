@@ -82,6 +82,14 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # Answering None restores the reported failure exactly, and it is invisible from the one
+    # place anybody looks: the operator's terminal still resolves the seat, because their shell
+    # has the variable. Only the hooks — which are spawned with the session's environment —
+    # silently fall back to the unnamed campaign and deny writes the seat permits.
+    ("a campaign named anywhere but the environment", "config._campaign_from_config",
+     "lib/showrunner/config.py",
+     r"(def _campaign_from_config\(data\):\n)",
+     "    return None\ndef _neutered_campaign_from_config(data):\n"),
     # Answering [] always is the state before this existed, and it is silent by construction:
     # every guard registered in both layers goes on firing twice per tool call, `doctor` reports
     # a healthy install, and the only symptom is two identical notices that read as the tool
