@@ -121,8 +121,23 @@ DEFAULTS = {
 
 
 def _campaign_from_env():
-    """The selected campaign, or None. Read at LOAD time — see Config.__init__."""
-    return (os.environ.get("SHOWRUNNER_CAMPAIGN") or "").strip() or None
+    """The campaign the environment names: a name, "" for the repo-wide one, or None if unset.
+
+    SET-BUT-EMPTY IS AN ANSWER, and it had to become one the moment config could carry a default.
+    `os.environ.get` already distinguishes unset (None) from set-to-empty (""), and collapsing
+    them meant a session could not say "the repo-wide campaign, for me, right now": unsetting the
+    variable falls through to the checkout's config default, and exporting it empty did too. So
+    the remedy for a config default that shadows your seat — use the other campaign for this
+    session — was expressible for every campaign except the repo-wide one, which is exactly the
+    one the reported case was holding a seat in.
+
+    Found writing the remedy sentence for that notice and discovering it named a command that
+    does not work.
+    """
+    raw = os.environ.get("SHOWRUNNER_CAMPAIGN")
+    if raw is None:
+        return None                     # unset: nobody said, go and look
+    return raw.strip()                  # "" means the repo-wide campaign, deliberately
 
 
 def _campaign_from_config(data):
@@ -191,8 +206,31 @@ class Config:
         # EXPLICIT > ENVIRONMENT > CONFIG. An argument is a caller who knows; the environment is
         # a dispatch that placed this process in a campaign; config is what a checkout does when
         # nobody said. A hook can only ever reach the third.
-        self._campaign = (campaign if campaign is not None
-                          else (_campaign_from_env() or _campaign_from_config(data)))
+        #
+        # WHICH LAYER ANSWERED IS KEPT, not just the answer. A campaign that came from CONFIG is
+        # per-CHECKOUT, so in a checkout where several agents work different campaigns it decides
+        # resolution for every session's hooks and not only the one that wrote it — and it can
+        # therefore strip a seat somebody else is holding right now. An env-derived campaign
+        # cannot do that: it is this process's own. Nothing can tell those apart from the value.
+        _env_campaign = _campaign_from_env()
+        _cfg_campaign = _campaign_from_config(data)
+        if campaign is not None:
+            # "" NAMES THE REPO-WIDE CAMPAIGN EXPLICITLY, and it has to be sayable. `None` here
+            # means "nobody specified, go and look", so a caller wanting the DEFAULT campaign had
+            # no way to ask for it — passing None re-read the config and answered whatever that
+            # said. `shadowed_seat` was written with exactly that bug: its probe of the repo-wide
+            # campaign silently probed the configured one instead, and it reported nothing while
+            # the seat it was looking for sat right there. The identity element again, in the
+            # code added to report an identity-element failure.
+            self._campaign, self._campaign_source = (campaign or None), "explicit"
+        elif _env_campaign is not None:
+            # `is not None`, NOT truthiness: "" is the environment explicitly naming the
+            # repo-wide campaign, and treating it as "unset" is what made that unsayable.
+            self._campaign, self._campaign_source = (_env_campaign or None), "environment"
+        elif _cfg_campaign:
+            self._campaign, self._campaign_source = _cfg_campaign, "config"
+        else:
+            self._campaign, self._campaign_source = None, None
 
     # -- accessors ---------------------------------------------------------
     def get(self, key, default=None):
@@ -201,6 +239,16 @@ class Config:
     @property
     def project_name(self):
         return self.get("project_name") or os.path.basename(self.root)
+
+    @property
+    def campaign_source(self):
+        """"explicit" | "environment" | "config" | None — WHICH layer named the campaign.
+
+        Exists because the three carry different authority. An explicit argument and an
+        environment variable belong to THIS process; a config default belongs to the checkout and
+        is therefore shared with every other session working in it.
+        """
+        return self._campaign_source
 
     @property
     def campaign(self):

@@ -261,6 +261,61 @@ def roster(cfg):
     return out
 
 
+def shadowed_seat(cfg, session):
+    """Is a CONFIG-derived campaign hiding a seat this session actually holds? (campaign, role) or None.
+
+    THE COST OF FIXING #82, reported by the same consumer while testing that fix and worth as much
+    as the original. `config.local.json` is per-CHECKOUT, and hooks have no environment, so in a
+    checkout where several agents work different campaigns whichever one writes the default
+    decides campaign resolution for EVERY session's hooks — not only its own. An agent holding a
+    seat in another campaign keeps it in its own terminal and loses it in every guard, mid-work,
+    with no event.
+
+    Measured before this was written: claim `campaign-lead` in the default campaign, add
+    `{"campaign": "some-other"}` to config, and the hook path answers `unassigned` while the
+    operator's shell still answers `campaign-lead`. Correct by the precedence rule; the rule is
+    not the problem, who pays is.
+
+    ONLY WHEN THE CAMPAIGN CAME FROM CONFIG. An explicit argument or an environment variable
+    belongs to THIS process — a dispatched Crawler is in its campaign because somebody put it
+    there, and pointing that out every turn would be noise. A config default is the only one that
+    can be somebody else's decision, and it is also the only one this can be cheap about: env-
+    driven sessions skip the scan entirely.
+
+    REPORTED, NEVER OVERRIDDEN. Resolving to the seat instead would make a config default mean
+    something different depending on who reads it, which is worse than the fault it fixes. This
+    hands the operator the two facts and the remedy.
+    """
+    if getattr(cfg, "campaign_source", None) != "config" or not session:
+        return None
+    from . import config as _config
+    root = os.path.join(cfg.root, ".showrunner", "campaigns")
+    others = [None]
+    try:
+        others += sorted(d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d)))
+    except OSError:
+        pass
+    for other in others:
+        if other == cfg.campaign:
+            continue
+        try:
+            # "" not None: None means "unspecified" and would re-read the very config default
+            # this function exists to look past.
+            probe = _config.load(cfg.root, campaign=(other or ""))
+        except Exception:                                           # noqa: BLE001
+            continue
+        for entry in roster(probe):
+            holder = entry.get("holder") or {}
+            if (holder.get("session") or "") != session:
+                continue
+            # HELD, not merely recorded. A stale seat in another campaign is not being taken
+            # from anybody, and warning about one would fire forever on abandoned state.
+            if entry.get("state") != locks.HELD:
+                continue
+            return (other, entry.get("role"))
+    return None
+
+
 def _seat_lock(cfg, role, seat):
     return locks.Lock(_claims_root(cfg), "%s#%d" % (slug(role, 40), seat))
 
@@ -696,6 +751,30 @@ def whoami(cfg, session=None):
         _state = None
     if _state and _state[0] != "ok":
         out.append("  %s" % _state[1])
+
+    # A CONFIG DEFAULT CAN TAKE A SEAT SOMEBODY IS HOLDING. `config.local.json` is per-CHECKOUT
+    # and hooks carry no environment, so in a checkout where several agents work different
+    # campaigns, whichever one writes the default decides resolution for EVERY session's hooks.
+    # The holder keeps the seat in their own terminal and loses it in every guard, mid-work, with
+    # no event — and the fault is visible only from the hooks, which is where nobody looks.
+    #
+    # SAID HERE for the same reason the re-seat and the stale pin are: this is the one message a
+    # session and a guard both read. Reported, never overridden — resolving to the seat instead
+    # would make one config default mean different things to different readers.
+    try:
+        _shadow = shadowed_seat(cfg, session)
+    except Exception:                                               # noqa: BLE001
+        _shadow = None
+    if _shadow:
+        _other, _role = _shadow
+        out.append("  NOTE: this checkout's config names campaign %r, and you hold %s in %s — so "
+                   "every hook resolves %r and reports you as the fallback while your own "
+                   "terminal still shows the seat. The config default is per-CHECKOUT and shared "
+                   "with every session here. Either `export SHOWRUNNER_CAMPAIGN=%s` for this "
+                   "session (empty names the repo-wide campaign, and is not the same as leaving "
+                   "it unset), or change `campaign` in .showrunner/config.local.json."
+                   % (cfg.campaign, _role, _other or "the repo-wide default campaign",
+                      cfg.campaign, _other or ""))
     if r["campaign"]:
         out.append("  campaign: %s" % r["campaign"])
 

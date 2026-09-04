@@ -534,6 +534,22 @@ def cmd_doctor(args):
     # `worktree register --local` (untracked) leaves every guard running twice per tool call.
     # The installer says so once, at install time; this says it on every run, which is the half
     # that survives somebody installing months ago.
+    # A CONFIG DEFAULT SHADOWING A LIVE SEAT (#82 follow-up). doctor is where somebody has
+    # stopped to look, which is the second half of the pair: the announcement catches it at the
+    # moment it bites, this catches it at the moment somebody is asking what is wrong.
+    try:
+        _sh = roles.shadowed_seat(cfg, os.environ.get("SHOWRUNNER_SESSION")
+                                  or util.caller_session())
+    except Exception:                                            # noqa: BLE001
+        _sh = None
+    if _sh:
+        print("  %s this checkout's config names campaign %r, and this session holds %s in %s. "
+              "Every hook here resolves the config one and reports the fallback, while a "
+              "terminal with SHOWRUNNER_CAMPAIGN set still shows the seat. The default is "
+              "per-CHECKOUT and shared with every session in it."
+              % (YEL + "warn " + OFF, cfg.campaign, _sh[1],
+                 _sh[0] or "the repo-wide default campaign"))
+
     _dbl = lease.double_registered(cfg.root)
     if _dbl:
         print("  %s %d showrunner hook(s) are registered in BOTH .claude/settings.json and "

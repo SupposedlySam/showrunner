@@ -14362,6 +14362,96 @@ def test_a_campaign_seat_is_visible_to_a_hook():
     ok("...and names the campaign it resolved, so an operator can tell WHICH one a guard was "
        "speaking for", "from-config" in said, said[:400])
 
+    # THE COST OF THAT FIX, reported by the same consumer while testing it. `config.local.json`
+    # is per-CHECKOUT and hooks carry no environment, so in a checkout where several agents work
+    # different campaigns whichever one writes the default decides resolution for EVERY session's
+    # hooks. An agent holding a seat elsewhere keeps it in its own terminal and loses it in every
+    # guard, mid-work, with no event — invisible from the only place anyone looks, for exactly
+    # the reason the original bug was.
+    cfg2 = make_repo()
+    home2 = tmpdir("shadow-home")
+    os.makedirs(os.path.join(home2, "showrunner"), exist_ok=True)
+    with open(os.path.join(home2, "showrunner", "roles.json"), "w") as fh:
+        json.dump({"roles": {"unassigned": {"acquire": "claim"},
+                             "campaign-lead": {"acquire": "claim"}},
+                   "fallback": "unassigned"}, fh)
+    env2 = dict(os.environ, XDG_CONFIG_HOME=home2)
+    env2.pop("SHOWRUNNER_CAMPAIGN", None)
+    subprocess.run([sys.executable, sr, "role", "claim", "campaign-lead", "--who", "me",
+                    "--session", "S-SHADOW"], cwd=cfg2.root, capture_output=True, text=True,
+                   env=env2)
+    with open(os.path.join(cfg2.root, ".showrunner", "config.local.json"), "w") as fh:
+        json.dump({"campaign": "somebody-elses"}, fh)
+
+    shadow_said = subprocess.run([sys.executable, sr, "whoami", "--session", "S-SHADOW"],
+                                 cwd=cfg2.root, capture_output=True, text=True,
+                                 env=env2).stdout
+    ok("a config default that shadows a seat this session HOLDS elsewhere is called out — the "
+       "holder is being disarmed by somebody else's per-checkout setting",
+       "somebody-elses" in shadow_said and "repo-wide default campaign" in shadow_said,
+       shadow_said[:600])
+
+    # THE REMEDY MUST WORK. It names `export SHOWRUNNER_CAMPAIGN=`, and an empty value used to
+    # fall THROUGH to the config default — so the sentence named a command that did nothing, for
+    # the one campaign the reported case was holding a seat in.
+    env_empty = dict(env2, SHOWRUNNER_CAMPAIGN="")
+    recovered = subprocess.run([sys.executable, sr, "whoami", "--session", "S-SHADOW"],
+                               cwd=cfg2.root, capture_output=True, text=True,
+                               env=env_empty).stdout
+    ok("...and the remedy it names actually recovers the seat — an empty value NAMES the "
+       "repo-wide campaign and is not the same as leaving the variable unset",
+       "campaign-lead" in recovered, recovered[:400])
+    eq("...which is a different answer from unset, or the two could not both be sayable",
+       config.load(cfg2.root).campaign, "somebody-elses")
+
+    # THE CONTROL: no shadow when the seat is in the campaign config names. Without it, the
+    # assertion above is satisfied by a notice that fires on every session with a config default.
+    with open(os.path.join(cfg2.root, ".showrunner", "config.local.json"), "w") as fh:
+        json.dump({"campaign": "matching"}, fh)
+    subprocess.run([sys.executable, sr, "role", "claim", "campaign-lead", "--who", "me",
+                    "--session", "S-MATCH"], cwd=cfg2.root, capture_output=True, text=True,
+                   env=dict(env2, SHOWRUNNER_CAMPAIGN="matching"))
+    quiet = subprocess.run([sys.executable, sr, "whoami", "--session", "S-MATCH"],
+                           cwd=cfg2.root, capture_output=True, text=True, env=env2).stdout
+    ok("...while a session whose seat IS in the configured campaign gets no such notice",
+       "repo-wide default campaign" not in quiet, quiet[:400])
+
+    # AND AN ENVIRONMENT-NAMED CAMPAIGN IS NEVER CALLED A SHADOW. A dispatched Crawler is in its
+    # campaign because somebody put it there; saying so every turn would be noise, and noise is
+    # what gets a notice ignored on the turn it matters.
+    from showrunner import roles as _R
+    eq("an env-named campaign is not reported as shadowing anything",
+       _R.shadowed_seat(config.load(cfg2.root, campaign="matching"), "S-SHADOW"), None)
+
+    # COMPANIONS, because the sweep scored this THIN at 1: every assertion around it expects the
+    # QUIET answer, and a producer neutered to "nothing is ever shadowed" satisfies all of them.
+    # The restraint claims are right and stay; these are the positive side.
+
+    # THE VALUE, not just the rendered sentence. A detector that returned the wrong campaign or
+    # the wrong role would still put those words on screen, and the operator would go looking in
+    # the wrong place.
+    with open(os.path.join(cfg2.root, ".showrunner", "config.local.json"), "w") as fh:
+        json.dump({"campaign": "somebody-elses"}, fh)
+    found = _R.shadowed_seat(config.load(cfg2.root), "S-SHADOW")
+    ok("the detector NAMES the campaign the seat is really in, and the role — an operator sent "
+       "to the wrong campaign is no better off than one told nothing",
+       found is not None and found[0] is None and str(found[1]).startswith("campaign-lead"),
+       found)
+
+    # THE CONSUMER. `doctor` is the second channel, and it is the one somebody reads when they
+    # have stopped to ask what is wrong. A fact computed for two readers with neither reading it
+    # is the registered-never-fired shape this repo keeps finding.
+    doc = subprocess.run([sys.executable, sr, "doctor"], cwd=cfg2.root,
+                         capture_output=True, text=True,
+                         env=dict(env2, SHOWRUNNER_SESSION="S-SHADOW")).stdout
+    # ANCHORED ON THE WARNING'S OWN WORDS, not on the campaign name. The name appears in
+    # doctor's output twice for unrelated reasons — the graph path and the waiting journal both
+    # contain it — so `"somebody-elses" in doc` passed whether or not the warning fired. It was
+    # a vacuous assertion, and the mutation sweep is what said so: it did not move the kill count.
+    ok("`doctor` reports the shadowed seat too, so it is visible at the moment somebody stops to "
+       "look and not only at the moment it bites",
+       "this checkout's config names campaign" in doc, doc[-700:])
+
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")

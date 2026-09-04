@@ -82,6 +82,21 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # Answering None always says "the environment named nothing", so config wins every time —
+    # and a Crawler dispatched INTO a campaign would silently work in whichever one the checkout
+    # configured. The dispatch still reports success and the tree is still correct; only the
+    # campaign every command inside it resolves is somebody else's.
+    ("the campaign the environment names", "config._campaign_from_env",
+     "lib/showrunner/config.py",
+     r"(def _campaign_from_env\(\):\n)",
+     "    return None\ndef _neutered_campaign_from_env():\n"),
+    # Answering None always restores the reported state exactly and in its quiet direction: the
+    # config default goes on stripping a seat somebody is holding, their own terminal keeps
+    # showing it, and only the hooks disagree. Nothing errors, and the holder finds out when a
+    # write they are entitled to make is denied.
+    ("a config default shadowing a held seat", "roles.shadowed_seat", "lib/showrunner/roles.py",
+     r"(def shadowed_seat\(cfg, session\):\n)",
+     "    return None\ndef _neutered_shadowed_seat(cfg, session):\n"),
     # Answering None restores the reported failure exactly, and it is invisible from the one
     # place anybody looks: the operator's terminal still resolves the seat, because their shell
     # has the variable. Only the hooks — which are spawned with the session's environment —
