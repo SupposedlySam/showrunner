@@ -4,6 +4,7 @@
 # carrying a campaign reported as permanently dirty and `--version` answered "dirty — this sha
 # overstates what is here" on a clean tree. A warning that is always on is one nobody reads.
 campaigns/
+sessions.json
 graph.db
 graph.db-*
 locks/

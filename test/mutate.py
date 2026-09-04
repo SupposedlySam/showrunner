@@ -82,6 +82,20 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # Answering {} always is "nobody bound anything", which is the pre-binding world: every
+    # agent in the monorepo falls back to the shared checkout default and they collide on
+    # campaign resolution. It cannot fail loudly — an empty map is what a fresh checkout has.
+    ("session bindings on disk", "config.read_session_bindings", "lib/showrunner/config.py",
+     r"(def read_session_bindings\(root\):\n)",
+     "    return {}\ndef _neutered_read_session_bindings(root):\n"),
+    # Answering None always removes the ONE per-session channel that reaches a hook. Every agent
+    # in the monorepo falls back to the shared checkout default, so they collide on campaign
+    # resolution and take each other's seats — silently, because each one's own terminal still
+    # looks right. That is the state this whole mechanism exists to end.
+    ("the campaign bound to THIS session", "config._campaign_from_session",
+     "lib/showrunner/config.py",
+     r"(def _campaign_from_session\(root\):\n)",
+     "    return None\ndef _neutered_campaign_from_session(root):\n"),
     # Answering None always says "the environment named nothing", so config wins every time —
     # and a Crawler dispatched INTO a campaign would silently work in whichever one the checkout
     # configured. The dispatch still reports success and the tree is still correct; only the
@@ -1024,6 +1038,10 @@ NOT_SWEPT = {
     # Return an exit code rather than a finding. Their behaviour is asserted through the CLI
     # group by exit code, which is the contract callers actually depend on.
     "cli.main": "dispatch; asserted by every CLI-group exit code",
+    "cli.cmd_campaign": "CLI wrapper over config.bind_session; its effect is asserted through "
+                        "what a second process RESOLVES — two agents in one checkout each "
+                        "reading their own campaign — which is stronger than mutating the "
+                        "wrapper, and its refusals (no session id, no name) are driven directly",
     "cli.cmd_claim": "CLI wrapper over graph.claim; exit code asserted",
     # The roles seam's three verbs, arriving with that work. Excused as wrappers ONLY because
     # the suite drives each as a real subprocess and asserts its exit code and its output --

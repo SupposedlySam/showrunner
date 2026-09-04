@@ -13133,8 +13133,12 @@ def test_cli():
     # Pure observation passes by finding nothing, which is also what a broken regex returns.
     ok("...and it found commands to check at all, so a PASS means they were verified rather "
        "than that the scan matched nothing", seen > 5, seen)
+    # THE GHOST WORD HAS TO STAY A GHOST, and this one did not: `campaign` was the example here
+    # until it became a real verb, at which point the fixture stopped testing anything and said
+    # so — because of the `not in verbs` half, which is the guard that makes the choice of word
+    # safe rather than lucky. Kept, with a word nothing is likely to adopt.
     ok("...and a verb the CLI rejects is caught rather than waved through",
-       "campaign" not in verbs and bool(list(commands_in("run `showrunner campaign` now"))))
+       "frobnicate" not in verbs and bool(list(commands_in("run `showrunner frobnicate` now"))))
 
     # The DENOMINATOR. Everything above only checks commands the positional rule can SEE, so
     # a remedy written in a position it does not recognise is not wrong — it is absent, and
@@ -13174,7 +13178,7 @@ def test_cli():
     # the rule separates them rather than that the repo happens to be clean today. (llm_chat's
     # practice, adopted after two of its own fixes each cut the finding count.)
     fixture = (
-        "run `showrunner campaign` to see it\n"          # ghost: no such verb
+        "run `showrunner frobnicate` to see it\n"        # ghost: no such verb
         "run `showrunner lock guard -- cmd` first\n"     # real, with a real subcommand
         "run `showrunner lock sprint -- cmd` first\n"    # real verb, ghost subcommand
         "run `showrunner close mytask --proof p` now\n"  # real verb + ARGUMENT, not a subverb
@@ -13187,7 +13191,7 @@ def test_cli():
             flagged.add("%s %s" % (word, sub))
     eq("the rule separates a ghost verb, a ghost subcommand, a real command, a real command "
        "with an argument, and prose — one fixture, so a clean repo cannot be mistaken for a "
-       "working check", flagged, {"campaign", "lock sprint"})
+       "working check", flagged, {"frobnicate", "lock sprint"})
     ok("...and `close`'s flag VALUES are not mistaken for subcommands, which would report a "
        "valid command as dead", not subverbs_of("close"), sorted(subverbs_of("close")))
 
@@ -14453,9 +14457,129 @@ def test_a_campaign_seat_is_visible_to_a_hook():
        "this checkout's config names campaign" in doc, doc[-700:])
 
 
+def test_many_agents_one_monorepo():
+    group("Several agents in ONE checkout each get their own campaign, without a shared file and "
+          "without taking each other's seats")
+    if not have("git"):
+        skip("the many-agents group", "git is not installed")
+        return
+
+    # THE REQUIREMENT, stated by an operator running many agents in one monorepo on one machine:
+    # each needs its own campaign and its own Crawlers, and none may disturb the others. Every
+    # other way of naming a campaign fails that:
+    #   * config.local.json is per-CHECKOUT — whoever writes it decides for everybody's hooks,
+    #     and strips seats from live holders (the #82 follow-up)
+    #   * SHOWRUNNER_CAMPAIGN is per-session but only settable BEFORE a session starts, so an
+    #     agent already running cannot choose a campaign at all
+    #
+    # A HOOK IS HANDED ITS OWN IDENTITY even though it is handed no config: CLAUDE_CODE_SESSION_ID
+    # is in the session process's environment, and PreToolUse payloads carry `session_id`. That
+    # is enough to look a binding up, which is why the per-session direction was NOT the dead end
+    # it was written off as.
+    cfg = make_repo()
+    home = tmpdir("mono-home")
+    os.makedirs(os.path.join(home, "showrunner"), exist_ok=True)
+    with open(os.path.join(home, "showrunner", "roles.json"), "w") as fh:
+        json.dump({"roles": {"unassigned": {"acquire": "claim"},
+                             "campaign-lead": {"acquire": "claim"}},
+                   "fallback": "unassigned"}, fh)
+    sr = os.path.join(ROOT, "bin", "showrunner")
+    A = "aaaaaaaa-0000-0000-0000-00000000000a"
+    B = "bbbbbbbb-0000-0000-0000-00000000000b"
+
+    def run(session, *argv):
+        env = dict(os.environ, XDG_CONFIG_HOME=home, CLAUDE_CODE_SESSION_ID=session)
+        env.pop("SHOWRUNNER_CAMPAIGN", None)     # a hook has no operator's export
+        return subprocess.run([sys.executable, sr] + list(argv), cwd=cfg.root,
+                              capture_output=True, text=True, env=env)
+
+    eq("agent A binds its own session", run(A, "campaign", "use", "alpha").returncode, 0)
+    eq("agent B binds its own session", run(B, "campaign", "use", "beta").returncode, 0)
+    run(A, "role", "claim", "campaign-lead", "--who", "agent-a", "--session", A)
+    run(B, "role", "claim", "campaign-lead", "--who", "agent-b", "--session", B)
+
+    said_a = run(A, "whoami", "--session", A).stdout
+    said_b = run(B, "whoami", "--session", B).stdout
+    ok("agent A's hooks resolve ITS campaign and see ITS seat, with no environment variable and "
+       "no shared file", "alpha" in said_a and "campaign-lead" in said_a, said_a[:400])
+    ok("...and agent B's resolve B's, at the same instant in the same checkout",
+       "beta" in said_b and "campaign-lead" in said_b, said_b[:400])
+
+    # THE CONFLICT THAT USED TO BE UNAVOIDABLE: both hold `campaign-lead`, which is a single seat
+    # per campaign. They do not collide because the seats are in different campaigns and each
+    # agent's hooks resolve its own.
+    ok("neither agent is holding the other's campaign", "beta" not in said_a and
+       "alpha" not in said_b, (said_a[:200], said_b[:200]))
+
+    # AND NOTHING PER-CHECKOUT WAS TOUCHED. A binding that wrote the shared config would be the
+    # very failure this replaces.
+    ok("no per-checkout config was written — the mechanism is per-session or it is nothing",
+       not os.path.exists(os.path.join(cfg.root, ".showrunner", "config.local.json")),
+       os.listdir(os.path.join(cfg.root, ".showrunner")))
+
+    # PRECEDENCE: the environment still outranks a binding, so a Crawler dispatched INTO a
+    # campaign cannot be moved out of it by anything an operator binds afterwards.
+    env_wins = dict(os.environ, XDG_CONFIG_HOME=home, CLAUDE_CODE_SESSION_ID=A,
+                    SHOWRUNNER_CAMPAIGN="dispatched")
+    said = subprocess.run([sys.executable, sr, "campaign", "show"], cwd=cfg.root,
+                          capture_output=True, text=True, env=env_wins).stdout
+    ok("a dispatched campaign outranks a binding, so a Crawler cannot be re-bound out of its own",
+       "dispatched" in said and "environment" in said, said[:300])
+
+    # AND `campaign use` SAYS SO rather than reporting a binding that will not take effect.
+    said = subprocess.run([sys.executable, sr, "campaign", "use", "other"], cwd=cfg.root,
+                          capture_output=True, text=True, env=env_wins).stdout
+    ok("...and binding under a dispatched campaign warns that it does not apply yet, instead of "
+       "reporting success that changes nothing", "NOTE" in said, said[:300])
+
+    # CLEARING IS REACHABLE, or a wrong binding would be as unremovable as the dep edge was.
+    run(A, "campaign", "clear")
+    after = run(A, "campaign", "show").stdout
+    ok("a binding can be removed", "not bound" in after, after[:200])
+
+    # COMPANIONS, because the sweep scored both producers THIN at 2: most assertions here expect
+    # the quiet answer, which a resolver returning None or {} satisfies. The positive side:
+
+    # THE RECORD ITSELF, so a binding that resolves by accident is told from one that is stored.
+    bindings = config.read_session_bindings(cfg.root)
+    ok("the binding is on disk, keyed by session — that key is the whole mechanism, because it "
+       "is the only thing about a session a hook is handed",
+       isinstance(bindings.get(B), dict) and bindings[B].get("campaign") == "beta", bindings)
+
+    # WHICH LAYER ANSWERED. Two agents resolving different campaigns proves they differ; this
+    # proves WHY, and dies if a binding starts being reported as something else.
+    _saved = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    _savedc = os.environ.get("SHOWRUNNER_CAMPAIGN")
+    os.environ["CLAUDE_CODE_SESSION_ID"] = B
+    os.environ.pop("SHOWRUNNER_CAMPAIGN", None)
+    try:
+        probe = config.load(cfg.root)
+        eq("a bound session resolves its campaign", probe.campaign, "beta")
+        eq("...and says the SESSION named it, not the checkout", probe.campaign_source, "session")
+
+        # STALE BINDINGS EXPIRE ON READ. A session id could be recycled, and an old entry would
+        # otherwise put a new agent into a finished campaign — expiry on write alone cannot
+        # prevent that, because nothing may write again.
+        path = os.path.join(cfg.root, ".showrunner", "sessions.json")
+        with open(path) as fh:
+            raw = json.load(fh)
+        raw[B]["ts"] = 0
+        with open(path, "w") as fh:
+            json.dump(raw, fh)
+        eq("a binding older than the TTL is ignored on READ, so a recycled session id cannot "
+           "inherit a finished campaign", config.load(cfg.root).campaign, None)
+    finally:
+        if _saved is None:
+            os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+        else:
+            os.environ["CLAUDE_CODE_SESSION_ID"] = _saved
+        if _savedc is not None:
+            os.environ["SHOWRUNNER_CAMPAIGN"] = _savedc
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

@@ -35,8 +35,10 @@ anything that names one repo's identity or one repo's state; see MACHINE_SCOPE_R
 
 import json
 import os
+import time
 
-from .util import Refused, caller_tree, die, main_checkout, slug, user_config_dir
+from .util import (Refused, atomic_write_json, caller_session, caller_tree, die, file_lock,
+                   main_checkout, slug, user_config_dir)
 
 CONFIG_NAME = "config.json"
 CONFIG_LOCAL_NAME = "config.local.json"
@@ -75,6 +77,7 @@ USER_PATH = os.path.join(user_config_dir(), CONFIG_NAME)
 STATE_IGNORE_SECTIONS = [
     ("# showrunner runtime state — not source",
      ["graph.db", "graph.db-*", "locks/", "scratch/", "campaigns/", "campaign.json",
+      "sessions.json",
       "routing.jsonl",
       "waiting.jsonl", "events.jsonl", "hook-heartbeat.jsonl", "fail-open.jsonl",
       "*.lock", "baseline.json",
@@ -138,6 +141,91 @@ def _campaign_from_env():
     if raw is None:
         return None                     # unset: nobody said, go and look
     return raw.strip()                  # "" means the repo-wide campaign, deliberately
+
+
+SESSIONS_NAME = "sessions.json"
+SESSION_BINDING_TTL = 30 * 24 * 3600     # 30 days; a binding outlives a session, not a month
+
+
+def _sessions_path(root):
+    """Where session→campaign bindings live. OUTSIDE any campaign, because it selects one."""
+    return os.path.join(root, STATE_DIR, SESSIONS_NAME)
+
+
+def read_session_bindings(root):
+    """{session: {"campaign": str, "ts": int}} — or {} when there are none or it cannot be read.
+
+    UNREADABLE READS AS EMPTY HERE, and that is the safe direction for this one file: a binding
+    that cannot be read means the session falls back to the config default and then the repo-wide
+    campaign, which is where it was before bindings existed. The failure is a session resolving
+    the wrong campaign, which is loud — its seat is missing — rather than silent.
+    """
+    try:
+        with open(_sessions_path(root)) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _campaign_from_session(root):
+    """The campaign bound to the CALLING session, or None.
+
+    THE ONLY PER-SESSION CHANNEL THAT REACHES A HOOK, which is what makes many agents in one
+    monorepo possible. `config.local.json` is per-CHECKOUT: in a repo where several agents work
+    different campaigns, whichever one writes it decides resolution for everybody's hooks and
+    takes seats from live holders. An environment variable is per-session but can only be set
+    BEFORE a session starts, so an agent already running cannot choose a campaign at all.
+
+    A hook can identify its session two independent ways — `CLAUDE_CODE_SESSION_ID` is in the
+    session process's environment, and PreToolUse payloads carry `session_id` — so a binding keyed
+    by session id is readable from exactly the place that could not be reached before. That was
+    written off as a dead end ("a hook is handed no session-scoped config"); the hook is handed no
+    config, but it is handed its own IDENTITY, which is enough to look one up.
+
+    Bindings older than SESSION_BINDING_TTL are ignored on READ as well as pruned on write: a
+    stale entry for a recycled session id would otherwise put a new agent in an old campaign, and
+    read-side expiry is what makes that impossible even if nobody ever writes again.
+    """
+    session = caller_session()
+    if not session:
+        return None
+    entry = read_session_bindings(root).get(session)
+    if not isinstance(entry, dict):
+        return None
+    try:
+        if time.time() - float(entry.get("ts") or 0) > SESSION_BINDING_TTL:
+            return None
+    except (TypeError, ValueError):
+        return None
+    return (str(entry.get("campaign") or "")).strip() or None
+
+
+def bind_session(root, session, campaign):
+    """Bind THIS session to a campaign, or unbind with campaign=None. Returns the stored value.
+
+    LOCKED READ-MODIFY-WRITE, because the whole point is several agents in one checkout: two
+    binding at once would otherwise each read a file without the other's entry and one would
+    overwrite the other — the same argument the hook registration makes for its own lock.
+
+    Pruned on write, so the file cannot grow forever in a monorepo that runs many sessions.
+    """
+    if not session:
+        raise Refused("a session id is required to bind a campaign — nothing else identifies "
+                      "which agent this binding is for")
+    path = _sessions_path(root)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with file_lock(path + ".lock"):
+        data = read_session_bindings(root)
+        now = int(time.time())
+        data = {s: e for s, e in data.items()
+                if isinstance(e, dict) and now - int(e.get("ts") or 0) <= SESSION_BINDING_TTL}
+        if campaign:
+            data[session] = {"campaign": campaign, "ts": now}
+        else:
+            data.pop(session, None)
+        atomic_write_json(path, data)
+    return campaign or None
 
 
 def _campaign_from_config(data):
@@ -213,6 +301,7 @@ class Config:
         # therefore strip a seat somebody else is holding right now. An env-derived campaign
         # cannot do that: it is this process's own. Nothing can tell those apart from the value.
         _env_campaign = _campaign_from_env()
+        _session_campaign = _campaign_from_session(root)
         _cfg_campaign = _campaign_from_config(data)
         if campaign is not None:
             # "" NAMES THE REPO-WIDE CAMPAIGN EXPLICITLY, and it has to be sayable. `None` here
@@ -227,6 +316,12 @@ class Config:
             # `is not None`, NOT truthiness: "" is the environment explicitly naming the
             # repo-wide campaign, and treating it as "unset" is what made that unsayable.
             self._campaign, self._campaign_source = (_env_campaign or None), "environment"
+        elif _session_campaign:
+            # ABOVE the checkout default and BELOW the environment. A binding belongs to one
+            # agent, so it must beat a file shared with every other agent here; and a Crawler
+            # dispatched with SHOWRUNNER_CAMPAIGN set belongs to that campaign for its whole
+            # life, so nothing an operator binds later may move it.
+            self._campaign, self._campaign_source = _session_campaign, "session"
         elif _cfg_campaign:
             self._campaign, self._campaign_source = _cfg_campaign, "config"
         else:

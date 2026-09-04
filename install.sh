@@ -147,6 +147,7 @@ graph.db-*
 locks/
 scratch/
 campaigns/
+sessions.json
 campaign.json
 routing.jsonl
 waiting.jsonl
@@ -195,7 +196,7 @@ sr_added=0
 # so converging a consumer's file to the full set is correct, while clobbering the file would
 # discard entries they added. `grep -qxF` makes it idempotent, so re-running adds nothing.
 for entry in "bin/" "lib/" "graph.db" "graph.db-*" "locks/" "scratch/" "campaigns/" \
-             "campaign.json" \
+             "sessions.json" "campaign.json" \
              "routing.jsonl" "waiting.jsonl" "events.jsonl" "*.lock" "baseline.json" \
              "integration-commit.json" "config.local.json" "seen-issues.json" \
              "hook-heartbeat.jsonl" "fail-open.jsonl"; do

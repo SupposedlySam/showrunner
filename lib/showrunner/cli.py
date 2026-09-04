@@ -538,8 +538,13 @@ def cmd_doctor(args):
     # stopped to look, which is the second half of the pair: the announcement catches it at the
     # moment it bites, this catches it at the moment somebody is asking what is wrong.
     try:
-        _sh = roles.shadowed_seat(cfg, os.environ.get("SHOWRUNNER_SESSION")
-                                  or util.caller_session())
+        # `caller_session()`, the imported name — NOT `util.caller_session()`. `util` is not
+        # imported here, so that spelling raised NameError into the except below and disabled
+        # this check for every session that does not set SHOWRUNNER_SESSION. It looked correct
+        # in its own test because the test set that variable and `or` short-circuits before
+        # reaching the broken half: a swallowed exception hiding a dead check, which is the
+        # shape this file spends its comments on.
+        _sh = roles.shadowed_seat(cfg, caller_session())
     except Exception:                                            # noqa: BLE001
         _sh = None
     if _sh:
@@ -988,6 +993,62 @@ def cmd_dep(args):
         return 0
     g.dep(args.child, args.parent)
     print("%s is blocked by %s" % (args.child, args.parent))
+    return 0
+
+
+def cmd_campaign(args):
+    """Bind THIS session to a campaign, so its hooks resolve it. See config._campaign_from_session.
+
+    THE CASE THIS EXISTS FOR: many agents running showrunner in ONE monorepo on one machine, each
+    with its own campaign and its own Crawlers. Every other way of naming a campaign fails that:
+    `config.local.json` is per-CHECKOUT, so whoever writes it decides for everybody's hooks and
+    takes seats from live holders; SHOWRUNNER_CAMPAIGN is per-session but can only be set BEFORE
+    a session starts, so an agent already running cannot choose one at all.
+    """
+    cfg = _cfg(args)
+    session = getattr(args, "session", None) or caller_session()
+    verb = getattr(args, "campcmd", None) or "show"
+
+    if verb == "show":
+        print("campaign: %s" % (cfg.campaign or "(the repo-wide one)"))
+        print("named by: %s" % (cfg.campaign_source or "nothing — this is the default"))
+        if session:
+            bound = config.read_session_bindings(cfg.root).get(session) or {}
+            print("this session: %s" % (bound.get("campaign") or "not bound"))
+        else:
+            # A SESSION ID IS NOT ALWAYS THERE, and saying so beats printing "not bound" — which
+            # would read as a fact about the binding rather than about the lookup.
+            print("this session: CANNOT TELL — no session id in the environment, so which "
+                  "binding applies cannot be determined")
+        return 0
+
+    if not session:
+        eprint("no session id — nothing identifies which agent to bind. showrunner reads "
+               "SHOWRUNNER_SESSION, CLAUDE_CODE_SESSION_ID or CLAUDE_SESSION_ID, or pass "
+               "--session explicitly.")
+        return 2
+
+    if verb == "clear":
+        config.bind_session(cfg.root, session, None)
+        print("unbound this session; it now resolves the checkout default, or the repo-wide "
+              "campaign if there is none")
+        return 0
+
+    name = getattr(args, "name", None)
+    if not name:
+        eprint("`campaign use` needs a name")
+        return 2
+    config.bind_session(cfg.root, session, name)
+    print("bound this session to campaign %r" % name)
+    # SAY WHETHER IT WILL ACTUALLY TAKE EFFECT. A binding is BELOW the environment, so a session
+    # launched with SHOWRUNNER_CAMPAIGN set keeps that campaign — and reporting "bound" while
+    # every command goes on resolving something else is the claim-about-a-thing-that-did-not-
+    # happen this project spends its time removing.
+    after = config.load(cfg.root)
+    if after.campaign != name:
+        print("  NOTE: this session still resolves %r, named by the %s, which outranks a "
+              "binding. The binding applies once that no longer names one."
+              % (after.campaign, after.campaign_source))
     return 0
 
 
@@ -3460,6 +3521,18 @@ def build_parser():
                         "statement of one policy and it will disagree. Branch on `enforced`; "
                         "exits non-zero if it could not resolve, so a parser can fail closed")
     s.set_defaults(func=cmd_whoami)
+
+    s = sub.add_parser("campaign", help="bind THIS session to a campaign, so its hooks resolve "
+                                        "it — many agents, one monorepo, no shared file")
+    csub = s.add_subparsers(dest="campcmd")
+    t = csub.add_parser("use", help="bind this session to a campaign")
+    t.add_argument("name")
+    t.add_argument("--session", help="bind a session other than this one")
+    t = csub.add_parser("show", help="what this session resolves, and what named it")
+    t.add_argument("--session")
+    t = csub.add_parser("clear", help="unbind this session")
+    t.add_argument("--session")
+    s.set_defaults(func=cmd_campaign)
 
     s = sub.add_parser("role", help="role SEATS — claim one, give it back, or see who holds what. "
                                     "`claim` claims a LEAF; this claims a role")
