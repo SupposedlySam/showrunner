@@ -373,6 +373,26 @@ parallelism it buys. So more than one at a time in one checkout is the ORDINARY 
 SHOWRUNNER_CAMPAIGN=my-campaign showrunner status    # state nests under a per-campaign directory
 ```
 
+```
+showrunner campaign use my-campaign     # bind THIS session; its hooks resolve that campaign
+showrunner campaign show                # what this session resolves, and which layer named it
+showrunner campaign clear               # unbind
+```
+
+**`campaign use` is what makes many agents in one monorepo possible.** A binding is keyed by
+session id and read back by anything that can name its own session — which a hook can, from
+`CLAUDE_CODE_SESSION_ID` in the session process's environment or from `session_id` in its
+PreToolUse payload. That is why the per-session direction was reachable after all: a hook is
+handed no config, but it is handed its own identity, and that is enough to look one up. Two agents
+in one checkout can each hold `campaign-lead` in their own campaign without colliding, and nothing
+shared is written.
+
+Precedence is **explicit > environment > session binding > config**. A binding belongs to one
+agent, so it outranks a file shared with every other agent in the checkout; and a Crawler
+dispatched with `SHOWRUNNER_CAMPAIGN` set cannot be moved out of its campaign by anything bound
+later. Bindings expire on READ as well as on write, because expiry on write alone cannot stop a
+recycled session id inheriting a finished campaign.
+
 `.showrunner/config.local.json` can carry `{"campaign": "my-campaign"}` as the default when the
 environment names none. That layer exists because **a hook cannot read your shell**: PreToolUse
 hooks are spawned with the session's environment, so a seat claimed under a named campaign

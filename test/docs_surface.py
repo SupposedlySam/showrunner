@@ -148,6 +148,25 @@ def installer_flags():
     return sorted(set(re.findall(r"^\s*(--[a-z][a-z-]*)\)", body, re.M)))
 
 
+def verbs_never_written_as_commands(text):
+    """Verbs whose NAME appears but which are never written as `showrunner <verb>`.
+
+    THE FLOOR UNDER THE FLOOR. `unnamed()` asks whether a surface is mentioned at all, and for a
+    verb whose name is also an ordinary word in this project's vocabulary that passes without
+    anybody documenting the verb. `campaign` shipped as a verb and this file stayed green,
+    because both front doors are full of prose about campaigns — the check was satisfied by the
+    noun.
+
+    Asking for `showrunner <verb>` is the cheapest thing that cannot be satisfied by prose: it is
+    the shape a reader copies. It is still only a shape — it says nothing about whether the
+    surrounding sentence is true — which is why this REPORTS rather than refuses, and why
+    docs/READINGS.md exists for the half no search can reach.
+    """
+    flat = re.sub(r"\s+", " ", text)
+    return sorted(v for v in verbs()
+                  if v not in NOT_FRONT_DOOR and ("showrunner %s" % v) not in flat)
+
+
 def vacuous():
     """Exclusion keys naming nothing this project actually has."""
     return sorted(set(NOT_FRONT_DOOR) - (set(verbs()) | set(env_vars()) | set(hooks())))
@@ -179,6 +198,14 @@ def unnamed():
             if n not in text:
                 missing.append("%-5s %s" % (kind, n))
     return missing, excluded, unreadable
+
+
+NEVER_A_COMMAND_CEILING = 3
+"""A RATCHET, NOT A TARGET. Three verbs are named in the docs but never written as a command.
+Reporting alone would make that wallpaper — a figure nobody moves, drifting up while every run
+stays green. On the COUNT rather than a ratio, because a ratio lies when the denominator moves:
+add five verbs and document none and the fraction barely stirs. Lower this in the same commit
+that documents one, so an improvement is recorded rather than absorbed."""
 
 
 def main():

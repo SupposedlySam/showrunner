@@ -11746,6 +11746,23 @@ def test_claims_about_the_layer_below():
     # exist: nothing, forever.
     sys.path.insert(0, os.path.join(ROOT, "test"))
     import docs_surface
+    # A NAME IS NOT A COMMAND. `unnamed()` is satisfied by the word appearing anywhere, and for a
+    # verb whose name is also ordinary vocabulary here that passes with nobody having documented
+    # it — `campaign` shipped as a verb while both front doors were full of prose about
+    # campaigns. Ratcheted rather than merely reported, so the number cannot drift up quietly.
+    _doc_text = ""
+    for _d in docs_surface.DOCS:
+        try:
+            with open(os.path.join(ROOT, _d)) as _fh:
+                _doc_text += _fh.read()
+        except OSError:
+            pass
+    _never = docs_surface.verbs_never_written_as_commands(_doc_text)
+    ok("no MORE than %d verb(s) are named but never written as `showrunner <verb>` (currently "
+       "%d) — a tripwire, not a target: documenting one lowers it, adding an undocumented verb "
+       "raises it" % (docs_surface.NEVER_A_COMMAND_CEILING, len(_never)),
+       len(_never) <= docs_surface.NEVER_A_COMMAND_CEILING, _never)
+
     missing, excluded, unreadable = docs_surface.unnamed()
     ok("every verb, env var and hook showrunner ships is at least NAMED in the front-door docs "
        "-- %d surface(s) excluded with a stated reason" % excluded,

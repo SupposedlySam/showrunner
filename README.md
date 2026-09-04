@@ -546,6 +546,21 @@ campaigns in one checkout is the ordinary case. `SHOWRUNNER_CAMPAIGN` scopes gra
 and scratch. **Locks deliberately do not follow it:** a lock names a physical resource shared by
 the machine, so two campaigns flashing the same TV must serialize against each other.
 
+**Many agents in one repo: `showrunner campaign use <name>`.** It binds THIS session, so each
+agent resolves its own campaign — including from its hooks, which is the part nothing else could
+do. Nothing shared is written, so two agents in one monorepo can each hold `campaign-lead` in
+their own campaign without colliding.
+
+```bash
+showrunner campaign use my-campaign   # bind this session
+showrunner campaign show              # what this session resolves, and what named it
+showrunner campaign clear             # unbind
+```
+
+Resolution is **explicit argument > environment > this session's binding > checkout config**. A
+Crawler dispatched with `SHOWRUNNER_CAMPAIGN` set therefore keeps the campaign it was dispatched
+into, whatever anybody binds afterwards.
+
 **Set `campaign` in `.showrunner/config.local.json` if you work in a named campaign.** Hooks are
 spawned with the *session's* environment, not the shell where you typed `export`, so a seat
 claimed under a named campaign is invisible to every guard unless something other than the
