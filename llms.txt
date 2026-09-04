@@ -1195,6 +1195,36 @@ says that is not the same as up to date.
 Same shape llm_chat hit: their `doctor` correctly detects that it is a different build from the
 one the hooks run, and that warning is useless to anyone whose problem is running the old copy.
 
+## Installing for yourself, not for the team
+
+`install.sh` is SHARED by default and that is deliberate: the payload and the gates are
+committed, and everyone who clones gets both. `--local` is the other arrangement.
+
+```
+./install.sh --local /path/to/project        # hooks to .claude/settings.local.json (untracked),
+                                             # payload excluded in .git/info/exclude
+./install.sh /path/to/project                # the shared default: hooks in .claude/settings.json
+```
+
+A `--local` install leaves `git status` **clean**. That is the whole promise, and it is why the
+exclusion goes in `.git/info/exclude` rather than the repo's `.gitignore`: `.gitignore` is
+source-controlled, so ignoring the payload there would make a private decision arrive as a tracked
+diff on everybody else's next pull. `info/exclude` is per-clone and needs nobody's agreement.
+game_loop's `--local` writes `.gitignore`; a consumer raised the asymmetry and was right, so this
+takes the stricter half.
+
+**A worktree consequence you only have if you run Crawlers.** `git worktree add` copies TRACKED
+files, so an untracked registration does not cross into a Crawler's tree by itself — a `--local`
+install would otherwise produce worktrees with no `.claude` at all, and therefore no worktree
+guard, no dispatch guard, no seat announcement and no reach gate, while the main checkout reported
+every one of them registered and healthy. `spawn` merges the untracked entries into each new tree
+for exactly this reason, and says so in its report.
+
+**Do not end up in both layers.** Registration is idempotent within the file it writes and cannot
+see the other one, so `init` (tracked) followed by `worktree register --local` (untracked) leaves
+every guard firing TWICE per matching call. `doctor` names any shim registered in both; which copy
+to remove is a decision about whose file it is, so the tool reports and does not choose.
+
 ## One copy of the code, every project's own config
 
 Per-project install is the **default** and stays the documented path. Central is opt-in, one

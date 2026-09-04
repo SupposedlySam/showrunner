@@ -82,6 +82,14 @@ ROOT = os.path.dirname(HERE)
 # producer silently do nothing. The stub must PARSE — a syntax error would be caught by
 # import machinery rather than by the assertions, which is a different question.
 TARGETS = [
+    # Answering [] always is the state before this existed, and it is silent by construction:
+    # every guard registered in both layers goes on firing twice per tool call, `doctor` reports
+    # a healthy install, and the only symptom is two identical notices that read as the tool
+    # being noisy. llm_chat measured the same shape as an agent appearing to repeat itself.
+    ("hooks registered in both settings layers", "lease.double_registered",
+     "lib/showrunner/lease.py",
+     r"(def double_registered\(root\):\n)",
+     "    return []\ndef _neutered_double_registered(root):\n"),
     # Answering False always is the state this was written to end, and it is invisible: every
     # tree reports as safely branch-backed, `gc` reclaims exactly as it did before, and the one
     # tree in a checkout whose HEAD sits in no ref is deleted along with the commit only it was

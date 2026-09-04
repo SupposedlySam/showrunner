@@ -14125,9 +14125,175 @@ def test_gc_sees_a_squash_merge():
        campaign.head_in_no_ref(cfg3, os.path.join(cfg3.root, "no-such-tree")), None)
 
 
+def test_install_local_reaches_nobody():
+    group("`install.sh --local` installs for one developer: nothing it writes reaches anyone who "
+          "clones the repo (#81)")
+    if not have("git"):
+        skip("the install-local group", "git is not installed")
+        return
+    inst = os.path.join(ROOT, "install.sh")
+    if not os.path.isfile(inst):
+        skip("the install-local group", "install.sh is not in this checkout")
+        return
+
+    # REPORTED: installing into a shared repo produced ` M .claude/settings.json` — 78 insertions
+    # of this tool's hooks in a source-controlled file — even when the developer wanted the
+    # harness for themselves. The workaround was to move six entries by hand after every install.
+    #
+    # THE CLI COULD ALREADY DO THIS. `init --local` and `worktree register --local` both existed
+    # and both write the untracked layer; the installer simply never passed the flag. The gap was
+    # the front door, which is why this group drives install.sh rather than the verbs.
+    consumer = tmpdir("local-consumer")
+    sh(["git", "init", "-q", "-b", "main"], consumer)
+    sh(["git", "config", "user.email", "t@t"], consumer)
+    sh(["git", "config", "user.name", "t"], consumer)
+    # A hook of THEIRS, so the merge has something to preserve and "we did not clobber it" is a
+    # measurement rather than a claim about an empty file.
+    os.makedirs(os.path.join(consumer, ".claude"), exist_ok=True)
+    with open(os.path.join(consumer, ".claude", "settings.json"), "w") as fh:
+        json.dump({"hooks": {"PreToolUse": [{"matcher": "Write", "hooks": [
+            {"type": "command", "command": "./their-own-hook.sh"}]}]}}, fh)
+    with open(os.path.join(consumer, "seed.txt"), "w") as fh:
+        fh.write("seed\n")
+    sh(["git", "add", "-A"], consumer)
+    sh(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "seed"], consumer)
+
+    p_ = subprocess.run(["bash", inst, "--local", "--no-skills", consumer],
+                        capture_output=True, text=True, timeout=300)
+    eq("the --local install succeeds", p_.returncode, 0, )
+    said = p_.stdout + p_.stderr
+
+    # THE REPORTER'S OWN TEST, and the whole promise of the flag.
+    dirty = subprocess.run(["git", "status", "--porcelain"], cwd=consumer,
+                           capture_output=True, text=True).stdout.strip()
+    ok("a --local install leaves NO tracked diff — that is the entire promise, and the reported "
+       "failure was ` M .claude/settings.json` reaching everyone who clones",
+       dirty == "", (dirty, said[-400:]))
+
+    def hook_refs(name):
+        try:
+            with open(os.path.join(consumer, ".claude", name)) as fh:
+                return fh.read().count("showrunner/hooks")
+        except OSError:
+            return 0
+
+    ok("the hooks went into the UNTRACKED layer", hook_refs("settings.local.json") > 0,
+       said[-300:])
+    eq("...and NOT into the source-controlled one", hook_refs("settings.json"), 0)
+
+    # THEIR FILE IS NOT OURS. The tracked settings file carries the project's own hooks and
+    # statusLine; a --local install must leave it exactly as it found it, not merely avoid
+    # adding to it.
+    with open(os.path.join(consumer, ".claude", "settings.json")) as fh:
+        theirs = fh.read()
+    ok("...and their own pre-existing hook is untouched", "their-own-hook" in theirs, theirs[:200])
+
+    # THE PAYLOAD IS EXCLUDED LOCALLY, NOT IGNORED IN A TRACKED FILE. game_loop's --local appends
+    # to .gitignore, which is itself source-controlled — a private decision arriving as a tracked
+    # diff, which is the thing the flag exists to avoid. The consumer who reported this raised the
+    # same asymmetry and used .git/info/exclude; it needs nobody's agreement.
+    ignored = subprocess.run(["git", "check-ignore", "-v", ".showrunner/config.json"],
+                             cwd=consumer, capture_output=True, text=True).stdout
+    ok("the payload is excluded", ".showrunner/" in ignored, ignored[:200])
+    ok("...via .git/info/exclude rather than the tracked .gitignore, so the exclusion itself "
+       "does not reach the team either", "info/exclude" in ignored, ignored[:200])
+
+    # IDEMPOTENT. An installer that appends its exclusion every run is one that grows a file
+    # forever, and this one runs on every upgrade.
+    subprocess.run(["bash", inst, "--local", "--no-skills", consumer],
+                   capture_output=True, text=True, timeout=300)
+    with open(os.path.join(consumer, ".git", "info", "exclude")) as fh:
+        excl = fh.read()
+    eq("a second --local install adds no second exclusion", excl.count(".showrunner/"), 1)
+
+
+def test_a_hook_registered_in_both_layers_is_reported():
+    group("The same hook in both settings layers fires twice, and nothing said so")
+
+    # ONE ORDINARY SEQUENCE AWAY: `init` registers in the tracked file and
+    # `worktree register --local` adds the same hooks to the untracked one. Registration is
+    # idempotent within the file it writes and cannot see the other layer, so the two compose
+    # into every guard running twice per tool call. Measured before the check existed — both
+    # files carried the worktree guard and nothing anywhere mentioned it.
+    from showrunner import lease as L
+    d = tmpdir("double-reg")
+    os.makedirs(os.path.join(d, ".claude"), exist_ok=True)
+
+    def write(name, cmd):
+        with open(os.path.join(d, ".claude", name), "w") as fh:
+            json.dump({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+                {"type": "command", "command": cmd}]}]}}, fh)
+
+    shim = '"$CLAUDE_PROJECT_DIR"/' + L.GUARD_SHIM
+    write("settings.json", shim)
+    eq("one layer only is not a double", L.double_registered(d), [])
+
+    write("settings.local.json", shim)
+    eq("...the same hook in BOTH layers is", L.double_registered(d), ["worktree-guard.sh"])
+
+    # SOMEBODY ELSE'S HOOK IS NOT OURS. The check derives what belongs to showrunner from the
+    # hooks directory in the command, so a project's own hook in both layers is their business.
+    write("settings.json", "./their-own-hook.sh")
+    write("settings.local.json", "./their-own-hook.sh")
+    eq("a hook that is not showrunner's is not reported, in either layer",
+       L.double_registered(d), [])
+
+    # UNREADABLE IS NOT EMPTY, which is the direction that reports a real double as clean.
+    write("settings.local.json", shim)
+    with open(os.path.join(d, ".claude", "settings.json"), "w") as fh:
+        fh.write("{not json")
+    eq("an unparseable layer is skipped rather than counted as 'nothing registered here'",
+       L.double_registered(d), [])
+
+    # COMPANIONS, because the sweep scored this THIN at 1: every assertion above except one
+    # expects the EMPTY answer, and a producer neutered to "nothing is ever doubled" satisfies
+    # all of them. The restraint claims are right and stay; these are the positive side.
+
+    # MORE THAN ONE SHIM, AND ALL OF THEM NAMED. A check that reported only the first collision
+    # would send an operator round the loop once per hook.
+    def write_many(name, cmds):
+        with open(os.path.join(d, ".claude", name), "w") as fh:
+            json.dump({"hooks": {"PreToolUse": [
+                {"matcher": "Bash", "hooks": [{"type": "command", "command": c}]}
+                for c in cmds]}}, fh)
+
+    both = ['"$CLAUDE_PROJECT_DIR"/' + L.GUARD_SHIM, '"$CLAUDE_PROJECT_DIR"/' + L.DISPATCH_SHIM]
+    write_many("settings.json", both)
+    write_many("settings.local.json", both)
+    eq("every doubled shim is named, not just the first — one round trip per hook is how a "
+       "report stops being read", L.double_registered(d),
+       ["dispatch-guard.sh", "worktree-guard.sh"])
+
+    # AND THE CONSUMER. The fact is computed for `doctor` to say; a producer answering correctly
+    # into a caller that never prints it is the registered-never-fired shape, and this whole
+    # check exists because nothing anywhere said the hooks were doubled.
+    cfg_d = make_repo()
+    os.makedirs(os.path.join(cfg_d.root, ".claude"), exist_ok=True)
+    for _name in ("settings.json", "settings.local.json"):
+        with open(os.path.join(cfg_d.root, ".claude", _name), "w") as fh:
+            json.dump({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+                {"type": "command",
+                 "command": '"$CLAUDE_PROJECT_DIR"/' + L.GUARD_SHIM}]}]}}, fh)
+    _doc = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                          cwd=cfg_d.root, capture_output=True, text=True).stdout
+    ok("`doctor` TELLS the operator the hooks are doubled — the fact has a reader, and a guard "
+       "firing twice is otherwise indistinguishable from a noisy tool",
+       "registered in BOTH" in _doc, _doc[-600:])
+    ok("...and names the shim, so the remedy is a specific line in a specific file",
+       "worktree-guard.sh" in _doc, _doc[-600:])
+
+    # THE PAIR: a single-layer install must NOT be warned at, or the warning is decoration that
+    # every consumer learns to scroll past.
+    os.remove(os.path.join(cfg_d.root, ".claude", "settings.local.json"))
+    _doc2 = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                           cwd=cfg_d.root, capture_output=True, text=True).stdout
+    ok("...while an ordinary single-layer install is not warned at",
+       "registered in BOTH" not in _doc2, _doc2[-400:])
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

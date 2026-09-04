@@ -1084,6 +1084,57 @@ def settings_candidates(root):
             os.path.join(root, ".claude", "settings.local.json")]
 
 
+HOOKS_DIR_FRAGMENT = os.path.join(".showrunner", "hooks") + os.sep
+
+
+def double_registered(root):
+    """Hooks of OURS registered in BOTH settings layers. A sorted list of shim names, or [].
+
+    A HOOK REGISTERED TWICE FIRES TWICE. `_register_locked` is idempotent within the file it
+    writes and cannot see the other layer, so the two arrangements compose into a repo where
+    every guard runs twice per tool call — two subprocesses, two notices, and a Stop trigger
+    refusing a turn-end on the strength of two identical answers.
+
+    IT IS ONE ORDINARY SEQUENCE AWAY, not a corner: `showrunner init` registers in the tracked
+    `settings.json`, and `worktree register --local` then adds the same hooks to the untracked
+    `settings.local.json`. Measured before this existed — both files carried the worktree guard,
+    and nothing anywhere said so.
+
+    REPORTED, NEVER REPAIRED AUTOMATICALLY, and that is the design rather than laziness. The
+    tracked file may belong to a team that registered these hooks deliberately; deleting their
+    entries because one developer ran an installer flag would be this tool editing shared source
+    control on a private decision. The operator is told which shims collide and chooses.
+
+    OURS IS DERIVED, NOT LISTED. Any hook command pointing into `.showrunner/hooks/` is one of
+    ours, so a shim added later is covered without anybody remembering — the same reason the
+    prose-file twins and the flag inventory are derived from the parser rather than enumerated.
+
+    llm_chat measured this exact shape in their own installer: two copies of a hook deliver every
+    message twice while advancing the cursor once, which reads from outside as the other agent
+    repeating itself.
+    """
+    import json
+    seen = {}
+    for path in settings_candidates(root):
+        try:
+            with open(path) as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            # UNREADABLE IS NOT EMPTY. A file that could not be parsed might hold anything, so it
+            # is skipped rather than counted as "nothing registered here" — which would report a
+            # genuine double as clean, in the direction nobody checks.
+            continue
+        if not isinstance(data, dict):
+            continue
+        for entries in (data.get("hooks") or {}).values():
+            for entry in entries or []:
+                for hook in (entry or {}).get("hooks") or []:
+                    cmd = (hook or {}).get("command") or ""
+                    if HOOKS_DIR_FRAGMENT in cmd:
+                        seen.setdefault(os.path.basename(cmd.strip('"')), set()).add(path)
+    return sorted(shim for shim, paths in seen.items() if len(paths) > 1)
+
+
 def _guard_registration(settings_path):
     return _registration(settings_path, "PreToolUse", "worktree-guard")
 

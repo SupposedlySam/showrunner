@@ -8,16 +8,24 @@ set -euo pipefail
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
 CENTRAL=0
+LOCAL=0
 SKILLS=ask
 TARGET="."
 for arg in "$@"; do
   case "$arg" in
     --central) CENTRAL=1 ;;
+    --local)   LOCAL=1 ;;
     --skills) SKILLS=yes ;;
     --no-skills) SKILLS=no ;;
     -h|--help)
-      echo "usage: ./install.sh [--central] [--skills|--no-skills] /path/to/your/project"
+      echo "usage: ./install.sh [--local] [--central] [--skills|--no-skills] /path/to/your/project"
       echo
+      echo "  --local     install for YOU, not for the team. Hooks go into the untracked"
+      echo "              .claude/settings.local.json instead of the source-controlled"
+      echo "              .claude/settings.json, and .showrunner/ is excluded LOCALLY."
+      echo "              Nothing this installs then reaches anybody who clones the repo."
+      echo "              Without it the install is SHARED, which is the default on purpose:"
+      echo "              the payload and the gates are committed and everyone gets both."
       echo "  --central   do not copy the tool's code into the project at all. Write one tiny"
       echo "              dispatcher shim that execs a shared, machine-wide install instead."
       echo "              Populate that with \`showrunner self --pin <ref> --dest <path>\`."
@@ -241,7 +249,11 @@ else
   # The source binary always works, and `init` resolves the project from the CWD, so it writes
   # the target's config either way. It also declines to place a binary over one that is already
   # executable, so this does not undo the shim.
-  (cd "$TARGET" && "$SRC/bin/showrunner" init >/dev/null)
+  # --local REACHES `init` TOO, and forgetting it is how the flag half-works: `init` registers
+  # the hooks itself, so a --local install whose init ran shared would write the tracked file
+  # first and the untracked one second — a tracked diff the flag promised to avoid AND every
+  # guard registered twice.
+  (cd "$TARGET" && "$SRC/bin/showrunner" init ${LOCAL:+$( [ "$LOCAL" = "1" ] && echo --local )} >/dev/null)
   echo "  seeded  .showrunner/config.json"
 fi
 
@@ -253,8 +265,72 @@ fi
 # TWO HOOKS NOW, and the line says so. `worktree register` writes both — the PreToolUse guard
 # and the Stop trigger that refuses a turn-end while a Crawler sits alive and inert — and a
 # report naming only one is how a reader concludes the other was never installed.
-if (cd "$TARGET" && "$SRC/bin/showrunner" worktree register 2>/dev/null | grep -q registered); then
-  echo "  hooked  .claude/settings.json — PreToolUse (worktree guard) and Stop (inert-Crawler gate)"
+REG_ARGS=""
+REG_FILE=".claude/settings.json"
+if [ "$LOCAL" = "1" ]; then
+  REG_ARGS="--local"
+  REG_FILE=".claude/settings.local.json"
+fi
+if (cd "$TARGET" && "$SRC/bin/showrunner" worktree register $REG_ARGS 2>/dev/null | grep -q registered); then
+  echo "  hooked  $REG_FILE — PreToolUse (worktree guard) and Stop (inert-Crawler gate)"
+fi
+
+# A HOOK REGISTERED IN BOTH LAYERS FIRES TWICE, and the two arrangements compose without either
+# one noticing: `init` registers in the tracked file, `--local` adds the same hooks to the
+# untracked one, and every guard then runs twice per tool call. Reported rather than repaired —
+# the tracked file may belong to a team who registered these deliberately, and deleting their
+# entries because one developer passed a flag would be this installer editing shared source
+# control on a private decision.
+DOUBLE=$(cd "$TARGET" && "$SRC/bin/showrunner" doctor 2>/dev/null | grep -c "registered in BOTH" || true)
+if [ "${DOUBLE:-0}" != "0" ]; then
+  echo "  ⚠ some showrunner hooks are now registered in BOTH settings layers, so they will fire"
+  echo "    twice. \`showrunner doctor\` names which; remove one copy — usually the one you did"
+  echo "    not mean to keep."
+fi
+
+if [ "$LOCAL" = "1" ]; then
+  # THE OTHER HALF OF --local. Hooks in settings.local.json reach nobody, but a committed
+  # .showrunner/ still would — the payload, the config, the state.
+  #
+  # `.git/info/exclude`, NOT the repo's `.gitignore`, and the distinction is the whole promise of
+  # the flag. `.gitignore` is source-controlled: appending to it makes a private decision a
+  # tracked diff that reaches the team, which is the thing --local exists to avoid. info/exclude
+  # is per-clone and needs nobody's agreement. game_loop's --local writes .gitignore; a consumer
+  # raised the asymmetry (#81) and they are right, so showrunner takes the stricter one.
+  # RESOLVED AGAINST THE TARGET, NOT THE CALLER'S CWD. `rev-parse --git-common-dir` answers
+  # RELATIVE to the repo it was asked about — plain `.git` for an ordinary checkout — so joining
+  # it to the installer's own working directory silently writes the exclude file of whatever repo
+  # the installer happens to be run FROM. Measured the hard way: a hand-run of this wrote
+  # `.showrunner/` into showrunner's own .git/info/exclude while the target repo got nothing, and
+  # the manual check said it had worked because it read the file it had just wrongly written.
+  GITDIR="$(git -C "$TARGET" rev-parse --git-common-dir)"
+  case "$GITDIR" in
+    /*) ;;                       # already absolute — a separate git dir, or a worktree
+    *)  GITDIR="$TARGET/$GITDIR" ;;
+  esac
+  EXCLUDE="$GITDIR/info/exclude"
+  if [ -n "$GITDIR" ]; then
+    mkdir -p "$(dirname "$EXCLUDE")"
+    # BOTH THINGS THIS INSTALL WROTE, because the promise is "nothing reaches the team" and
+    # an UNTRACKED file still reaches them through the next `git add -A`. Claude Code usually
+    # ignores settings.local.json already; usually is not a guarantee, and the one repo where
+    # it does not is the one where a developer's private hooks get committed under their name.
+    sr_excl=0
+    for sr_path in ".showrunner/" ".claude/settings.local.json"; do
+      if grep -qxF "$sr_path" "$EXCLUDE" 2>/dev/null; then continue; fi
+      if [ "$sr_excl" = 0 ]; then
+        { [ -s "$EXCLUDE" ] && [ -n "$(tail -c 1 "$EXCLUDE")" ] && echo ""; } >> "$EXCLUDE" 2>/dev/null || true
+        echo "# showrunner, installed with --local: this clone only, not the team." >> "$EXCLUDE"
+      fi
+      echo "$sr_path" >> "$EXCLUDE"
+      sr_excl=$((sr_excl + 1))
+    done
+    if [ "$sr_excl" -gt 0 ]; then
+      echo "  excluded $sr_excl path(s) in .git/info/exclude — local to this clone, not a tracked diff"
+    else
+      echo "  ok      .git/info/exclude already excludes what --local writes"
+    fi
+  fi
 fi
 
 # ------------------------------------------------------------------- skills

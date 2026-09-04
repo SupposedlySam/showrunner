@@ -529,6 +529,19 @@ def cmd_doctor(args):
         print("  %s all %d hook file(s) under .showrunner/hooks parse — the one failure that "
               "blocks its own repair" % (GRN + "ok   " + OFF, _seen))
 
+    # THE SAME HOOK IN BOTH SETTINGS LAYERS FIRES TWICE. Registration is idempotent within the
+    # file it writes and cannot see the other layer, so `init` (tracked) followed by
+    # `worktree register --local` (untracked) leaves every guard running twice per tool call.
+    # The installer says so once, at install time; this says it on every run, which is the half
+    # that survives somebody installing months ago.
+    _dbl = lease.double_registered(cfg.root)
+    if _dbl:
+        print("  %s %d showrunner hook(s) are registered in BOTH .claude/settings.json and "
+              ".claude/settings.local.json, so each fires TWICE per matching call: %s. Remove "
+              "one copy — the tracked file is the team's, the local one is yours, and which to "
+              "keep is that decision and not this tool's."
+              % (YEL + "warn " + OFF, len(_dbl), ", ".join(_dbl)))
+
     # A `writes` POLICY WITH NOTHING ON BASH TO ENFORCE IT (#77). showrunner publishes `writes`
     # and does not enforce it — no write guard ships here — so the only thing it can honestly
     # check is whether a reader exists at all. The reported install had one registered for
