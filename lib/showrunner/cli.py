@@ -1013,8 +1013,18 @@ def cmd_campaign(args):
         print("campaign: %s" % (cfg.campaign or "(the repo-wide one)"))
         print("named by: %s" % (cfg.campaign_source or "nothing — this is the default"))
         if session:
-            bound = config.read_session_bindings(cfg.root).get(session) or {}
-            print("this session: %s" % (bound.get("campaign") or "not bound"))
+            bound = config.read_session_bindings(cfg.root).get(session)
+            # "" IS A BINDING — the repo-wide campaign, chosen deliberately. `or "not bound"`
+            # collapsed it into the absence of one, so `show` reported "not bound" one line under
+            # "named by: session" and contradicted itself. The store keeps the distinction and
+            # the resolver honours it; only this line threw it away, which is the falsy-coercion
+            # this whole feature exists to avoid, in the code that reports on it.
+            if not isinstance(bound, dict) or "campaign" not in bound:
+                print("this session: not bound")
+            elif bound["campaign"] == "":
+                print("this session: bound to the repo-wide campaign")
+            else:
+                print("this session: %s" % bound["campaign"])
         else:
             # A SESSION ID IS NOT ALWAYS THERE, and saying so beats printing "not bound" — which
             # would read as a fact about the binding rather than about the lookup.
@@ -1049,7 +1059,12 @@ def cmd_campaign(args):
     # every command goes on resolving something else is the claim-about-a-thing-that-did-not-
     # happen this project spends its time removing.
     after = config.load(cfg.root)
-    if after.campaign != name:
+    # ASKED OF THE SOURCE, not of the value. The question is "did this binding take effect", and
+    # comparing the resolved campaign to the name answers it wrongly for the repo-wide one:
+    # binding "" resolves to None, `None != ""`, and the NOTE fired on a binding that was working
+    # — telling an agent that the thing protecting it was not in effect. `campaign_source` says
+    # which layer answered, which is the fact the sentence is actually about.
+    if after.campaign_source != "session":
         print("  NOTE: this session still resolves %r, named by the %s, which outranks a "
               "binding. The binding applies once that no longer names one."
               % (after.campaign, after.campaign_source))

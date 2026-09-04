@@ -14644,6 +14644,30 @@ def test_many_agents_one_monorepo():
     ok("`clear` still falls back to the checkout default — it is not a synonym for --repo-wide",
        "shadowing" in cleared, cleared[:300])
 
+    # AND THE REPORTING MUST NOT CONTRADICT ITSELF (#83). `show` coerced "" to "not bound" and
+    # the NOTE compared the resolved campaign to the name — `None != ""` — so a session that had
+    # just pinned itself was told, twice, that it had not: "named by: session" one line above
+    # "this session: not bound", and a NOTE saying the binding was not in effect. The store was
+    # right and the resolver was right; only the two lines reporting on them were wrong, which
+    # is the falsy coercion this feature exists to avoid appearing in its own status output.
+    run(A, "campaign", "use", "--repo-wide")
+    shown = run(A, "campaign", "show").stdout
+    ok("`show` reports a repo-wide binding AS a binding, agreeing with the layer it names",
+       "named by: session" in shown and "not bound" not in shown, shown[:300])
+    used = run(A, "campaign", "use", "--repo-wide").stdout
+    ok("...and binding it prints no 'does not apply' NOTE, because it does apply",
+       "NOTE" not in used, used[:300])
+
+    # THE PROTECTION ITSELF, which is what the reporting was lying ABOUT. A pinned session must
+    # keep its campaign when another agent writes a checkout default — that is the whole reason
+    # --repo-wide exists, and asserting the display without it would leave the guarantee untested.
+    with open(os.path.join(cfg.root, ".showrunner", "config.local.json"), "w") as fh:
+        json.dump({"campaign": "somebody-elses"}, fh)
+    pinned = run(A, "campaign", "show").stdout
+    ok("a session pinned with --repo-wide keeps the repo-wide campaign even when another agent "
+       "writes a checkout default — the binding outranks it",
+       "named by: session" in pinned and "somebody-elses" not in pinned, pinned[:300])
+
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
