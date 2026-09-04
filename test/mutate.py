@@ -424,7 +424,7 @@ TARGETS = [
     # restraint assertions around it agree with a neutered version. Only the positive case can
     # notice, and this is what proves that is still true.
     ("work-since-block evidence", "campaign.work_since_block", "lib/showrunner/campaign.py",
-     r"(def work_since_block\(cfg, crawler, branch, worktree\):\n)",
+     r"(def work_since_block\(cfg, crawler, branch, worktree, scratch=None\):\n)",
      "    return False, \"\"\ndef _neutered_work_since_block(cfg, crawler, branch, worktree):\n"),
     # Added when the release gate's accounting refused: five producers arrived from another
     # session unswept. These two are registered rather than excused, because both are POLICY.

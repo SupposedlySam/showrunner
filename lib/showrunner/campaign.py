@@ -984,7 +984,7 @@ def reap(cfg, graph, base="HEAD", apply=False):
     return actions, warnings
 
 
-def work_since_block(cfg, crawler, branch, worktree):
+def work_since_block(cfg, crawler, branch, worktree, scratch=None):
     """Has this Crawler worked SINCE showrunner recorded it blocked? (issue #54)
 
     `harness.stop_gate` says outright that `blocked` alone is a fact about the past: it reports
@@ -1034,6 +1034,36 @@ def work_since_block(cfg, crawler, branch, worktree):
             continue                        # a file that vanished mid-scan is not evidence
     if newest > since:
         return True, "a tracked file in its worktree changed after the block was recorded"
+
+    # AND ITS SCRATCH DIR, which for some Crawlers is the ONLY place the work lands. Reported by
+    # a consumer running a play-test leaf: briefed explicitly not to touch lib/, test/ or
+    # server/, its whole deliverable a findings document, a transcript and ten screenshots under
+    # its own scratch dir. It produced all of that and the gate fired TWICE saying "ALIVE AND
+    # DOING NOTHING" — accurately about the tree, and wrongly about the Crawler.
+    #
+    # THE COST IS NOT THE FALSE ALARM. The gate's advice ladder points at PARK and REAP for this
+    # shape, and `reap` "surfaces the tree" — but for a leaf whose only output is untracked
+    # scratch, the tree is not where the work is. An orchestrator that trusted the gate would
+    # have released a claim on a Crawler mid-report. The reporter checked the process and the
+    # scratch mtimes by hand instead, which is the check this now does for them.
+    #
+    # NO NEW CONVENTION: the scratch dir is already per-leaf and is already where this tool puts
+    # a Crawler's artifacts. UNTRACKED IS THE POINT here, which is why this walks the directory
+    # rather than asking git — the opposite of the tree check above, and for the opposite reason:
+    # there, an untracked file is harness noise that must not release a gate; here, untracked
+    # files are the deliverable.
+    scratch_dir = scratch if os.path.isabs(scratch or "") else (
+        os.path.join(cfg.root, scratch) if scratch else "")
+    if scratch_dir and os.path.isdir(scratch_dir):
+        for dirpath, _dirs, files in os.walk(scratch_dir):
+            for name in files:
+                try:
+                    if int(os.path.getmtime(os.path.join(dirpath, name))) > since:
+                        return True, ("wrote to its scratch dir after the block was recorded — "
+                                      "for a leaf whose deliverable is a report rather than "
+                                      "code, that is where the work is")
+                except OSError:
+                    continue        # vanished mid-scan; not evidence either way
     return False, ""
 
 
@@ -1064,7 +1094,7 @@ def waiting(cfg, graph, base="HEAD"):
         worked, why_worked = (False, "")
         if f["blocked"]:
             worked, why_worked = work_since_block(cfg, f["crawler"], f.get("branch"),
-                                                  f.get("worktree") or "")
+                                                  f.get("worktree") or "", f.get("scratch"))
         if f["parked"]:
             # PARKED IS CHECKED FIRST, and that ordering is the whole bug (#62). It used to sit
             # after `blocked`, so a Crawler that was parked AND refused at a turn-end never

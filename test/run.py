@@ -2481,6 +2481,46 @@ def test_work_since_block():
     ok("the tree-evidence reason is different text from the branch-evidence reason",
        why_tree and why_tree != why, (why_tree, why))
 
+    # AND THE SCRATCH DIR, which for some Crawlers is the ONLY place the work lands. Reported by
+    # a consumer running a play-test leaf: briefed explicitly not to touch lib/, test/ or
+    # server/, its whole deliverable a findings document, a transcript and ten screenshots under
+    # its own scratch dir. It produced all of that, and the gate fired TWICE saying "ALIVE AND
+    # DOING NOTHING" — accurate about the tree and wrong about the Crawler. The cost is not the
+    # false alarm: the gate's advice ladder points at PARK and REAP for that shape, and reap
+    # would have released a claim on a Crawler mid-report.
+    # THE TREE MUST BE QUIET FIRST, or the check above answers before scratch is ever reached and
+    # these assertions pass on the wrong evidence — the fixture agreeing with itself.
+    os.utime(tracked, (blocked_at - 60, blocked_at - 60))
+    play_scratch = os.path.join(cfg.root, ".showrunner", "scratch", "playtest")
+    os.makedirs(play_scratch, exist_ok=True)
+    _rel_scratch = os.path.relpath(play_scratch, cfg.root)
+    with open(os.path.join(play_scratch, "FINDINGS.md"), "w") as fh:
+        fh.write("what I found\n")
+    os.utime(os.path.join(play_scratch, "FINDINGS.md"), (blocked_at - 60, blocked_at - 60))
+    got, why = campaign.work_since_block(cfg, "c-work", None, wt, _rel_scratch)
+    ok("a scratch dir whose artifacts all PREDATE the block is not evidence — the restraint half, "
+       "or every Crawler with a brief on disk would read as working forever",
+       got is False, (got, why))
+
+    os.utime(os.path.join(play_scratch, "FINDINGS.md"), (blocked_at + 60, blocked_at + 60))
+    got, why = campaign.work_since_block(cfg, "c-work", None, wt, _rel_scratch)
+    ok("...while a write to its scratch dir AFTER the block IS evidence: for a leaf whose "
+       "deliverable is a report rather than code, that is where the work is",
+       got is True, (got, why))
+    ok("...and the reason says WHICH evidence, so an operator is not sent to look for a commit "
+       "that was never going to exist", "scratch" in (why or ""), why)
+
+    # UNTRACKED IS THE POINT HERE, which is the opposite of the tree rule directly above — there
+    # an untracked file is harness noise that must not release a gate; here untracked files are
+    # the deliverable. Both are right because they are about different directories, and stating
+    # that is cheaper than letting somebody "fix" the inconsistency later.
+    with open(os.path.join(play_scratch, "screenshot-01.png"), "w") as fh:
+        fh.write("not really a png\n")
+    os.utime(os.path.join(play_scratch, "screenshot-01.png"), (blocked_at + 90, blocked_at + 90))
+    got, _w = campaign.work_since_block(cfg, "c-work", None, wt, _rel_scratch)
+    ok("...and an UNTRACKED artifact counts there, deliberately unlike the worktree rule",
+       got is True, got)
+
     # AND THE CONSUMER, which is what this leaf is actually about: the signal decides whether
     # `waiting` reports a Crawler as blocked, and a producer that answers correctly into a caller
     # that ignores it is the registered-never-fired shape. Driven through `waiting` rather than
