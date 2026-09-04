@@ -14560,10 +14560,19 @@ def test_many_agents_one_monorepo():
         # STALE BINDINGS EXPIRE ON READ. A session id could be recycled, and an old entry would
         # otherwise put a new agent into a finished campaign — expiry on write alone cannot
         # prevent that, because nothing may write again.
+        # FAIL, NEVER RAISE. Under a neutered `read_session_bindings` the writer reads {} and
+        # clobbers, so this file can legitimately lack B — and a KeyError here would take every
+        # assertion below it down unrun, which the sweep scores as UNSCOREABLE rather than as
+        # coverage. The missing entry is itself the failure worth reporting.
         path = os.path.join(cfg.root, ".showrunner", "sessions.json")
-        with open(path) as fh:
-            raw = json.load(fh)
-        raw[B]["ts"] = 0
+        try:
+            with open(path) as fh:
+                raw = json.load(fh)
+        except (OSError, ValueError):
+            raw = {}
+        ok("the binding file still holds B's entry, or the expiry check below measures nothing",
+           isinstance(raw.get(B), dict), raw)
+        raw.setdefault(B, {"campaign": "beta"})["ts"] = 0
         with open(path, "w") as fh:
             json.dump(raw, fh)
         eq("a binding older than the TTL is ignored on READ, so a recycled session id cannot "
