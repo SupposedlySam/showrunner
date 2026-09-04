@@ -124,6 +124,30 @@ def hooks():
 
 
 
+def installer_flags():
+    """Every flag `install.sh` accepts, read from its own case arms.
+
+    THE FOURTH SURFACE, and it was missing because the list was written when there were three.
+    Verbs, env vars and hooks were enumerated; the installer's flags were not, so a flag could
+    ship built, tested, published and named in neither front door with this check green. Two of
+    them were in exactly that state when this was added — including `--skills`, which is the only
+    thing the installer writes OUTSIDE the target repo.
+
+    FROM THE CASE ARMS, NOT THE USAGE TEXT. The usage text is prose about the flags; the case arms
+    are what the script actually accepts. Reading the prose to check the prose would pass on a
+    flag that was documented and then removed, and fail to see one added without a help line —
+    which is the direction that matters, since forgetting the help line is the whole failure.
+
+    `-h|--help` is not listed: it is not a surface anybody has to be told about.
+    """
+    try:
+        with open(os.path.join(ROOT, "install.sh")) as fh:
+            body = fh.read()
+    except OSError:
+        return []
+    return sorted(set(re.findall(r"^\s*(--[a-z][a-z-]*)\)", body, re.M)))
+
+
 def vacuous():
     """Exclusion keys naming nothing this project actually has."""
     return sorted(set(NOT_FRONT_DOOR) - (set(verbs()) | set(env_vars()) | set(hooks())))
@@ -146,7 +170,8 @@ def unnamed():
         except OSError:
             unreadable.append(d)
     missing, excluded = [], 0
-    for kind, names in (("verb", verbs()), ("env", env_vars()), ("hook", hooks())):
+    for kind, names in (("verb", verbs()), ("env", env_vars()), ("hook", hooks()),
+                        ("flag", installer_flags())):
         for n in names:
             if n in NOT_FRONT_DOOR:
                 excluded += 1
@@ -168,7 +193,7 @@ def main():
         for m in missing:
             print("  " + m)
     else:
-        print("every verb, env var and hook is at least NAMED.")
+        print("every verb, env var, hook and installer flag is at least NAMED.")
 
     print("\nTHIS IS THE FLOOR, NOT THE GOAL. It cannot tell whether the prose is right, still")
     print("describes the code, explains anything, or reads coherently for somebody arriving new.")

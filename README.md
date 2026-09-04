@@ -38,6 +38,12 @@ $EDITOR .showrunner/config.json      # resources, lanes, inject, checks
 
 `showrunner` is the project-local binary `./.showrunner/bin/showrunner` — not a global command.
 
+The installer touches **only the target repo**, with one exception it asks about: `--skills` links
+the Claude Code skills (`showrunner`, `sr-status`, `sr-doctor`, `sr-install`) into
+`~/.claude/skills`, which is the one thing written outside your project. Given neither flag it
+asks, and only when there is a terminal to ask at; `--no-skills` never touches `~/.claude` and
+does not ask.
+
 ### Installing for yourself, not for the team
 
 That install is **shared**, on purpose: the payload and the gates are committed, and everyone who

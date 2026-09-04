@@ -1231,6 +1231,10 @@ Per-project install is the **default** and stays the documented path. Central is
 flag, and reversible in both directions:
 
 ```
+./install.sh --skills /path/to/project       # also link the skills into ~/.claude/skills — the ONLY
+                                             # thing the installer writes outside the target repo.
+                                             # `--no-skills` never touches ~/.claude and does not ask;
+                                             # given neither, it asks, and only on a TTY.
 ./install.sh --central /path/to/project      # write ONE dispatcher shim, no local copy of the code
 showrunner self --pin <ref> --dest <path>    # populate central: extract bin/ and lib/ at a git ref
                                              # RUN FROM A SHOWRUNNER CHECKOUT: the ref is resolved
