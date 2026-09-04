@@ -38,6 +38,32 @@ $EDITOR .showrunner/config.json      # resources, lanes, inject, checks
 
 `showrunner` is the project-local binary `./.showrunner/bin/showrunner` — not a global command.
 
+### Installing for yourself, not for the team
+
+That install is **shared**, on purpose: the payload and the gates are committed, and everyone who
+clones the repo gets both. If you want showrunner for yourself only:
+
+```bash
+./install.sh --local /path/to/your/project
+```
+
+Hooks go into the untracked `.claude/settings.local.json` instead of the source-controlled
+`.claude/settings.json`, and what the install writes is excluded in `.git/info/exclude`. A
+`--local` install leaves `git status` **clean** — that is the whole promise, and it is why the
+exclusion is not appended to `.gitignore`: that file is source-controlled, so ignoring the payload
+there would make a private decision arrive as a tracked diff on everybody else's next pull.
+
+Two things worth knowing before you use it:
+
+- **`spawn` carries the untracked registration into each Crawler tree.** `git worktree add` copies
+  tracked files only, so without that a `--local` install would produce worktrees with no
+  `.claude` at all — no worktree guard, no dispatch guard, no seat announcement, no reach gate —
+  while the main checkout reported every one of them registered and healthy.
+- **Do not end up in both layers.** Registration is idempotent within the file it writes and
+  cannot see the other one, so a shared install followed by a local one leaves every guard firing
+  twice. `showrunner doctor` names any hook registered in both; which copy to remove depends on
+  whose file it is, so the tool reports it and does not choose.
+
 ## The cast
 
 | Piece | Role |
