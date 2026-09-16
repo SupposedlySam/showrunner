@@ -41,6 +41,12 @@ import time
 REPO = "SupposedlySam/showrunner"
 TRUSTED_LOGINS = {"supposedlysam", "mrgnhnt96"}
 TRUSTED_NAMES = {"jonah walker", "morgan hunt"}
+# HOW THIS SESSION RECOGNISES ITS OWN WRITING. The agent comments under the maintainer's GitHub
+# account, so author is not a discriminator — the signature is the only thing that separates "I
+# wrote this" from "the person I exist to hear from wrote this". Overridable so that changing the
+# signature in one place changes it everywhere; the default is what this agent actually signs.
+SIGNATURE = os.environ.get("SHOWRUNNER_AGENT_SIGNATURE") or "— 🤖 showrunner owner agent"
+PAGE = 100                 # what `comments_since` asks for; a FULL page means there may be more
 POLL_SEC = 60
 BUDGET_SEC = 1800          # bounded: a poller with no end is a process nobody remembers starting
 # THE DEBT CHECK USED TO RUN ONLY AFTER THE FULL BUDGET DRAINED. Somebody waiting on an answer
@@ -128,21 +134,35 @@ def comments_since(stamp):
     different thing, and saying so here is cheaper than somebody later concluding the watcher is
     broken because an inline review comment did not ring.
 
-    MY OWN COMMENTS MUST NOT WAKE ME, and the watermark is what makes that true by construction
-    rather than by filtering on author. The agent posts under the maintainer's account, so "skip
-    comments by the authenticated user" would skip the maintainer — who is the person this exists
-    to hear from. Instead the stamp is seeded when the poll STARTS: anything posted during the
-    turn is already behind it, and the session is parked at a turn-end for the whole poll, so a
-    comment appearing mid-poll is necessarily somebody else's.
+    MY OWN COMMENTS MUST NOT WAKE ME, and this docstring used to claim the watermark achieved
+    that "by construction". It did not: the stamp is seeded at poll start only on the very first
+    poll ever, and is loaded from the state file every time after. The watcher woke this session
+    to report a comment this session had just posted, which is how the claim was found to be
+    decoration. Author is not available as a filter either — the agent posts under the
+    maintainer's account, so "skip the authenticated user" skips the one person worth hearing
+    from. The discriminator is the SIGNATURE, applied by the caller.
+
+    THE WINDOW MUST NOT GROW. This asks for ONE page and does not paginate, so a stamp that never
+    advances eventually has more than a page of comments behind it — at which point this returns
+    the OLDEST hundred and newer comments fall off the end unseen. A watcher that has silently
+    stopped reporting looks exactly like a quiet repo. The caller advances the stamp to the newest
+    `createdAt` it has processed, and treats a FULL page as "there may be more", not as the end.
     """
     if not GH or not stamp:
         return None
     try:
         out = subprocess.run(
-            [GH, "api", "repos/%s/issues/comments?since=%s&per_page=100" % (REPO, stamp),
+            [GH, "api", "repos/%s/issues/comments?since=%s&per_page=%d" % (REPO, stamp, PAGE),
+             # `tail` IS NOT REDUNDANT WITH `body`. `body` is the first 160 characters, for the
+             # human-readable line in the wake; the signature sits at the END, so on any comment
+             # longer than that it is not present in `body` at all and a suffix test against it
+             # can never match. The first version of the signature check was written against
+             # `body` and would have suppressed nothing, silently — a filter that never fires
+             # looks exactly like a world with nothing to filter.
              "--jq", '[.[] | {id, issue: (.issue_url | split("/") | last), '
                      'author: {login: .user.login, name: .user.login}, '
-                     'createdAt: .created_at, body: (.body[0:160])}]'],
+                     'createdAt: .created_at, body: (.body[0:160]), '
+                     'tail: (.body[-160:])}]'],
             capture_output=True, text=True, timeout=45)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -487,10 +507,16 @@ def main():
         seen = seed
 
     already = rung()
-    # SEEDED AT POLL START, which is what keeps my own comments from waking me without having to
-    # filter on author — the agent posts under the maintainer's account, so an author filter
-    # would silence the person this exists to hear from. Anything posted during the turn is
-    # already behind this stamp, and the session is parked at a turn-end for the whole poll.
+    # THIS COMMENT USED TO SAY "seeded at poll start, which keeps my own comments from waking me".
+    # That was true of the FIRST poll only and false every time after, since the stamp is loaded
+    # from the state file and the `if not mark` branch never fires again. It was caught by the
+    # watcher waking this session to report a comment this session had just written.
+    #
+    # THERE IS NO WATERMARK THAT FIXES THAT, and it is worth saying why rather than trying: the
+    # agent posts under the maintainer's account, so "my own comment" and "the one person this
+    # exists to hear from" are the same author, and any stamp late enough to exclude the former
+    # excludes the latter. The discriminator has to be the SIGNATURE — the reason for having one
+    # — and it is applied at the point of reporting, not here.
     mark, rung_comments = comment_mark()
     if not mark:
         mark = _utcnow()
@@ -528,17 +554,58 @@ def main():
                           if was.get(n) == "closed" and (r.get("state") or "") == "open")
 
         rows = comments_since(mark)
-        replies = []
+        replies, mine = [], 0
         if rows:
             for c in rows:
                 try:
                     cid = int(c.get("id"))
                 except (TypeError, ValueError):
                     continue
-                if cid not in rung_comments:
-                    replies.append(dict(c, id=cid))
+                if cid in rung_comments:
+                    continue
+                # SIGNED BY ME MEANS I ALREADY KNOW. Matched at the END of the body so that
+                # somebody QUOTING the signature — which is exactly what a reply discussing it
+                # would do — is still heard. Counted, not dropped in silence: a suppressor that
+                # cannot say how much it suppressed is indistinguishable from a quiet world, and
+                # if the signature ever changes this count going to zero is the symptom.
+                if " ".join((c.get("tail") or "").split()).endswith(SIGNATURE):
+                    mine += 1
+                    rung_comments = rung_comments | {cid}
+                    continue
+                replies.append(dict(c, id=cid))
+
+        # THE STAMP MUST MOVE, and until now it never did: it was written once and every poll
+        # afterwards asked for everything since that instant. One page is requested and there is
+        # no `--paginate`, so the moment more than a page of comments sits behind the stamp, the
+        # API returns the OLDEST page and everything newer is invisible — permanently, and with
+        # no error. The watcher would go on reporting nothing while the repo filled up.
+        #
+        # Advanced to the newest `createdAt` actually PROCESSED, not to the local clock: the
+        # timestamps are GitHub's and the comparison is GitHub's, so no clock skew here can skip
+        # a comment. `since` is inclusive on the second, so the ledger is pruned to exactly the
+        # ids sitting ON the new stamp — the only ones that can come back — instead of growing
+        # without bound.
+        if rows:
+            newest = max((c.get("createdAt") or "") for c in rows)
+            if newest and newest > mark:
+                mark = newest
+                rung_comments = {int(c["id"]) for c in rows
+                                 if (c.get("createdAt") or "") == newest
+                                 and str(c.get("id") or "").lstrip("-").isdigit()}
+                _save(seen, since=mark, comment_ids=sorted(rung_comments))
 
         if not (fresh or reopened or replies):
+            # A POLL THAT SAW ONLY MY OWN COMMENTS still advances the ledger, or they are
+            # re-fetched and re-matched every 60s for the life of the process.
+            if mine:
+                _save(seen, since=mark, comment_ids=sorted(rung_comments))
+            # A FULL PAGE MEANS THERE MAY BE MORE, and the remainder is NOT lost: the stamp has
+            # just advanced past what was processed, so the next poll asks for what follows it.
+            # The drain is one page per POLL_SEC — 100 comments a minute, which is not the
+            # failure mode this repo has. There is deliberately no "go round again immediately"
+            # branch: the sleep sits at the top of this loop, so such a branch would be
+            # identical to falling through, and a defensive branch that cannot fire is worse
+            # than none — it reads as a guarantee on every future visit.
             continue
 
         # ADVANCE FIRST. If the wake lands and the agent acts, a second wake for the same event
@@ -556,6 +623,8 @@ def main():
             what.append("%d reopened" % len(reopened))
         if replies:
             what.append("%d new comment(s)" % len(replies))
+        if mine:
+            what.append("%d of my own (not shown)" % mine)
         lines = ["GitHub activity on %s: %s" % (REPO, ", ".join(what)), ""]
 
         any_untrusted = False

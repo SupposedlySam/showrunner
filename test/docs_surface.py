@@ -55,6 +55,12 @@ NOT_FRONT_DOOR = {
     "stop-gate": "a hook verb, not something a reader invokes; documented where the gate is",
     "integration-commit": "the second half of `integrate`, described with it",
     "SHOWRUNNER_STATE": "test seam for the issue waker, not a consumer knob",
+    "SHOWRUNNER_AGENT_SIGNATURE": "the issue waker's own; it is how that hook recognises comments "
+                                  "this agent wrote, since the agent posts under the maintainer's "
+                                  "GitHub account and author is therefore not a discriminator. "
+                                  "Excluded for the same reason as the hook that reads it — "
+                                  "install.sh does not copy issue-waker.py, so no consumer "
+                                  "receives either.",
     "SHOWRUNNER_SESSION": "set by the harness for a Crawler, never by a reader",
     "SHOWRUNNER_BIN": "an override for the probe's own resolution, not consumer surface",
     "SHOWRUNNER_CENTRAL": "central mode, documented in its own section by name",

@@ -14950,6 +14950,65 @@ def test_the_watcher_sees_more_than_new_issues():
     rc, said = drive(world, [], {"seen": [1, 2], "rung": []})
     eq("an open issue the old watcher had already recorded does not ring on migration", rc, 0)
 
+    # MY OWN COMMENTS MUST NOT WAKE ME, and for a while they did. The code claimed the watermark
+    # made it true "by construction"; the watermark is seeded at poll start on the FIRST poll
+    # only and loaded from the state file every time after, so the claim held for one poll and
+    # was decoration thereafter. Found when the watcher woke this session to report a comment
+    # this session had just written. Author is not a usable filter — the agent comments under
+    # the maintainer's account, so filtering on it silences the one person worth hearing from.
+    sig = w.SIGNATURE
+    signed = {"id": 900, "issue": "1", "createdAt": "2026-09-16T02:00:00Z",
+              "author": {"login": "SupposedlySam", "name": "SupposedlySam"},
+              "body": "Reproduced your exact starting state, and the news is mixed",
+              "tail": "that is the point of the file being outside the repo.\n\n" + sig}
+    rc, said = drive({1: issue}, [signed], base)
+    eq("a comment signed by THIS agent does not ring", rc, 0)
+
+    # THE TRAP THE FIRST VERSION FELL INTO: testing the signature against `body`, which the query
+    # truncates to the FIRST 160 characters. The signature is at the END, so on any real comment
+    # it is absent from `body` entirely and the suffix test can never match — a filter that never
+    # fires is indistinguishable from a world with nothing to filter. This is the control: same
+    # comment, nothing in the tail, must still ring.
+    rc, said = drive({1: issue}, [dict(signed, id=901, tail="")], base)
+    eq("...while a comment whose TAIL does not carry the signature still rings, so the "
+       "suppressor is not a blanket", rc, 2)
+
+    # SOMEBODY QUOTING MY SIGNATURE IS STILL SOMEBODY ELSE. Matching at the END rather than
+    # anywhere is what keeps a reply that discusses the signature audible.
+    quoted = "why do you sign with " + sig + " on every comment?"
+    rc, said = drive({1: issue}, [dict(signed, id=902, body=quoted, tail=quoted)], base)
+    eq("a comment QUOTING the signature mid-body still rings", rc, 2)
+
+    # THE STAMP MUST MOVE. It never did: written once, and every later poll asked for everything
+    # since that instant. One page is requested and there is no pagination, so once more than a
+    # page of comments sits behind the stamp the API returns the OLDEST page and everything newer
+    # is invisible — permanently, with no error, looking exactly like a quiet repo.
+    other = {"id": 910, "issue": "1", "createdAt": "2026-09-16T03:00:00Z",
+             "author": {"login": "SupposedlySam", "name": "SupposedlySam"},
+             "body": "a real reply", "tail": "a real reply"}
+    rc, said = drive({1: issue}, [other], base)
+    eq("a comment from somebody else rings", rc, 2)
+    moved = json.load(open(w.STATE))
+    eq("...and the watermark ADVANCED to the newest comment processed, so the next poll asks a "
+       "bounded question instead of re-reading history forever",
+       moved.get("comments_since"), "2026-09-16T03:00:00Z")
+    eq("...taken from GitHub's timestamp and not this machine's clock, which could skew past a "
+       "comment and skip it in silence",
+       moved.get("comments_since"), other["createdAt"])
+
+    # THE LEDGER IS PRUNED TO THE BOUNDARY rather than grown forever. `since` is inclusive on the
+    # second, so only ids sitting ON the new stamp can come back; keeping more is a slow leak.
+    eq("...and the id ledger holds only the comment(s) ON the new stamp",
+       sorted(moved.get("comments_rung") or []), [910])
+
+    # SUPPRESSED IS COUNTED, NEVER SILENT. A filter that cannot say how much it filtered has the
+    # same shape as a broken one, and if the signature ever changes this going to zero is the
+    # only symptom there would be.
+    rc, said = drive({1: issue, 9: pr}, [signed], base)
+    eq("a wake that happens for another reason still accounts for my own comments", rc, 2)
+    ok("...saying how many were mine rather than hiding them",
+       "of my own" in said, said[:400])
+
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
