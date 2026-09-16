@@ -14709,9 +14709,152 @@ def test_many_agents_one_monorepo():
        "named by: session" in pinned and "somebody-elses" not in pinned, pinned[:300])
 
 
+def test_the_watcher_sees_more_than_new_issues():
+    group("The GitHub watcher rings for pull requests, reopens and comments — not only for a "
+          "brand-new open issue")
+    import importlib.util
+    import io as _io          # the suite does not import io at module scope
+    spec = importlib.util.spec_from_file_location(
+        "issue_waker_w", os.path.join(ROOT, ".showrunner", "hooks", "issue-waker.py"))
+    w = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(w)
+
+    # WHAT IT USED TO WATCH was one quarter of what happens. The query was `state=open` with
+    # `select(.pull_request==null)`, so a pull request was invisible, a CLOSED issue was
+    # invisible, and an issue REOPENED after being seen stayed invisible because its number was
+    # already in the seen set. The only event it could report was a brand-new open issue — the
+    # event that happens LEAST often on a repo people are actively reviewing.
+    #
+    # Measured against the live repo when this was widened: 83 items visible where the old query
+    # returned 0, of which 5 were pull requests, and 11 comments in two days — including one on a
+    # CLOSED issue correcting a report, which the old watcher could not have surfaced at all.
+
+    # THE QUERY, asserted on the argv it builds rather than on its output, because the output is
+    # GitHub's and the query is ours. Stubbed subprocess, so this needs no network.
+    seen_argv = []
+
+    class _Done:
+        returncode = 0
+        stdout = ('[{"number":7,"title":"a pr","state":"open","is_pr":true,'
+                  '"author":{"login":"SupposedlySam","name":"SupposedlySam"},'
+                  '"createdAt":"2026-09-16T00:00:00Z","updatedAt":"2026-09-16T00:00:00Z"}]')
+
+    real_run = w.subprocess.run
+
+    def fake_run(argv, **kw):
+        seen_argv.append(argv)
+        return _Done()
+
+    w.subprocess.run = fake_run
+    try:
+        got = w.look()
+    finally:
+        w.subprocess.run = real_run
+    url = " ".join(seen_argv[0]) if seen_argv else ""
+    ok("the watcher asks for BOTH states, so a closed issue can still be heard from",
+       "state=all" in url, url[:200])
+    ok("...and does NOT filter pull requests out, which is what made them invisible",
+       "pull_request==null" not in url, url[:200])
+    ok("...and sorts by UPDATE, so a long backlog cannot push today's activity off the page",
+       "sort=updated" in url, url[:200])
+    ok("...and it still parses into {number: record}, carrying whether each is a PR",
+       got and got.get(7, {}).get("is_pr") is True, got)
+
+    # THE THREE EVENT KINDS, driven through main() with the pollers stubbed. A watcher is the
+    # one component whose whole value is firing on something that has not happened yet, so the
+    # only honest test is to make each thing happen and watch for the bell.
+    scratch = tmpdir("watcher-kinds")
+    w.STATE = os.path.join(scratch, "seen.json")
+    w.POLL_SEC = 0
+    w.BUDGET_SEC = 1
+    w.chat_debts = lambda: []
+
+    def drive(items, comments, state):
+        """Run one poll against a fixed world. Returns (rc, what it wrote to stderr)."""
+        with open(w.STATE, "w") as fh:
+            json.dump(state, fh)
+        w.look = lambda: items
+        w.comments_since = lambda _s: comments
+        buf = _io.StringIO()
+        real_err, w.sys.stderr = w.sys.stderr, buf
+        try:
+            rc = w.main()
+        finally:
+            w.sys.stderr = real_err
+        return rc, buf.getvalue()
+
+    base = {"seen": [1], "rung": [], "states": {"1": "open"},
+            "comments_since": "2026-01-01T00:00:00Z", "comments_rung": []}
+    issue = {"number": 1, "title": "known", "state": "open", "is_pr": False,
+             "author": {"login": "SupposedlySam", "name": "SupposedlySam"}}
+
+    rc, said = drive({1: issue}, [], base)
+    eq("a world where nothing changed does not ring", rc, 0)
+
+    # A PULL REQUEST is a new number like any other — and the wake SAYS it is a PR, because
+    # "a new issue" pointing at a pull request sends a reader to the wrong page.
+    pr = {"number": 9, "title": "a pull request", "state": "open", "is_pr": True,
+          "author": {"login": "SupposedlySam", "name": "SupposedlySam"}}
+    rc, said = drive({1: issue, 9: pr}, [], base)
+    eq("a new PULL REQUEST rings", rc, 2)
+    ok("...and is labelled a PR, not an issue", "NEW PR" in said, said[:400])
+
+    # A REOPEN changes no set. This is the one the old shape could not see even in principle.
+    closed_then_open = dict(issue, state="open")
+    rc, said = drive({1: closed_then_open}, [],
+                     dict(base, states={"1": "closed"}))
+    eq("an issue REOPENED since it was last seen rings, though no number is new", rc, 2)
+    ok("...and says so, rather than reporting it as new", "REOPENED" in said, said[:400])
+
+    # A COMMENT, on a CLOSED issue — closed is not finished, and the report that produced this
+    # very change arrived as a comment on an issue that had already been closed.
+    done = dict(issue, state="closed")
+    reply = {"id": 555, "issue": "1", "createdAt": "2026-09-16T01:00:00Z",
+             "author": {"login": "SupposedlySam", "name": "SupposedlySam"},
+             "body": "one more thing"}
+    rc, said = drive({1: done}, [reply], dict(base, states={"1": "closed"}))
+    eq("a COMMENT on a closed issue rings", rc, 2)
+    ok("...and shows which issue and who wrote it", "COMMENT on #1" in said, said[:400])
+
+    # ONCE, NOT FOREVER. `since` is inclusive on the second, so the same comment comes back on
+    # every poll; without the id ledger the bell would ring on it until the budget ran out.
+    after = json.load(open(w.STATE))
+    ok("the comment id is recorded, so the same comment cannot ring twice",
+       555 in (after.get("comments_rung") or []), after)
+    rc, said = drive({1: done}, [reply], after)
+    eq("...and re-polling the same comment is silent", rc, 0)
+
+    # AN UPGRADE MUST NOT WAKE ON THE BACKLOG. The old file stored the numbers of OPEN ISSUES
+    # only; `look()` now returns every issue AND pull request in both states. Comparing the new
+    # world against the old set makes every closed item and every PR "new" — measured on this
+    # repo's own state file, that was 13 seen against 83 items, so the first turn-end after the
+    # upgrade would have handed the session seventy wakes. Same failure the bootstrap already
+    # guards, arriving through a format change rather than an empty file.
+    old_shape = {"seen": [1], "rung": []}          # no `states`: written before the widening
+    rc, said = drive({1: issue, 2: dict(issue, number=2, state="closed"),
+                      3: dict(issue, number=3, is_pr=True)}, [], old_shape)
+    eq("an upgrade from the old state shape re-seeds instead of ringing", rc, 0)
+    eq("...and emits nothing at all", said, "")
+    migrated = json.load(open(w.STATE))
+    eq("...having adopted the whole world as seen, so only what happens NEXT is new",
+       len(migrated.get("seen") or []), 3)
+    ok("...and recorded per-number states and a watermark, which is what makes reopens and "
+       "comments visible from here on",
+       len(migrated.get("states") or {}) == 3 and bool(migrated.get("comments_since")), migrated)
+
+    # A FAILED LOOK IS NEVER 'NOTHING NEW' — the rule the original was built on, which must
+    # survive the widening. Both pollers, because either one returning None used to be the only
+    # way this could go quiet while the world moved.
+    rc, said = drive(None, None, base)
+    eq("a look that FAILED does not ring and does not record — it is not an empty world", rc, 0)
+    still = json.load(open(w.STATE))
+    eq("...and the watermark is untouched, so nothing is skipped when the API comes back",
+       still.get("comments_since"), base["comments_since"])
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,
