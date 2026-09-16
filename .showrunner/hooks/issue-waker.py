@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-"""Stop hook (asyncRewake): poll GitHub while idle, and WAKE the session when an issue arrives.
+"""Stop hook (asyncRewake): poll GitHub while idle, and WAKE the session when anything arrives.
+
+WHAT RINGS, stated first because this file's own header used to say "when an issue arrives" and
+that was a quarter of the truth:
+
+  * a new ISSUE, or a new PULL REQUEST — the wake says which
+  * an issue or PR REOPENED since it was last seen, which changes no set and is therefore
+    invisible to anything keyed on numbers alone
+  * a COMMENT on any of them, open or CLOSED — closed is not finished, and a correction posted
+    on an issue already closed is how several of the changes in this repo arrived
+  * a chat debt: somebody in a room waiting on an answer from this session
+
+WHAT DOES NOT: pull-request REVIEW comments, the ones anchored to a diff line. They are a
+different endpoint and a different object, and saying so here is cheaper than somebody later
+concluding the watcher is broken because an inline review comment did not ring.
 
 THE MOMENT A TURN ENDS, NOTHING FIRES. A session_start check catches what arrived between
 sessions; within a long one, nothing looks. Claude Code exposes no inbound IPC — but a Stop hook
