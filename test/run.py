@@ -14851,6 +14851,49 @@ def test_the_watcher_sees_more_than_new_issues():
     eq("...and the watermark is untouched, so nothing is skipped when the API comes back",
        still.get("comments_since"), base["comments_since"])
 
+    # THE MIGRATION MUST NOT EAT THE SIGNAL IT WAS WRITTEN TO PROTECT. A state file from before
+    # the widening has no "states" key, so the watcher re-seeds from the world — and the first
+    # version seeded from ALL of it, which silently swallowed any open issue filed between the
+    # last poll and the upgrade. That happened: #84 was filed 13 minutes before the migration
+    # shipped and the first poll after it absorbed the issue in total silence. It was found by
+    # running `gh api` by hand for an unrelated reason.
+    #
+    # The distinction the fix turns on: the OLD watcher could only ever see open non-PR issues,
+    # so its `seen` list is COMPLETE for that class and worthless for every other. Closed items
+    # and pull requests are backlog and must be seeded; an open issue it never recorded is news.
+    old_shape = {"seen": [1], "rung": []}           # no "states" — this is what pre-widening wrote
+    world = {
+        1: {"number": 1, "title": "known", "state": "open", "is_pr": False,
+            "author": {"login": "SupposedlySam", "name": "SupposedlySam"}},
+        2: {"number": 2, "title": "filed during the upgrade", "state": "open", "is_pr": False,
+            "author": {"login": "SupposedlySam", "name": "SupposedlySam"}},
+        3: {"number": 3, "title": "old closed issue", "state": "closed", "is_pr": False,
+            "author": {"login": "SupposedlySam", "name": "SupposedlySam"}},
+        4: {"number": 4, "title": "a pull request", "state": "open", "is_pr": True,
+            "author": {"login": "SupposedlySam", "name": "SupposedlySam"}},
+    }
+    rc, said = drive(world, [], old_shape)
+    eq("migrating a pre-widening state file RINGS for an issue filed during the upgrade", rc, 2)
+    ok("...naming that issue and not the backlog", "#2" in said, said[:400])
+
+    # THE POSITIVE CONTROL AND THE DENOMINATOR TOGETHER. "It rang" is not the claim — the claim is
+    # that it rang for exactly one of four items. Without this, seeding NOTHING would also pass the
+    # assertion above while restoring the flood the migration exists to stop.
+    ok("...and does NOT report the closed item (#3) as new — that is backlog, not news",
+       "#3" not in said, said[:400])
+    ok("...and does NOT report the pull request (#4) as new, for the same reason",
+       "#4" not in said, said[:400])
+    after_mig = json.load(open(w.STATE))
+    eq("...and the ring covered one item, not four", said.count("NEW "), 1)
+    ok("...after which every number is recorded, so the next poll is quiet",
+       set(after_mig.get("seen") or []) == {1, 2, 3, 4}, after_mig.get("seen"))
+    rc, said = drive(world, [], after_mig)
+    eq("...and re-polling the migrated world is silent", rc, 0)
+
+    # THE OTHER HALF OF THE SAME BUG: if the old file had ALREADY seen it, it is not news.
+    rc, said = drive(world, [], {"seen": [1, 2], "rung": []})
+    eq("an open issue the old watcher had already recorded does not ring on migration", rc, 0)
+
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")

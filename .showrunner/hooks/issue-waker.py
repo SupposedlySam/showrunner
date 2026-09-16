@@ -446,19 +446,45 @@ def main():
     # against the old set makes seventy closed items and five pull requests "new", and the first
     # turn-end after an upgrade hands the session a flood.
     #
-    # THE SAME FAILURE THE BOOTSTRAP ALREADY GUARDS, arriving through a format change instead of
-    # through an empty file: "an empty baseline wakes on the whole backlog" is true of a baseline
-    # that is merely the wrong SHAPE too. Detected by the absence of `states`, which no file
-    # written before the widening can have, and repaired by re-seeding from the world as it is
-    # now — the same thing bootstrap does, for the same reason.
-    if _state() is not None and "states" not in (_state() or {}):
+    # BUT THE OLD BASELINE IS NOT WORTHLESS, AND THE FIRST VERSION OF THIS THREW IT AWAY. Seeding
+    # from the whole world discards a record that was accurate about one class: the old `seen` is
+    # a COMPLETE list of the open non-PR issues as of its last poll, because that is the only
+    # class the old query could return. Anything in that class missing from `seen` is therefore
+    # genuinely new, not backlog.
+    #
+    # THIS IS NOT HYPOTHETICAL. #84 was filed at 14:21Z, this migration shipped at 14:34Z, and the
+    # first poll after it — 14:42Z — folded #84 into the seed and stayed silent. It was found by
+    # hand, running `gh api` for an unrelated reason. A guard written to prevent a flood spent its
+    # first run eating the single event it existed to deliver, which is the failure mode of every
+    # filter: the cost lands on the signal, and silence is what success looks like too.
+    #
+    # So seed only what the old watcher COULD NOT see — pull requests and closed items, the part
+    # that would actually flood — and WITHHOLD genuinely new open issues, leaving them absent from
+    # `seen` so the poll below reports them exactly as the old watcher would have.
+    prior = _state()
+    if prior is not None and "states" not in prior:
         world = look()
         if world is None:
             return 0           # could not look; never re-seed from a failed read
-        _save(set(world),
-              seen_states={n: (r.get("state") or "open") for n, r in world.items()},
+        knew = set(prior.get("seen") or [])
+        withheld = {n for n, r in world.items()
+                    if not r.get("is_pr")
+                    and (r.get("state") or "open") == "open"
+                    and n not in knew}
+        seed = set(world) - withheld
+        # Withheld numbers are left out of `states` too, so they ring as NEW rather than as a
+        # reopen — `reopened` keys on a recorded "closed", and no record is the honest state here.
+        #
+        # `since` starts at now and comments from before the upgrade are lost. Stated rather than
+        # glossed: the old file carried no comment watermark, so there is no baseline to preserve,
+        # and inventing one — the old file's mtime, say — would be a guess that risks the flood
+        # this block exists to prevent. Measured for this repo at the time: no comments in the
+        # window, so the loss here was zero, which is luck and not a design.
+        _save(seed,
+              seen_states={n: (r.get("state") or "open")
+                           for n, r in world.items() if n not in withheld},
               since=_utcnow(), comment_ids=[])
-        seen = set(world)
+        seen = seed
 
     already = rung()
     # SEEDED AT POLL START, which is what keeps my own comments from waking me without having to
