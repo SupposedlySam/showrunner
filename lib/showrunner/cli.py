@@ -320,6 +320,14 @@ def cmd_doctor(args):
     seat_map, seat_problems = roles.seat_roles(cfg)
     for msg in seat_problems:
         print("  %s %s" % (YEL + "warn " + OFF, msg))
+    # WHERE PERMISSION CAME FROM, printed every run rather than only when something is wrong.
+    # `doctor` used to report a repo-defined role as `ok   4 role(s) defined, shape valid`,
+    # listing it beside the operator's own — shape was the only question it asked, and shape is
+    # not the interesting one when the file is inside the repo the session can edit (#84).
+    for msg in roles.ignored_project_grants(cfg):
+        print("  %s %s" % (YEL + "warn " + OFF, msg))
+    print("  %s role definitions and seat mappings are read from %s ONLY — this project's "
+          "config can neither add one nor widen one" % (GRN + "ok   " + OFF, roles.USER_PATH))
     for where, role in sorted(seat_map.items()):
         if role_defs and role not in role_defs:
             print("  %s seat_roles maps the %s seat to %r, which no role defines — that seat "

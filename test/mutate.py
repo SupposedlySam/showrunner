@@ -620,6 +620,15 @@ TARGETS = [
     ("the role roster", "roles.roster", "lib/showrunner/roles.py",
      r"(def roster\(cfg\):\n)",
      "    return []\ndef _neutered_roster(cfg):\n"),
+    # THE REFUSAL HAS TO BE AUDIBLE. Returning [] here is the shape a silent drop takes: the
+    # project's roles are still correctly ignored, so nothing is granted and no escalation is
+    # possible — the security property survives this mutant intact. What dies is the operator's
+    # ability to find out. A repo whose roles were its only roles goes from a working role
+    # system to none, and `whoami`/`doctor` say nothing that distinguishes that from "roles were
+    # never configured here". Refusing well and refusing invisibly look identical from inside.
+    ("project roles refused OUT LOUD", "roles.ignored_project_grants", "lib/showrunner/roles.py",
+     r"(def ignored_project_grants\(cfg\):\n)",
+     "    return []\ndef _neutered_ignored_project_grants(cfg):\n"),
     ("locks present on disk", "locks.LockSet.on_disk", "lib/showrunner/locks.py",
      r"(    def on_disk\(self\):\n)",
      "        return []\n    def _neutered_on_disk(self):\n"),

@@ -18,6 +18,7 @@ So this harness is split in two:
 Run:  python3 test/run.py [-v]
 """
 
+import copy as _copy
 import argparse
 
 # BORROWED CLAIMS IN THIS FILE ARE REPORTED, NOT VERIFIED HERE. Findings attributed to another
@@ -5518,13 +5519,40 @@ def test_crawler_seat_resolves_to_a_role():
            "with a campaign confers no role by itself",
            R._resolved(cfg, "sess-o", defs)[0], R.FALLBACK)
 
-        # A PROJECT MAY NOT REMAP ITS OWN SEAT -- it could otherwise hand itself any role in the
-        # catalog, the widening the definitions left the repo to prevent.
+        # A PROJECT MAY NOT MAP A SEAT AT ALL. This used to read "may not REMAP", allowing a
+        # project to map a seat the user had left UNMAPPED -- and that exception was the whole
+        # hole (#84): first-mapping hands the session any role in the catalog by exactly the
+        # route remapping would have. The rule and its own stated rationale had disagreed since
+        # the day it was written.
         merged, problems = R.seat_roles({"seat_roles": {"crawler": "campaign-lead"}})
-        eq("a project remapping a seat the user already mapped loses to the user-level mapping",
+        eq("a project remapping a seat the user already mapped does not take effect",
            merged.get("crawler"), "worker")
-        ok("...and the conflict is reported rather than resolved silently",
-           any("user-level" in x for x in problems), problems)
+        ok("...and the refusal is reported rather than resolved silently",
+           any("user level" in x for x in problems), problems)
+
+        # THE CASE THE OLD RULE ALLOWED, and the one actually measured as an escalation: a seat
+        # the user never mapped. `solo` is unmapped in this fixture, so under the old code the
+        # project's mapping WON and a deny-everything session resolved to `worker`.
+        merged2, problems2 = R.seat_roles({"seat_roles": {"solo": "worker"}})
+        ok("a project mapping a seat the USER LEFT UNMAPPED does not take effect either — the "
+           "exception that made a repo file a way to grant yourself a writable seat",
+           "solo" not in merged2, merged2)
+        ok("...and that refusal is reported too, since a silent drop reads as 'never configured'",
+           any("solo" in x for x in problems2), problems2)
+
+        # THE SECOND, INDEPENDENT ROUTE: no mapping needed at all. A project that DEFINES a
+        # claimable role can simply claim it. Measured before the fix: two lines in
+        # `.showrunner/config.json` produced `CLAIMED selfmade#0 ... may write: **`.
+        defs_only, _probs = R.spec({"roles": {"selfmade": {"acquire": "claim",
+                                                           "writes": {"allow": ["**"]}}}})
+        ok("a role DEFINED by the project is not in the catalog, so it cannot be claimed",
+           "selfmade" not in defs_only, sorted(defs_only))
+        told = R.ignored_project_grants({"roles": {"selfmade": {"acquire": "claim"}}})
+        ok("...and the project is told its roles were refused, naming them",
+           told and "selfmade" in told[0], told)
+        eq("...while a project that defines no roles is told nothing — the notice reports a real "
+           "refusal and is not a banner that fires on every repo",
+           R.ignored_project_grants({}), [])
 
         # A DROPPED MAPPING IS ANNOUNCED, not merely returned. `whoami` is the seam a session
         # actually reads, and a mapping silently ignored there leaves it told `unassigned` while
@@ -5534,6 +5562,34 @@ def test_crawler_seat_resolves_to_a_role():
         ok("`whoami` says a seat mapping was IGNORED rather than dropping it quietly",
            "SEAT MAPPING IGNORED" in body, body[-300:])
         wt_cfg.data.pop("seat_roles", None)
+
+        # AND SO ARE REFUSED ROLE DEFINITIONS -- asserted HERE, at the seam a session reads,
+        # because the unit call alone scored THIN: `ignored_project_grants` returns [] on its
+        # happy path, so a neutered version returning [] is invisible at that layer. Refusing
+        # correctly and refusing invisibly are the same object from inside the function; only
+        # the announcement tells them apart, and the announcement is the whole point of the
+        # channel. The mutation sweep said so and this is the companion it asked for.
+        wt_cfg.data["roles"] = {"selfmade": {"acquire": "claim", "writes": {"allow": ["**"]}}}
+        body = "\n".join(R.whoami(wt_cfg, session="sess-c"))
+        ok("`whoami` says a project's role definitions were IGNORED, naming them",
+           "PROJECT ROLES IGNORED" in body and "selfmade" in body, body[-400:])
+
+        # THE LOUDEST CASE, and the one a branch-local notice would have missed: a project whose
+        # roles were its ONLY roles. The refusal takes a working role system down to none, and
+        # without this line that is indistinguishable from "roles were never configured here".
+        bare = _copy.deepcopy(wt_cfg)
+        bare.data["roles"] = {"selfmade": {"acquire": "claim"}}
+        body_bare = "\n".join(R.whoami(bare, session="sess-c"))
+        ok("...and says it even when the USER level defines nothing, where the drop is total",
+           "PROJECT ROLES IGNORED" in body_bare, body_bare[-400:])
+
+        # THE POSITIVE CONTROL AND THE DENOMINATOR. Without this, a `whoami` that printed the
+        # notice unconditionally -- a banner, not a report -- would satisfy both lines above.
+        wt_cfg.data.pop("roles", None)
+        quiet = "\n".join(R.whoami(wt_cfg, session="sess-c"))
+        ok("...and a project that defines no roles is told nothing, so the notice reports a real "
+           "refusal rather than firing on every repo",
+           "PROJECT ROLES IGNORED" not in quiet, quiet[-300:])
 
         # A SEAT MAPPED AT A ROLE NOBODY DEFINED resolves to the fallback, which looks exactly
         # like having written no mapping at all. One typo buys the whole bug back, so `doctor`

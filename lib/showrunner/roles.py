@@ -101,30 +101,57 @@ def _read(path):
 
 
 def spec(cfg):
-    """Merged role definitions. Returns (roles, problems).
+    """Role definitions, USER LEVEL ONLY. Returns (roles, problems).
 
-    USER LEVEL IS AUTHORITATIVE AND A PROJECT MAY ONLY ADD. A project that could redefine a
-    user-level role would be able to widen the policy that constrains it, which is the whole
-    reason the definitions left the repo — so a redefinition is reported as a problem and the
-    user-level version is kept.
+    PERMISSION IS USER LEVEL AND A PROJECT CONTRIBUTES NOTHING. This used to read "a project may
+    only ADD", on the reasoning that redefining a user-level role would let a session widen the
+    policy that constrains it. The reasoning was right and the rule did not implement it: ADDING
+    is granting. Measured in a throwaway repo, with the user-level file untouched (#84): put
+
+        {"roles": {"selfmade": {"acquire": "claim", "writes": {"allow": ["**"]}}}}
+
+    in `.showrunner/config.json`, run `showrunner role claim selfmade`, and the session holds a
+    role granting `**`:
+
+        CLAIMED selfmade#0        role: selfmade (claimed)   PUBLISHED may write: **
+
+    `showrunner doctor` then reported it as `ok   4 role(s) defined, shape valid: campaign-lead,
+    free, unassigned, worker` — the repo-defined role listed beside the operator's own, with no
+    provenance. Two lines in a file the blocked session can write. The docstring's own
+    sentence, "otherwise the policy a session runs under is editable by that session", described
+    the hole it was standing next to.
+
+    The identity element again: UNMAPPED and UNDEFINED were read as "the operator has no opinion",
+    and no-opinion resolved as permission. An operator who has said nothing has not said yes.
+
+    Nothing legitimate is lost. Neither this repo nor any doc defines a project-level role;
+    `roles.json` is described everywhere as the user-level file that permission left the repo for.
+    A project that wants a role says so at user level, which is exactly the posture that makes it
+    an operator decision. Ignored entries are REPORTED, never silently dropped —
+    `ignored_project_grants` carries them, and `whoami` and `doctor` print them.
     """
     problems = []
     roles, err = _read(USER_PATH)
     if err:
         problems.append(err)
-    roles = dict(roles)
+    return dict(roles), problems
 
+
+def ignored_project_grants(cfg):
+    """Role definitions this project's config asked for and did NOT get. A list of messages.
+
+    ITS OWN CHANNEL, DELIBERATELY. `spec`'s `problems` means "the definitions are unreadable" and
+    `porcelain` turns enforcement OFF when it is non-empty — so routing this through it would let
+    a stray project role DISABLE the role system, converting a self-grant into a total bypass and
+    making the fix strictly worse than the bug.
+    """
     project = (cfg.get("roles") or {}) if hasattr(cfg, "get") else {}
-    if isinstance(project, dict):
-        for name, d in project.items():
-            if name in roles:
-                problems.append(
-                    "%r is defined in this project AND at user level; the user-level definition "
-                    "wins. A project may ADD a role, never redefine one — otherwise the policy a "
-                    "session runs under is editable by that session." % name)
-                continue
-            roles[name] = d
-    return roles, problems
+    if not isinstance(project, dict) or not project:
+        return []
+    return ["this project's config defines %d role(s) (%s) and NONE of them are in effect: "
+            "permission is user level (~/.config/showrunner/roles.json). A repo-defined role "
+            "would be one a session can grant itself by editing the repo it is standing in."
+            % (len(project), ", ".join(sorted(str(n) for n in project)))]
 
 
 def _read_seat_roles(path):
@@ -148,23 +175,26 @@ def _read_seat_roles(path):
 def seat_roles(cfg):
     """Merged {seat: role}. Returns (map, problems).
 
-    USER LEVEL IS AUTHORITATIVE AND A PROJECT MAY ONLY ADD, exactly as for the definitions. A
-    project that could remap its own seat would hand itself any role in the catalog, which is the
-    widening the definitions left the repo to prevent.
+    USER LEVEL ONLY, exactly as for the definitions. This used to let a project map a seat the
+    user had left UNMAPPED, on the reasoning that only a REMAP could "hand itself any role in the
+    catalog". First-mapping hands itself the same role by the same route; the exception was the
+    whole hole. Measured (#84): a repo-level {"seat_roles": {"solo": "worker"}} resolved a
+    deny-everything session to `worker` with `may write: **`, user file untouched.
+
+    Project entries are REPORTED rather than dropped in silence, through `problems` — which
+    `whoami` renders as SEAT MAPPING IGNORED and, unlike `spec`'s `problems`, does not switch
+    enforcement off.
     """
     m, err = _read_seat_roles(USER_PATH)
     problems = [err] if err else []
     m = dict(m)
     project = (cfg.get(SEAT_ROLES_KEY) or {}) if hasattr(cfg, "get") else {}
-    if isinstance(project, dict):
-        for where, role in project.items():
-            if str(where) in m:
-                problems.append(
-                    "the seat %r is mapped in this project AND at user level; the user-level "
-                    "mapping wins. A project may map a seat the user left unmapped, never remap "
-                    "one." % where)
-                continue
-            m[str(where)] = str(role)
+    if isinstance(project, dict) and project:
+        problems.append(
+            "this project's config maps %d seat(s) (%s) and NONE of them are in effect: a seat "
+            "mapping is permission, and permission is user level. Map it in "
+            "~/.config/showrunner/roles.json if you mean it."
+            % (len(project), ", ".join(sorted(str(k) for k in project))))
     return m, problems
 
 
@@ -703,6 +733,7 @@ def resolution(cfg, session=None):
         "notes": d.get("notes"),
         "problems": list(problems),
         "ignored_seat_mappings": seat_roles(cfg)[1],
+        "ignored_project_grants": ignored_project_grants(cfg),
     }
 
 
@@ -824,6 +855,18 @@ def whoami(cfg, session=None):
         # see says otherwise, with nothing connecting the two.
         for msg in r["ignored_seat_mappings"]:
             out.append("  SEAT MAPPING IGNORED: %s" % msg)
+        if r["role"] == FALLBACK:
+            # THE VERDICT WITHOUT THE REMEDY IS WHY #84 WAS FILED. A session landing here is told
+            # it may write nothing and not told that a seat mapping is the documented way out, so
+            # the reporter read the roster, concluded two of four roles were unreachable, and
+            # filed an issue asking for a feature that already existed. `seat_roles` was in both
+            # front-door docs — mapping `crawler`, never `solo`, which is the seat a session in
+            # this position actually holds.
+            out.append("    TO GET A SEAT, the OPERATOR maps one in "
+                       "~/.config/showrunner/roles.json — not this repo:")
+            out.append('      {"seat_roles": {"%s": "<one of your roles>"}}' % r["seat"])
+            out.append("    A session cannot grant itself this, and that is the point of the "
+                       "file being outside the repo.")
         for label, line in enforced_lines(r["policy"]):
             out.append("    %-9s %s" % (label, line))
         if any(label == "PUBLISHED" for label, _ in enforced_lines(r["policy"])):
@@ -845,6 +888,14 @@ def whoami(cfg, session=None):
             out.append("    ...which is prose your project wrote. Nothing checks it.")
     else:
         out.append("  no roles are defined, so no dispatch policy is enforced for any seat.")
+
+    # OUTSIDE THE BRANCHES ON PURPOSE. A project whose role definitions were refused must hear it
+    # in every state of the user-level file, and the state where it matters most is the one where
+    # that file is EMPTY: before this change the project's roles were the only ones such a repo
+    # had, so the refusal takes a working role system down to none. A silent drop there looks
+    # exactly like "roles were never configured".
+    for msg in r["ignored_project_grants"]:
+        out.append("  PROJECT ROLES IGNORED: %s" % msg)
     return out
 
 

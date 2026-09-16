@@ -515,14 +515,30 @@ every Crawler resolved to the fallback and ran under the fallback's policy *insi
 routing its evidence around the write guard with shell redirection. A guard whose reward for
 holding is a workaround teaches every later session to route around it.
 
+**`crawler` is not the only seat you can map**, and every example here used to show only that
+one — which is why a session doing one human-assigned task in a campaign-carrying repo read the
+roster, found `worker` acquirable only by `assign`, and concluded two of four roles were dead
+letters (#84). The keys are the derived seats: `crawler`, `orchestrator`, `solo`.
+
 ```json
-{"roles": {"...": {}}, "seat_roles": {"crawler": "worker"}}
+{"roles": {"...": {}},
+ "seat_roles": {"crawler": "worker",
+                "solo": "worker"}}
 ```
 
-Same authority as the definitions: **user level wins**, and a project may map a seat the user left
-unmapped but never remap one — a project that could remap its own seat would hand itself any role
-in the catalog, which is the widening the definitions left the repo to prevent. A conflict is
-reported, not resolved silently.
+**`solo` is the answer to "this session is not doing campaign work."** A checkout that carries a
+campaign seats a plain session as `orchestrator`; `showrunner campaign use <a-new-name>` moves it
+to `solo`, and a `solo` mapping then gives it a writable role without touching the campaign's own
+seats. That is the supported way for an operator to say a session is not governed by a campaign
+it happens to be standing next to.
+
+Same authority as the definitions: **user level ONLY**. A project's `roles` and `seat_roles` are
+read, reported, and ignored — `whoami` prints `SEAT MAPPING IGNORED` / `PROJECT ROLES IGNORED`
+and `doctor` warns. This used to allow a project to map a seat the user had left *unmapped*, on
+the reasoning that only a REMAP could hand a session any role in the catalog. First-mapping hands
+it the same role by the same route, and so does defining a claimable role in the repo and
+claiming it — both measured as working escalations before the rule was tightened. An operator who
+has mapped nothing has not consented to anything.
 
 Two halves keep this record-based rather than location-based. Only a worktree the campaign record
 NAMES resolves, so `git worktree add` is not a way to grant yourself a role. And **`orchestrator`

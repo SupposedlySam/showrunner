@@ -503,10 +503,17 @@ a user-level path, because an in-repo config is writable by the very session it 
 Crawler resolved to the fallback and ran under the fallback's policy *inside the worktree `spawn`
 had just made for it* — with a deny-everything fallback, an audit leaf finished only by routing
 its evidence around the write guard with shell redirection. `seat_roles` maps a derived seat onto
-one of your roles, `{"seat_roles": {"crawler": "worker"}}`, and the campaign record is the
-assignment being read back: `spawn` names the tree's leaf before the session exists. User level
-wins and a project may only map a seat the user left unmapped — one that could remap its own seat
-would hand itself any role in the catalog. Only a worktree the record NAMES resolves, so `git
+one of your roles, `{"seat_roles": {"crawler": "worker", "solo": "worker"}}`, and the campaign
+record is the assignment being read back: `spawn` names the tree's leaf before the session exists.
+The keys are the derived seats — `crawler`, `orchestrator`, `solo` — and **`solo` is how an
+operator says a session is not doing campaign work**: in a checkout that carries a campaign,
+`showrunner campaign use <a-new-name>` moves the seat to `solo`, and a `solo` mapping gives it a
+writable role without touching the campaign's own seats. Permission is **user level ONLY**; a
+project's `roles` and `seat_roles` are reported and ignored. The rule used to permit a project to
+map a seat the user left *unmapped*, which handed a session any role in the catalog by exactly
+the route a remap would have — as did defining a claimable role in the repo and claiming it. Both
+were measured working before the rule was tightened (#84); an operator who has mapped nothing has
+not consented to anything. Only a worktree the record NAMES resolves, so `git
 worktree add` grants nothing, and **`orchestrator` ships unmapped on purpose**: standing in the
 main checkout is a location, not a record, and authority by location is the failure this seam
 replaced. `doctor` refuses a seat mapped at a role nothing defines — that seat resolves to the
