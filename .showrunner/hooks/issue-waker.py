@@ -574,6 +574,17 @@ def main():
                     continue
                 replies.append(dict(c, id=cid))
 
+        # THE RULE THIS WAS CAUGHT BY, credited because a rule with no source is one nobody can
+        # check: "Before the 'so', check what produced the number." — wcs, #showrunner_owner
+        # seq 73, from a case where their matcher reported a New Smyrna Beach buyer against three
+        # Detroit houses; real numbers, and the script had never installed the place graph the
+        # app installs at startup. The measurement was sound and the INSTRUMENT was the defect.
+        #
+        # Applied here: this hook reports "nothing new" and that sentence is only as good as the
+        # query behind it. The query was thirteen minutes old and had never been run against a
+        # world containing a new issue when it first said so — and it was wrong. Silence is what
+        # a working filter and a blind one both produce.
+        #
         # THE STAMP MUST MOVE, and until now it never did: it was written once and every poll
         # afterwards asked for everything since that instant. One page is requested and there is
         # no `--paginate`, so the moment more than a page of comments sits behind the stamp, the
