@@ -130,6 +130,33 @@ def create(cfg, name, branch, base="HEAD"):
                 "`showrunner reap` reports it if it is abandoned."
                 % (path, _indent(err.strip() or "(the hook printed nothing)"),
                    os.environ.get("PATH", "(unset)")), code=2)
+        # A REPO WITH NO COMMITS IS THE OTHER CASE WITH ITS OWN REMEDY, and it reached an owner
+        # of a brand-new repo as `fatal: invalid reference: HEAD` (reported by balooga-owner,
+        # onboarding a fresh Flutter app). `install.sh` succeeds on such a repo and so does
+        # `add`, so the first thing that fails is `spawn` — several steps after the cause, with
+        # a message about a git internal rather than about the one missing action.
+        #
+        # Worth its own branch for the same reason as the post-checkout case above: the remedy
+        # is unrelated to git. Nothing is broken and nothing needs repairing — a branch simply
+        # cannot be cut from a history that does not exist yet. Detected by asking whether HEAD
+        # resolves at all, which is cheap and only runs on the failure path.
+        rc_head, _, _ = git(["rev-parse", "--verify", "HEAD"], cwd=cfg.root)
+        if rc_head != 0:
+            die("this repository has no commits yet, so there is no HEAD to branch from and no "
+                "worktree can be created.\n"
+                "  Nothing is broken: `spawn` cuts a branch, and a branch needs a history to "
+                "start from.\n"
+                "\n"
+                "  Make one commit and run this again:\n"
+                "      git -C %s add -A\n"
+                "      git -C %s commit -m 'initial commit'\n"
+                "\n"
+                "  `install.sh` and `add` both succeed on an empty repo, so this is the first "
+                "step that could have told you — which is why it says it here rather than "
+                "passing git's `invalid reference: HEAD` along.\n"
+                "\n"
+                "  git said:\n%s"
+                % (cfg.root, cfg.root, _indent(err.strip() or "(git printed nothing)")), code=2)
         die("git worktree add failed and no tree was created at %s: %s" % (path, err.strip()),
             code=2)
     return path

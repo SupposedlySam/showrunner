@@ -18,6 +18,7 @@ So this harness is split in two:
 Run:  python3 test/run.py [-v]
 """
 
+import copy
 import copy as _copy
 import argparse
 
@@ -2698,6 +2699,38 @@ def test_post_checkout_hook_failure():
     ok("...and names the PATH this process used, because two sessions on one machine disagree "
        "and checking your own shell can exonerate a tool that is unreachable HERE",
        "PATH as this process sees it" in said, said[-400:])
+
+    # A REPO WITH NO COMMITS is the third cause with its own remedy, and it reached the owner of
+    # a brand-new repo as `fatal: invalid reference: HEAD` — several steps after the cause, and
+    # about a git internal rather than the one missing action. Reported by balooga-owner while
+    # onboarding a fresh Flutter app, which is a state this repo has not been in for months.
+    # Built inline rather than through make_repo, which commits by design — and should, since a
+    # commitless repo is the exception this branch exists for and not a fixture other groups want.
+    bare_root = tmpdir("repo-no-commits")
+    sh(["git", "init", "-q", "-b", "main"], bare_root)
+    bare = copy.deepcopy(cfg)
+    bare.root = bare_root
+    # A SEPARATE NAME ON PURPOSE: `said` still belongs to the post-checkout case above and is
+    # asserted on again below. Reusing it here made a later assertion read this message instead
+    # of the one it was written for, and it failed — correctly, having been handed the wrong
+    # subject. A test that shares a variable across two subjects tests whichever ran last.
+    _, empty_said = attempt_message(lambda: worktree.create(bare, "wt-empty",
+                                                            "showrunner/wt-empty"))
+    ok("a repo with NO COMMITS says so, instead of passing git's 'invalid reference: HEAD' "
+       "along as if git were broken",
+       "no commits yet" in empty_said, empty_said[:300])
+    ok("...and gives the one action that fixes it, which is a commit and not a git repair",
+       "commit -m" in empty_said, empty_said[:400])
+    ok("...and still shows git's own words, so the diagnosis can be checked rather than "
+       "trusted", "invalid reference" in empty_said, empty_said[-300:])
+    # THE DISCRIMINATOR MUST DISCRIMINATE. Without this, returning the empty-repo message for
+    # EVERY worktree failure would pass all three assertions above while destroying the
+    # post-checkout diagnosis the rest of this group exists to protect.
+    ok("...while a repo that HAS commits still gets the post-checkout diagnosis, so the new "
+       "branch did not swallow the old one",
+       "no commits yet" not in attempt_message(
+           lambda: worktree.create(cfg, "wt-hook2", "showrunner/wt-hook2"))[1],
+       "the empty-repo branch is firing on a repo with a history")
     ok("...and says the tree is probably usable, because four retries followed a message that "
        "implied nothing had been made", "probably usable" in said, said[-300:])
 
