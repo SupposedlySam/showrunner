@@ -15154,6 +15154,27 @@ def test_spawn_binds_the_crawler_to_its_campaign():
        "can compare it against a write target without resolving anything itself",
        got and os.path.isabs(got) and got.endswith(os.path.join("scratch", "w1-l1")), got)
 
+    # ASSERTED AT THE SEAM A GUARD ACTUALLY READS, because the unit call alone scored THIN: None
+    # is the correct answer for every session that is not a Crawler, so a version that always
+    # answers None is right for the orchestrator, right for a solo session, and publishes
+    # nothing for the single caller that needs it. A guard reading `scratch: null` cannot tell
+    # "you are not a Crawler" from "this tool stopped telling you", and the second sends it back
+    # to hardcoding the path campaign scoping already moved once.
+    real_load2 = campaign.load
+    try:
+        campaign.load = lambda _c: {"crawlers": [entry]}
+        crawl_porc = roles.resolution(crawl_cfg, session="child-1")
+    finally:
+        campaign.load = real_load2
+    eq("a CRAWLER's porcelain reports the seat as crawler, so the scratch below is being read "
+       "off the session the guard is actually gating", crawl_porc.get("seat"), roles.CRAWLER)
+    ok("...and carries a NON-NULL scratch for it, which is the whole point of publishing the "
+       "field — null here is indistinguishable from the tool having gone quiet",
+       crawl_porc.get("scratch"), crawl_porc)
+    eq("...and it is the SAME path the record holds, so a guard comparing a write target "
+       "against it agrees with `gc`, which reports that directory as the surviving evidence",
+       crawl_porc.get("scratch"), os.path.join(cfg.root, entry["scratch"]))
+
     # AND THE BRIEF SAYS WHAT TO DO WHEN A GUARD REFUSES IT, because the Crawlers that hit this
     # did the right thing (worked around it and said so) and still scattered the evidence.
     with open(os.path.join(ROOT, "lib", "showrunner", "brief.py"), encoding="utf-8") as _bfh:

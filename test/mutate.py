@@ -432,6 +432,16 @@ TARGETS = [
     # Whether this worktree is one `spawn` PLACED or one somebody added by hand. None everywhere
     # makes every tree look hand-added -- but this same function is what stops `git worktree add`
     # being a way to grant yourself a role, and a mutant proves the assertions tell those apart.
+    # NULL IS THE HAPPY PATH FOR EVERY NON-CRAWLER, which is what makes this worth sweeping:
+    # a version that always answers None is correct for the orchestrator, correct for a solo
+    # session, and silently publishes nothing for the one caller that needs it. A boundary
+    # guard reading `scratch: null` cannot tell "you are not a Crawler" from "this tool has
+    # stopped telling you", and the second one sends it back to hardcoding the path that
+    # campaign scoping already moved once.
+    ("the scratch path a guard is told to allowlist", "roles.crawler_scratch",
+     "lib/showrunner/roles.py",
+     r"(def crawler_scratch\(cfg\):\n)",
+     "    return None\ndef _neutered_crawler_scratch(cfg):\n"),
     ("crawler leaf resolution", "roles.crawler_leaf", "lib/showrunner/roles.py",
      r"(def crawler_leaf\(cfg\):\n)",
      "    return None\ndef _neutered_crawler_leaf(cfg):\n"),
