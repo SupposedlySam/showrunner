@@ -411,6 +411,69 @@ def crawler_leaf(cfg):
     existed, and a worktree somebody added by hand is not. Only the former may resolve to a
     working role -- otherwise `git worktree add` is a way to grant yourself one.
     """
+    return crawler_leaf_detail(cfg)[0]
+
+
+def crawler_leaf_detail(cfg):
+    """(leaf, why). The leaf the campaign record names for THIS worktree, and how it knows.
+
+    THREE OUTCOMES WORE ONE FACE, and the middle one cost a reporter four dispatches (#85):
+    a record naming this tree, a record that does not, and a record that could not be read or
+    was looked for in a DIFFERENT CAMPAIGN all returned the same bare `None`. The announcement
+    built on it then said "no campaign record names it, so it was not placed by spawn" — which
+    reads as a fact about the record and was a fact about which record was opened. The record
+    named the tree the whole time; the session was resolving another campaign.
+
+    `why` always names the campaign that was searched, because the failure this exists to expose
+    is precisely "looked in the wrong one" and no message that omits the campaign can say it.
+    """
+    from . import campaign as _campaign
+
+    tree = getattr(cfg, "tree", None)
+    if not tree:
+        return None, "no worktree path is known for this session"
+    here = os.path.basename(tree)
+    where = cfg.campaign or "(repo-wide)"
+    try:
+        crawlers = _campaign.load(cfg).get("crawlers") or []
+    except Exception as exc:                                    # noqa: BLE001
+        # COULD NOT READ IS NOT EMPTY. Kept distinct from the no-match case below rather than
+        # folded into it, for the reason the rest of this repo keeps repeating: an unreadable
+        # record and a record that says nothing produce the same silence and need opposite
+        # responses — repair one, accept the other.
+        return None, ("the campaign record for %s could not be read (%s), which is not the "
+                      "same as it not naming this tree" % (where, exc))
+    for c in crawlers:
+        if c.get("crawler") == here:
+            return c.get("leaf"), "the campaign record for %s names its leaf" % where
+    if not crawlers:
+        return None, ("campaign %s records no Crawlers at all — if this tree was placed by "
+                      "`spawn`, this session is resolving a DIFFERENT campaign than the one "
+                      "that placed it (see `showrunner campaign show`)" % where)
+    return None, ("campaign %s records %d Crawler(s) and none is %s, so this tree was not "
+                  "placed by spawn into it" % (where, len(crawlers), here))
+
+
+def crawler_scratch(cfg):
+    """This Crawler's scratch directory as an ABSOLUTE path, or None. Never raises.
+
+    WHY A GUARD NEEDS THIS FROM US (#86). The scratch dir is deliberately OUTSIDE the worktree:
+    `gc` reports the scratch of dead Crawlers precisely because it "may hold the only copy of
+    real work", so it has to outlive the tree it belonged to. A boundary guard that refuses
+    writes outside the worktree is therefore correct AND will refuse the one directory `spawn`
+    tells the Crawler to use.
+
+    A consumer's guard solved that by allowlisting the documented default scratch root, and
+    campaign scoping then moved the real path to .showrunner/campaigns/<campaign>/scratch/<crawler>. Two Crawlers hit the
+    mismatch in one session and each invented a different workaround, so the evidence a leaf was
+    meant to leave behind landed somewhere unpredictable.
+
+    The fix is not to move the directory, which would break the outlive-the-tree property, and
+    not to widen the guard, which is the consumer's file and cannot be fixed from here. It is to
+    STATE the path, so a guard can ask instead of guessing. Exposed through `whoami --porcelain`
+    for the same reason the resolved role is: a hook that has to recompute what this tool
+    already knows will eventually compute something else.
+    """
     from . import campaign as _campaign
 
     tree = getattr(cfg, "tree", None)
@@ -420,7 +483,10 @@ def crawler_leaf(cfg):
     try:
         for c in (_campaign.load(cfg).get("crawlers") or []):
             if c.get("crawler") == here:
-                return c.get("leaf")
+                raw = c.get("scratch")
+                if not raw:
+                    return None
+                return raw if os.path.isabs(raw) else os.path.join(cfg.root, raw)
     except Exception:                                           # noqa: BLE001
         return None
     return None
@@ -458,11 +524,10 @@ def seat(cfg):
     main = os.path.realpath(cfg.root)
 
     if tree != main:
-        leaf = crawler_leaf(cfg)
-        return CRAWLER, ("standing in a linked worktree (%s)%s"
-                         % (os.path.basename(tree),
-                            "; the campaign record names its leaf %s" % leaf if leaf else
-                            "; no campaign record names it, so it was not placed by spawn"))
+        leaf, why = crawler_leaf_detail(cfg)
+        return CRAWLER, ("standing in a linked worktree (%s); %s%s"
+                         % (os.path.basename(tree), why,
+                            " %s" % leaf if leaf else ""))
 
     try:
         crawlers = _campaign.load(cfg).get("crawlers") or []
@@ -734,6 +799,10 @@ def resolution(cfg, session=None):
         "problems": list(problems),
         "ignored_seat_mappings": seat_roles(cfg)[1],
         "ignored_project_grants": ignored_project_grants(cfg),
+        # THE ONE PATH OUTSIDE THE WORKTREE A CRAWLER IS SUPPOSED TO WRITE (#86). Null for any
+        # session that is not a Crawler placed by spawn, which is the honest answer rather than
+        # a default a guard would then allowlist for everybody.
+        "scratch": crawler_scratch(cfg),
     }
 
 

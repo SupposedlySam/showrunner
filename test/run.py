@@ -19,7 +19,6 @@ Run:  python3 test/run.py [-v]
 """
 
 import copy
-import copy as _copy
 import argparse
 
 # BORROWED CLAIMS IN THIS FILE ARE REPORTED, NOT VERIFIED HERE. Findings attributed to another
@@ -5610,7 +5609,7 @@ def test_crawler_seat_resolves_to_a_role():
         # THE LOUDEST CASE, and the one a branch-local notice would have missed: a project whose
         # roles were its ONLY roles. The refusal takes a working role system down to none, and
         # without this line that is indistinguishable from "roles were never configured here".
-        bare = _copy.deepcopy(wt_cfg)
+        bare = copy.deepcopy(wt_cfg)
         bare.data["roles"] = {"selfmade": {"acquire": "claim"}}
         body_bare = "\n".join(R.whoami(bare, session="sess-c"))
         ok("...and says it even when the USER level defines nothing, where the drop is total",
@@ -15043,9 +15042,134 @@ def test_the_watcher_sees_more_than_new_issues():
        "of my own" in said, said[:400])
 
 
+def test_spawn_binds_the_crawler_to_its_campaign():
+    group("A launched Crawler resolves the campaign that placed it, and says which one it "
+          "looked in when it does not (#85)")
+    if not have("git"):
+        skip("the spawn-binding group", "git is not installed")
+        return
+
+    # THE DEFECT: campaign membership resolves PER SESSION, and `spawn` minted a session for the
+    # Crawler without ever binding it. The child therefore resolved the REPO-WIDE campaign, whose
+    # record names none of these worktrees, so `crawler_leaf` found no entry for its own tree and
+    # the child ran under the deny-everything fallback INSIDE the worktree spawn had just made
+    # for it. Reported measurement: 0 commits, every write denied, dead at three minutes.
+    cfg = make_repo(extra_config={"campaign": "sprint-27"})
+    g = new_graph(cfg)
+    g.add("do a thing", leaf_id="L1", labels=["backend"], paths=["lib/a.py"])
+
+    # A STUB BINARY, so this launches a REAL child through the real code path without starting a
+    # real agent. `--dry-run` cannot cover this: it returns before the launch step, which is
+    # exactly where the binding belongs, so a rehearsal-based test would assert nothing.
+    stub = os.path.join(tmpdir("stub-bin"), "fake-claude")
+    with open(stub, "w") as fh:
+        fh.write("#!/bin/sh\nexit 0\n")
+    os.chmod(stub, 0o755)
+    data = dict(cfg.data)
+    data["dispatch"] = dict(data.get("dispatch") or {}, claude_bin=stub)
+    data["campaign"] = "sprint-27"
+    with open(os.path.join(cfg.root, ".showrunner", "config.json"), "w") as fh:
+        json.dump(data, fh)
+
+    exe = os.path.join(ROOT, "bin", "showrunner")
+    env = dict(os.environ, NO_COLOR="1", SHOWRUNNER_SESSION="orchestrator-1")
+    out = subprocess.run([sys.executable, exe, "spawn", "L1", "--actor", "w1", "--launch"],
+                         cwd=cfg.root, capture_output=True, text=True, env=env)
+
+    bindings = config.read_session_bindings(cfg.root)
+    child = [sid for sid in bindings if sid != "orchestrator-1"]
+    ok("`spawn --launch` BINDS the Crawler's session to the campaign that placed it, so the "
+       "child resolves the record naming its own worktree",
+       bool(child), {"bindings": bindings, "stderr": out.stderr[-300:]})
+    if child:
+        eq("...to THIS campaign, not to the repo-wide default the unbound child fell back to",
+           bindings[child[0]].get("campaign"), "sprint-27")
+    ok("...and the orchestrator's own binding is untouched, because the flag that arms the "
+       "worker must not disarm the dispatcher",
+       bindings.get("orchestrator-1", {}).get("campaign") in (None, "sprint-27"), bindings)
+
+    # THE MESSAGE THAT COST FOUR DISPATCHES. `crawler_leaf` folded three outcomes into one bare
+    # None, and the seat line built on it asserted the strongest of them: "no campaign record
+    # names it, so it was not placed by spawn". The record named the tree the whole time — the
+    # session was reading a different campaign's record.
+    placed = make_repo(extra_config={"campaign": "sprint-27"})
+    tree_cfg = copy.deepcopy(placed)
+    tree_cfg.tree = os.path.join(placed.root, ".worktrees", "w1-do-a-thing")
+
+    leaf, why = roles.crawler_leaf_detail(tree_cfg)
+    ok("a tree the resolved campaign does not name NAMES THE CAMPAIGN it searched, so 'looked "
+       "in the wrong one' is expressible at all",
+       "sprint-27" in why or "repo-wide" in why, why)
+    ok("...and when that campaign records NO Crawlers, it says the session may be resolving a "
+       "different campaign rather than asserting the tree was not placed by spawn",
+       leaf is None and ("DIFFERENT campaign" in why or "no Crawlers" in why), (leaf, why))
+
+    # AND THE THIRD OUTCOME STAYS SEPARATE. An unreadable record and a record that says nothing
+    # produce identical silence and need opposite responses — repair one, accept the other.
+    # Driven by making the LOAD raise, because that is the only thing the branch keys on;
+    # constructing an unreadable state dir through the Config object is not possible (state_dir
+    # is derived, with no setter) and a test that cannot reach a branch is not covering it.
+    real_load = campaign.load
+    try:
+        def _boom(_cfg):
+            raise OSError("permission denied")
+        campaign.load = _boom
+        _leaf2, why2 = roles.crawler_leaf_detail(tree_cfg)
+    finally:
+        campaign.load = real_load
+    ok("a record that COULD NOT BE READ says so, and says it is not the same as the record "
+       "failing to name this tree",
+       "could not be read" in why2 and "not the same" in why2, why2)
+    ok("...and still names the campaign it was trying to read, since 'which record' is the "
+       "question this whole split exists to answer",
+       "sprint-27" in why2 or "repo-wide" in why2, why2)
+    ok("...and it does NOT reuse the not-placed-by-spawn wording, which asserts something the "
+       "failed read cannot know", "not placed by spawn" not in why2, why2)
+
+    # THE SCRATCH PATH IS PUBLISHED, so a boundary guard can ask instead of hardcoding (#86).
+    # The scratch dir is OUTSIDE the worktree on purpose -- `gc` reports the scratch of dead
+    # Crawlers because it "may hold the only copy of real work", so it must outlive the tree.
+    # A guard that refuses writes outside the worktree is therefore correct and will refuse the
+    # one directory `spawn` names. A consumer's guard allowlisted the documented default; then
+    # campaign scoping moved the real path, two Crawlers hit the mismatch in one run, and each
+    # invented a different place to put its evidence.
+    porc = roles.resolution(cfg, session="orchestrator-1")
+    ok("`whoami --porcelain` carries a `scratch` key at all, which is what lets a guard stop "
+       "guessing a layout this tool computes", "scratch" in porc, sorted(porc))
+    eq("...and it is NULL for a session that is not a Crawler placed by spawn, rather than a "
+       "default a guard would then allowlist for everybody", porc.get("scratch"), None)
+
+    # THE POSITIVE HALF. Without this, never populating the field passes the two assertions
+    # above while publishing nothing a guard could use.
+    crawl_cfg = copy.deepcopy(cfg)
+    crawl_cfg.tree = os.path.join(cfg.root, ".worktrees", "w1-l1")
+    entry = {"crawler": "w1-l1", "leaf": "L1", "scratch": ".showrunner/campaigns/x/scratch/w1-l1"}
+    real_load = campaign.load
+    try:
+        campaign.load = lambda _c: {"crawlers": [entry]}
+        got = roles.crawler_scratch(crawl_cfg)
+    finally:
+        campaign.load = real_load
+    ok("...while a Crawler the record NAMES gets its real scratch path, absolute, so the guard "
+       "can compare it against a write target without resolving anything itself",
+       got and os.path.isabs(got) and got.endswith(os.path.join("scratch", "w1-l1")), got)
+
+    # AND THE BRIEF SAYS WHAT TO DO WHEN A GUARD REFUSES IT, because the Crawlers that hit this
+    # did the right thing (worked around it and said so) and still scattered the evidence.
+    with open(os.path.join(ROOT, "lib", "showrunner", "brief.py"), encoding="utf-8") as _bfh:
+        btext = _bfh.read()
+    ok("the brief tells a Crawler that a guard refusing the scratch path is the GUARD being out "
+       "of date, not a signal to invent somewhere else to put its evidence",
+       "the guard is out of date and the path is right" in btext,
+       "brief.py no longer carries the guard-refusal guidance")
+    ok("...and points at the porcelain field, so the fix reaches whoever owns the guard rather "
+       "than dying in one Crawler's close report",
+       "`scratch` field" in btext, "brief.py no longer names the porcelain field")
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

@@ -199,7 +199,19 @@ messages, captured output, before/after artifacts, fixtures. Never at a path rel
 worktree: your tree is removed once your work is integrated and everything inside it goes too,
 including the artifact you cite as `--proof`. (It is kept only if it still holds uncommitted
 changes, which yours should not once you have closed.) The scratch dir named above is in the main
-checkout and survives. Not a shared temp dir either. Two Crawlers in a real
+checkout and survives.
+
+**If a write guard refuses that path, the guard is out of date and the path is right.**
+Being outside your worktree is the POINT -- it is why your evidence outlives the tree --
+so a guard that allowlists only paths inside the worktree will refuse the one directory
+you were told to use. Do not improvise somewhere else to put your evidence: two Crawlers
+hit this in one run, each picked a different workaround, and the artifacts a leaf was
+meant to leave behind ended up somewhere nobody could find. Say so in your close instead,
+and tell whoever owns the guard that `showrunner whoami --porcelain` publishes this exact
+path as its `scratch` field, so it can be allowlisted without hardcoding a layout that
+campaign scoping has already changed once.
+
+Not a shared temp dir either. Two Crawlers in a real
 run both reached for `commitmsg.txt` in one shared directory; the second noticed the first
 one's file only because it happened to list the directory first. Had it not, one Crawler
 would have committed the other's commit message onto its own changes: a real commit, a

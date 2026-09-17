@@ -2526,6 +2526,38 @@ def cmd_spawn(args):
     if getattr(args, "launch", False) and not session:
         session = dispatch.new_session_id()
 
+    # BIND THE CHILD TO THIS CAMPAIGN, BEFORE IT STARTS (#85). Campaign membership resolves PER
+    # SESSION, and `spawn` minted a session for the Crawler without ever writing one — so the
+    # child resolved the repo-wide campaign, whose record names none of these worktrees, and
+    # `crawler_leaf` found no entry for its own tree. The result was a Crawler that resolved the
+    # deny-everything fallback and could not write a single file in the worktree spawn had just
+    # made for it. Measured by the reporter: 0 commits, every write denied, dead at 3 minutes;
+    # with the binding supplied by hand, 6 writes and a closed leaf.
+    #
+    # THE EVIDENCE LINE WAS THE EXPENSIVE PART, not the denial. The child said "no campaign
+    # record names it, so it was not placed by spawn" — which reads as a fact about the record
+    # and was a fact about WHICH record was read. It cost the reporter four dispatches.
+    #
+    # Placed here for the reason the module docstring gives for the session id itself: recorded
+    # BEFORE the process exists. A binding written afterwards leaves a window in which the child
+    # is running and resolving the wrong campaign, which is precisely the failure being fixed.
+    # `""` is the repo-wide campaign rather than "no campaign", so an orchestrator standing in
+    # the repo-wide seat hands its child that same seat instead of unbinding it.
+    if session and getattr(args, "launch", False):
+        try:
+            config.bind_session(cfg.root, session, cfg.campaign or "")
+        except Exception as exc:                                    # noqa: BLE001
+            # NOT FATAL, AND NOT SILENT. The tree, branch, claim and brief already exist by now;
+            # aborting here would strand them. But an unbound child is the exact defect above,
+            # so this must never pass for success — it names the one command that repairs it.
+            eprint("WARNING: could not bind the Crawler's session to campaign %r (%s).\n"
+                   "  It will resolve the repo-wide campaign, find no record naming its "
+                   "worktree, and be denied every write.\n"
+                   "  Repair before it does any work:  `showrunner campaign use %s "
+                   "--session %s`"
+                   % (cfg.campaign or "(repo-wide)", exc, cfg.campaign or "--repo-wide",
+                      session))
+
     chat = (dispatch.open_channel(cfg, record, session=session)
             if getattr(args, "launch", False) else None)
     text = brief.build(cfg, leaf, record, decision,
