@@ -655,6 +655,7 @@ showrunner whoami                    # SessionStart AND PostCompact  (whoami.sh)
 showrunner dispatch guard            # PreToolUse on BASH            (dispatch-guard.sh)
 showrunner reach                     # PreToolUse on Write|Edit|NotebookEdit|Bash|TodoWrite
                                      #                               (reach-gate.sh)
+showrunner wake-gate                 # PreToolUse on BASH            (wake-gate.sh)
 ```
 
 **`whoami` carries the campaign's STATE, not just a name.** A compacted agent that has lost which
@@ -675,6 +676,48 @@ was the one verb an agent had to already know about, which is the defect `dispat
 header names — *a guard is exactly as present as its registration* — arriving in the verb whose
 job is to name it. Registering costs near nothing: it never refuses and is silent unless it has
 something specific to say. Opting out is deleting the entry; opting in was knowing it existed.
+
+**`wake-gate` says, at the moment long work starts, that nothing can wake you back to a goal.**
+Without a bound mandate `game_loop doorbell` answers *"no mandate is bound here, so there is
+nothing to wake this run FOR"*, so a wake arriving mid-run returns an agent to a prompt with a
+hole where the goal goes and the run is re-derived from scratch.
+
+That information was never missing. showrunner's own SessionStart banner has always printed
+`MANDATE: none (Stop gate inert)`, and `doorbell` has always explained the remedy in full to
+anyone who ran it. Agents started unattended runs unarmed anyway, and the operator bound it by
+hand every time — *"I have to tell them manually, none of them know."* **So this is a DELIVERY
+defect, not a documentation one**, and more documentation was the one fix guaranteed not to work.
+Session-start text is read once, before the agent knows whether the work ahead is long; by the
+time it is long the banner is thousands of tokens upstream. The human succeeded where both
+documents failed for exactly one reason: they spoke at the moment.
+
+It fires on **Bash only** — narrower than `reach`'s five tools, because long unattended work is a
+process (a suite, a build, a deploy, a backgrounded call, a dispatch) and an `Edit` is never what
+leaves a session unreachable for twenty minutes. It is **silent** when a mandate is bound, when
+game_loop is absent (showrunner does not require it), for ordinary commands, and after the first
+telling in a session — a notice on every long call is how a true signal becomes scenery. It
+**never refuses**: every path exits 0.
+
+Backgrounding outranks every pattern, because `run_in_background` is the caller *stating* the
+call outlives the turn rather than this guessing from the text. The patterns are deliberately
+anchored on runners rather than on words like "test" or "build", which appear in ordinary prose
+and in paths: a false positive spends the attention the true ones depend on.
+
+Exercise the rule directly rather than by constructing a PreToolUse event:
+
+```
+showrunner wake-gate --command "python3 test/run.py"     # would this fire, and what would it say
+showrunner wake-gate --command "ls -la" --background     # the harness SAYING the call is long
+showrunner wake-gate --command "pytest" --session s1     # whose once-per-session telling to spend
+```
+
+`--command` checks the rule with no hook payload at all, `--background` treats the call as
+backgrounded the way the harness would report it, and `--session` names the session whose
+once-per-session telling is being tested — pass a throwaway id, or the real one is spent and the
+gate goes quiet for the rest of that session. `armed()` reports **armed, unarmed, absent or unknown**
+as four distinct answers — a `doorbell` that could not be run or printed nothing says nothing
+about whether a goal is bound, and recording that as "fine" is the identity-element defect this
+tracker is mostly made of fixes for.
 
 **`reach` names the mechanism at the moment of reach.** An agent that cannot remember a tool does
 not stop working — it reaches for what it already knows: `git worktree add`, a private todo list,
@@ -881,7 +924,7 @@ authorisation" to satisfy a word-ban has traded a visible stall for an invisible
 transcript means ALLOWED WITHOUT BEING CHECKED, like every other guard here.
 
 Both run from tracked shims under `.showrunner/hooks/`, beside `worktree-guard.sh`,
-`inert-crawler-gate.sh`, `reach-gate.sh` and `waiting-probe.sh`.
+`inert-crawler-gate.sh`, `reach-gate.sh`, `wake-gate.sh` and `waiting-probe.sh`.
 
 **`worktree register` does NOT wire all of them, and this sentence used to claim it did.** It
 writes the worktree guard, the inert-Crawler stop trigger, the seat announcement and the

@@ -874,6 +874,39 @@ def register_reach(cfg, local=False):
             lambda p: _registration(p, "PreToolUse", "reach-gate"), "reach gate")
 
 
+WAKE_SHIM = os.path.join(".showrunner", "hooks", "wake-gate.sh")
+
+
+def register_wake_gate(cfg, local=False):
+    """Register the wake gate on PreToolUse (Bash). Returns (changed, message).
+
+    REGISTERED BY DEFAULT, for the reason `register_reach` records at length and paid for once
+    already: the thing being fixed IS not knowing, so an opt-in reaches only the agents who did
+    not need it. The operator who asked for this said it plainly -- "I have to tell them
+    manually, none of them know" -- and an unregistered gate would have left that exactly true.
+
+    BASH ONLY, and narrower than the reach gate's five tools on purpose. Long unattended work is
+    a process: a test suite, a build, a deploy, a backgrounded call, a dispatch. An `Edit` is
+    never the thing that leaves a session unreachable for twenty minutes, so matching it would
+    add reasons to fire without adding a case worth firing on -- and every needless fire spends
+    the attention the real one depends on.
+    """
+    import json
+    from .util import atomic_write_json, file_lock
+
+    path = settings_target(cfg.root, local)
+    entry = {"matcher": "Bash",
+             "hooks": [{"type": "command",
+                        "command": "\"$CLAUDE_PROJECT_DIR\"/" + WAKE_SHIM,
+                        "timeout": 15,
+                        "statusMessage": "showrunner: can anything wake you back to a goal?"}]}
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with file_lock(_register_lock(cfg)):
+        return _register_locked(
+            cfg, path, entry, json, atomic_write_json, "PreToolUse",
+            lambda p: _registration(p, "PreToolUse", "wake-gate"), "wake gate")
+
+
 def register_whoami(cfg, local=False):
     """Announce the seat on SessionStart AND PostCompact (#36). Returns (changed, message).
 

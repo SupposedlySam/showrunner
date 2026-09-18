@@ -21,3 +21,7 @@ fail-open.jsonl
 waiting.jsonl
 *.lock
 seen-issues.json
+# Which sessions the wake gate has already told. Runtime, per-machine, and pruned on
+# write -- a ledger of who has been spoken to is not source, and committing it would
+# silence the gate for every clone that inherited somebody else's session ids.
+wake-gate-seen.json

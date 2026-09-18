@@ -86,7 +86,7 @@ STATE_IGNORE_SECTIONS = [
      "# absolute paths, and without these lines the files land NEITHER TRACKED NOR IGNORED --\n"
      "# the exact state doctor flags elsewhere, and the state that reopens the leak\n"
      "# config.local.json exists to prevent.",
-     [CONFIG_LOCAL_NAME, "seen-issues.json"]),
+     [CONFIG_LOCAL_NAME, "seen-issues.json", "wake-gate-seen.json"]),
     ("# The TOOL, not this project — replaced wholesale on upgrade.",
      ["bin/", "lib/"]),
 ]

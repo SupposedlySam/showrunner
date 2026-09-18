@@ -15188,9 +15188,233 @@ def test_spawn_binds_the_crawler_to_its_campaign():
        "`scratch` field" in btext, "brief.py no longer names the porcelain field")
 
 
+def test_a_session_is_told_before_it_goes_unattended():
+    group("Long work with nothing able to wake it back to a goal is said ONCE, at the moment it "
+          "starts")
+    from showrunner import wake
+
+    # THE DEFECT WAS DELIVERY, NOT DOCUMENTATION. The SessionStart banner already printed
+    # `MANDATE: none (Stop gate inert)` and `game_loop doorbell` already explained the remedy in
+    # full. Agents still started unattended runs unarmed and a human bound it by hand every time:
+    # "I have to tell them manually, none of them know." Session-start text is read once, before
+    # the agent knows the work ahead is long. The human won by speaking at the MOMENT.
+
+    # WHAT COUNTS AS LONG. The harness SAYING SO outranks every guess below it.
+    ok("a backgrounded call is long because the CALLER said so, which is a statement rather "
+       "than an inference", wake.long_work("ls -la", background=True)[0], wake.long_work("ls -la", True))
+    ok("...and the same command in the foreground is not, so the signal is the backgrounding "
+       "and not the text", not wake.long_work("ls -la")[0], wake.long_work("ls -la"))
+    for cmd in ("python3 test/run.py", "pytest -q", "cargo build --release",
+                "flutter test", "npm run build", "sleep 600"):
+        ok("...and %r reads as long work" % cmd, wake.long_work(cmd)[0], wake.long_work(cmd))
+    # THE RESTRAINT HALF, and the one that decides whether this stays readable. A matcher that
+    # fires on ordinary commands spends the attention the real notice depends on.
+    for cmd in ("ls -la", "git status", "cat README.md", "echo test", "grep -rn build ."):
+        ok("...while %r does NOT, so the gate is not a banner on every Bash call" % cmd,
+           not wake.long_work(cmd)[0], wake.long_work(cmd))
+
+    # AN EMPTY COMMAND IS NOT LONG WORK, and it is the shape a malformed payload arrives in.
+    ok("an empty command is not treated as long work — a payload that lost its command must not "
+       "manufacture a notice", not wake.long_work("")[0], wake.long_work(""))
+    ok("...and neither is None, which is what a missing key reads as",
+       not wake.long_work(None)[0], wake.long_work(None))
+
+    # ARMED / UNARMED / ABSENT / UNKNOWN, each distinct. Folding any pair together is the defect
+    # this whole repo is mostly fixes for.
+    norepo = tmpdir("wake-no-gl")
+    state, detail = wake.armed(norepo)
+    eq("a project with NO game_loop reports ABSENT, which is an ordinary answer and not a "
+       "problem — showrunner does not require game_loop", state, "absent")
+    ok("...and says why, rather than returning a bare falsy value", bool(detail), detail)
+
+    # A STUB game_loop, so the three live answers are driven rather than described.
+    def _gl(root, body):
+        d = os.path.join(root, ".game_loop", "bin")
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, "game_loop")
+        with open(path, "w") as fh:
+            fh.write(body)
+        os.chmod(path, 0o755)
+        return path
+
+    unarmed_root = tmpdir("wake-unarmed")
+    _gl(unarmed_root, "#!/bin/sh\necho 'no mandate is bound here, so there is nothing to wake'\n")
+    eq("a doorbell that says no mandate is bound reports UNARMED",
+       wake.armed(unarmed_root)[0], "unarmed")
+
+    armed_root = tmpdir("wake-armed")
+    _gl(armed_root, "#!/bin/sh\necho '=== WAKE-UP PROMPT ===\nDONE MEANS: ship it'\n")
+    eq("a doorbell that names a goal reports ARMED", wake.armed(armed_root)[0], "armed")
+
+    # COULD-NOT-TELL IS NOT ARMED. A doorbell that printed nothing answers neither way, and
+    # storing that as "fine" is the identity element this codebase keeps finding.
+    silent_root = tmpdir("wake-silent")
+    _gl(silent_root, "#!/bin/sh\nexit 0\n")
+    eq("a doorbell that printed NOTHING reports unknown, never armed",
+       wake.armed(silent_root)[0], "unknown")
+    broken_root = tmpdir("wake-broken")
+    _gl(broken_root, "#!/bin/sh\nexit 9\n")
+    ok("...and neither a crash nor an empty answer is allowed to read as armed",
+       wake.armed(broken_root)[0] in ("unknown", "unarmed"), wake.armed(broken_root))
+
+    # WHAT IT SAYS, AND WHEN IT SAYS NOTHING.
+    eq("an ARMED session is told nothing, because the advice has already been taken",
+       wake.notice_lines("armed", "d", "w"), [])
+    eq("a project with no game_loop is told nothing at all", wake.notice_lines("absent", "d", "w"), [])
+    said = "\n".join(wake.notice_lines("unarmed", "detail here", "it matched a pattern"))
+    ok("an UNARMED session is given the exact command, not a description of one",
+       "game_loop mandate --set" in said, said)
+    ok("...and is told to bind it BEFORE the long call, which is the whole timing claim",
+       "BEFORE the long call" in said, said)
+    ok("...and is told this is not a refusal, so it does not stop and ask",
+       "Not a refusal" in said, said)
+    unknown_said = "\n".join(wake.notice_lines("unknown", "d", "w"))
+    ok("an UNKNOWN session is told that could-not-tell is not armed, rather than being handed "
+       "the confident remedy", "not armed" in unknown_said, unknown_said)
+
+    # ONCE PER SESSION. A notice on every long command is how a true signal becomes scenery.
+    told_root = tmpdir("wake-told")
+    os.makedirs(os.path.join(told_root, ".showrunner"), exist_ok=True)
+    ok("a session that has never been told is not recorded as told",
+       not wake.already_told(told_root, "s1"), "s1")
+    wake.record_told(told_root, "s1")
+    ok("...and IS after it has been", wake.already_told(told_root, "s1"), "s1")
+    ok("...while a DIFFERENT session in the same checkout is still owed its one telling, "
+       "because the thing being fixed is per-agent ignorance",
+       not wake.already_told(told_root, "s2"), "s2")
+
+    # AN UNREADABLE LEDGER FAILS TOWARD SPEAKING, which is the opposite of this repo's usual
+    # posture and is chosen by the asymmetry: a second notice costs one skimmed paragraph, a
+    # swallowed first one costs the unattended run this exists to prevent.
+    with open(os.path.join(told_root, ".showrunner", wake.SEEN_NAME), "w") as fh:
+        fh.write("{not json")
+    ok("an unreadable ledger reports NOT told, so the notice still lands",
+       not wake.already_told(told_root, "s1"), "corrupt ledger")
+
+    # AND THE VERB IS REGISTERED, because a verb nobody registers has never once run — the
+    # failure named in dispatch-guard.sh's own header, which this repo has now shipped twice.
+    with open(os.path.join(ROOT, "lib", "showrunner", "lease.py"), encoding="utf-8") as _fh:
+        src = _fh.read()
+    ok("`init` has a registrar for the wake gate at all", "def register_wake_gate" in src, "lease.py")
+    with open(os.path.join(ROOT, "lib", "showrunner", "cli.py"), encoding="utf-8") as _fh:
+        cli_src = _fh.read()
+    ok("...and `init` actually CALLS it, which is the half that makes a hook exist",
+       "lease.register_wake_gate" in cli_src, "cli.py")
+    with open(os.path.join(ROOT, "install.sh"), encoding="utf-8") as _fh:
+        inst = _fh.read()
+    ok("...and install.sh COPIES the shim, since a registration naming a file nobody shipped is "
+       "worse than no registration — it looks present",
+       "wake-gate.sh" in inst, "install.sh")
+    shim = os.path.join(ROOT, ".showrunner", "hooks", "wake-gate.sh")
+    ok("...and the shim it names exists and is executable", os.access(shim, os.X_OK), shim)
+
+    # THE SHIM KEEPS LOOKING when a binary does not know the verb. Found by running it: the first
+    # version stopped at the first candidate that EXISTED, which here is the deliberately-pinned
+    # `.showrunner_self` — older than HEAD, so it exited 2 with a usage error, `|| true` swallowed
+    # it, and a registered gate produced exactly what a quiet one produces.
+    with open(shim, encoding="utf-8") as _fh:
+        shim_src = _fh.read()
+    ok("the shim does not stop at a binary that cannot answer — registered and DEAD must not "
+       "look like registered and quiet", "continue" in shim_src, shim_src[-400:])
+    ok("...and replays the payload, because stdin is consumed by the first reader and the next "
+       "would be handed an empty stream it would rightly say nothing about",
+       "payload=" in shim_src, shim_src[-400:])
+
+
+def test_a_required_prose_option_can_be_supplied_by_file():
+    group("A prose option that is REQUIRED can still be supplied by file — `required=True` made "
+          "the file twin unreachable (#87)")
+    if not have("git"):
+        skip("the prose-twin group", "git is not installed")
+        return
+
+    # THE DEFECT. `_add_prose_twins` gives every prose option a `--<x>-file` sibling whose help
+    # says prose over 400 chars "must come this way". argparse enforces `required` while parsing,
+    # long before `_resolve_prose` can fold the file in -- so on `amend`:
+    #     --reason-file <path>            -> "the following arguments are required: --reason"
+    #     --reason x --reason-file <path> -> "two answers to one question; pass one"
+    # There was no invocation that used the flag. The one case it was built for -- a long
+    # correction explaining why an earlier verdict was wrong -- was the one case it could not
+    # serve, and the reporter had to compress 2.3 KB of evidence into a 400-char summary.
+
+    # THE INVARIANT, asserted on the parser rather than on the two known verbs, because the
+    # contradiction is a property of the MECHANISM: any prose option declared `required=True`
+    # acquires an unreachable twin the moment `_add_prose_twins` runs. Pinning the mechanism is
+    # what stops a third one being added later and nobody noticing for months.
+    from showrunner import cli as _cli
+    # BOTH STEPS, because `main()` does both and the relaxation lives in the second. A test that
+    # built the parser alone measured a parser no invocation ever uses, and reported the defect
+    # as still present against code that had fixed it.
+    parser = _cli.build_parser()
+    _cli._add_prose_twins(parser)
+    still_required = []
+    for act in parser._subparsers._group_actions:
+        for name, sub in getattr(act, "choices", {}).items():
+            for a in sub._actions:
+                for o in a.option_strings:
+                    if o.startswith("--") and o[2:] in _cli.PROSE_OPTS and a.required:
+                        still_required.append("%s %s" % (name, o))
+    eq("no prose option is left `required` once its file twin exists — that pair is exactly the "
+       "contradiction, and it is unreachable rather than merely awkward",
+       still_required, [])
+
+    # AND THE REQUIREMENT SURVIVED THE RELAXATION. Dropping `required=True` without replacing it
+    # would turn an unreachable flag into a missing check, which is worse than the bug: `amend`
+    # with no reason at all would be accepted.
+    ok("...and the pairs that WERE required are remembered, so the requirement became "
+       "'one of the two' rather than 'neither'",
+       ("amend", "reason") in _cli._REQUIRED_PROSE, sorted(_cli._REQUIRED_PROSE))
+    ok("...including `park`, which had the identical defect and nobody had hit — the reporter "
+       "found one instance and the mechanism had two",
+       ("park", "reason") in _cli._REQUIRED_PROSE, sorted(_cli._REQUIRED_PROSE))
+
+    # DRIVEN THROUGH THE REAL CLI, because the bug lived in argparse's own ordering and a unit
+    # call on the resolver would have stepped straight over it.
+    cfg = make_repo()
+    g = new_graph(cfg)
+    g.add("a leaf", leaf_id="L1", labels=["backend"], paths=["lib/a.py"])
+    exe = os.path.join(ROOT, "bin", "showrunner")
+    env = dict(os.environ, NO_COLOR="1")
+
+    def sr(*argv):
+        return subprocess.run([sys.executable, exe] + list(argv), cwd=cfg.root,
+                              capture_output=True, text=True, env=env)
+
+    proof = os.path.join(cfg.root, "README.md")
+    sr("close", "L1", "--proof", proof, "--premise", "holds", "--premise-read", proof,
+       "--reason", "initial")
+
+    long_prose = "y" * 900 + " two independent reasons, with file and line for each."
+    rpath = os.path.join(tmpdir("prose87"), "r.txt")
+    with open(rpath, "w") as fh:
+        fh.write(long_prose)
+
+    got = sr("amend", "L1", "--premise", "refuted", "--evidence", proof, "--reason-file", rpath)
+    eq("`--reason-file` ALONE is accepted, which is the invocation that did not exist",
+       got.returncode, 0)
+    shown = sr("show", "L1").stdout
+    ok("...and the WHOLE file is stored, not a summary — the 400-char ceiling is what the file "
+       "twin exists to escape, so landing a truncated version would be the same defect",
+       ("y" * 900) in shown, shown[:300])
+
+    both = sr("amend", "L1", "--premise", "refuted", "--evidence", proof,
+              "--reason", "see file", "--reason-file", rpath)
+    ok("...while passing BOTH is still refused, since they are two answers to one question",
+       both.returncode != 0 and "two answers to one question" in both.stderr,
+       both.stderr[-200:])
+
+    neither = sr("amend", "L1", "--premise", "refuted", "--evidence", proof)
+    ok("...and passing NEITHER is still refused, so relaxing `required` did not delete the "
+       "requirement", neither.returncode != 0 and "--reason is required" in neither.stderr,
+       neither.stderr[-200:])
+    ok("...naming BOTH ways to satisfy it, because the refusal that sent the reporter back to a "
+       "400-char summary named only one", "--reason-file" in neither.stderr,
+       neither.stderr[-200:])
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

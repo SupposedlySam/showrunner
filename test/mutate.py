@@ -627,6 +627,23 @@ TARGETS = [
      "    return []\ndef _neutered_validate(roles):\n"),
     # An empty roster reads as "no seat is held", which is exactly what a session checks before
     # claiming one — so it is the answer that lets two sessions hold the same role.
+    # EVERY ONE OF THESE NEUTERS THE GATE INTO SILENCE, which is the only failure mode it has.
+    # It never refuses and never blocks, so a broken version does not break anything — it just
+    # stops telling agents the one thing they demonstrably do not know, and looks exactly like a
+    # world where every session is properly armed. There is no louder symptom to fall back on.
+    ("whether this session was already told", "wake.already_told", "lib/showrunner/wake.py",
+     r"(def already_told\(root, session\):\n)",
+     "    return True\ndef _neutered_already_told(root, session):\n"),
+    # "absent" is the correct answer for every repo without game_loop, so this mutant is RIGHT
+    # everywhere except the repos that need the gate — the same shape that made crawler_scratch
+    # and ignored_project_grants score THIN.
+    ("finding the game_loop that owns the doorbell", "wake.game_loop_bin",
+     "lib/showrunner/wake.py",
+     r"(def game_loop_bin\(root\):\n)",
+     "    return None\ndef _neutered_game_loop_bin(root):\n"),
+    ("what the gate actually says", "wake.notice_lines", "lib/showrunner/wake.py",
+     r"(def notice_lines\(state, detail, why\):\n)",
+     "    return []\ndef _neutered_notice_lines(state, detail, why):\n"),
     ("the role roster", "roles.roster", "lib/showrunner/roles.py",
      r"(def roster\(cfg\):\n)",
      "    return []\ndef _neutered_roster(cfg):\n"),

@@ -283,6 +283,27 @@ silent otherwise, because a notice on every call is an alarm that is always on. 
 game_loop's `harden` stay quiet in repos without game_loop, and every verb a rule names is
 verified against the parser by the suite.
 
+**And `wake-gate` says, once, that long work is about to start with nothing able to wake you back
+to a goal.** With no mandate bound, `game_loop doorbell` answers "there is nothing to wake this
+run FOR", so a wake arriving mid-run drops an agent into a prompt with a hole where the goal goes
+and the run gets re-derived from scratch.
+
+None of that information was missing: the SessionStart banner already printed `MANDATE: none
+(Stop gate inert)` and `doorbell` already explained the fix to anyone who ran it. Agents started
+unattended runs unarmed anyway and a human bound the mandate by hand every time. That makes it a
+**delivery** defect rather than a documentation one — session-start text is read once, before the
+agent knows the work ahead is long, and by then the banner is far upstream. The human won by
+speaking at the moment, so this speaks at the moment.
+
+Bash only, since long unattended work is a process and an `Edit` is never what makes a session
+unreachable for twenty minutes. Silent when a mandate is bound, when game_loop is absent, for
+ordinary commands, and after the first telling in a session. Never refuses. A backgrounded call
+counts because the caller *said* it outlives the turn; the patterns behind that are anchored on
+runners rather than words like "test" that appear in ordinary prose, because a false positive
+spends the attention the true ones depend on. And `armed` reports **armed, unarmed, absent or
+unknown** separately — a doorbell that could not be run says nothing about whether a goal is
+bound, and filing that under "fine" is the defect this codebase is mostly fixes for.
+
 **A guard finds its project from its own location before it gives up.** `cwd` and
 `CLAUDE_PROJECT_DIR` used to be the only anchors, so a tool call from a scratch directory with no
 harness variable was allowed unchecked — including a raw `claude -p` — while the hook answering it

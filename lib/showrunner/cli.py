@@ -13,7 +13,8 @@ import subprocess
 import sys
 
 from . import (__version__, brief, campaign, collide, config, dispatch, events, gates,
-               reach, graph as G, harness, lanes, lease, locks, pin, roles, worktree)
+               reach, graph as G, harness, lanes, lease, locks, pin, roles, wake,
+               worktree)
 from .util import (RESOLVED_BASIS, Refused, caller_session, die, eprint, git, now,
                    package_root,
                    session_pid as util_session_pid,
@@ -1528,7 +1529,9 @@ def cmd_worktree_register(args):
                               (lease.register_dispatch_guard,
                                "dispatch guard (PreToolUse on Bash)"),
                               (lease.register_reach,
-                               "reach gate (PreToolUse; advice, never refuses)")):
+                               "reach gate (PreToolUse; advice, never refuses)"),
+                              (lease.register_wake_gate,
+                               "wake gate (PreToolUse on Bash; advice, never refuses)")):
         register = (lambda c, f=register_fn: f(c, local))
         changed, note = register(cfg)
         if changed:
@@ -1760,6 +1763,63 @@ def cmd_role_roster(args):
     if stale:
         eprint("NOTE: %d seat(s) read STALE — the holder is proved dead, so `_resolved` skips "
                "them and those sessions announce the fallback: %s" % (len(stale), ", ".join(stale)))
+    return 0
+
+
+def cmd_wake_gate(args):
+    """PreToolUse on Bash: say, AT THE MOMENT long work starts, that nothing can wake you to a goal.
+
+    A DELIVERY DEFECT, NOT A DOCUMENTATION ONE. The SessionStart banner has always printed
+    `MANDATE: none (Stop gate inert)` and `game_loop doorbell` has always explained the remedy in
+    full. Agents still started unattended runs unarmed, and a human bound the mandate for them by
+    hand every time -- "I have to tell them manually, none of them know". The human was not better
+    informed than the banner; they spoke at a different MOMENT. Session-start text is read once,
+    before the agent knows whether the work ahead is long.
+
+    So this says one thing, once, when it applies, and otherwise says nothing at all. It never
+    denies: every path exits 0. The failure it guards against is an unattended run that has to be
+    re-derived after a wake, and blocking a Bash call is a wildly disproportionate response to
+    that -- and would, as with every other PreToolUse rule here, risk locking the repo against
+    its own repair.
+    """
+    payload, problem = ({}, None) if args.command is not None else _hook_payload()
+    if problem:
+        # SILENT ON A BROKEN PAYLOAD, which is the opposite of `dispatch guard`'s loud allow, and
+        # the difference is what the guard PROTECTS. That one is the only thing standing between a
+        # session and an unguarded dispatch, so an unchecked call must announce itself. This one
+        # is advice about a wake path; announcing that it could not read its input would put a
+        # paragraph in front of every Bash call the moment stdin changed shape, which is how the
+        # notice that matters stops being read.
+        return 0
+    tool_input = payload.get("tool_input") if isinstance(payload.get("tool_input"), dict) else {}
+    command = args.command if args.command is not None else (tool_input.get("command") or "")
+    # THE FLAG HAD NO READER, and this is the shape this repo keeps finding: `--background` was
+    # declared on the parser and the value was taken only from the payload, so the flag existed,
+    # parsed, and decided nothing. Caught by exercising it rather than by reading the code.
+    background = bool(tool_input.get("run_in_background")) or bool(
+        getattr(args, "background", False))
+
+    is_long, why = wake.long_work(command, background=background)
+    if not is_long:
+        return 0
+    try:
+        cfg = _cfg(args, guard=True)
+        root = cfg.root
+    except Exception:                                           # noqa: BLE001
+        return 0                    # no repo resolved; nothing to advise about
+    session = (args.session or payload.get("session_id")
+               or os.environ.get("SHOWRUNNER_SESSION") or caller_session() or "")
+    if wake.already_told(root, session):
+        return 0
+
+    state, detail = wake.armed(root)
+    lines = wake.notice_lines(state, detail, why)
+    if not lines:
+        return 0
+    wake.record_told(root, session)
+    print(json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "additionalContext": "\n".join(lines)}}))
     return 0
 
 
@@ -3641,6 +3701,20 @@ def build_parser():
                         "rule without constructing a PreToolUse event")
     d.set_defaults(func=cmd_dispatch_guard)
 
+    s = sub.add_parser("wake-gate",
+                       help="PreToolUse (Bash): when a session starts LONG work with no mandate "
+                            "bound, say so once — a wake that lands on an unarmed run returns an "
+                            "agent to a prompt with a hole where the goal goes. Never denies; "
+                            "silent when a mandate is bound, when game_loop is absent, and for "
+                            "ordinary commands")
+    s.add_argument("--session")
+    s.add_argument("--command", default=None,
+                   help="check this command instead of reading a hook payload — for testing the "
+                        "rule without constructing a PreToolUse event")
+    s.add_argument("--background", action="store_true",
+                   help="treat the command as backgrounded, as the harness would report it")
+    s.set_defaults(func=cmd_wake_gate)
+
     s = sub.add_parser("waiting",
                        help="is this orchestrator legitimately waiting? exit 0 waiting, 1 not "
                             "waiting, 3 a Crawler is BLOCKED (alive and inert — needs a message, "
@@ -3741,8 +3815,28 @@ PROSE_OPTS = ("reason", "title", "who", "stale-proof-reason", "note")
 PROSE_MAX = 400
 
 
+# (verb, opt) pairs where the prose is MANDATORY but may arrive through either twin. Derived by
+# `_add_prose_twins` from what the parsers actually declare, never hand-written: a second list of
+# which options are required is a list that drifts from the parser, and the drift would be
+# invisible exactly the way the defect below was.
+_REQUIRED_PROSE = set()
+
+
 def _add_prose_twins(parser):
-    """Give every prose option a `--<name>-file` sibling, wherever it appears."""
+    """Give every prose option a `--<name>-file` sibling, wherever it appears.
+
+    AND UN-REQUIRE THE ORIGINAL, because `required=True` makes the sibling UNREACHABLE (#87).
+    argparse enforces `required` while parsing, long before `_resolve_prose` gets a chance to
+    fold the file in — so `--reason-file x` alone died with "the following arguments are
+    required: --reason", and passing both died with "two answers to one question". There was no
+    invocation that used the flag, while its own help text promised it was the only way to pass
+    prose over %d chars. The one case it existed for was the one case it could not serve.
+
+    Reported against `amend`, and `park` had it too: the same contradiction, unhit, because
+    nobody had yet needed a long reason to park something. Fixing the mechanism fixes both and
+    stops a third from being added -- a new `required=True` prose option is relaxed here the
+    moment its twin appears, and the requirement survives as "one of the two".
+    """ % PROSE_MAX
     seen = []
     for action in getattr(parser, "_subparsers", None) and parser._subparsers._group_actions or []:
         for name, sub in getattr(action, "choices", {}).items():
@@ -3754,12 +3848,22 @@ def _add_prose_twins(parser):
                                      help="read %s from this file instead — no shell touches it, "
                                           "and prose over %d chars must come this way"
                                           % (flag, PROSE_MAX))
+                    for a in sub._actions:
+                        if flag in a.option_strings and a.required:
+                            a.required = False
+                            _REQUIRED_PROSE.add((name, opt))
                     seen.append("%s %s" % (name, flag))
     return seen
 
 
 def _resolve_prose(parser, args):
-    """Fold `--x-file` into `--x`, and refuse prose too long to have survived the shell."""
+    """Fold `--x-file` into `--x`, and refuse prose too long to have survived the shell.
+
+    ALSO ENFORCES THE REQUIREMENT that `_add_prose_twins` had to relax. Dropping `required=True`
+    without replacing it would turn an unreachable flag into a missing check -- `amend` with no
+    reason at all would have been accepted, which is worse than the bug being fixed.
+    """
+    verb = getattr(args, "cmd", None)
     for opt in PROSE_OPTS:
         dest = opt.replace("-", "_")
         fdest = dest + "_file"
@@ -3774,6 +3878,10 @@ def _resolve_prose(parser, args):
             except OSError as exc:
                 parser.error("--%s-file could not be read: %s" % (opt, exc))
         val = getattr(args, dest, None)
+        if (verb, opt) in _REQUIRED_PROSE and not val:
+            parser.error("--%s is required. Pass it inline, or `--%s-file <path>` for prose over "
+                         "%d chars — either satisfies it, and neither is optional."
+                         % (opt, opt, PROSE_MAX))
         if isinstance(val, str) and len(val) > PROSE_MAX and not path:
             parser.error("--%s is %d chars, over the %d-char limit for prose on a command line. "
                          "Use --%s-file: a long argument is where backticks and $(...) hide, and "
