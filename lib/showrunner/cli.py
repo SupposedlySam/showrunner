@@ -3838,21 +3838,42 @@ def _add_prose_twins(parser):
     moment its twin appears, and the requirement survives as "one of the two".
     """ % PROSE_MAX
     seen = []
-    for action in getattr(parser, "_subparsers", None) and parser._subparsers._group_actions or []:
-        for name, sub in getattr(action, "choices", {}).items():
-            have = {o for a in sub._actions for o in a.option_strings}
-            for opt in PROSE_OPTS:
-                flag = "--%s" % opt
-                if flag in have and (flag + "-file") not in have:
-                    sub.add_argument(flag + "-file", metavar="PATH",
-                                     help="read %s from this file instead — no shell touches it, "
-                                          "and prose over %d chars must come this way"
-                                          % (flag, PROSE_MAX))
-                    for a in sub._actions:
-                        if flag in a.option_strings and a.required:
-                            a.required = False
-                            _REQUIRED_PROSE.add((name, opt))
-                    seen.append("%s %s" % (name, flag))
+
+    # RECURSIVE, because the first version walked ONE level and `role claim --who` is two. The
+    # consequence was #87 again in a place #87's fix could not reach: `_resolve_prose` enforces
+    # the 400-char ceiling by OPTION NAME across every verb, so a long `--who` was refused and
+    # told to "Use --who-file" — a flag that was never created for that subparser. A ceiling
+    # whose escape hatch is named in the refusal and does not exist is the same defect the file
+    # twin was built to prevent, reintroduced by the walk rather than by the rule.
+    #
+    # Found because game_loop hit the neighbouring version of it — a gate keyed on an option
+    # NAME rather than on the (verb, option) pair — and said so. Mine is keyed on the name too;
+    # what saved it is that all five prose names happen to be prose wherever they appear. That
+    # is luck, and it is recorded here rather than fixed, because the fix is a per-verb
+    # declaration and there is no observed failure to justify the churn yet.
+    def walk(node, path):
+        subs = getattr(node, "_subparsers", None)
+        for action in (subs._group_actions if subs else []):
+            for name, sub in getattr(action, "choices", {}).items():
+                here = "%s %s" % (path, name) if path else name
+                have = {o for a in sub._actions for o in a.option_strings}
+                for opt in PROSE_OPTS:
+                    flag = "--%s" % opt
+                    if flag in have and (flag + "-file") not in have:
+                        sub.add_argument(flag + "-file", metavar="PATH",
+                                         help="read %s from this file instead — no shell touches "
+                                              "it, and prose over %d chars must come this way"
+                                              % (flag, PROSE_MAX))
+                        for a in sub._actions:
+                            if flag in a.option_strings and a.required:
+                                a.required = False
+                                # Keyed on the LEAF verb, which is what `_resolve_prose` can see
+                                # on `args`; a nested verb stores its own name under its own dest.
+                                _REQUIRED_PROSE.add((name, opt))
+                        seen.append("%s %s" % (here, flag))
+                walk(sub, here)
+
+    walk(parser, "")
     return seen
 
 
@@ -3863,7 +3884,11 @@ def _resolve_prose(parser, args):
     without replacing it would turn an unreachable flag into a missing check -- `amend` with no
     reason at all would have been accepted, which is worse than the bug being fixed.
     """
-    verb = getattr(args, "cmd", None)
+    # EVERY VERB NAME ON `args`, not just the top one. A nested subcommand stores its own name
+    # under its own dest (`rolecmd`, `dispatchcmd`, ...), so keying only on `cmd` would look up
+    # "role" for a requirement recorded against "claim" and silently enforce nothing.
+    verbs = {getattr(args, d) for d in vars(args)
+             if isinstance(getattr(args, d, None), str) and (d == "cmd" or d.endswith("cmd"))}
     for opt in PROSE_OPTS:
         dest = opt.replace("-", "_")
         fdest = dest + "_file"
@@ -3878,7 +3903,7 @@ def _resolve_prose(parser, args):
             except OSError as exc:
                 parser.error("--%s-file could not be read: %s" % (opt, exc))
         val = getattr(args, dest, None)
-        if (verb, opt) in _REQUIRED_PROSE and not val:
+        if any((v, opt) in _REQUIRED_PROSE for v in verbs) and not val:
             parser.error("--%s is required. Pass it inline, or `--%s-file <path>` for prose over "
                          "%d chars — either satisfies it, and neither is optional."
                          % (opt, opt, PROSE_MAX))

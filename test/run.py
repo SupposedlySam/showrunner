@@ -15411,6 +15411,69 @@ def test_a_required_prose_option_can_be_supplied_by_file():
        "400-char summary named only one", "--reason-file" in neither.stderr,
        neither.stderr[-200:])
 
+    # NESTED VERBS TOO, and this is where #87 survived its own fix. `_add_prose_twins` walked ONE
+    # level of subparsers; `role claim --who` is two, so it never got a twin. Meanwhile
+    # `_resolve_prose` enforces the 400-char ceiling by option NAME across every verb — so a long
+    # `--who` was refused and told to "Use --who-file", a flag that did not exist for that
+    # subparser. A ceiling naming an escape hatch that is absent is the same defect the twin was
+    # built to prevent, reintroduced by the traversal rather than by the rule.
+    #
+    # The assertion walks the parser rather than naming `role claim`, because the defect was a
+    # failure to walk: a test that checks the one verb I happened to notice would pass the moment
+    # that verb was fixed and keep missing every other nesting.
+    def every_verb(node, path=""):
+        subs = getattr(node, "_subparsers", None)
+        for act in (subs._group_actions if subs else []):
+            for name, sub in getattr(act, "choices", {}).items():
+                here = ("%s %s" % (path, name)).strip()
+                yield here, sub
+                for deeper in every_verb(sub, here):
+                    yield deeper
+
+    orphan_ceiling = []
+    depth_seen = set()
+    for path, sub in every_verb(parser):
+        depth_seen.add(len(path.split()))
+        # NOT `have`: that is the module-level helper this group calls at the top, and binding
+        # it here makes it local for the WHOLE function — the group crashed on `have("git")`
+        # before reaching any assertion. Same shadowing class as reusing `said` for a second
+        # subject earlier in this file.
+        opts = {o for a in sub._actions for o in a.option_strings}
+        for opt in _cli.PROSE_OPTS:
+            flag = "--%s" % opt
+            if flag in opts and (flag + "-file") not in opts:
+                orphan_ceiling.append("%s %s" % (path, flag))
+    eq("every prose option has its file twin at EVERY nesting depth — the ceiling is enforced by "
+       "option name across all verbs, so a twin missing anywhere is a refusal naming a flag that "
+       "does not exist", orphan_ceiling, [])
+    ok("...and the walk actually reached a NESTED verb, so the check above cannot pass by only "
+       "ever seeing the top level — which is exactly how the bug survived",
+       max(depth_seen) >= 2, sorted(depth_seen))
+
+    # DRIVEN THROUGH THE CLI on the verb that had it, because the parser assertion proves the
+    # twin exists and not that the path through `_resolve_prose` works for a nested verb.
+    who = os.path.join(tmpdir("who88"), "w.txt")
+    with open(who, "w") as fh:
+        fh.write("w" * 450)
+    # ASSERTED ON REACHING THE LOGIC, not on succeeding. The suite runs against an isolated
+    # user-config dir with no roles defined, so `role claim` cannot succeed here and demanding
+    # exit 0 would test the fixture rather than the parser. What matters is that a 450-char
+    # `--who-file` got PAST argparse and `_resolve_prose` into role resolution — the inline form
+    # dies at the ceiling before reaching any of it.
+    deep = sr("role", "claim", "campaign-lead", "--who-file", who)
+    blocked_by_prose = ("--who-file" in deep.stderr and "unrecognized" in deep.stderr) \
+        or "over the %d-char limit" % _cli.PROSE_MAX in deep.stderr
+    ok("a NESTED verb accepts the file twin and reaches real logic, rather than dying at the "
+       "ceiling or on an unknown flag — which is what it did before the walk went deeper",
+       not blocked_by_prose, (deep.returncode, deep.stderr[-160:]))
+    deep_inline = sr("role", "claim", "campaign-lead", "--who", "w" * 450)
+    ok("...while the 450-char INLINE form on that same nested verb is still refused by the "
+       "ceiling, so the twin is the only way over it and the control still bites",
+       "over the %d-char limit" % _cli.PROSE_MAX in deep_inline.stderr, deep_inline.stderr[-160:])
+    deep_both = sr("role", "claim", "campaign-lead", "--who", "short", "--who-file", who)
+    ok("...and still refuses both on a nested verb, so the resolver reached it rather than "
+       "skipping it", "two answers to one question" in deep_both.stderr, deep_both.stderr[-160:])
+
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
