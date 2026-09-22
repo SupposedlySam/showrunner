@@ -644,6 +644,15 @@ TARGETS = [
     ("what the gate actually says", "wake.notice_lines", "lib/showrunner/wake.py",
      r"(def notice_lines\(state, detail, why\):\n)",
      "    return []\ndef _neutered_notice_lines(state, detail, why):\n"),
+    # BOTH NEUTER TOWARD THE SAME PLACE — "cannot tell" — which lingering() treats as stop.
+    # So the dangerous mutant here is not a crash; it is reap silently never acting again.
+    ("when the process at a pid started", "util.process_started", "lib/showrunner/util.py",
+     r"(def process_started\(pid\):\n)",
+     "    return None\ndef _neutered_process_started(pid):\n"),
+    ("whether a live pid is still the process a record started", "util.pid_is_ours",
+     "lib/showrunner/util.py",
+     r"(def pid_is_ours\(entry\):\n)",
+     "    return True\ndef _neutered_pid_is_ours(entry):\n"),
     ("the role roster", "roles.roster", "lib/showrunner/roles.py",
      r"(def roster\(cfg\):\n)",
      "    return []\ndef _neutered_roster(cfg):\n"),

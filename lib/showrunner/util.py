@@ -244,6 +244,78 @@ def pid_alive(pid):
         return True
 
 
+def process_started(pid):
+    """Epoch seconds at which the process CURRENTLY holding `pid` started, or None. Never raises.
+
+    A PID NAMES A SLOT, NOT A PROCESS. The boot token scopes a pid to one boot, which stops a
+    reboot from handing our number to a stranger — but a machine that stays up for days recycles
+    pids inside a single boot, and nothing here noticed (#88). `reap` proposed SIGTERMing pid
+    72245 for a leaf that had finished 4.3 days earlier; `ps` showed 72245 was CoreADI's `adid`,
+    started by macOS that afternoon. The earlier occurrence resolved to `contactsd`.
+
+    Start time is what distinguishes the two: the same pid with a different start time is a
+    different process. `lstart` is second-resolution and printed in local time, so the caller
+    compares with a small tolerance. `LC_ALL=C` because the format is locale-dependent and a
+    translated weekday would parse as None — which is safe (the acting caller stops) but would
+    make every reap on such a machine a silent no-op.
+    """
+    if not pid:
+        return None
+    try:
+        out = subprocess.run(["ps", "-p", str(int(pid)), "-o", "lstart="],
+                             capture_output=True, text=True, timeout=5,
+                             env=dict(os.environ, LC_ALL="C", LANG="C"))
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        return None
+    text = " ".join((out.stdout or "").split())
+    if out.returncode != 0 or not text:
+        return None
+    try:
+        return time.mktime(time.strptime(text, "%a %b %d %H:%M:%S %Y"))
+    except (ValueError, OverflowError):
+        return None
+
+
+PROCESS_START_SLACK = 5     # seconds: lstart is whole seconds, and Popen returns before exec
+
+
+def pid_is_ours(entry):
+    """True / False / None: is the process at `entry["pid"]` the one this record started?
+
+    False means PROVABLY NOT — the slot has been reused. None means this cannot tell, and the
+    caller's posture decides what that is worth: a report may fall back to "the pid answers",
+    an action must not.
+
+    Two rules, strongest first:
+      - the record carries `pid_started` (written at launch): the live process must have
+        started at that moment, give or take PROCESS_START_SLACK;
+      - an older record without it: the live process must not have started after the Crawler
+        was dispatched (or, lacking that, after the leaf finished) — the reporter's check, and
+        sufficient for the observed case, where the daemon started days after the finish.
+    """
+    pid = entry.get("pid")
+    if not pid:
+        return None
+    started = process_started(pid)
+    if started is None:
+        return None
+    recorded = entry.get("pid_started")
+    if recorded is not None:
+        try:
+            return abs(started - float(recorded)) <= PROCESS_START_SLACK
+        except (TypeError, ValueError):
+            return None
+    for key in ("dispatched_at", "finished_at"):
+        bound = entry.get(key)
+        if bound is None:
+            continue
+        try:
+            return started <= float(bound) + PROCESS_START_SLACK
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 # ------------------------------------------------------- the session transcript
 # THE ONE SIGNAL THAT SEPARATES "WORKING" FROM "WEDGED" (#69). Every other liveness fact
 # showrunner holds is about a PROCESS, and a process parked at a prompt is byte-identical to

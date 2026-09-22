@@ -41,7 +41,8 @@ import os
 import time
 
 from .util import (atomic_write_json, boot_token, die, eprint, file_lock, git, now,
-                   pid_alive, rel, run, same_boot, short_session, try_file_lock)
+                   pid_alive, pid_is_ours, rel, run, same_boot, short_session,
+                   try_file_lock)
 from . import events, gates, locks, worktree
 
 RECORD = "campaign.json"
@@ -342,7 +343,13 @@ def live(entry):
     # different boot the moment the token format changed.
     if entry.get("boot") and same_boot(entry["boot"], boot_token()) is False:
         return False
-    return pid_alive(entry.get("pid"))
+    if not pid_alive(entry.get("pid")):
+        return False
+    # A RECYCLED PID IS NOT A LIVE CRAWLER (#88). This site only reports, so its posture is the
+    # opposite of `lingering`'s: PROVABLY someone else's process is dead-to-us, while
+    # cannot-tell falls back to the pid answering — the same split the boot check above makes
+    # with `is False` against lingering's `is not True`.
+    return pid_is_ours(entry) is not False
 
 
 def tree_bytes(path):

@@ -11018,7 +11018,12 @@ def test_dispatch():
        "assertion that stops this from killing a Crawler mid-commit",
        dispatch.lingering({"pid": mypid, "finished_at": time.time()}) is None)
     old = time.time() - (dispatch.LINGER_GRACE_SECONDS + 60)
-    ling = dispatch.lingering({"pid": mypid, "finished_at": old})
+    # STAMPED THE WAY A LAUNCH NOW STAMPS IT (#88). Without `pid_started`, identity falls back to
+    # "did this process start before the leaf finished" — and `mypid` is the SUITE, whose start
+    # moves with how long the suite has already run. These fixtures passed or failed on suite
+    # duration, and #88 is what made that visible.
+    mystart = util.process_started(mypid)
+    ling = dispatch.lingering({"pid": mypid, "finished_at": old, "pid_started": mystart})
     ok("...but one still alive long after its leaf closed IS lingering, which is what stacks "
        "up under repeated fan-out", ling and ling["pid"] == mypid, ling)
     ok("...and a dead process is not lingering, so a reaped Crawler is not reported twice",
@@ -11031,7 +11036,8 @@ def test_dispatch():
        "and this is the one check here that acts rather than reports",
        dispatch.lingering({"pid": mypid, "finished_at": old, "boot": "a-previous-boot"}) is None)
     ok("...while the same pid recorded THIS boot still is, so the guard did not just disable "
-       "the feature", dispatch.lingering({"pid": mypid, "finished_at": old, "boot": _bt()}))
+       "the feature", dispatch.lingering({"pid": mypid, "finished_at": old, "boot": _bt(),
+                                          "pid_started": mystart}))
 
     # Closing a room must never be the thing that fails a close.
     eq("a Crawler with no channel closes cleanly rather than erroring",
@@ -11203,6 +11209,7 @@ def test_dispatch():
     # the grace window has to be REPORTED by reap, or the detector is correct and unused. Dry
     # run, so nothing is signalled — reap stays a report until --apply, including here.
     campaign.set_state(fcfg, "c-fin", "finished", pid=mypid,
+                       pid_started=util.process_started(mypid),
                        finished_at=time.time() - (dispatch.LINGER_GRACE_SECONDS + 60))
     fg = G.open_graph(fcfg)
     racts, _ = campaign.reap(fcfg, fg, apply=False)
@@ -11225,6 +11232,7 @@ def test_dispatch():
     try:
         campaign.set_state(fcfg, "c-fin", "finished", pid=stubborn.pid,
                            boot=boot_token_for_test(),
+                           pid_started=util.process_started(stubborn.pid),
                            finished_at=time.time() - (dispatch.LINGER_GRACE_SECONDS + 60))
         acts, warns = campaign.reap(fcfg, fg, apply=True)
         ent2 = [c for c in campaign.load(fcfg)["crawlers"] if c["crawler"] == "c-fin"][0]
@@ -12607,6 +12615,7 @@ def test_cross_branch_overlap_and_lingering():
     rec = worktree.spawn(cfg, g.show("LG1"), actor="ghost")
     campaign.record_spawn(cfg, rec, pid=os.getpid())
     campaign.set_state(cfg, rec["crawler"], "finished",
+                       pid_started=util.process_started(os.getpid()),
                        finished_at=int(time.time()) - 9999, finished_why="leaf closed")
     ling = campaign.lingering_crawlers(cfg)
     ok("a process alive well after its leaf closed is reportable WITHOUT running reap — the "
@@ -15475,9 +15484,84 @@ def test_a_required_prose_option_can_be_supplied_by_file():
        "skipping it", "two answers to one question" in deep_both.stderr, deep_both.stderr[-160:])
 
 
+def test_a_recycled_pid_is_not_a_lingering_crawler():
+    group("reap does not trust a stored pid after the OS has handed it to somebody else (#88)")
+    # OBSERVED TWICE on one machine: `status` reported "pid 72245 outlived its leaf" 4.3 days
+    # after the leaf finished, and `ps` showed 72245 was CoreADI's `adid`, started by macOS that
+    # afternoon. The first time it was `contactsd`. `reap --apply` would have SIGTERMed a system
+    # daemon. The boot token already stops a REBOOT recycling our pid; nothing stopped a machine
+    # that simply stayed up long enough to wrap its pid space.
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        deadline = time.time() + 5
+        started = None
+        while started is None and time.time() < deadline:
+            started = util.process_started(proc.pid)
+            if started is None:
+                time.sleep(0.1)
+        if started is None:
+            skip("the recycled-pid group", "`ps -o lstart=` could not be read on this host")
+            return
+        ok("the start time of a live process is readable, and recent — a value from the wrong "
+           "process or the wrong clock would make every comparison below meaningless",
+           abs(time.time() - started) < 120, started)
+        ok("...and a pid that is not running has no start time rather than a borrowed one",
+           util.process_started(2 ** 22 + 7) is None, "unused pid")
+
+        now_ = time.time()
+        finished = now_ - 4.3 * 86400
+        legacy = {"pid": proc.pid, "dispatched_at": finished - 600, "finished_at": finished}
+        eq("THE REPORTED CASE: a live pid whose process STARTED AFTER its leaf finished is "
+           "provably not ours", util.pid_is_ours(legacy), False)
+        eq("...so it is not a lingering Crawler, and reap has nothing to signal",
+           dispatch.lingering(legacy), None)
+        stamped = dict(legacy, pid_started=finished - 600)
+        eq("...and a record carrying `pid_started` catches it by identity, which also covers a "
+           "pid recycled BEFORE the leaf finished, where the reporter's check would not",
+           util.pid_is_ours(stamped), False)
+        eq("...and is not lingering either", dispatch.lingering(stamped), None)
+
+        # THE CONTROL. A fix that made lingering() return None for everything would pass all
+        # four lines above and turn reap into a no-op — the safe-looking failure, and the one
+        # that lets real leftover Crawlers pile up again under fan-out.
+        ours = {"pid": proc.pid, "pid_started": started, "dispatched_at": started,
+                "finished_at": now_ - 3600}
+        eq("a Crawler that really is still running an hour after its leaf finished IS ours",
+           util.pid_is_ours(ours), True)
+        ling = dispatch.lingering(ours)
+        ok("...and IS reported as lingering, so reap still has its real job",
+           bool(ling) and ling.get("pid") == proc.pid, ling)
+
+        # CANNOT-TELL IS NOT A LICENCE TO SIGNAL. This branch acts, so only a positive match
+        # proceeds — the same posture the boot check in lingering() already takes.
+        #
+        # Made undecidable by making the START TIME unreadable, not by leaving timestamps off:
+        # a first version of this fixture carried `finished_at`, which is a perfectly good bound,
+        # so the function correctly DECIDED it and the test called that a bug.
+        unknown = dict(ours)
+        real_started = util.process_started
+        try:
+            util.process_started = lambda _pid: None
+            eq("a record whose process start time cannot be read answers cannot-tell, not yes",
+               util.pid_is_ours(unknown), None)
+            eq("...and cannot-tell does NOT make a Crawler lingering, because the next step is a "
+               "SIGTERM", dispatch.lingering(unknown), None)
+            eq("...while `campaign.live`, which only reports, still trusts a pid it cannot "
+               "disprove", campaign.live(dict(unknown)), True)
+        finally:
+            util.process_started = real_started
+
+        # AND THE REPORTING SITE TAKES THE OPPOSITE POSTURE ON PURPOSE. `live()` only reports,
+        # so provably-someone-else is dead to us while cannot-tell still trusts the pid.
+        eq("`campaign.live` calls a provably recycled pid NOT live",
+           campaign.live(dict(legacy)), False)
+    finally:
+        proc.kill()
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

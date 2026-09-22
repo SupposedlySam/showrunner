@@ -34,7 +34,8 @@ import subprocess
 import uuid
 
 from . import campaign, locks
-from .util import Refused, boot_token, die, eprint, now, pid_alive, rel, short_session, same_boot
+from .util import (Refused, boot_token, die, eprint, now, pid_alive, pid_is_ours,
+                   process_started, rel, short_session, same_boot)
 
 # MEASURED, AND THE OPPOSITE OF WHAT I FIRST REASONED. This was `acceptEdits`, chosen because
 # bypassPermissions "is a wider door than the problem needs". The prediction was wrong: under
@@ -437,7 +438,10 @@ def launch(cfg, record, decision, brief, session_id, dry_run=False, chat=None):
         campaign.set_state(cfg, record["crawler"], "dispatch-failed", error=str(exc))
         raise Refused("could not start a session for %s: %s" % (record["crawler"], exc))
 
-    campaign.set_state(cfg, record["crawler"], "running", pid=proc.pid, dispatched_at=now())
+    # `pid_started` is what makes this pid checkable days later (#88): a pid alone names a slot
+    # the OS will hand to somebody else, and `reap` acts on it.
+    campaign.set_state(cfg, record["crawler"], "running", pid=proc.pid, dispatched_at=now(),
+                       pid_started=process_started(proc.pid))
     return {"session": session_id, "model": model,
             "channel": channel if (chat_ok and _joined) else None,
             "joined": bool(_joined), "chat": chat_detail, "cmd": cmd, "pid": proc.pid, "log": rel(log, cfg.root),
@@ -627,6 +631,13 @@ def lingering(entry, grace=LINGER_GRACE_SECONDS):
         return None
     pid = entry.get("pid")
     if not pid or not pid_alive(pid):
+        return None
+    # ALIVE IS NOT OURS (#88). A boot-scoped pid can still be recycled inside the boot, and on a
+    # machine up for days it was — twice, both times to a macOS daemon that `reap` then offered
+    # to SIGTERM. Same posture as the boot check above and for the same reason: this branch
+    # feeds a signal, so only a POSITIVE identity match proceeds. Recycled and cannot-tell
+    # both stop, and a Crawler whose process is gone is not lingering, it is finished.
+    if pid_is_ours(entry) is not True:
         return None
     finished = entry.get("finished_at")
     if not finished:
