@@ -63,12 +63,27 @@ def long_work(command, background=False):
     """
     if background:
         return True, "the call is backgrounded, which is the caller stating it runs past this turn"
-    text = " ".join((command or "").split())
-    if not text:
+    if not (command or "").strip():
         return False, "no command to judge"
-    for pat in LONG_PATTERNS:
-        if re.search(pat, text):
-            return True, "the command matches %s, which this project treats as long work" % pat
+    # A MENTION IS NOT A USE. The first version searched the whole command string, so a commit
+    # message containing the word "make" read as a build: reported by balooga-owner and
+    # reproduced independently by llm_chat's owner on their own commit, both within a day of
+    # release. That is the defect reach.py's gate had already paid for twice (a heredoc body, then
+    # a quoted argument) and fixed with `_command_segments`: heredoc bodies dropped, quoted
+    # contents emptied, split at command boundaries. Borrowed rather than re-derived, so a third
+    # mention-vs-use fix lands in one place and reaches both gates.
+    #
+    # Matching still runs anywhere WITHIN a segment rather than only at its start, because
+    # `--launch` is a flag on a showrunner command and `cd x && pytest` puts the runner second.
+    # What it no longer sees is prose: `git commit -m "make it faster"` becomes
+    # `git commit -m ""`.
+    from .reach import _command_segments
+    for seg in _command_segments(command):
+        text = " ".join(seg.split())
+        for pat in LONG_PATTERNS:
+            if re.search(pat, text):
+                return True, ("the command matches %s, which this project treats as long work"
+                              % pat)
     return False, "nothing about this command says it runs long"
 
 

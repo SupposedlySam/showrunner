@@ -15222,6 +15222,21 @@ def test_a_session_is_told_before_it_goes_unattended():
         ok("...while %r does NOT, so the gate is not a banner on every Bash call" % cmd,
            not wake.long_work(cmd)[0], wake.long_work(cmd))
 
+    # A MENTION IS NOT A USE. Reported by balooga-owner and reproduced by llm_chat's owner on
+    # their own commit within a day of release: `\bmake\b` matched a commit MESSAGE. The runner
+    # words are only runners at a command boundary, so prose handed to another program — a
+    # heredoc body, a quoted argument — must not fire.
+    for cmd in ('git commit -m "make the gate faster"',
+                "git commit -F - <<'EOF'\nmake it so\npytest everything\nEOF",
+                'echo "run pytest later"'):
+        ok("...and prose that merely MENTIONS a runner does not fire: %r" % cmd[:40],
+           not wake.long_work(cmd)[0], wake.long_work(cmd))
+    # THE CONTROL, so the fix cannot be "match nothing": runners still fire when they are the
+    # command, including second in a chain and as a flag on a showrunner verb.
+    for cmd in ("cd sub && make -j4", "./bin/showrunner spawn L1 --actor w --launch"):
+        ok("...while %r still fires, because there it IS the command" % cmd,
+           wake.long_work(cmd)[0], wake.long_work(cmd))
+
     # AN EMPTY COMMAND IS NOT LONG WORK, and it is the shape a malformed payload arrives in.
     ok("an empty command is not treated as long work — a payload that lost its command must not "
        "manufacture a notice", not wake.long_work("")[0], wake.long_work(""))
