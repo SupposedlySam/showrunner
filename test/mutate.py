@@ -653,6 +653,10 @@ TARGETS = [
      "lib/showrunner/util.py",
      r"(def pid_is_ours\(entry\):\n)",
      "    return True\ndef _neutered_pid_is_ours(entry):\n"),
+    # `a == b` IS the pre-fix rule, so this mutant restores the reported defect exactly.
+    ("whether two session ids name one session", "util.same_session", "lib/showrunner/util.py",
+     r"(def same_session\(a, b\):\n)",
+     "    return a == b\ndef _neutered_same_session(a, b):\n"),
     ("the role roster", "roles.roster", "lib/showrunner/roles.py",
      r"(def roster\(cfg\):\n)",
      "    return []\ndef _neutered_roster(cfg):\n"),

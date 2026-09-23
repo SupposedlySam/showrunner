@@ -35,7 +35,7 @@ import uuid
 
 from . import campaign, locks
 from .util import (Refused, boot_token, die, eprint, now, pid_alive, pid_is_ours,
-                   process_started, rel, short_session, same_boot)
+                   process_started, rel, same_boot, same_session, short_session)
 
 # MEASURED, AND THE OPPOSITE OF WHAT I FIRST REASONED. This was `acceptEdits`, chosen because
 # bypassPermissions "is a wider door than the problem needs". The prediction was wrong: under
@@ -825,7 +825,7 @@ def resolved_role(cfg, session, defs=None):
     defs = defs if defs is not None else _roles.spec(cfg)[0]
     for entry in _roles.roster(cfg):
         holder = entry.get("holder") or {}
-        if entry.get("state") == locks.HELD and holder.get("session") == session:
+        if entry.get("state") == locks.HELD and same_session(holder.get("session"), session):
             return holder.get("role") or entry["role"], "claimed"
     return _roles.FALLBACK, "fallback"
 

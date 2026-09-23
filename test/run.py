@@ -15574,9 +15574,66 @@ def test_a_recycled_pid_is_not_a_lingering_crawler():
         proc.kill()
 
 
+def test_an_absent_session_id_matches_nothing():
+    group("An empty session id is not an identity — it must never match another empty one")
+    # REPORTED BY wcs: a seat claimed from a shell with no session id recorded `""`, and so does
+    # every caller whose shell exports none, so `holder.session == session` let any unidentified
+    # caller inherit any unidentified seat. `whoami` from a plain shell announced
+    # "campaign-lead (claimed)"; so would every other session in that checkout.
+    eq("two empty ids do not name the same session", util.same_session("", ""), False)
+    eq("...nor does a missing one beside an empty one", util.same_session(None, ""), False)
+    eq("...nor an empty one beside a real one", util.same_session("", "abc"), False)
+    eq("two DIFFERENT real ids do not either", util.same_session("abc", "xyz"), False)
+    eq("THE CONTROL: the same real id IS the same session, so the rule is not 'match nothing'",
+       util.same_session("abc", "abc"), True)
+
+    # THROUGH THE RESOLVER, because the defect lived at the call sites, not in a helper. A HELD
+    # seat recorded under "" and a caller with no id: before, a claim; now, the fallback.
+    defs = {"campaign-lead": {"acquire": "claim"}}
+    held_empty = [{"role": "campaign-lead#0", "state": locks.HELD,
+                   "holder": {"session": "", "role": "campaign-lead", "pid": 1}}]
+    held_named = [{"role": "campaign-lead#0", "state": locks.HELD,
+                   "holder": {"session": "sess-a", "role": "campaign-lead", "pid": 1}}]
+    real_roster = roles.roster
+    cfg = make_repo()
+    try:
+        roles.roster = lambda _c: held_empty
+        eq("a caller with NO session id does not inherit a seat recorded with none — the "
+           "reported case", roles._resolved(cfg, "", defs)[0], roles.FALLBACK)
+        eq("...and neither does the second copy of the resolver in dispatch",
+           dispatch.resolved_role(cfg, "", defs)[0], roles.FALLBACK)
+        roles.roster = lambda _c: held_named
+        eq("THE CONTROL: the session that DOES hold the seat still resolves to it, so a re-claim "
+           "is not needed for the holder itself", roles._resolved(cfg, "sess-a", defs)[0],
+           "campaign-lead")
+        eq("...and a different named session does not", roles._resolved(cfg, "sess-b", defs)[0],
+           roles.FALLBACK)
+    finally:
+        roles.roster = real_roster
+
+    # EVERY COMPARISON GOES THROUGH THE ONE RULE. Six sites drifted because each remembered the
+    # guard or did not; a bare `==` on a holder's session reintroduces the defect wherever it is
+    # written, so the assertion is on the source rather than on the sites I happened to fix.
+    bare = []
+    pat = re.compile(r'\.get\("session"\)[^=\n]*(==|!=) *session|"session"\) or ""\) != session')
+    for mod in ("roles", "dispatch", "lease", "locks", "campaign", "cli"):
+        with open(os.path.join(ROOT, "lib", "showrunner", mod + ".py"), encoding="utf-8") as fh:
+            for n, line in enumerate(fh, 1):
+                if pat.search(line) and "session and" not in line:
+                    bare.append("%s.py:%d" % (mod, n))
+    eq("no holder-session comparison bypasses `same_session` — a bare `==` is how six sites "
+       "each let \"\" match \"\"", bare, [])
+    # THE SCAN MUST BE ABLE TO FIND ONE, or the empty list above is what a broken regex returns.
+    ok("...and the scan does catch each bare shape the six sites used, while passing the fixed one",
+       all(pat.search(x) for x in ('if a and holder.get("session") == session:',
+                                   'if not force and h.get("session") != session:',
+                                   'if (holder.get("session") or "") != session:'))
+       and not pat.search('if same_session(holder.get("session"), session):'), pat.pattern)
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

@@ -35,7 +35,7 @@ import re
 import shutil
 
 from . import locks
-from .util import now, rel, session_pid, short_session, stamp
+from .util import now, rel, same_session, session_pid, short_session, stamp
 
 PREFIX = "worktree:"
 INTERACTIVE = "interactive"
@@ -143,7 +143,7 @@ class Lease:
         h = self.lock.holder()
         if not h:
             return False, "not held"
-        if not force and h.get("session") != session:
+        if not force and not same_session(h.get("session"), session):
             return False, ("held by session %s, not you (%s) — pass force only if you know that "
                            "session is gone" % (h.get("session") or "?", session or "no session"))
         self.lock.release(force=True)
@@ -226,7 +226,7 @@ def enter(cfg, session, path=None, who=None):
         return "unreadable", {"tree": tree, "holder": h or {}}
 
     if state == locks.HELD:
-        if h and h.get("session") == session:
+        if h and same_session(h.get("session"), session):
             return "own", {"tree": tree, "holder": h}
         # THE EVENT THIS WHOLE LEAF EXISTS TO PRODUCE. WL-05 may not build anything that
         # refuses until a hijack has actually been observed — no gate without a logged failure —

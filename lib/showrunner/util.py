@@ -578,6 +578,22 @@ def caller_session():
             or "")
 
 
+def same_session(a, b):
+    """Do these two session ids name the SAME session? Both must be present to say yes.
+
+    AN ABSENT ID IS NOT AN IDENTITY. A seat claimed from a shell that exported no session id
+    records `""`, and so does every caller whose shell exports none — so a bare `==` let any
+    unidentified caller inherit any unidentified seat: `whoami` from a plain shell announced
+    `campaign-lead (claimed)`, and so would every other session in that checkout (reported by
+    wcs). `reseat_after_reload` and two lock sites already refused this; six other comparisons
+    did not, and four of them GRANT something — a role, a lease, a release, a mapped seat.
+
+    One function rather than six guards, because six guards is how the six drifted: the rule was
+    stated once in a docstring and then each call site either remembered it or did not.
+    """
+    return bool(a) and bool(b) and a == b
+
+
 def package_root():
     """The checkout this code is running out of. ONLY the guards may anchor to it (#74).
 

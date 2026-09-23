@@ -51,7 +51,8 @@ import json
 import os
 
 from . import locks
-from .util import pid_alive, session_pid, short_session, slug, user_config_dir
+from .util import (pid_alive, same_session, session_pid, short_session, slug,
+                   user_config_dir)
 
 # PRECEDENCE HERE IS THE OPPOSITE OF `config.json`'s, AND THAT IS DELIBERATE. Both files live in
 # `user_config_dir()` and both are overlaid by the project, so a reader standing at either one
@@ -336,7 +337,7 @@ def shadowed_seat(cfg, session):
             continue
         for entry in roster(probe):
             holder = entry.get("holder") or {}
-            if (holder.get("session") or "") != session:
+            if not same_session(holder.get("session"), session):
                 continue
             # HELD, not merely recorded. A stale seat in another campaign is not being taken
             # from anybody, and warning about one would fire forever on abandoned state.
@@ -725,7 +726,7 @@ def reseat_after_reload(cfg, session):
     try:
         for entry in roster(cfg):
             holder = entry.get("holder") or {}
-            if (holder.get("session") or "") != session:
+            if not same_session(holder.get("session"), session):
                 continue
             recorded = str(holder.get("pid") or "")
             mine, basis = session_pid()
@@ -990,7 +991,7 @@ def _resolved(cfg, session, defs):
     """
     for entry in roster(cfg):
         holder = entry.get("holder") or {}
-        if entry.get("state") == locks.HELD and holder.get("session") == session:
+        if entry.get("state") == locks.HELD and same_session(holder.get("session"), session):
             return holder.get("role") or entry["role"], "claimed"
 
     mapped, _problems = seat_roles(cfg)
@@ -1015,7 +1016,8 @@ def _resolved(cfg, session, defs):
         held_elsewhere = [e for e in roster(cfg)
                           if e.get("state") == locks.HELD
                           and (e.get("role") or "").rsplit("#", 1)[0] == slug(role or "", 40)
-                          and (e.get("holder") or {}).get("session") != session]
+                          and not same_session((e.get("holder") or {}).get("session"),
+                                               session)]
         cap = int(((defs.get(role) or {}).get("capacity") or 1)) if role in defs else 1
         if role in defs and len(held_elsewhere) >= cap:
             h = (held_elsewhere[0].get("holder") or {})
