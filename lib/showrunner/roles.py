@@ -455,8 +455,16 @@ def crawler_leaf_detail(cfg):
                   "placed by spawn into it" % (where, len(crawlers), here))
 
 
-def crawler_scratch(cfg):
+def crawler_scratch(cfg, session=None):
     """This Crawler's scratch directory as an ABSOLUTE path, or None. Never raises.
+
+    ASKED FROM ANYWHERE, ANSWERED BY SESSION (#89). A guard decides a write by resolving the
+    TREE the target path is in and asking from there — reasonable, and it means a write into the
+    Crawler's own scratch dir is judged from the MAIN checkout, where this used to answer None
+    because the main checkout is not a Crawler's tree. The record names each Crawler's session
+    as well as its tree, so when the tree does not identify one, the session does. Matched with
+    `same_session`, so an absent id never matches an absent id. This PUBLISHES a path and grants
+    nothing — whether to allow the write stays the guard's decision.
 
     WHY A GUARD NEEDS THIS FROM US (#86). The scratch dir is deliberately OUTSIDE the worktree:
     `gc` reports the scratch of dead Crawlers precisely because it "may hold the only copy of
@@ -478,18 +486,24 @@ def crawler_scratch(cfg):
     from . import campaign as _campaign
 
     tree = getattr(cfg, "tree", None)
-    if not tree:
-        return None
-    here = os.path.basename(tree)
+    here = os.path.basename(tree) if tree else None
     try:
-        for c in (_campaign.load(cfg).get("crawlers") or []):
-            if c.get("crawler") == here:
-                raw = c.get("scratch")
-                if not raw:
-                    return None
-                return raw if os.path.isabs(raw) else os.path.join(cfg.root, raw)
+        crawlers = _campaign.load(cfg).get("crawlers") or []
     except Exception:                                           # noqa: BLE001
         return None
+
+    def _abs(c):
+        raw = c.get("scratch")
+        if not raw:
+            return None
+        return raw if os.path.isabs(raw) else os.path.join(cfg.root, raw)
+
+    for c in crawlers:
+        if here and c.get("crawler") == here:
+            return _abs(c)
+    for c in crawlers:
+        if same_session(c.get("session"), session):
+            return _abs(c)
     return None
 
 
@@ -803,7 +817,7 @@ def resolution(cfg, session=None):
         # THE ONE PATH OUTSIDE THE WORKTREE A CRAWLER IS SUPPOSED TO WRITE (#86). Null for any
         # session that is not a Crawler placed by spawn, which is the honest answer rather than
         # a default a guard would then allowlist for everybody.
-        "scratch": crawler_scratch(cfg),
+        "scratch": crawler_scratch(cfg, session),
     }
 
 

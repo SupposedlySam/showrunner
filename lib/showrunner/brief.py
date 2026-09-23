@@ -228,6 +228,16 @@ a passing test, a golden, a committed file — and it must be newer than your cl
     {sr} close {leaf_id} --proof <path> --premise <verdict> \\
         --premise-read <path> --reason "<what you did>"
 
+A reason over 400 characters goes on STDIN, not in a file you write first:
+
+    {sr} close {leaf_id} --proof <path> --premise <verdict> --premise-read <path> \\
+        --reason-file - <<'EOF'
+    <what you did, as long as it needs to be>
+    EOF
+
+Writing it to a file would put it in your scratch dir, which is in the main checkout, where a
+write guard may correctly refuse you. If that happens, the guard is not wrong; use stdin.
+
 Prefer to keep your edits inside the files this leaf is about. Your siblings are working
 other leaves right now, and the orchestrator predicted your file sets do not overlap.
 """

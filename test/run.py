@@ -15631,9 +15631,57 @@ def test_an_absent_session_id_matches_nothing():
        and not pat.search('if same_session(holder.get("session"), session):'), pat.pattern)
 
 
+def test_a_crawler_can_close_without_writing_into_the_main_checkout():
+    group("A Crawler can give a long close reason without writing a file, and its scratch path "
+          "is published whichever tree a guard asks from (#89)")
+    # REPORTED: a worker Crawler was refused writing close-reason.txt into its scratch dir. The
+    # dir is in the MAIN checkout by design (it must outlive the tree), so a guard that judges a
+    # write by the target's tree resolved the orchestrator's seat and the deny-everything
+    # fallback. Every piece was right in isolation. The Crawler wrote it through Bash instead and
+    # reported "the guard is wrong" — which is the lesson this must not teach.
+    cfg = make_repo()
+    g = new_graph(cfg)
+    g.add("a leaf", leaf_id="L1", labels=["backend"], paths=["lib/a.py"])
+    exe = os.path.join(ROOT, "bin", "showrunner")
+    proof = os.path.join(cfg.root, "README.md")
+    long_reason = "r" * 600
+    done = subprocess.run([sys.executable, exe, "close", "L1", "--proof", proof,
+                           "--premise", "holds", "--premise-read", proof, "--reason-file", "-"],
+                          cwd=cfg.root, input=long_reason, capture_output=True, text=True,
+                          env=dict(os.environ, NO_COLOR="1"))
+    eq("`--reason-file -` reads the reason from STDIN, so closing needs no file written anywhere",
+       done.returncode, 0)
+    shown = subprocess.run([sys.executable, exe, "show", "L1"], cwd=cfg.root,
+                           capture_output=True, text=True).stdout
+    ok("...and the whole 600 characters arrive, not a truncation of them",
+       long_reason in shown, shown[:200])
+
+    # THE BRIEF SAYS SO, because the Crawler learns the close flow from the brief and nowhere else.
+    with open(os.path.join(ROOT, "lib", "showrunner", "brief.py"), encoding="utf-8") as fh:
+        brief_src = fh.read()
+    ok("the Crawler brief shows the stdin form and says a refusing guard is not wrong",
+       "--reason-file -" in brief_src and "the guard is not wrong" in brief_src, "brief.py")
+
+    # SCRATCH IS PUBLISHED BY SESSION when asked from outside the Crawler's tree — the direction
+    # a per-path guard asks from. Publishing only; nothing is granted here.
+    # `worktree.spawn` makes the tree; `record_spawn` is what writes the campaign record the
+    # lookup reads. `set_state` on an unrecorded Crawler does nothing, silently — the first cut of
+    # this fixture skipped the record and asserted against an empty one.
+    rec = worktree.spawn(cfg, g.show("L1"), actor="w")
+    campaign.record_spawn(cfg, rec, session="crawler-sess-1")
+    main_cfg = config.load(start=cfg.root)
+    got = roles.crawler_scratch(main_cfg, "crawler-sess-1")
+    ok("asked from the MAIN checkout with the Crawler's session, its scratch path comes back",
+       bool(got) and got.endswith(rec["crawler"]), got)
+    eq("...a DIFFERENT session gets nothing, so it is not a published path for everybody",
+       roles.crawler_scratch(main_cfg, "someone-else"), None)
+    eq("...and an EMPTY session gets nothing, since an absent id is not an identity",
+       roles.crawler_scratch(main_cfg, ""), None)
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

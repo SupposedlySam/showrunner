@@ -440,8 +440,8 @@ TARGETS = [
     # campaign scoping already moved once.
     ("the scratch path a guard is told to allowlist", "roles.crawler_scratch",
      "lib/showrunner/roles.py",
-     r"(def crawler_scratch\(cfg\):\n)",
-     "    return None\ndef _neutered_crawler_scratch(cfg):\n"),
+     r"(def crawler_scratch\(cfg, session=None\):\n)",
+     "    return None\ndef _neutered_crawler_scratch(cfg, session=None):\n"),
     ("crawler leaf resolution", "roles.crawler_leaf", "lib/showrunner/roles.py",
      r"(def crawler_leaf\(cfg\):\n)",
      "    return None\ndef _neutered_crawler_leaf(cfg):\n"),

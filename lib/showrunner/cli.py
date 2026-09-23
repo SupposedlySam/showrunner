@@ -3897,9 +3897,17 @@ def _resolve_prose(parser, args):
             if getattr(args, dest, None):
                 parser.error("--%s and --%s-file are two answers to one question; pass one"
                              % (opt, opt))
+            # `-` IS STDIN (#89). A Crawler closing with a long reason had to WRITE a file first,
+            # and the place its brief sends files — its scratch dir — is in the main checkout, where
+            # a per-path write guard correctly resolves the orchestrator's seat and refuses. The
+            # Crawler then wrote it through Bash instead and learned "the guard is wrong". Reading
+            # stdin removes the write entirely; a heredoc piped in touches no file.
             try:
-                with open(path) as fh:
-                    setattr(args, dest, fh.read().strip())
+                if path == "-":
+                    setattr(args, dest, sys.stdin.read().strip())
+                else:
+                    with open(path) as fh:
+                        setattr(args, dest, fh.read().strip())
             except OSError as exc:
                 parser.error("--%s-file could not be read: %s" % (opt, exc))
         val = getattr(args, dest, None)
