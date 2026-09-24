@@ -107,7 +107,28 @@ showrunner spawn <leaf> --launch     # ...and STARTS a real Claude Code session 
                                      # hooks, on the model its lane declares. --dry-run to see the
                                      # command and start nothing. Without --launch, spawn prepares
                                      # and stops, and you start the agent yourself.
+showrunner spawn <leaf> --sparse app audio
+                                     # a SPARSE tree: only these top-level dirs (plus root files)
+                                     # are ever written. Same as sparse_by_label in config, which
+                                     # it overrides. Nothing set = a full checkout, as before
 showrunner integrate                 # serial merge, checks re-run on each MERGED result
+
+# SPARSE TREES (#90) — a campaign of full-tree worktrees filled a 1 TB disk on a monorepo.
+#   config: {"sparse_by_label": {"flutter": ["app", "audio", "rust"], "docs": ["docs"]}}
+# The cone is the UNION over the leaf's labels; `--sparse` beats config. It is applied before any
+# file is written (`worktree add --no-checkout`, `sparse-checkout set --cone`, `checkout`).
+#
+# A CONE NARROWS THE WORK, NEVER THE RAILS. Every cone also gets `.claude/` and every tracked
+# top-level directory a registered hook command points into, derived at spawn time from both
+# settings layers — so `.game_loop/` and `.showrunner/` are present whenever something registers
+# them. After checkout the tree is checked for them, and a gap REFUSES the spawn: a hook whose
+# file is missing exits non-zero WITHOUT blocking, so a wrong cone would be an unguarded Crawler
+# that nothing reports (measured by game_loop's owner).
+#
+# A declared leaf path outside the cone is warned at spawn, and the brief tells the Crawler its
+# tree is sparse and to `git sparse-checkout add <dir>` a missing directory rather than widen it.
+# The main checkout stays full; git records `extensions.worktreeConfig = true` in the shared repo
+# config to keep the sparse setting per-worktree — expected, and worth knowing.
 
 # THE LAUNCH BINARY IS CONFIGURABLE, and `doctor` resolves it. `dispatch.claude_bin` defaults
 # to `claude` on PATH; set an absolute path in .showrunner/config.local.json when the only

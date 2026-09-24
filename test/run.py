@@ -15679,9 +15679,157 @@ def test_a_crawler_can_close_without_writing_into_the_main_checkout():
        roles.crawler_scratch(main_cfg, ""), None)
 
 
+def test_a_crawler_tree_can_be_sparse_without_losing_its_rails():
+    group("spawn can write a SPARSE tree, and the cone can narrow the work but never the hooks (#90)")
+    if not have("git"):
+        skip("the sparse-cone group", "git is not installed")
+        return
+    # REPORTED: a campaign of full-tree Crawler worktrees filled a 1 TB disk on a monorepo. The
+    # workaround was a brief line telling each Crawler to narrow its own tree — after the full
+    # checkout had already landed. The cone now applies before any file is written.
+    #
+    # AND THE DANGER, measured by game_loop's owner: a registered hook whose file is missing
+    # exits 126, and only exit 2 blocks, so a cone that drops a hook's directory gives an
+    # UNGUARDED Crawler, silently. Every rail must survive any cone.
+    cfg = make_repo(files={"README.md": "seed\n", "app/a.dart": "x\n", "audio/b.rs": "x\n",
+                           "rust/c.rs": "x\n", ".game_loop/bin/X": "#!/bin/sh\nexit 0\n"})
+    hook = ('d="$CLAUDE_PROJECT_DIR/.game_loop_self"; [ -x "$d/bin/X" ] || '
+            'd="$CLAUDE_PROJECT_DIR/.game_loop"; exec "$d"/bin/X')
+    os.makedirs(os.path.join(cfg.root, ".claude"), exist_ok=True)
+    with open(os.path.join(cfg.root, ".claude", "settings.json"), "w") as fh:
+        json.dump({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+            {"type": "command", "command": hook},
+            {"type": "command", "command": 'p="${CLAUDE_PROJECT_DIR:-.}"; x="$p/.nowhere/y"'},
+            {"type": "command", "command": "$HOME/dev/tool/x.sh"}]}]}}, fh)
+    sh(["git", "add", "-A"], cfg.root)
+    sh(["git", "commit", "-q", "-m", "hooks"], cfg.root)
+
+    # 1. THE HOOK DIRECTORIES, derived from the commands — including game_loop's own shape,
+    #    which names its dir WITHOUT a trailing slash. A first cut required one and found only
+    #    `bin` from `$d/bin/`, missing `.game_loop` itself.
+    dirs = worktree.hook_dirs(cfg)
+    ok("the directory a registered hook execs from is found in game_loop's real command form, "
+       "where the name is followed by a quote rather than a slash", ".game_loop" in dirs, dirs)
+    ok("...and only TRACKED top-level directories count, so `$HOME/dev/...` and a gitignored "
+       "`.game_loop_self` do not leak into the cone", not ({"dev", ".game_loop_self", ".nowhere"}
+                                                          & dirs), dirs)
+
+    # 2. THE LEAF'S LISTS. The graph stores labels and paths COMMA-JOINED, and iterating the raw
+    #    field walks characters: a first cut did, so `sparse_by_label` could never match.
+    g = new_graph(cfg)
+    g.add("flutter leaf", leaf_id="S1", labels=["flutter", "docs"],
+          paths=["app/main.dart", "rust/lib.rs"])
+    leaf = g.show("S1")
+    eq("a leaf's labels come back as labels, not characters",
+       worktree._leaf_list(leaf, "labels"), ["flutter", "docs"])
+
+    # 3. WHERE THE CONE COMES FROM, most specific first — and what it always carries.
+    none, why = worktree.resolve_cone(cfg, leaf)
+    eq("with no --sparse and no sparse_by_label match, the tree is FULL, exactly as before",
+       none, None)
+    cfg.data["sparse_by_label"] = {"flutter": ["app"], "docs": ["audio"]}
+    by_label, src = worktree.resolve_cone(cfg, leaf)
+    ok("sparse_by_label is matched through the leaf's real labels, and takes the UNION of them",
+       src == "sparse_by_label" and {"app", "audio"} <= set(by_label or []), (src, by_label))
+    explicit, src2 = worktree.resolve_cone(cfg, leaf, explicit=["rust"])
+    ok("--sparse outranks the config", src2 == "--sparse" and "rust" in explicit
+       and "app" not in explicit, (src2, explicit))
+    ok("...and EVERY cone carries .claude and the hook directories, so a cone narrows the work "
+       "and never the rails", {".claude", ".game_loop"} <= set(explicit), explicit)
+
+    # 4. A DECLARED PATH OUTSIDE THE CONE is a file the Crawler is guaranteed not to find.
+    eq("a declared path outside the cone is reported at spawn", worktree.cone_misses(leaf, by_label),
+       ["rust/lib.rs"])
+    eq("...and a cone that covers it reports nothing", worktree.cone_misses(
+       leaf, by_label + ["rust"]), [])
+
+    # 5. THE REAL SPAWN: sparse tree, full main checkout, cone on the record.
+    cfg.data.pop("sparse_by_label", None)
+    cfg.data["harness"] = dict(cfg.data.get("harness") or {}, require=False)
+    rec = worktree.spawn(cfg, leaf, actor="w", sparse=["app"])
+    tree = rec["worktree"]
+    top = sorted(e for e in os.listdir(tree) if e != ".git")
+    ok("the Crawler's tree holds ONLY the cone plus root files", "audio" not in top
+       and "rust" not in top and "app" in top, top)
+    ok("...and the hook's exec target exists in it, so the gate is live",
+       os.path.exists(os.path.join(tree, ".game_loop", "bin", "X")), top)
+    ok("...while the MAIN checkout stays full — sparse settings are per-worktree",
+       all(os.path.isdir(os.path.join(cfg.root, d)) for d in ("app", "audio", "rust")),
+       sorted(os.listdir(cfg.root)))
+    ok("the cone is RECORDED, so a reviewer can see what the Crawler could not",
+       (rec.get("sparse") or {}).get("dirs") and rec["sparse"]["misses"] == ["rust/lib.rs"],
+       rec.get("sparse"))
+
+    # 6. THE REFUSAL. A tree missing a hook directory must not be handed over, because the
+    #    failure it produces is silence.
+    eq("a complete sparse tree has no gaps", worktree.cone_gaps(cfg, tree), [])
+    shutil.rmtree(os.path.join(tree, ".game_loop"))
+    ok("...and a tree missing a hook's directory IS reported as a gap — the check spawn runs "
+       "before handing the tree over, and refuses on", ".game_loop/" in worktree.cone_gaps(cfg, tree),
+       worktree.cone_gaps(cfg, tree))
+
+    # THE REFUSAL ITSELF, not just the detector. The mutation sweep scored cone_gaps THIN with
+    # only the line above noticing it — and it is the one whose neutered form is the dangerous
+    # one: an empty gap list hands the Crawler a tree whose gates are all off. So drive `create`
+    # with a cone that deliberately OMITS the hook directory, bypassing resolve_cone (which would
+    # have added it back), and require that it refuses and leaves nothing behind.
+    bad_name = "w-gap"
+    bad_path = worktree.worktree_path(cfg, bad_name)
+    # `attempt_message` returns (None, text) on a refusal — `die` raises Refused — so the refusal
+    # is the TEXT, not the first element, which is None exactly when this worked.
+    _made, _msg = attempt_message(lambda: worktree.create(
+        cfg, bad_name, "showrunner/gap-probe", "HEAD", cone=[".claude", "app"]))
+    ok("a cone missing a hook's directory is REFUSED at spawn rather than handed over — a missing "
+       "hook fails open, so this is the only place the gap can be caught",
+       _made is None and ".game_loop/" in _msg, _msg[:200])
+    ok("...and the refused tree is removed, so no unguarded tree is left lying around to be "
+       "picked up by hand", not os.path.exists(bad_path), bad_path)
+
+    # 7. THE BRIEF tells the Crawler, since a missing file in an untold sparse tree reads as a bug.
+    block = brief._cone_block(rec)
+    ok("the brief says the tree is sparse, how to add ONE directory, and which declared paths "
+       "are outside it", "SPARSE" in block and "git sparse-checkout add" in block
+       and "rust/lib.rs" in block, block[:300])
+    ok("...and names what IS in the tree, so the Crawler knows what it has rather than only what "
+       "it lacks", "app" in block and ".game_loop" in block, block[:200])
+    ok("...and gives the one-directory remedy rather than 'widen the tree'",
+       "git sparse-checkout add <dir>" in block and "Do not widen" in block, block[:300])
+
+    # 8. UNTRACKED REGISTRATIONS (game_loop's owner). `install.sh --local` registers hooks in the
+    #    untracked settings.local.json against an untracked directory; a worktree gets neither,
+    #    and the tracked-only cone check cannot see it. hook_gaps runs after all provisioning.
+    with open(os.path.join(cfg.root, ".claude", "settings.local.json"), "w") as fh:
+        json.dump({"hooks": {"Stop": [{"hooks": [
+            {"type": "command", "command": '"$CLAUDE_PROJECT_DIR"/.thirdtool/bin/t'}]}]}}, fh)
+    os.makedirs(os.path.join(cfg.root, ".thirdtool", "bin"), exist_ok=True)
+    gaps = worktree.hook_gaps(cfg, tree)
+    ok("an UNTRACKED registered hook directory missing from the tree is a gap — the --local case "
+       "the cone check cannot see", any(".thirdtool/" in g for g in gaps), gaps)
+    os.makedirs(os.path.join(tree, ".thirdtool"), exist_ok=True)
+    os.makedirs(os.path.join(tree, ".game_loop"), exist_ok=True)
+    eq("...and once every hook finds a directory, there are no gaps", worktree.hook_gaps(cfg, tree), [])
+    # ONE OF, NOT ALL: game_loop's commands name a gitignored `.game_loop_self` first and fall
+    # back to `.game_loop`. Requiring both would refuse every spawn; the fallback satisfies it.
+    os.makedirs(os.path.join(cfg.root, ".game_loop_self"), exist_ok=True)
+    eq("...including when a command's PREFERRED directory is absent but its fallback is present",
+       worktree.hook_gaps(cfg, tree), [])
+
+    # THE REFUSAL THROUGH SPAWN, not just the detector — the mutation sweep scored hook_gaps THIN
+    # with one assertion noticing, and its neutered form hands over a tree with a gate silently
+    # off. `.thirdtool` is registered (untracked) and nothing in spawn copies it, so spawn must
+    # abort and leave no tree behind.
+    g.add("second leaf", leaf_id="S2", labels=["docs"], paths=["app/x.dart"])
+    s2_path = worktree.worktree_path(cfg, worktree.crawler_name("S2", "w"))
+    _made2, _msg2 = attempt_message(lambda: worktree.spawn(cfg, g.show("S2"), actor="w"))
+    ok("a spawn whose finished tree lacks a registered hook's directory is REFUSED, naming it",
+       _made2 is None and ".thirdtool/" in _msg2, _msg2[:240])
+    ok("...and leaves no tree behind to be picked up by hand", not os.path.exists(s2_path), s2_path)
+    eq("...and says nothing at all for a full tree", brief._cone_block({"sparse": None}), "")
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

@@ -304,6 +304,15 @@ spends the attention the true ones depend on. And `armed` reports **armed, unarm
 unknown** separately — a doorbell that could not be run says nothing about whether a goal is
 bound, and filing that under "fine" is the defect this codebase is mostly fixes for.
 
+**A Crawler's tree can be sparse, and the cone can narrow the work but never the rails.** A campaign
+of full-tree worktrees filled a 1 TB disk on a monorepo. `showrunner spawn <leaf> --sparse app audio`,
+or `sparse_by_label` in config, writes only those directories plus root files — before any file
+lands, not afterwards. Every cone also carries `.claude/` and each tracked directory a registered
+hook points into, derived from both settings layers; the tree is checked for them after checkout
+and a gap refuses the spawn, because a hook whose file is missing fails open and silently. Declared
+paths outside the cone are warned at spawn and named in the brief. The main checkout stays full;
+git sets `extensions.worktreeConfig` in the shared config to keep that true.
+
 **A guard finds its project from its own location before it gives up.** `cwd` and
 `CLAUDE_PROJECT_DIR` used to be the only anchors, so a tool call from a scratch directory with no
 harness variable was allowed unchecked — including a raw `claude -p` — while the hook answering it

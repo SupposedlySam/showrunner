@@ -77,8 +77,178 @@ def _indent(text, pad="    "):
     return "\n".join(pad + line for line in (text or "").splitlines()) or (pad + "(nothing)")
 
 
-def create(cfg, name, branch, base="HEAD"):
-    """Create the worktree. Refuses rather than degrading if placement is unsafe."""
+# ALWAYS IN A CONE, whatever the leaf says (#90). Cone mode keeps the ROOT FILES and the listed
+# directories and nothing else, so `.claude/settings.json` — which lives in a directory, not at
+# the root — would vanish, and every hook registered in it with it. A Crawler with no
+# registrations runs with no rails and reports nothing wrong.
+CONE_ALWAYS = (".claude",)
+
+
+def hook_dirs(cfg, base="HEAD"):
+    """Top-level directories that a registered hook command points into. Never raises.
+
+    DERIVED, NOT LISTED. A hook registered as `$CLAUDE_PROJECT_DIR/.game_loop/bin/...` needs
+    `.game_loop/` in the cone or the registration names a file that is not there. Which tools a
+    consumer installed, and where, is theirs to decide — so this reads both settings layers at
+    spawn time rather than hard-coding `.showrunner` and `.game_loop` and missing the third tool.
+    """
+    import json as _json
+    import re as _re
+    # ANY VARIABLE, NOT ONE SPELLING (from game_loop's owner). Hooks write
+    # `$CLAUDE_PROJECT_DIR/.game_loop/...`, but game_loop's statusline goes through a variable:
+    # `p="${CLAUDE_PROJECT_DIR:-.}"; gl="$p/.game_loop_self/..."`. A parser keyed on the one
+    # spelling misses the second form. So take the first path segment after ANY variable — and
+    # then keep only names that are real TRACKED top-level directories at the base, which drops
+    # `$HOME/...` noise and gitignored dirs like `.game_loop_self` that no cone can supply anyway.
+    # The segment may END at a quote, a space or `;` as well as a slash: game_loop's hooks write
+    # `d="$CLAUDE_PROJECT_DIR/.game_loop"; ... exec "$d"/bin/X`, so requiring a trailing slash
+    # found only `bin` from `$d/bin/` and MISSED `.game_loop` — the exact gap this exists for.
+    var_path = _re.compile(
+        r'\$\{?[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\}?"?/([^/\s"\';]+)(?=[/"\s\';]|$)')
+    rc, listing, _ = git(["ls-tree", "--name-only", "-d", base], cwd=cfg.root)
+    tracked = set(listing.split()) if rc == 0 else None
+    out = set()
+    for name in ("settings.json", "settings.local.json"):
+        try:
+            with open(os.path.join(cfg.root, ".claude", name)) as fh:
+                data = _json.load(fh)
+        except (OSError, ValueError):
+            continue
+        for entries in ((data.get("hooks") or {}).values() if isinstance(data, dict) else []):
+            for entry in entries or []:
+                for h in (entry.get("hooks") or []) if isinstance(entry, dict) else []:
+                    cmd = (h or {}).get("command") or ""
+                    for m in var_path.finditer(cmd):
+                        out.add(m.group(1))
+    return out if tracked is None else (out & tracked)
+
+
+def _leaf_list(leaf, key):
+    """A leaf's labels or paths AS A LIST. The graph stores them comma-joined; `Leaf` exposes
+    `labels_list` / `paths_list`, and a plain dict gets the same split.
+
+    Iterating the raw field walks its CHARACTERS: the first cut of the cone did exactly that, so
+    `sparse_by_label` could never match a real label and no out-of-cone path was ever reported —
+    while `--sparse`, which reads no leaf field, worked and hid both.
+    """
+    prop = getattr(leaf, key + "_list", None)
+    if isinstance(prop, list):
+        return prop
+    raw = leaf.get(key) if hasattr(leaf, "get") else None
+    if isinstance(raw, (list, tuple)):
+        return [str(x) for x in raw if x]
+    return [x.strip() for x in (raw or "").split(",") if x.strip()]
+
+
+def resolve_cone(cfg, leaf, explicit=None, base="HEAD"):
+    """(dirs, source) for this leaf's sparse checkout, or (None, why) for a full tree.
+
+    Most specific first: `spawn --sparse`, then `sparse_by_label` in config (the UNION of every
+    label the leaf carries — a leaf labelled both `flutter` and `docs` needs both), then nothing,
+    which is a full checkout exactly as before. Whatever is chosen gets CONE_ALWAYS and every
+    hook directory added, so a cone can narrow the work tree and never the rails.
+    """
+    dirs, source = None, None
+    if explicit:
+        dirs, source = list(explicit), "--sparse"
+    else:
+        by_label = cfg.get("sparse_by_label") if hasattr(cfg, "get") else None
+        if isinstance(by_label, dict):
+            hit = []
+            for label in _leaf_list(leaf, "labels"):
+                val = by_label.get(label)
+                if isinstance(val, list):
+                    hit += [str(v) for v in val]
+            if hit:
+                dirs, source = hit, "sparse_by_label"
+    if not dirs:
+        return None, "no cone configured for this leaf — full checkout"
+    full = set(d.strip("/") for d in dirs if d and d.strip("/"))
+    full |= set(CONE_ALWAYS) | hook_dirs(cfg, base)
+    return sorted(full), source
+
+
+def cone_misses(leaf, cone):
+    """Declared leaf paths that fall outside the cone — each one a file the Crawler cannot see."""
+    if not cone:
+        return []
+    tops = set(cone)
+    return [p for p in _leaf_list(leaf, "paths")
+            if "/" in p.strip("/") and p.strip("/").split("/")[0] not in tops]
+
+
+def hook_gaps(cfg, tree):
+    """Registered hooks that would find NONE of their directories in the finished tree.
+
+    THE CHECK THAT MATTERS FOR EVERY TREE, not just a sparse one (game_loop's owner, #90). A
+    hook whose file is missing exits non-zero WITHOUT blocking, so a tree lacking a hook's
+    directory is a Crawler with that gate silently off. `cone_gaps` only sees TRACKED
+    directories, because only those can be in a cone — but `install.sh --local` registers hooks in
+    the untracked `settings.local.json` against an untracked directory, and a plain worktree gets
+    neither. showrunner's own hooks and game_loop's harness are copied in by `spawn`; anything
+    else registered that way was not, and nothing said so.
+
+    PER COMMAND, "at least one of". game_loop's commands try a pinned `.game_loop_self` first and
+    fall back to `.game_loop`, and the pinned copy is gitignored — so requiring every directory a
+    command names would refuse every spawn. A command is satisfied when ANY directory it names is
+    present. Only names that exist in the main checkout count, which keeps `$HOME/...` paths out.
+
+    Returns human-readable strings, one per unsatisfied command. Run AFTER all provisioning.
+    """
+    import json as _json
+    import re as _re
+    var_path = _re.compile(
+        r'\$\{?[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\}?"?/([^/\s"\';]+)(?=[/"\s\';]|$)')
+    out = []
+    for name in ("settings.json", "settings.local.json"):
+        try:
+            with open(os.path.join(cfg.root, ".claude", name)) as fh:
+                data = _json.load(fh)
+        except (OSError, ValueError):
+            continue
+        for event, entries in ((data.get("hooks") or {}).items() if isinstance(data, dict) else []):
+            for entry in entries or []:
+                for h in (entry.get("hooks") or []) if isinstance(entry, dict) else []:
+                    cmd = (h or {}).get("command") or ""
+                    names = {m.group(1) for m in var_path.finditer(cmd)}
+                    names = {n for n in names if os.path.exists(os.path.join(cfg.root, n))}
+                    if names and not any(os.path.isdir(os.path.join(tree, n)) for n in names):
+                        out.append("a %s hook in %s needs %s, and the Crawler's tree has none of "
+                                   "them — that gate would be silently OFF"
+                                   % (event, name, " or ".join(sorted(n + "/" for n in names))))
+    return out
+
+
+def cone_gaps(cfg, tree, base="HEAD"):
+    """What a sparse tree lacks that its hooks need. [] when nothing is missing.
+
+    PROVE IT ACTED (#90). game_loop's owner measured it: a registered hook whose file is gone
+    exits 126, and only exit 2 blocks, so the tool call proceeds and the gate is simply OFF —
+    including a guard designed to fail CLOSED, because a missing shim never reaches that code. A
+    wrong cone is therefore an UNGUARDED Crawler rather than a stuck one, and nothing reports
+    it. So the checked-out tree is compared against what the hooks need, and a gap refuses.
+    """
+    need = set(CONE_ALWAYS) | hook_dirs(cfg, base)
+    rc, listing, _ = git(["ls-tree", "--name-only", "-d", base], cwd=cfg.root)
+    tracked = set(listing.split()) if rc == 0 else set(need)
+    gaps = sorted(d + "/" for d in need
+                  if d in tracked and not os.path.isdir(os.path.join(tree, d)))
+    rc, has_settings, _ = git(["ls-tree", "--name-only", base, ".claude/settings.json"],
+                              cwd=cfg.root)
+    if rc == 0 and has_settings.strip() and not os.path.isfile(
+            os.path.join(tree, ".claude", "settings.json")):
+        gaps.append(".claude/settings.json")
+    return gaps
+
+
+def create(cfg, name, branch, base="HEAD", cone=None):
+    """Create the worktree. Refuses rather than degrading if placement is unsafe.
+
+    With `cone`, the tree is SPARSE from the first byte (#90): added with `--no-checkout`, the
+    cone set, then checked out — so the full tree is never written and then deleted. A brief
+    telling the Crawler to narrow its own tree ran after the full checkout had already landed,
+    which is how a campaign of worktrees filled a 1 TB disk.
+    """
     cfg.require_valid()
     ensure_root(cfg)
     path = worktree_path(cfg, name)
@@ -101,7 +271,32 @@ def create(cfg, name, branch, base="HEAD"):
             "      git worktree remove %s\n"
             "      git branch -D %s"
             % (path, path, path, branch), code=2)
-    rc, _, err = git(["worktree", "add", "-b", branch, path, base], cwd=cfg.root)
+    if cone:
+        rc, _, err = git(["worktree", "add", "--no-checkout", "-b", branch, path, base],
+                         cwd=cfg.root)
+        if rc == 0:
+            rc, _, err = git(["sparse-checkout", "set", "--cone"] + list(cone), cwd=path)
+            if rc == 0:
+                rc, _, err = git(["checkout"], cwd=path)
+                if rc == 0:
+                    missing = cone_gaps(cfg, path, base)
+                    if missing:
+                        git(["worktree", "remove", "--force", path], cwd=cfg.root)
+                        git(["branch", "-D", branch], cwd=cfg.root)
+                        die("REFUSED: the sparse tree for %s is missing what its hooks need: %s.\n"
+                            "  A hook whose file is absent exits non-zero WITHOUT blocking, so every "
+                            "gate in this Crawler would be off and nothing would say so. The tree "
+                            "was removed rather than handed over." % (name, ", ".join(missing)),
+                            code=2)
+            else:
+                # A tree with no cone and no checkout is empty and useless. Remove it so the
+                # retry after fixing the cone does not hit "already exists".
+                git(["worktree", "remove", "--force", path], cwd=cfg.root)
+                git(["branch", "-D", branch], cwd=cfg.root)
+                die("could not set the sparse cone %s for %s: %s"
+                    % (" ".join(cone), name, err.strip()), code=2)
+    else:
+        rc, _, err = git(["worktree", "add", "-b", branch, path, base], cwd=cfg.root)
     if rc != 0:
         # PRESENT-BUT-UNREACHABLE IS NOT BROKEN, and this path used to report it as broken.
         # `git worktree add` runs the repo's post-checkout hooks, and a hook that fails makes
@@ -566,7 +761,7 @@ def base_report(cfg, graph, leaf, base="HEAD", explicit=None):
     return out
 
 
-def spawn(cfg, leaf, actor="crawler", base="HEAD", branch=None):
+def spawn(cfg, leaf, actor="crawler", base="HEAD", branch=None, sparse=None):
     """Create everything a Crawler gets. Returns a record; raises on anything unsafe."""
     cfg.require_valid()
     name = crawler_name(leaf["id"], actor)
@@ -577,7 +772,8 @@ def spawn(cfg, leaf, actor="crawler", base="HEAD", branch=None):
     # only copy of a dead Crawler's work.
     rc, base_sha, _ = git(["rev-parse", "%s^{commit}" % base], cwd=cfg.root)
     base_sha = base_sha.strip() if rc == 0 else None
-    path = create(cfg, name, branch, base)
+    cone, cone_source = resolve_cone(cfg, leaf, sparse, base)
+    path = create(cfg, name, branch, base, cone=cone)
     scratch = scratch_for(cfg, name)
     injected, problems = inject(cfg, path)
 
@@ -610,6 +806,9 @@ def spawn(cfg, leaf, actor="crawler", base="HEAD", branch=None):
     elif harness_problems:
         provisioned += ["NOT ENFORCED (harness.require is false): %s" % p for p in harness_problems]
 
+    # LAST, after everything spawn copies in: every registered hook must find its directory.
+    problems += hook_gaps(cfg, path)
+
     if problems:
         # Fail the spawn loudly rather than handing over a half-built environment — and undo
         # the branch as well as the worktree. Leaving the branch behind means the retry, after
@@ -640,6 +839,9 @@ def spawn(cfg, leaf, actor="crawler", base="HEAD", branch=None):
         "provisioned": provisioned,
         "shares": audit_shared(cfg),
         "harness_gap": harness_gap(cfg, path),
+        # RECORDED so a reviewer can see what the Crawler could not (#90).
+        "sparse": ({"dirs": cone, "source": cone_source,
+                    "misses": cone_misses(leaf, cone)} if cone else None),
         "created_ts": now(),
     }
     return record

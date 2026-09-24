@@ -2558,7 +2558,7 @@ def cmd_spawn(args):
         return 0
 
     record = worktree.spawn(cfg, leaf, actor=args.actor, base=args.base or "HEAD",
-                            branch=args.branch)
+                            branch=args.branch, sparse=getattr(args, "sparse", None))
     # THE ROOM IS OPENED HERE, BEFORE THE BRIEF, and that ordering is the whole fix. The
     # channel still has to be named before the brief is written — a room the agent is never
     # told about is one it never joins, indistinguishable from one that was never opened — but
@@ -2635,6 +2635,16 @@ def cmd_spawn(args):
     print("  lane     %s%s" % (decision["lane"],
                                " (resource %s)" % decision["resource"] if decision.get("resource") else ""))
     print("  worktree %s" % rel(record["worktree"], cfg.root))
+    sp = record.get("sparse")
+    if sp:
+        print("  cone     %s  (from %s)" % (" ".join(sp["dirs"]), sp["source"]))
+        for miss in sp.get("misses") or []:
+            # SAID AT SPAWN, the one moment it is cheap: a declared path outside the cone is a
+            # file this Crawler is guaranteed not to find (#90).
+            print("  %sWARN%s     leaf path %s is OUTSIDE the cone — the Crawler will not see it. "
+                  "Add its top-level directory with --sparse." % (YEL, OFF, miss))
+    else:
+        print("  cone     full checkout (no --sparse, no sparse_by_label match)")
     print("  branch   %s" % record["branch"])
     _print_base(base_seen)
     print("  scratch  %s" % rel(record["scratch"], cfg.root))
@@ -3573,6 +3583,10 @@ def build_parser():
                    help="something you already checked; the Crawler is asked to confirm or refute it")
     s.add_argument("--despite-base", action="append", metavar="LEAF",
                    help="accept a base missing this dependency, naming which one (#73)")
+    s.add_argument("--sparse", nargs="+", metavar="DIR", default=None,
+                   help="sparse-checkout cone for this Crawler's tree: only these top-level "
+                        "directories are written (plus root files, .claude and every directory "
+                        "a registered hook points into). Overrides sparse_by_label in config")
     s.add_argument("--despite-live", action="append", metavar="LEAF",
                    help="accept a collision with a NAMED live leaf. Repeatable, and it must "
                         "name every colliding leaf — an override that does not say what it is "

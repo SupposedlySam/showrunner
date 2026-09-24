@@ -133,7 +133,7 @@ rather than editing the old one — somebody may have already acted on it.
 | worktree | `{worktree}` |
 | branch | `{branch}` |
 | scratch | `{scratch}` |
-
+{cone_block}
 Your worktree is **inside** the repo on purpose: your own write guard treats everything
 outside the project as read-only, so a sibling directory would deny your first edit.
 
@@ -514,7 +514,32 @@ def build(cfg, leaf, spawn_record, decision=None, orchestrator_findings=None,
         # resolve to the shared directory. #15 replaced that workaround with an absolute path —
         # correctly — and this stayed relative, so the fix removed what had been masking it.
         scratch=cfg.abspath(spawn_record["scratch"]),
+        cone_block=_cone_block(spawn_record),
     )
+
+
+def _cone_block(spawn_record):
+    """What this tree does NOT contain, said to the one reader who would otherwise hit it blind.
+
+    A sparse tree fails as a missing file, and a Crawler that has not been told its tree is
+    partial reads a missing file as a bug in the code (#90). The remedy is the narrow one:
+    `sparse-checkout add` the one directory it needs, not a wider tree for everyone.
+    """
+    sp = spawn_record.get("sparse")
+    if not sp:
+        return ""
+    lines = ["| sparse cone | `%s` |" % " ".join(sp.get("dirs") or []), "",
+             "**Your tree is SPARSE.** Only the directories above, plus root files, are checked "
+             "out. A missing file outside them is not a bug: add just that directory with",
+             "",
+             "    git sparse-checkout add <dir>",
+             "",
+             "and say in your close reason that you did. Do not widen the tree to the whole repo."]
+    misses = sp.get("misses") or []
+    if misses:
+        lines += ["", "This leaf declares paths OUTSIDE the cone, so you WILL need to add their "
+                      "directories: %s" % ", ".join("`%s`" % m for m in misses)]
+    return "\n".join(lines) + "\n"
 
 
 def write(cfg, spawn_record, text):
