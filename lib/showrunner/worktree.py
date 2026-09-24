@@ -479,21 +479,57 @@ def unignored(worktree, paths):
     return IgnoreCheck(missing, paths)
 
 
-def inject(cfg, worktree):
+def in_cone(path, cone):
+    """Would git's cone-mode sparse checkout materialize `path`? True for a full tree.
+
+    Cone mode includes every file at the root, everything under a cone directory, and the files
+    directly inside each ANCESTOR of a cone directory — so `backend/x.env` is present when the
+    cone holds `backend/api`, and `backend/other/y` is not.
+    """
+    if cone is None:
+        return True
+    path = path.strip("/")
+    parent = os.path.dirname(path)
+    for d in cone:
+        d = d.strip("/")
+        if path == d or path.startswith(d + "/"):
+            return True
+        if parent == "" or d == parent or d.startswith(parent + "/"):
+            return True
+    return False
+
+
+def inject(cfg, worktree, cone=None):
     """Materialize the configured paths into a fresh worktree.
 
     Returns (results, problems). A declared path that is missing is a **problem**, not a
     warning: letting the Crawler discover it as a mysterious runtime failure is how a
     broken environment becomes a confident, detailed, wrong finding about a service.
+
+    AN ENTRY OUTSIDE A SPARSE CONE IS SKIPPED, and said so. Nothing in that tree can use it, and
+    the `.gitignore` that covers it in the main checkout usually lives beside it — outside the
+    cone too — so provisioning it anyway gets the spawn refused by the ignore check below for a
+    path the Crawler was never going to see.
+
+    The reverse — an in-cone path whose ignore rule is out of the cone — cannot occur: a
+    `.gitignore` governs only paths beneath its own directory, and cone mode always checks out
+    the files directly inside every ancestor of a cone directory. So the ignore check below
+    still runs, unchanged, on everything that was provisioned.
     """
     results, problems = [], []
     declared = cfg.get("inject") or []
+    skipped = set()
     for entry in declared:
         if isinstance(entry, str):
             entry = {"path": entry}
         src_rel = entry.get("path")
         if not src_rel:
             problems.append("an inject entry has no 'path': %r" % entry)
+            continue
+        if not in_cone(src_rel, cone):
+            skipped.add(src_rel)
+            results.append("skip inject %s — outside the cone, so nothing in this tree can "
+                           "use it" % src_rel)
             continue
         mode = entry.get("mode", "symlink")
         optional = bool(entry.get("optional"))
@@ -564,7 +600,8 @@ def inject(cfg, worktree):
 
     # Verify, never mutate: see unignored().
     paths = [(e if isinstance(e, str) else e.get("path")) for e in declared]
-    stageable = unignored(worktree, [p for p in paths if p]).stageable
+    paths = [p for p in paths if p and p not in skipped]
+    stageable = unignored(worktree, paths).stageable
     if stageable:
         problems.append(
             "these injected path(s) are NOT ignored by the repo, so an agent running "
@@ -775,7 +812,7 @@ def spawn(cfg, leaf, actor="crawler", base="HEAD", branch=None, sparse=None):
     cone, cone_source = resolve_cone(cfg, leaf, sparse, base)
     path = create(cfg, name, branch, base, cone=cone)
     scratch = scratch_for(cfg, name)
-    injected, problems = inject(cfg, path)
+    injected, problems = inject(cfg, path, cone=cone)
 
     # The harness is provisioned before anything else can go wrong, and its rule files are
     # compared byte-for-byte against the parent's. A Crawler whose rails are quietly weaker

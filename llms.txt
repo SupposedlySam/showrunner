@@ -125,6 +125,10 @@ showrunner integrate                 # serial merge, checks re-run on each MERGE
 # `--local` install of a tool spawn does not copy in. "At least one", so a `.game_loop_self ->
 # .game_loop` fallback passes. A gap refuses and removes the tree.
 #
+# An `inject` entry OUTSIDE the cone is skipped, and the spawn report says `skip inject <path> —
+# outside the cone`: nothing in the tree can use it, and the .gitignore covering it usually lives
+# beside it, outside the cone as well. Every inject that IS provisioned still has to be ignored.
+#
 # A declared leaf path outside the cone is warned at spawn, and the brief tells the Crawler its
 # tree is sparse and to `git sparse-checkout add <dir>` a missing directory rather than widen it.
 # The main checkout stays full: git adds `extensions.worktreeConfig = true` to THAT REPO'S OWN

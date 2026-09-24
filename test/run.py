@@ -15785,6 +15785,52 @@ def test_a_crawler_tree_can_be_sparse_without_losing_its_rails():
     ok("...and the refused tree is removed, so no unguarded tree is left lying around to be "
        "picked up by hand", not os.path.exists(bad_path), bad_path)
 
+    # 6b. AN INJECT OUTSIDE THE CONE (#91). Reported on a monorepo: `inject` named
+    #     `backend/api/node_modules`, ignored by `backend/api/.gitignore` — which is outside a
+    #     Flutter leaf's cone, so the sparse tree lacked the rule and the ignore check refused
+    #     EVERY sparse spawn for a path the Crawler could never use.
+    cfg2 = make_repo(files={"README.md": "seed\n", "app/a.dart": "x\n",
+                            "backend/api/.gitignore": "node_modules\n",
+                            "backend/api/index.js": "x\n", "backend/top.env.example": "x\n"})
+    os.makedirs(os.path.join(cfg2.root, "backend", "api", "node_modules"))
+    with open(os.path.join(cfg2.root, "backend", "api", "node_modules", "m.js"), "w") as fh:
+        fh.write("x\n")
+    with open(os.path.join(cfg2.root, "app", "local.env"), "w") as fh:
+        fh.write("secret\n")
+    cfg2.data["harness"] = dict(cfg2.data.get("harness") or {}, require=False)
+    cfg2.data["inject"] = [{"path": "backend/api/node_modules"}]
+    g2 = new_graph(cfg2)
+    g2.add("flutter leaf", leaf_id="S2")
+    try:
+        rec2, why2 = worktree.spawn(cfg2, g2.show("S2"), actor="w", sparse=["app"]), None
+    except Exception as exc:   # the #91 refusal itself — measured, not a crash
+        rec2, why2 = {}, str(exc)
+    ok("an inject OUTSIDE the cone no longer refuses the spawn, and is named as skipped",
+       any("skip inject backend/api/node_modules" in l and "outside the cone" in l
+           for l in rec2.get("injected") or []), why2 or rec2.get("injected"))
+    ok("...and it is really not provisioned into the tree", bool(rec2.get("worktree")) and
+       not os.path.lexists(os.path.join(rec2["worktree"], "backend", "api", "node_modules")),
+       rec2.get("worktree"))
+    eq("cone membership follows git's cone mode: under a cone dir, a root file, and a file "
+       "directly inside an ANCESTOR of a cone dir are in; a sibling subtree is out",
+       [worktree.in_cone(x, ["backend/api"]) for x in
+        ("backend/api/node_modules", "README.md", "backend/top.env.example", "backend/web/x",
+         "app/a")], [True, True, True, False, False])
+    eq("...and a full tree has no outside", worktree.in_cone("anything/at/all", None), True)
+    # THE CHECK STILL BITES INSIDE THE CONE: an in-cone inject nothing ignores is refused.
+    cfg2.data["inject"] = [{"path": "app/local.env"}]
+    g2.add("second leaf", leaf_id="S3")
+    try:
+        worktree.spawn(cfg2, g2.show("S3"), actor="w", sparse=["app"])
+        refused = None
+    except SystemExit as exc:
+        refused = str(exc)
+    except Exception as exc:  # die() may raise a project error type
+        refused = str(exc)
+    ok("an IN-cone inject that the repo does not ignore is still refused — the skip narrows "
+       "what is provisioned, never the ignore check", refused is not None
+       and "NOT ignored" in (refused or ""), refused)
+
     # 7. THE BRIEF tells the Crawler, since a missing file in an untold sparse tree reads as a bug.
     block = brief._cone_block(rec)
     ok("the brief says the tree is sparse, how to add ONE directory, and which declared paths "

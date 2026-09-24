@@ -298,7 +298,9 @@ hook points into, derived from both settings layers; the tree is checked for the
 and a gap refuses the spawn, because a hook whose file is missing fails open and silently. And for
 **every** spawn, sparse or not, each registered hook must find its directory in the finished tree
 — tracked or untracked, which covers a `--local` install of any tool — or the spawn is refused.
-Declared paths outside the cone are warned at spawn and named in the brief. The main checkout
+Declared paths outside the cone are warned at spawn and named in the brief. An `inject` entry
+outside the cone is skipped and named in the spawn report: nothing in that tree can use it, and
+the `.gitignore` covering it usually sits beside it, outside the cone too. The main checkout
 stays full: git adds `extensions.worktreeConfig = true` to **that repository's own `.git/config`**
 to keep the sparse setting per-worktree. That file is local and never committed, and your global
 `~/.gitconfig` is not touched.
