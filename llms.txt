@@ -20,19 +20,18 @@ would it still hold?* And the rule showrunner adds, because its guards are cross
 guard must fail loud, never quiet.** A mutex that is silently a no-op is worse than no mutex, because
 nobody inside a single Crawler can observe the collision.
 
-**A guard resolves the repo from its own location when nothing else can (#74).** cwd and
-`CLAUDE_PROJECT_DIR` were the only two anchors, so a call made from a scratch directory with no
-harness variable went unchecked — while the shim answering it was sitting inside the project the
-whole time. That anchor is a `fallback=` parameter that ONLY the two guard verbs pass: a guard is
-asked about a call happening right now and must answer, whereas every other verb may refuse and
-must. Making it global made `showrunner ready` from a scratch directory quietly report on
-showrunner's own checkout — a wrong answer shaped exactly like a right one, caught by the suite.
+**A guard resolves the repo from its own location when nothing else can.** cwd and
+`CLAUDE_PROJECT_DIR` alone would leave a call made from a scratch directory with no harness
+variable unchecked — while the shim answering it sits inside the project. That anchor is a
+`fallback=` parameter that ONLY the two guard verbs pass: a guard is asked about a call happening
+right now and must answer, whereas every other verb may refuse and must. Made global, it would let
+`showrunner ready` from a scratch directory quietly report on showrunner's own checkout — a wrong
+answer shaped exactly like a right one.
 
 **"Loud" is a property of the channel, not of the wording.** A guard that degrades prints a notice
 saying so — and that notice arrives as hook output beside a SUCCESSFUL tool result, which is the
-channel an agent concentrating on something else skims. The person who reported this said it about
-their own reading, and they were the one who had just filed the guard issue. Writing the notice in
-capitals does not fix that; it treats a delivery problem as a copywriting problem.
+channel an agent concentrating on something else skims. Writing the notice in capitals does not
+fix that; it treats a delivery problem as a copywriting problem.
 
 So every fail-open also appends to `.showrunner/fail-open.jsonl`, and `doctor` reports the COUNT.
 That is the part a notice cannot carry: one unchecked call and twenty are different facts about a
@@ -68,24 +67,20 @@ watchdog with a sibling's liveness.
 You cannot do this for the operator — a probe an agent can set is a watchdog an agent can switch
 off — so if you are running unattended, say that it is unarmed rather than proceeding quietly.
 
-**A probe's COST is part of its contract (#76).** game_loop runs `waiting` under a hardcoded 15s
+**A probe's COST is part of its contract.** game_loop runs `waiting` under a hardcoded 15s
 timeout and reads a timeout as *"the probe did not run at all"* — which it reports as a broken
 watchdog and then **stops scheduling re-checks**. So a slow probe does not degrade the watchdog,
-it disarms it, silently. Measured on a real campaign: 869 git subprocesses, 20 seconds, six days
-with no verdict logged, and three Crawlers dead without committing inside that window, each found
-only because a human went to look.
+it disarms it, silently, and Crawlers can die uncommitted with nothing looking.
 
 `waiting` therefore costs a number of subprocesses bounded by how many Crawlers are **alive**,
 never by how many the campaign has ever recorded. Two things get it there, and the suite asserts
-the shape rather than a wall-clock time — a timing assertion measures the machine, and the
-reporter's machine was slow for a reason no code change fixes (four security suites intercepting
-every process spawn, ~23ms per `git` against the usual 2-3ms):
+the shape rather than a wall-clock time — a timing assertion measures the machine, and a machine
+can be slow for reasons no code change fixes (security software intercepting every process spawn):
 
-* branch questions are answered from ONE `for-each-ref` per pass, not a `rev-parse` per branch —
-  that alone was 544 of the 869;
+* branch questions are answered from ONE `for-each-ref` per pass, not a `rev-parse` per branch;
 * `waiting` asks `reconcile` for a SHALLOW pass. It reads alive, parked, blocked and the ids; it
-  never touches merged, empty, uncommitted, tree, harness, model or session_health, and it was
-  paying for all of them on every Crawler in the record. The skipped keys are **absent** from a
+  never touches merged, empty, uncommitted, tree, harness, model or session_health, which would
+  otherwise be paid for on every Crawler in the record. The skipped keys are **absent** from a
   shallow finding rather than `None`, so a caller that reads one gets a KeyError instead of a
   quiet wrong answer.
 
@@ -110,10 +105,10 @@ showrunner spawn <leaf> --launch     # ...and STARTS a real Claude Code session 
 showrunner spawn <leaf> --sparse app audio
                                      # a SPARSE tree: only these top-level dirs (plus root files)
                                      # are ever written. Same as sparse_by_label in config, which
-                                     # it overrides. Nothing set = a full checkout, as before
+                                     # it overrides. Nothing set = a full checkout
 showrunner integrate                 # serial merge, checks re-run on each MERGED result
 
-# SPARSE TREES (#90) — a campaign of full-tree worktrees filled a 1 TB disk on a monorepo.
+# SPARSE TREES — on a large monorepo, a campaign of full-tree worktrees can fill a disk.
 #   config: {"sparse_by_label": {"flutter": ["app", "audio", "rust"], "docs": ["docs"]}}
 # The cone is the UNION over the leaf's labels; `--sparse` beats config. It is applied before any
 # file is written (`worktree add --no-checkout`, `sparse-checkout set --cone`, `checkout`).
@@ -123,26 +118,31 @@ showrunner integrate                 # serial merge, checks re-run on each MERGE
 # settings layers — so `.game_loop/` and `.showrunner/` are present whenever something registers
 # them. After checkout the tree is checked for them, and a gap REFUSES the spawn: a hook whose
 # file is missing exits non-zero WITHOUT blocking, so a wrong cone would be an unguarded Crawler
-# that nothing reports (measured by game_loop's owner).
+# that nothing reports.
+#
+# AND FOR EVERY SPAWN, sparse or not: after all provisioning, each registered hook must find at
+# least one directory it names in the finished tree — tracked OR untracked, which is what covers a
+# `--local` install of a tool spawn does not copy in. "At least one", so a `.game_loop_self ->
+# .game_loop` fallback passes. A gap refuses and removes the tree.
 #
 # A declared leaf path outside the cone is warned at spawn, and the brief tells the Crawler its
 # tree is sparse and to `git sparse-checkout add <dir>` a missing directory rather than widen it.
-# The main checkout stays full; git records `extensions.worktreeConfig = true` in the shared repo
-# config to keep the sparse setting per-worktree — expected, and worth knowing.
+# The main checkout stays full: git adds `extensions.worktreeConfig = true` to THAT REPO'S OWN
+# .git/config to keep the sparse setting per-worktree. Local, never committed, and not your global
+# ~/.gitconfig — the same change git makes itself for `git sparse-checkout` in a linked worktree.
 
 # THE LAUNCH BINARY IS CONFIGURABLE, and `doctor` resolves it. `dispatch.claude_bin` defaults
 # to `claude` on PATH; set an absolute path in .showrunner/config.local.json when the only
 # binary lives inside an editor extension. Unresolvable means EVERY `--launch` fails, so
 # doctor reports it as an ERROR rather than letting the first failed spawn find out.
 #
-# A LAUNCH THAT FAILS PARKS THE LEAF. spawn records first and starts second — correct — but
-# nothing used to compensate when the start failed: the leaf stayed in_progress on the
-# invoking shell's pid, out of `ready`, invisible to the only discovery surface. It is parked
+# A LAUNCH THAT FAILS PARKS THE LEAF. spawn records first and starts second — correct — and
+# without compensation a failed start would leave the leaf in_progress on the invoking
+# shell's pid, out of `ready`, invisible to the only discovery surface. It is parked
 # with the launch error as the reason, so it survives `reap` and stays visible, and the
 # worktree is KEPT because it may hold the only copy of real work. `unpark` when fixed.
-# Deliberately not a rollback: the stale-claim steer to `reap` was reported proposing to close
-# a dozen chat rooms belonging to another agent's Crawlers, sweeping far wider than the
-# failure.
+# Deliberately not a rollback: steering a stale claim to `reap` can propose closing chat
+# rooms belonging to another agent's Crawlers, sweeping far wider than the failure.
 
 # A chat room is NOT optional under --launch. A Crawler refused at its turn-end stays alive
 # and inert, and a message is the only thing that restarts it. Nothing is vendored:
@@ -151,7 +151,9 @@ showrunner integrate                 # serial merge, checks re-run on each MERGE
 # drive the Crawlers yourself. Machine-specific paths go in .showrunner/config.local.json.
 showrunner reap                      # dry run; --apply to reclaim dead Crawlers' claims and locks,
                                      # close rooms they left open, and SIGTERM processes that
-                                     # outlived their leaf. `close` already closed the room and
+                                     # outlived their leaf — ONLY a process proved to be the
+                                     # Crawler's by its recorded start time, since pids recycle
+                                     # within a boot; cannot-tell never signals. `close` already closed the room and
                                      # marked the Crawler finished; this catches what died badly.
                                      # It also SURFACES stalled claims and never touches them:
                                      # a live process whose transcript has stopped moving. Not
@@ -160,8 +162,8 @@ showrunner gc                        # remove worktrees whose branch is MERGED a
                                      # CLEAN. Dry-run by default; --apply performs it. Dirty,
                                      # unreadable and unmerged trees are reported and KEPT.
                                      # `integrate` already does this on success (--keep-trees
-                                     # opts out); gc is for the backlog and for trees whose
-                                     # leaf integrated before this existed
+                                     # opts out); gc is for the backlog and for trees
+                                     # integrate did not remove
 showrunner reconcile                 # on resume: merged / abandoned / live / BLOCKED — ask FIRST
 showrunner amend <leaf> --premise .. # correct a CLOSED leaf's premise by SUPERSEDING it: the
                                      # original verdict stays readable, because a record that can
@@ -242,8 +244,8 @@ showrunner worktree guard            # PreToolUse: DENY a write into a tree anot
 showrunner worktree register         # put the hooks it owns in .claude/settings.json (idempotent).
                                      # --local writes settings.local.json (UNTRACKED) instead,
                                      # for a repo that keeps showrunner out of its history:
-                                     # the worktree guard, the dispatch guard and the REACH gate
-                                     # on PreToolUse, the inert-Crawler gate on Stop, and the
+                                     # the worktree guard, the dispatch guard, the REACH gate and
+                                     # the WAKE gate on PreToolUse, the inert-Crawler gate on Stop, and the
                                      # seat announcement on SessionStart AND PostCompact. The
                                      # list is the claim; a COUNT here rots the day it gains one.
 showrunner whoami                    # what this session IS — a seat DERIVED from where it stands
@@ -278,28 +280,28 @@ guard nobody registered has never once run.
 
 **The registration check reads BOTH settings layers**, and the remedy follows the arrangement. A
 repo that keeps showrunner out of its history puts the hooks in the untracked
-`.claude/settings.local.json` — the only place they can go — and `doctor` used to endorse that
-arrangement in one line and ERROR on it eleven lines later, because the check read
-`settings.json` alone. Worse, its printed remedy wrote the TRACKED file: following it would have
-committed this tool's hooks into a file shared with a developer running their own install.
+`.claude/settings.local.json` — the only place they can go — so a check that read `settings.json`
+alone would ERROR on an arrangement `doctor` itself endorses. The remedy follows the arrangement
+because a remedy that wrote the TRACKED file would commit this tool's hooks into a file shared
+with a developer running their own install.
 
     showrunner init --local              # register into the untracked layer from the start
     showrunner worktree register --local # and afterwards
 
-**AN UNTRACKED REGISTRATION CANNOT CROSS ON ITS OWN, and `spawn` now carries it.** `git worktree
+**AN UNTRACKED REGISTRATION CANNOT CROSS ON ITS OWN, and `spawn` carries it.** `git worktree
 add` copies TRACKED files only — that is the same sentence that explains why the shim needs one
-of the two arrangements above, applied to the file that REGISTERS it. Measured: a `--local`
-install produced worktrees with no `.claude` directory at all, so the worktree guard, the
-dispatch guard, the seat announcement and the reach gate were absent from every Crawler while the
-main checkout reported all of them registered and healthy. The shim files were already
-provisioned; a provisioned shim nothing registers has never once run.
+of the two arrangements above, applied to the file that REGISTERS it. Left alone, a `--local`
+install produces worktrees with no `.claude` directory at all, so the worktree guard, the
+dispatch guard, the seat announcement and the reach gate are absent from every Crawler while the
+main checkout reports all of them registered and healthy. A provisioned shim nothing registers
+never runs.
 
 `spawn` merges showrunner's own entries into the tree's `settings.local.json` and says it did.
 MERGED, never copied: the file carries your statusLine, your permissions and your unrelated
 hooks, and a wholesale copy discards them — the mistake the harness section names for the same
 file.
 
-**THE ORDERING IS THE OTHER HALF, and a consumer lost three files to it.** Claude Code reads
+**THE ORDERING IS THE OTHER HALF.** Claude Code reads
 settings at STARTUP, so a hook registered AFTER `spawn --launch` returns is not read by the
 Crawler that spawn just started — the guard sits in the file, unread, while the session works.
 If a hook of yours must be live for a Crawler's first tool call, it has to be registered before
@@ -307,7 +309,7 @@ the spawn, and in the TRACKED layer if you want `git worktree add` to carry it w
 doing anything.
 
 `init` needs it too: it registers the guard before `register` ever runs, so `--local` on the
-later verb alone still left one hook in the tracked file. The error now NAMES the files it read,
+later verb alone leaves one hook in the tracked file. The error NAMES the files it read,
 because *"registers no worktree-guard hook"* reads as **you have not registered it** when the
 honest sentence is **I did not look where you put it**.
 
@@ -315,27 +317,26 @@ honest sentence is **I did not look where you put it**.
 that the call was allowed without being checked. A PreToolUse that hard-fails on its own plumbing
 blocks every write including the one that would repair it.
 
-There is still no `lease take` verb: a lease is acquired by `enter` and `fork`, and
+There is no `lease take` verb: a lease is acquired by `enter` and `fork`, and
 `lease status` is how you read the result. A lease is released when its tree is removed, and a
 wedged one is cleared by name — `showrunner lock release worktree:<tree> --force`, which is the
 remedy the UNREADABLE refusal prints.
 
 **A second hook, on Stop.** `.showrunner/hooks/inert-crawler-gate.sh` refuses the ORCHESTRATOR's
 turn-end while `waiting` reports a Crawler that is alive and inert — refused at its own turn-end,
-needing a message rather than time. `waiting` already knew; nothing consulted it at the one moment
-that decides anything, and a run stalled until a human noticed. It fails open on every unknown, it
+needing a message rather than time. `waiting` knows that, and this is what consults it at the one
+moment that decides anything, so a run does not stall until a human notices. It fails open on every unknown, it
 offers `reap` beside messaging (a block can mean gone rather than waiting), and it does not fire
 inside a Crawler's own worktree — a Crawler cannot message or reap its siblings.
 
 Read `waiting --porcelain`, not the prose, if you build anything on this. The BLOCKED lines are
-printed on stdout AND stderr now, and BLOCKED has its own exit code — but a verb whose finding,
+printed on stdout AND stderr, and BLOCKED has its own exit code — but a verb whose finding,
 verdict and status live on three channels will be integrated against incorrectly, and the idiom
 `waiting || exit 0` still swallows the blocked case because it collapses every non-zero code. The
 JSON is the contract; the prose is for a person.
 
-A worktree had an owner on paper (`campaign.json`) and no holder in fact — nothing consulted that
-record when a second session opened the directory and started editing. A lease's holder is a live
-process. `pid_basis` says how that pid was learned, because a hook is handed no PID and the
+An owner on paper (`campaign.json`) is not a holder in fact — nothing consults that record when a
+second session opens the directory and starts editing. A lease's holder is a live process. `pid_basis` says how that pid was learned, because a hook is handed no PID and the
 answer comes from walking an ancestry, which can land on a weaker fact. Read it: a lease resting
 on `ppid-fallback` is worth less than one resting on `ancestor-claude`.
 
@@ -348,27 +349,27 @@ nothing here can prompt it — `reap` correctly proposes nothing and every other
 healthy. Send it something in its room. If chat is disabled you have no way to reach it, which is
 why the room is not optional under `--launch`.
 
-**That remedy only works because `spawn` joins the Crawler itself.** It used to tell the Crawler
-to join, in a brief sentence that read as already-done, and a Crawler that goes straight to the
-work never ran it — so the message you sent was accepted by the server, answered `nobody else is
-in this room yet`, and sat unread until after the leaf closed. Delivery that depends on the
-recipient volunteering is not delivery. Membership is keyed to the SESSION, so the session id is
+**That remedy only works because `spawn` joins the Crawler itself.** A brief sentence telling
+the Crawler to join reads as already-done, and a Crawler that goes straight to the work never
+runs it — so a message sent to it is accepted by the server, answered `nobody else is in this
+room yet`, and sits unread until after the leaf closes. Delivery that depends on the recipient
+volunteering is not delivery. Membership is keyed to the SESSION, so the session id is
 generated before the room is opened, the join runs from inside the Crawler's worktree, and the
 recorded membership is read back rather than inferred from an exit code — a join that returns 0
-and records nothing is the same "reported success" this project keeps finding.
+and records nothing is a "reported success" that did not happen.
 
-**A STALLED Crawler is the same family and a different detector (#69).** It was not refused by
-anything — it simply stopped producing, and a live pid cannot tell you so: `ps` reports `Ss` for a
+**A STALLED Crawler is the same family and a different detector.** It is not refused by
+anything — it simply stops producing, and a live pid cannot tell you so: `ps` reports `Ss` for a
 session parked at a prompt and one mid-computation alike, and `%CPU` is a lifetime average, so a
 Crawler that worked five minutes and stalled fifty still reads healthy. `heartbeat_ts` does not
 help either; it is written at claim time and nothing reads it. The signal that does work needs no
 new plumbing: a claim already carries `claim_tree` and `claim_session`, and the session transcript
 derived from those two has a frozen mtime beside a live pid.
 
-`status` and `reap` now print it as a third verdict — **live / stalled / abandoned** — and neither
+`status` and `reap` print it as a third verdict — **live / stalled / abandoned** — and neither
 one acts on it, including `reap --apply`. That restraint is the point rather than an unfinished
-edge: the incident that filed this held four uncommitted files and an already-green suite in the
-stalled worktree, so reclaiming the leaf would have destroyed both. The remedy is to prompt the
+edge: a stalled worktree can hold uncommitted files and an already-green suite, and reclaiming
+the leaf would destroy both. The remedy is to prompt the
 session; reclaim only once its tree is known to be safe. A claim whose transcript cannot be read
 is reported as unmeasurable and never as stalled — showrunner does not own that path, so a failed
 read is a fact about where it looked, not about what the agent did.
@@ -407,8 +408,7 @@ showrunner campaign clear               # unbind
 **`campaign use` is what makes many agents in one monorepo possible.** A binding is keyed by
 session id and read back by anything that can name its own session — which a hook can, from
 `CLAUDE_CODE_SESSION_ID` in the session process's environment or from `session_id` in its
-PreToolUse payload. That is why the per-session direction was reachable after all: a hook is
-handed no config, but it is handed its own identity, and that is enough to look one up. Two agents
+PreToolUse payload. That is why a per-session binding works: a hook is handed no config, but it is handed its own identity, and that is enough to look one up. Two agents
 in one checkout can each hold `campaign-lead` in their own campaign without colliding, and nothing
 shared is written.
 
@@ -418,13 +418,18 @@ dispatched with `SHOWRUNNER_CAMPAIGN` set cannot be moved out of its campaign by
 later. Bindings expire on READ as well as on write, because expiry on write alone cannot stop a
 recycled session id inheriting a finished campaign.
 
+**`spawn --launch` binds each Crawler's own session** to the campaign that placed it, before the
+process starts, so the Crawler resolves the campaign whose record names its worktree rather than
+the repo-wide one and its deny-everything fallback. When a seat is not found, the seat line names
+the campaign that was searched.
+
 `.showrunner/config.local.json` can carry `{"campaign": "my-campaign"}` as the default when the
 environment names none. That layer exists because **a hook cannot read your shell**: PreToolUse
-hooks are spawned with the session's environment, so a seat claimed under a named campaign
-resolved as `unassigned` in every guard while the operator's own terminal reported it correctly —
-same repo, same session, same instant. It only ever worked when the campaign you claimed in
-happened to be the unnamed default. Precedence is explicit argument > environment > config, so a
-dispatched Crawler cannot have its campaign overridden by a checkout's default.
+hooks are spawned with the session's environment, so a campaign named only in your shell leaves
+a seat claimed under it resolving as `unassigned` in every guard while your own terminal reports
+it correctly — same repo, same session, same instant. It sits at the bottom of the precedence above — explicit >
+environment > session binding > config — so a dispatched Crawler cannot have its campaign
+overridden by a checkout's default.
 
 Graph, campaign record, event journal and scratch all follow the campaign. **Locks deliberately do
 not.** A lock names a physical single-consumer resource — a device, a bound port — shared by the
@@ -432,8 +437,8 @@ machine and not by a body of work, so two campaigns flashing the same TV must se
 each other. Per-campaign lock roots would give each its own and let both hold it at once: a mutex
 that is quietly a no-op.
 
-With no campaign selected every path resolves exactly as it always did, so an existing checkout is
-untouched. An env var rather than a flag because a flag has to be threaded through every verb, and
+With no campaign selected every path resolves to the repo-wide layout, so a checkout that never
+names a campaign is untouched. An env var rather than a flag because a flag has to be threaded through every verb, and
 any verb that forgot it would silently answer about a different campaign.
 
 The worktree root stays repo-wide, so two campaigns naming the same leaf collide on a path — a loud
@@ -443,10 +448,10 @@ checkout share a chat prefix unless you set one.
 ### A command that NAMES another session's tree
 
 The worktree guard reads the paths in a tool payload and the directory the session stands in.
-It now also reads the absolute paths a Bash command CONTAINS, and **reports** them when they
+It also reads the absolute paths a Bash command CONTAINS, and **reports** them when they
 fall inside a tree another live session holds — `cd /tmp && python3 -c "open('/repo/.worktrees/
-other/f','w')"` was previously invisible, because the guard's precondition was where the shell
-stood while its subject is what the command writes.
+other/f','w')"` would otherwise be invisible, because where the shell stands is not what the
+command writes.
 
 **It never refuses on this, and that is settled rather than interim.** A path can be named
 without being written — an echo, a grep pattern, a message — and a guard that denies
@@ -456,8 +461,8 @@ a tree from whatever gets in anyway.
 
 **A LITERAL variable assignment IS resolved**, because that is the shape that occurs by default
 rather than the edge case — an orchestrator reaches its worktrees through variables, so
-`T=/repo/.worktrees/other && echo x > $T/f` is the normal form under fan-out and was invisible
-while the spelled-out path was noticed.
+`T=/repo/.worktrees/other && echo x > $T/f` is the normal form under fan-out, and must not be
+invisible where the spelled-out path is noticed.
 
 ```
 T=/repo/.worktrees/other && echo x > $T/f     resolved and reported
@@ -501,13 +506,13 @@ rather than printing a line that reads like it happened.
 
 `dispatch.chat.identity` if you set it; otherwise `<project>[-<campaign>]-orchestrator`. It is
 namespaced deliberately: the bare word `orchestrator` is not reserved, and it is exactly the
-identity a real agent picks when it IS one. Hardcoding it pulled a second agent of that name
-into every Crawler room a campaign opened — receiving another campaign's messages, accruing
+identity a real agent picks when it IS one. A bare name would pull a second agent of that name
+into every Crawler room a campaign opens — receiving another campaign's messages, accruing
 `owed` debt for questions it never saw, and, because a chat identity resolves per room and the
 room's join wins, sending its own messages out under the wrong name.
 
-The campaign is in the name because the reported collision was two campaigns in ONE git root,
-where a project-only prefix separates nothing. Each Crawler room's topic names the identity to
+The campaign is in the name because two campaigns can share ONE git root, where a project-only
+prefix separates nothing. Each Crawler room's topic names the identity to
 reply to, so a Crawler does not have to guess it.
 
 ## Roles: showrunner checks the shape, never the meaning
@@ -515,7 +520,8 @@ reply to, so a Crawler does not have to guess it.
 Names and meaning are yours, the way lane rules already are. showrunner knows only two things: how
 a seat is obtained, and what the fields a guard reads say. Definitions live at a user-level path
 (`roles.json` under your config home) because an in-repo config is writable by the very session it
-constrains — measured, not assumed. A project may ADD a role there, never redefine one.
+constrains — measured, not assumed. A project's own `roles` and `seat_roles` are reported and
+IGNORED: adding a role is granting one, so a project contributes nothing to permission.
 
 **Precedence here is the REVERSE of `config.json`'s**, which lives in the same directory: roles
 are PERMISSION and the user wins, config is PREFERENCE and the project wins. Two files, one
@@ -530,16 +536,15 @@ distinction was never about names — it was about how the seat is obtained:
 | `claim` | a session TAKES an open seat. Exclusive, first-come, with pid+boot liveness so a dead holder's seat is reclaimable. The only way a from-scratch session can get one. |
 | `assign` | written by whoever CREATED the session, before it existed. A session holding one cannot claim. The campaign record IS that writing: `spawn` names the tree's leaf before the session exists, keyed to its worktree, and `seat_roles` is what reads it back. |
 
-`seat_roles` maps a **derived seat** onto one of your roles. Without it `assign` had no reader, so
-every Crawler resolved to the fallback and ran under the fallback's policy *inside the worktree
-`spawn` had just made for it* — with a deny-everything fallback, an audit leaf finished only by
-routing its evidence around the write guard with shell redirection. A guard whose reward for
+`seat_roles` maps a **derived seat** onto one of your roles. It is `assign`'s reader: without a
+mapping every Crawler resolves to the fallback and runs under the fallback's policy *inside the
+worktree `spawn` just made for it* — and with a deny-everything fallback, a leaf can finish only
+by routing its evidence around the write guard with shell redirection. A guard whose reward for
 holding is a workaround teaches every later session to route around it.
 
-**`crawler` is not the only seat you can map**, and every example here used to show only that
-one — which is why a session doing one human-assigned task in a campaign-carrying repo read the
-roster, found `worker` acquirable only by `assign`, and concluded two of four roles were dead
-letters (#84). The keys are the derived seats: `crawler`, `orchestrator`, `solo`.
+**`crawler` is not the only seat you can map.** A role acquirable only by `assign` is not a dead
+letter for a plain session; map the seat it stands in. The keys are the derived seats: `crawler`,
+`orchestrator`, `solo`.
 
 ```json
 {"roles": {"...": {}},
@@ -555,11 +560,10 @@ it happens to be standing next to.
 
 Same authority as the definitions: **user level ONLY**. A project's `roles` and `seat_roles` are
 read, reported, and ignored — `whoami` prints `SEAT MAPPING IGNORED` / `PROJECT ROLES IGNORED`
-and `doctor` warns. This used to allow a project to map a seat the user had left *unmapped*, on
-the reasoning that only a REMAP could hand a session any role in the catalog. First-mapping hands
-it the same role by the same route, and so does defining a claimable role in the repo and
-claiming it — both measured as working escalations before the rule was tightened. An operator who
-has mapped nothing has not consented to anything.
+and `doctor` warns. That includes a project mapping a seat the user left *unmapped*: a
+first mapping hands a session a role by the same route a REMAP does, and so does defining a
+claimable role in the repo and claiming it — both are escalations. An operator who has mapped
+nothing has not consented to anything.
 
 Two halves keep this record-based rather than location-based. Only a worktree the campaign record
 NAMES resolves, so `git worktree add` is not a way to grant yourself a role. And **`orchestrator`
@@ -576,7 +580,7 @@ and one typo would otherwise buy the whole write denial back, silently.
 **With no roles defined, no dispatch policy is enforced for anybody.** That is deliberate:
 inventing one would refuse the dispatches of every consumer who never wrote any.
 
-**ENFORCED and PUBLISHED are different labels, and the block says which (#77).** `may_create` is
+**ENFORCED and PUBLISHED are different labels, and the block says which.** `may_create` is
 ENFORCED: `spawn --launch` AND `dispatch guard` both refuse from a seat that may not create.
 `writes` is PUBLISHED: showrunner states it and **ships no write guard** — a hook of yours has to
 enforce it, and it must cover **Bash** or every heredoc, `sed -i`, `tee`, `cp` and `>` redirection
@@ -584,19 +588,15 @@ walks past it. `showrunner doctor` reports whether ANY PreToolUse hook matches B
 declares `writes`; it cannot say which hook enforces it, because attributing another tool's job
 would be a guess.
 
-This printed one `ENFORCED` banner over both. A reporter's seat announced *"may dispatch: NOTHING"*
-and *"may NOT write: **"*, both labelled ENFORCED, and they did half an hour of real work from it:
-two Crawlers launched through `spawn --launch`, which never asked, and repo files written through
-a heredoc, past a guard registered for `Write|Edit|NotebookEdit` only. Announcing enforcement you
-do not perform is worse than announcing nothing, because it is the sentence that stops somebody
-checking. The guard had been built around the path the same announcement steers you AWAY from.
+One `ENFORCED` banner over both would claim a write denial nothing performs — a guard registered
+for `Write|Edit|NotebookEdit` only is walked past by a heredoc. Announcing enforcement you do not
+perform is worse than announcing nothing, because it is the sentence that stops somebody
+checking.
 
 ### Getting a seat, and keeping it
 
-Both modes had to become reachable before either worked. `assign` had no reader until a seat could
-resolve through `seat_roles`; `claim` had no writer at all — `roles.claim` was a library function
-nothing called, and the `claim` VERB claims a leaf. So on a stock install every session resolved
-to the fallback whatever its roles said.
+Each mode has one entry point. `assign` is read through `seat_roles`; `claim` is written by
+`role claim` — the plain `claim` VERB claims a leaf, not a seat.
 
 ```
 showrunner role claim campaign-lead --who agent-a
@@ -611,14 +611,13 @@ cannot be self-nominated. That one is obtained by `seat_roles`.
 **A CLAIM'S PID IS DISCOVERED, NOT HANDED OVER**, and this is the difference between a seat and a
 seat-shaped file. Liveness is a pid plus a boot token, so a claim keyed to the short-lived process
 that *made* the call is dead the moment that call returns: it reports success, the roster reads
-STALE, the resolver skips it, and `whoami` announces the fallback again. Reported from a real
-seating attempt and recovered only by walking the process ancestry by hand — which `util.session_pid`
-already did, with a `basis` separating "proved it" from "could not tell". `lock acquire` prints the
-same warning for the same reason; the roles path shared its mechanism and not its mitigation. A pid
+STALE, the resolver skips it, and `whoami` announces the fallback again. So the pid is found by
+walking the process ancestry — `util.session_pid`, with a `basis` separating "proved it" from
+"could not tell". `lock acquire` prints the same warning for the same reason. A pid
 that cannot be resolved is REFUSED rather than recorded, following `lease`: a claim with no
 liveness is not a weaker claim, it is a lock nothing can ever reclaim.
 
-**A WINDOW RELOAD NO LONGER COSTS THE SEAT.** Reloading a VS Code window restarts the extension
+**A WINDOW RELOAD DOES NOT COST THE SEAT.** Reloading a VS Code window restarts the extension
 host under a new pid, so the recorded holder is dead, `locks` correctly reports STALE, and the
 resolver skips it — correct, and useless, because the same logical session comes back and cannot
 see its own seat. The two facts age differently, which is what makes this decidable: the Claude
@@ -631,45 +630,45 @@ processes under one session id is what `claude --resume` produces, and both reso
 because the session is the unit of identity — what does not happen is the pid moving, and the
 note says so rather than implying a refusal. An **empty** session id matches nothing on either
 side: a seat claimed without one records `""`, and treating absent-as-equal would let any
-unidentified session inherit any unidentified seat. A **different** session inherits nothing, no
+unidentified session inherit any unidentified seat. That rule is one function, `same_session`, used
+by every comparison — seats, lease ownership, lease release, mapped seats. A **different** session inherits nothing, no
 matter how dead the pid — the discriminator is the session, not that something died.
 
 **The session id is DISCOVERED, not demanded.** `role claim` reads `SHOWRUNNER_SESSION` first,
 then the harness's own `CLAUDE_CODE_SESSION_ID`, so a seat claimed the obvious way — no flag —
-already carries what the re-seat needs. It did not at first: a plain claim recorded `""`, the
-feature refused to match it, and the operator had to know to pass `--session` for a mechanism
-whose whole point is that nobody should have to think about it. That would have been documenting
-a footgun instead of closing it. The SessionStart hook reads `session_id` from its payload for
+already carries what the re-seat needs. A plain claim that recorded `""` would never match, and
+requiring `--session` would defeat a mechanism whose whole point is that nobody should have to
+think about it. The SessionStart hook reads `session_id` from its payload for
 the same reason, falling back to those variables; an empty or unparseable payload costs the
 session id and nothing else.
 
-`role roster` exists because that state had nowhere to be seen. The only way to notice a dead
-claim was calling `roles.roster()` from Python, and a state nothing surfaces is a state nobody
-debugs.
+`role roster` exists so that state can be seen: a dead claim is otherwise visible only by calling
+`roles.roster()` from Python, and a state nothing surfaces is a state nobody debugs.
 
 ### A guard cannot consume prose
 
-`whoami` emitted prose and nothing else, so a hook author who needed the resolved role had no way
-to ask for it. A consumer's `PreToolUse` write guard therefore carried its own copy of the
-resolver; when a seat learned to resolve through `seat_roles` the copy did not, so the
-announcement said one role while the guard enforced the deny-everything fallback and a session was
-correctly unable to edit the file it had been dispatched to edit. Two statements of one policy,
-free to disagree — the failure `enforced_lines` prevents *inside* the announcement, arriving from
-outside it.
+A hook author who needs the resolved role cannot parse it out of prose, and a guard that carries
+its own copy of the resolver drifts from it: the announcement says one role while the guard
+enforces the deny-everything fallback, and a session is unable to edit the file it was dispatched
+to edit. Two statements of one policy, free to disagree — the failure `enforced_lines` prevents
+*inside* the announcement, arriving from outside it.
 
 ```
 showrunner whoami --porcelain
 ```
 
-emits the seat, the evidence, the resolved role and how it was resolved, and the
-`writes`/`may_create`/`reports_to`/`acquire` a guard actually enforces. `whoami` RENDERS this same
+emits the seat, the evidence, the resolved role and how it was resolved, the
+`writes`/`may_create`/`reports_to`/`acquire` a guard actually enforces, and `scratch` — a
+Crawler's scratch path, or null for anything that is not one. `scratch` is answered BY SESSION
+when asked from outside the Crawler's tree: a guard that judges a write by the target path's
+tree asks from the main checkout. It publishes a path and grants nothing. `whoami` RENDERS this same
 dict, so the prose and the JSON cannot drift. Branch on **`enforced`**: it is false whenever
 showrunner enforces nothing, and a null `role` must never be read as "no restriction" — that is
 the fail-open reading, and `problems` says which case it is. The porcelain exits non-zero if it
 could not resolve at all, so a parser can fail closed; the prose path still exits 0, because a
 SessionStart hook cannot block.
 
-## The two seams showrunner did not own, and now does
+## The seams showrunner owns: session start and tool use
 
 ```
 showrunner whoami                    # SessionStart AND PostCompact  (whoami.sh)
@@ -684,33 +683,29 @@ campaign it is on is not helped by a label; the counts are the identity. It repo
 leaves exist, how they are split by status, and how many are READY to dispatch right now — and
 when the graph cannot be read it says so, because "no work" and "could not look" are opposite
 facts that both render as silence. It also prints **every** verb, derived from the argparse
-parser rather than a second list that would go stale. Naming only the dispatch verbs answered
-"how do I dispatch" and nothing else, so an agent needing anything else had no reason to think
-the tool could do it.
+parser rather than a second list that would go stale. Naming only the dispatch verbs would answer
+"how do I dispatch" and nothing else, so an agent needing anything else would have no reason to
+think the tool could do it.
 
-**`reach` is REGISTERED BY DEFAULT, and the argument for not doing so did not survive contact.**
-It shipped wired by hand, reasoning that advice should be opt-in. A consumer measured the cost:
-zero references in either settings layer, and in one session they hand-rolled a worktree wrapper,
-a dispatch script and a layer guard — then piped a payload in by hand and got the sentence they
-had needed hours earlier. The verb that exists so an agent need not already know about showrunner
-was the one verb an agent had to already know about, which is the defect `dispatch-guard.sh`'s own
-header names — *a guard is exactly as present as its registration* — arriving in the verb whose
-job is to name it. Registering costs near nothing: it never refuses and is silent unless it has
-something specific to say. Opting out is deleting the entry; opting in was knowing it existed.
+**`reach` is REGISTERED BY DEFAULT.** Opt-in advice goes unregistered, and an agent that does not
+know the verb exists hand-rolls a worktree wrapper, a dispatch script and a layer guard instead.
+The verb that exists so an agent need not already know about showrunner cannot be one an agent
+has to already know about — *a guard is exactly as present as its registration*, as
+`dispatch-guard.sh`'s own header says. Registering costs near nothing: it never refuses and is
+silent unless it has something specific to say. Opting out is deleting the entry; opting in
+would be knowing it existed.
 
 **`wake-gate` says, at the moment long work starts, that nothing can wake you back to a goal.**
 Without a bound mandate `game_loop doorbell` answers *"no mandate is bound here, so there is
 nothing to wake this run FOR"*, so a wake arriving mid-run returns an agent to a prompt with a
 hole where the goal goes and the run is re-derived from scratch.
 
-That information was never missing. showrunner's own SessionStart banner has always printed
-`MANDATE: none (Stop gate inert)`, and `doorbell` has always explained the remedy in full to
-anyone who ran it. Agents started unattended runs unarmed anyway, and the operator bound it by
-hand every time — *"I have to tell them manually, none of them know."* **So this is a DELIVERY
-defect, not a documentation one**, and more documentation was the one fix guaranteed not to work.
-Session-start text is read once, before the agent knows whether the work ahead is long; by the
-time it is long the banner is thousands of tokens upstream. The human succeeded where both
-documents failed for exactly one reason: they spoke at the moment.
+That information is not missing elsewhere: showrunner's SessionStart banner prints
+`MANDATE: none (Stop gate inert)`, and `doorbell` explains the remedy in full to anyone who runs
+it. Agents start unattended runs unarmed anyway. **So this is a DELIVERY problem, not a
+documentation one**, and more documentation is the one fix guaranteed not to work. Session-start
+text is read once, before the agent knows whether the work ahead is long; by the time it is long
+the banner is far upstream. What works is speaking at the moment.
 
 It fires on **Bash only** — narrower than `reach`'s five tools, because long unattended work is a
 process (a suite, a build, a deploy, a backgrounded call, a dispatch) and an `Edit` is never what
@@ -722,7 +717,9 @@ telling in a session — a notice on every long call is how a true signal become
 Backgrounding outranks every pattern, because `run_in_background` is the caller *stating* the
 call outlives the turn rather than this guessing from the text. The patterns are deliberately
 anchored on runners rather than on words like "test" or "build", which appear in ordinary prose
-and in paths: a false positive spends the attention the true ones depend on.
+and in paths: a false positive spends the attention the true ones depend on. It applies the reach
+gate's mention-versus-use rule below — heredoc bodies dropped, quoted text emptied — so a commit
+message mentioning `make` is not a build.
 
 Exercise the rule directly rather than by constructing a PreToolUse event:
 
@@ -737,8 +734,7 @@ backgrounded the way the harness would report it, and `--session` names the sess
 once-per-session telling is being tested — pass a throwaway id, or the real one is spent and the
 gate goes quiet for the rest of that session. `armed()` reports **armed, unarmed, absent or unknown**
 as four distinct answers — a `doorbell` that could not be run or printed nothing says nothing
-about whether a goal is bound, and recording that as "fine" is the identity-element defect this
-tracker is mostly made of fixes for.
+about whether a goal is bound, and recording that as "fine" is the identity-element defect.
 
 **`reach` names the mechanism at the moment of reach.** An agent that cannot remember a tool does
 not stop working — it reaches for what it already knows: `git worktree add`, a private todo list,
@@ -757,12 +753,11 @@ cannot do the thing.
 
 **Mention versus use has TWO doors, and both are shut.** Heredoc bodies are stripped, and a rule
 must match at a COMMAND BOUNDARY — the start of the string or just after `;`, `&&`, `||`, `|` or
-a newline — with quoted contents emptied first. The second one came from a real hit: a consumer
-writing a knowledge-base entry whose body quoted `git worktree add` as the example of what not to
-do, and the advice fired on prose about the advice. `git` as the third word of somebody else's
-command line is not somebody running git.
+a newline — with quoted contents emptied first, so a command writing a note that quotes
+`git worktree add` as the example of what not to do does not fire the advice on prose about the
+advice. `git` as the third word of somebody else's command line is not somebody running git.
 
-The deliberate cost: a real command INSIDE quotes (`bash -c "git worktree add x"`) is now a miss,
+The deliberate cost: a real command INSIDE quotes (`bash -c "git worktree add x"`) is a miss,
 and the suite asserts that so the trade is on the record rather than a surprise. For a channel
 whose whole value is being worth reading, a false positive is the expensive direction — it teaches
 a reader to skim exactly the turns this is depended on for.
@@ -781,17 +776,16 @@ checked. This is the complete list, so a reader knows where the coverage stops:
 | `showrunner doctor` (no finding) | says CANNOT TELL rather than guessing when the comparand is missing — an unreadable baseline, a pin with no HEAD to compare against, a hook that has never stamped |
 | `doctor`'s fail-open count (0) | an absent ledger reads as "no guard has failed open"; one that cannot be PARSED reads as UNKNOWN. An empty read and a broken reader are the pair this repo most often collapses |
 | `doctor`'s worktree count (0) | a worktree root that cannot be listed says UNKNOWN, not none |
-| `showrunner gc` (nothing to reclaim) | it prints every tree it held back WITH the reason, so "nothing to reclaim" is distinguishable from "nothing was looked at". A tree whose SIZE could not be measured reports `?`, never `0` — `os.walk` yields nothing for a missing path, so the naive version returned a confident zero |
+| `showrunner gc` (nothing to reclaim) | it prints every tree it held back WITH the reason, so "nothing to reclaim" is distinguishable from "nothing was looked at". A tree whose SIZE could not be measured reports `?`, never `0` — `os.walk` yields nothing for a missing path, so summing it would give a confident zero |
 | `whoami`'s campaign counts (0 leaves) | a graph that cannot be read says so instead of printing a campaign with nothing in it |
 
 **Everywhere else you are on your own.** A quiet guard, an empty grep, a check that printed
 nothing — none of those has a control behind it, and the honest reading of each is *could not
-tell*, not *nothing there*. Two of the three above were added after an incident, not by
-foresight; assume the same about anything not listed.
+tell*, not *nothing there*. Assume anything not listed has no control behind it.
 
 Worked example, from this repo: a search for `CANNOT BE DETERMINED` in `lib/showrunner/cli.py`
 returns nothing while the string is plainly there, split across two adjacent string literals. The
-empty result meant *could not tell*. It was nearly read as *absent*.
+empty result means *could not tell*, not *absent*.
 
 ### Re-running a published corpus number
 
@@ -800,14 +794,12 @@ python3 test/corpus.py                  # this project's newest transcript
 python3 test/corpus.py --transcript PATH --gate promise --json
 ```
 
-Every corpus number this project has published — the promise gate's rate over turn-final
-closings, the pipeline gate's rate over Bash commands — used to come from a script written for
-the occasion and then deleted. The numbers reached commit messages and this file; the instrument
-lasted four minutes and nobody could re-run one.
+A corpus number — the promise gate's rate over turn-final closings, the pipeline gate's rate over
+Bash commands — is only worth quoting if the instrument that produced it can be re-run. A script
+written for the occasion and then deleted leaves a number nobody can check.
 
-That is the same defect as quoting a rate from a standalone classifier while shipping a
-different predicate, which happened here and had to be corrected. **An ad-hoc grep is a
-standalone classifier under another name.** So this tool implements NO predicate: it extracts a
+It is also the same defect as quoting a rate from a standalone classifier while shipping a
+different predicate. **An ad-hoc grep is a standalone classifier under another name.** So this tool implements NO predicate: it extracts a
 population and feeds it to the hook FILES. Change a hook, the number changes.
 
 It **refuses to report a rate from a gate it cannot verify**, and exits **3** — not 1, so a
@@ -843,10 +835,9 @@ reached anything; a hook far behind that was registered and not reached. **It do
 cause** — a stamp proves a gate did not run, not why. An earlier blocking hook in the Stop array
 is offered as a candidate, not a diagnosis.
 
-`SHOWRUNNER_HEARTBEAT` overrides the file path. The test suite sets it, because the first
-reading of this heartbeat was 28 stamps per burst for one gate — all of them the suite invoking
-the hook, not turn-ends. A freshly-run suite made every hook look freshly reached, which is the
-one thing the file exists to answer. **An instrument its own tests can forge measures nothing.**
+`SHOWRUNNER_HEARTBEAT` overrides the file path. The test suite sets it, because otherwise its own
+hook invocations stamp the file, and a freshly-run suite makes every hook look freshly reached,
+which is the one thing the file exists to answer. **An instrument its own tests can forge measures nothing.**
 
 ### `$?` after a pipe is the truncator's status, not the command's
 
@@ -865,14 +856,13 @@ cmd > /tmp/out 2>&1; rc=$?        # the real status
 grep -E 'FAIL|RESULT' /tmp/out    # the pipe belongs to a different command
 ```
 
-**EVERY RATE BELOW IS A SNAPSHOT WITH A MOVING DENOMINATOR.** This project's corpus is its own
+**EVERY CORPUS RATE IS A SNAPSHOT WITH A MOVING DENOMINATOR.** This project's corpus is its own
 transcript, and it grows while the work happens — re-running the tool the same afternoon gives a
 different denominator with, usually, the same numerator. Worse and unfixable: writing about a
-gate ADDS TO THE CORPUS THAT GATE IS MEASURED ON, so this paragraph will be in a later reading.
-The tool prints an `AS OF` line for that reason; a rate quoted from it without one is being
-presented as a constant when it is not. Figures here are as of 2026-08-26.
+gate ADDS TO THE CORPUS THAT GATE IS MEASURED ON. The tool prints an `AS OF` line for that
+reason; a rate quoted from it without one is being presented as a constant when it is not.
 
-**`${PIPESTATUS[0]}` IS NOT A SHELL-NEUTRAL REMEDY, and this file used to print it as one.**
+**`${PIPESTATUS[0]}` IS NOT A SHELL-NEUTRAL REMEDY.**
 zsh spells the array `pipestatus` and indexes it **from 1**, so the bash form expands to the
 empty string there:
 
@@ -883,11 +873,11 @@ bash   true | false ;  ${PIPESTATUS[0]}=[0]  ${PIPESTATUS[1]}=[1]
 
 That fails **worse** than the defect it fixes. Reading `$?` after a pipeline gives a real number
 about the wrong command; the bash idiom under zsh gives nothing at all, which renders as `exit=`
-and reads as neither pass nor fail — the identity element, inside the cure. The gate used to
-silence on the mere presence of the word, so an author following this page's own advice on a zsh
-host got an empty status *and* no warning.
+and reads as neither pass nor fail — the identity element, inside the cure. A gate that went
+silent on the mere presence of the word would give an author on a zsh host an empty status *and*
+no warning.
 
-It now checks `$SHELL`: the bash form on a zsh host is its own finding with its own text,
+So it checks `$SHELL`: the bash form on a zsh host is its own finding with its own text,
 because the cause differs — the other arm is about whose exit code you are believing, this one
 about a remedy that yields nothing here. It requires an actual `$` expansion, so `grep
 "PIPESTATUS"` is a mention rather than a use.
@@ -901,31 +891,29 @@ The false-positive share is an **INSPECTION, not a measurement**: no tool produc
 artifact-versus-genuine split, somebody reads the lines. So it is bounded by what was actually
 read. `test/pipeline-fires-inspected.json` records one verdict per fire with its reason, and the
 tool reports any fire whose digest is not in it as **NOT INSPECTED — the standing does not cover
-these**. Every artifact so far is text ABOUT the pattern rather than a command: a string literal,
+these**. The artifacts are text ABOUT the pattern rather than a command: a string literal,
 a results table inside a message, a JSON fixture, the defect quoted verbatim. The hook skips a
 line beginning with `#`, `>` or `*`, which does not reach a quoted fragment mid-line.
 
-Two corrections this page keeps rather than quietly dropping, because each is the defect the gate
-exists to stop:
+Two rules follow, because breaking either is the defect the gate exists to stop:
 
-* It stated a false-positive share as a plain figure and left it there while the corpus grew.
-  Re-inspecting understated it threefold — **the number never moved, the population did**, which
-  no amount of re-reading the figure would have caught.
-* It claimed **no false positives**, from a standalone classifier that hand-excluded artifacts
-  the hook does not exclude. Two different predicates, and the flattering one was not the shipped
-  one.
+* A false-positive share is not a plain figure. Left in place while the corpus grows, it drifts
+  — **the number does not move, the population does**, and no amount of re-reading the figure
+  catches that.
+* A false-positive claim must come from the hook itself, not from a standalone classifier that
+  hand-excludes artifacts the hook does not exclude. Two different predicates, and the flattering
+  one is not the shipped one.
 
-Re-running the still-reproducible commands with and without the pipe — a comparison the corpus
-tool does NOT perform, since it measures the gate rather than the subjects — found a majority
-reporting a wrong status, and one of those false readings became a bug report filed against
-another project for a defect that did not exist.
+Whether a pipe actually hid a wrong status is a comparison the corpus tool does NOT perform —
+it measures the gate rather than the subjects — and a false reading through a pipe can become a
+bug report against a defect that does not exist.
 
-The sharpest instance is this project's own. `showrunner check` exits **3** on VOID, and its
-output argues for that exact code: *"distinct from 2 (new failures) so a caller that treats
-non-zero as 'the code is bad' gets a code it did not map rather than a wrong answer it will
-believe."* Reasoned for, implemented, documented — and then read as 0 through a pipe by the
-author of it. A truncation is lossless exactly where there is nothing to lose, which is the
-case that builds your confidence in it, and destructive on the case it was meant to summarise.
+`showrunner check` shows how easily it happens. It exits **3** on VOID, and its output argues
+for that exact code: *"distinct from 2 (new failures) so a caller that treats non-zero as 'the
+code is bad' gets a code it did not map rather than a wrong answer it will believe."* Read
+through a pipe, that 3 is a 0. A truncation is lossless exactly where there is nothing to lose,
+which is the case that builds your confidence in it, and destructive on the case it was meant to
+summarise.
 
 ### A turn that promises work instead of doing it is refused
 
@@ -933,8 +921,8 @@ case that builds your confidence in it, and destructive on the case it was meant
 turn. If it contains a first-person future commitment — "next I'll", "then I'll", "I'll take",
 "moving on to" — the turn-end is refused with exit 2 and the phrase is quoted back.
 
-It exists because the rule was hardened as PROSE first, in a file delivered into context, and
-broken the same day by the agent who wrote it with the rule in front of them. A concept-level
+It exists because the rule as PROSE, in a file delivered into context, does not hold — an agent
+breaks it with the rule in front of them. A concept-level
 rule is checked against INTENT, and the intent is always fine: an agent that has just finished a
 long correct piece of work does not experience a forward pointer as stopping, it experiences it
 as courtesy. So the gate fires on the TEXT, where the defect is.
@@ -947,22 +935,16 @@ transcript means ALLOWED WITHOUT BEING CHECKED, like every other guard here.
 Both run from tracked shims under `.showrunner/hooks/`, beside `worktree-guard.sh`,
 `inert-crawler-gate.sh`, `reach-gate.sh`, `wake-gate.sh` and `waiting-probe.sh`.
 
-**`worktree register` does NOT wire all of them, and this sentence used to claim it did.** It
-writes the worktree guard, the inert-Crawler stop trigger, the seat announcement and the
-dispatch guard. The count is deliberately not stated here — there is no number that survives the
+**`worktree register` does NOT wire all of them.** It writes the worktree guard, the
+inert-Crawler stop trigger, the seat announcement, the dispatch guard, the reach gate and the
+wake gate. The count is deliberately not stated here — there is no number that survives the
 verb gaining one, and the table below is the thing that has to stay right. It does not touch:
 
 | hook | wired by | why not `register` |
 |---|---|---|
-| `future-tense-gate.sh` | by hand | added after the verb; registering it is a one-line settings edit |
+| `future-tense-gate.sh` | by hand | outside the verb's set; registering it is a one-line settings edit |
 | `pipeline-status-gate.sh` | by hand | same |
-
-| `waiting-probe.sh` | **NOBODY — deliberately** | arming an idle watchdog is a human decision, stated forty lines above this one: *a probe an agent can set is a watchdog an agent can switch off* |
-
-The old sentence contradicted that earlier warning while sitting six hundred lines away from it,
-which is how it survived — a doc inconsistent with itself in a way that reads as detail. It even
-carried the moral: *a guard nobody registers has never once run, which was true of one of these
-between building it and noticing.* True, and still wrong about which ones were wired.
+| `waiting-probe.sh` | **NOBODY — deliberately** | arming an idle watchdog is a human decision, stated under "First thing, every session": *a probe an agent can set is a watchdog an agent can switch off* |
 
 Enforced by a default-deny check: every hook file present is registered in a settings file or
 excused in writing with a reason, and a new one cannot join silently.
@@ -979,9 +961,8 @@ read, and its ENFORCED block is generated from the role fields the guards actual
 one place and enforcement in another is two statements of one policy, free to disagree.
 
 `dispatch guard` refuses a raw headless `claude` dispatch from a session whose role may not create
-one. On BASH, which is the mechanism actually used: a version of this matched on `Agent` guarded
-the in-process subagent tool while 42 consecutive real dispatches went out through Bash, reporting
-nothing. It cannot see a command built from a shell variable, a wrapper script, or any non-Bash
+one. On BASH, which is the mechanism actually used: matching on `Agent` would guard the
+in-process subagent tool while real dispatches go out through Bash, reporting nothing. It cannot see a command built from a shell variable, a wrapper script, or any non-Bash
 tool — the LEASE is what protects a tree from whatever gets in anyway.
 
 ## When a run could not measure anything
@@ -1004,19 +985,18 @@ error all read as VALID, and the verdict says so.
 
 ### A blocked report is a fact about the past
 
-`waiting` no longer reports a Crawler as BLOCKED when its **tree disagrees**. A commit on its
+`waiting` does not report a Crawler as BLOCKED when its **tree disagrees**. A commit on its
 branch, or a tracked file in its own worktree changed since the block was recorded, means it is
 working without a channel to report on — legitimate waiting, and it is counted as live.
 
-This exists because a chat outage produced the opposite: a Crawler went inert (its only
-reporting channel was gone), the gate refused the ORCHESTRATOR's turn-end, and both remedies it
-offered were unavailable or destructive — message it, which needed the dead bus, or reap it,
-which releases the claim and surfaces a tree holding live uncommitted work. After an
-out-of-band wake it kept refusing while the Crawler was demonstrably working, because "inert"
-was inferred from the room and never from the tree.
+This exists for a chat outage: a Crawler whose only reporting channel is gone reads as inert,
+the gate refuses the ORCHESTRATOR's turn-end, and both remedies it offers are unavailable or
+destructive — message it, which needs the dead bus, or reap it, which releases the claim and
+surfaces a tree holding live uncommitted work. Inferring "inert" from the room alone would keep
+refusing while the Crawler is demonstrably working; the tree is the other witness.
 
 **Tree evidence only ever RELEASES.** No recorded block, an unreadable tree, a missing branch or
-a disagreeing clock all yield no evidence, which is exactly today's behaviour. Only TRACKED
+a disagreeing clock all yield no evidence, and the room-based verdict stands. Only TRACKED
 files count: a log the harness writes or an editor swapfile would otherwise release a gate with
 nobody having done any work, and a false positive is the expensive direction for a signal whose
 job is to stop refusing.
@@ -1035,7 +1015,7 @@ showrunner waiting                       # exit 0 waiting · 1 not waiting · 3 
                                          # NEITHER waiting nor parked — only a message restarts
                                          # it. 3 is its own code so a caller treating non-zero as
                                          # "no" cannot miss the one case it exists for. Build on
-                                         # --porcelain: the finding is on BOTH streams now, but
+                                         # --porcelain: the finding is on BOTH streams, but
                                          # three exit codes and two streams combine wrongly.
 ```
 
@@ -1049,15 +1029,14 @@ Your brief is in your scratch dir (`BRIEF.md`). The short version:
 
 **1. Verify the premise before you write anything.** The issue was written from an incident, and the
 incident may have happened in a different repo, a different harness, or a version of this code that no
-longer exists. Three of fourteen issues in one real run described something that was not true here;
-in a later batch of seven, all seven held. The rate is not the point — you cannot tell which batch
-you are in from the inside, and the two look identical until you read the source.
+longer exists. Some premises are false here and most hold; you cannot tell which one you have
+from the inside, and the two look identical until you read the source.
 
 **2b. "Unreachable" is a THIRD outcome.** A true premise attached to code nothing reaches is
 void, and the premise check cannot catch it — that asks *is this true of the code*, this asks
-*does anything get here*, and the answer is in files the brief never named. Observed twice in
-one hour: a genuinely malformed colour matrix on a preset an allowlist dropped five months
-earlier, and a real branch defect gated on `count <= 4` where the only client sends 40.
+*does anything get here*, and the answer is in files the brief never named: a genuinely
+malformed value on a preset an allowlist already drops, or a real branch defect gated on
+`count <= 4` where the only client sends 40.
 
 ```
 showrunner close <leaf> --unreachable --evidence <allowlist|caller|enumeration> \
@@ -1084,18 +1063,23 @@ showrunner close <leaf> --proof <path> --premise holds|partial|refuted|unverifia
     --premise-read <path> --reason "<what you did>"
 ```
 
-A RELATIVE PATH IS RESOLVED AGAINST THE TREE YOU ARE STANDING IN, so the artifact you just wrote
-in your own worktree is the one read. It used to be joined against the main checkout, which found
-that checkout's stale copy of the same relative path and refused the close as proof older than the
-claim — the one verdict the gate exists to produce, manufactured from a correct submission, and
-invisible to anyone who happened to pass absolute paths. A cwd outside this repo's trees falls back
-to the main checkout, and a refusal now names the tree it read from.
+A reason over 400 characters goes on STDIN — `--reason-file - <<'EOF' ... EOF` — so closing needs
+no file written anywhere.
 
-**4. Write non-repo files in YOUR OWN scratch dir**, the one named in your brief. Commit messages,
-captured output, fixtures, before/after artifacts. Not a shared temp dir. In a real run two Crawlers
-independently picked the same obvious filename and one nearly committed the other's commit message
-onto its own changes — a real commit, plausible message, describing work it does not contain, every
-gate green. You and your siblings are the same model solving similar tasks from similar prompts, so
+A RELATIVE PATH IS RESOLVED AGAINST THE TREE YOU ARE STANDING IN, so the artifact you just wrote
+in your own worktree is the one read. Joined against the main checkout instead, it would find
+that checkout's stale copy of the same relative path and refuse the close as proof older than the
+claim — the one verdict the gate exists to produce, manufactured from a correct submission. A cwd
+outside this repo's trees falls back to the main checkout, and a refusal names the tree it read
+from.
+
+**4. Write non-repo files in YOUR OWN scratch dir**, the one named in your brief. It is in the MAIN
+checkout, not your worktree, because it has to outlive the tree — so a write guard that judges by
+path may refuse it, and that guard is not wrong. Say so rather than routing around it through Bash;
+`whoami --porcelain` publishes the path as `scratch` for a guard to allow. Commit messages,
+captured output, fixtures, before/after artifacts. Not a shared temp dir: two Crawlers that pick
+the same obvious filename there can commit one's message onto the other's changes — a real
+commit, plausible message, describing work it does not contain, every gate green. You and your siblings are the same model solving similar tasks from similar prompts, so
 you converge on the same obvious filename far more often than independent actors would.
 
 **5. Run single-consumer commands through the lock**, never directly:
@@ -1116,7 +1100,6 @@ you are stuck under a mandate to finish, and that is the moment it is most wrong
 showrunner's own gate reading the graph, and it is telling you the truth. Do not treat it as a
 signal to stop: a headless session that stops there has nothing that can restart it from inside,
 and the orchestrator sees a live process on an open leaf with every artifact looking finished.
-One sat 44 minutes that way.
 
 **8. In your room, post what the orchestrator can ACT on — and no start notice.** It dispatched you
 seconds ago and wrote your brief; it has that content already. A refuted premise, a collision with
@@ -1137,11 +1120,10 @@ A parked leaf is excluded from `reap`, does not block `stop-gate`, and does not 
 inert-Crawler gate either — but it is still reported, and the report says when a parked Crawler
 is ALSO inert so its owner learns the run is stalled.
 
-That last part was not true until #62. The sentence used to name `stop-gate` alone and read as a
-general property of parking; the inert-Crawler gate is a different gate and did not consult the
-flag. In a checkout running two campaigns that left a non-owner with `reap --apply` on somebody
-else's uncommitted tree as the only working way to end a turn — hooks read the DEFAULT campaign
-regardless of which one your session works, so the Crawler blocking you may not be yours.
+The inert-Crawler gate is a different gate from `stop-gate`, and it consults the parked flag
+too. That matters in a checkout running two campaigns: hooks read the DEFAULT campaign regardless
+of which one your session works, so the Crawler blocking you may not be yours, and `reap --apply`
+on somebody else's uncommitted tree must not be the only way to end a turn.
 **Park it and tell its owner.** The refusal NAMES the actor who claimed the leaf and the session
 that holds it, because the blocked session's first question is whether it is theirs at all — and
 if it is not, it does not need the controls, it needs to know who to tell.
@@ -1169,9 +1151,8 @@ refusal advises them to close work in worktrees they cannot reach, and a headles
 next turn in which to act on it. Given no `--leaf`, the gate falls back to matching the caller's
 worktree against `claim_tree`, which is why a manual `claim` records the tree it was made from.
 
-Both of those defects came from wiring this gate at all: this section once described both gates as
-hooks with no path into a Crawler, which made the stop gate real, documented and unreachable.
-Reaching it produced the BLOCKED state above, and reaching it *unscoped* produced this.
+A gate with no path into a Crawler is real, documented and unreachable. Wired in, it produces
+the BLOCKED state above; wired in *unscoped*, it produces the sibling-gating just described.
 
 ## Checks: no NEW failures, never "all green"
 
@@ -1198,18 +1179,22 @@ file in an integration commit that **no Crawler ever touched**.
 
 ### Prose that outlives the command: `--<name>-file`
 
-Every prose option — `--reason`, `--title`, `--who`, `--stale-proof-reason`, `--body` — has a
+Every prose option — `--reason`, `--title`, `--who`, `--stale-proof-reason` — has a
 `--<name>-file` twin, and prose over 400 characters on the command line is REFUSED in favour of
-it. A close reason is a decision's only human explanation and is read back off the record much
+it. (`--body-file` on `add` and `edit` is declared directly rather than derived.) **`-` means
+stdin**, so a heredoc piped in touches no file. A close reason is a decision's only human explanation and is read back off the record much
 later; it must not be edited in transit.
 
 The hazard is specific and quiet: **a backtick or `$(...)` inside a double-quoted shell argument
 is executed and removed before the program sees it.** The command then reports success and
-neither side can see what was lost. That happened to a sibling tool's release note, and the
-damaged text is permanent — published state should not be rewritten to repair a word.
+neither side can see what was lost, and damaged published text is permanent — published state
+should not be rewritten to repair a word.
 
 **The twins are DERIVED by walking the parser, not written out**, so an option added later gets
-one without anybody remembering. Which means grepping the source for `--reason-file` finds
+one without anybody remembering — including on NESTED verbs like `role claim --who`. **A REQUIRED
+prose option accepts either twin**: argparse would enforce `required` before the file is read, so
+the requirement is "one of the two".
+Which means grepping the source for `--reason-file` finds
 nothing: it is named in `--help` and here, and nowhere else. That is the cost of derivation and
 it is worth paying, but a reader who greps and concludes the twin does not exist is making the
 mistake this paragraph exists to prevent.
@@ -1225,8 +1210,8 @@ showrunner list|show|ready|claim|release|park|unpark
 ```
 
 **`edit` exists because the body IS the brief.** A leaf's body is interpolated into the document a
-Crawler works from, so a wrong one dispatches a wrong task — and before this verb there was no way
-back: `add` refuses an existing id, and the only exit was to close the leaf, which spends the
+Crawler works from, so a wrong one dispatches a wrong task — and without this verb there is no way
+back: `add` refuses an existing id, and the only exit would be to close the leaf, which spends the
 proof-of-done gate on a decision that never happened. It refuses on a leaf that is not open, so it
 cannot rewrite the instructions under a Crawler already working from them. Fix the body *before*
 you spawn.
@@ -1253,18 +1238,15 @@ them can name a commit:
 | **checkout** | the code lives in a showrunner git repo — its root IS the repo root. Reports HEAD, and whether the tree is dirty, because uncommitted edits make that sha an overstatement. |
 | **copy** | `install.sh` without `--central` copies from a working tree. **No commit names this code**, and none is invented — that absence is the argument for pinning. |
 
-`__version__` alone was `0.1.0` for the project's whole life and never bumped, so it could not
-distinguish a checkout from this morning from an install three weeks stale.
+`__version__` alone is not bumped per change, so it cannot distinguish a checkout from this
+morning from an install weeks stale.
 
 ### An old copy cannot warn you about itself
 
-The staleness report (`pin.staleness`, #65) lives **in the code being reported on**. A copy
+The staleness report (`pin.staleness`) lives **in the code being reported on**. A copy
 vendored before that feature existed does not carry the check, so it says nothing about being
 behind — and silence there reads exactly like "up to date". Improving the warning cannot reach
 that case, because the improvement ships in the build you are not running.
-
-Verified, not reasoned about: a copy pinned at the commit before #65 has no `staleness` in its
-`pin.py` at all, and its `doctor` never mentions it.
 
 So the answer is a command that does not require the stale thing to be running. **Read the
 recorded commit off the copy and compare it yourself:**
@@ -1280,12 +1262,10 @@ the self-vendored pin at `<sha>`, which is N commit(s) BEHIND HEAD"* — works f
 the code, including copies cut long before it was written. It compares a **recorded sha against
 live git**.
 
-An earlier version of this paragraph stopped at *"a check that reads durable state survives its
-own staleness"*. **That is not sufficient, and llm_chat refuted it by measurement.** Their
-install-staleness check reads a recorded fingerprint — durable, external, exactly that category
-— and an old copy of it always reports STALE, because it recomputes the comparand by hashing
-*its own* tree: the flag naming which tree to hash did not exist yet. Same durable datum,
-silently different subject.
+*"A check that reads durable state survives its own staleness"* **is not sufficient.** A check
+that reads a recorded fingerprint — durable, external, exactly that category — still fails in
+an old copy if it recomputes the comparand by hashing *its own* tree because that copy has no
+way to name another. Same durable datum, silently different subject.
 
     durable evidence + comparison performed OUTSIDE the build   survives
     durable evidence + comparison performed BY the build        does not
@@ -1294,18 +1274,17 @@ silently different subject.
 The self-vendor warning survives because `git rev-list` is outside the build entirely. The old
 copy does not have to agree about how to compute anything — only where to look.
 
-**And the failure DIRECTION is a choice made when the check is written.** llm_chat's degrades
-toward alarm: always STALE, annoying and safe. Mine degraded toward silence, which is the one
-that costs a week. So: *when the old-copy answer is undefined, make the undefined answer the
-loud one.* That is cheaper than making a check durable, and sometimes it is the only option.
+**And the failure DIRECTION is a choice made when the check is written.** Degrading toward
+alarm — always STALE — is annoying and safe. Degrading toward silence is the one that costs a
+week. So: *when the old-copy answer is undefined, make the undefined answer the loud one.* That
+is cheaper than making a check durable, and sometimes it is the only option.
 
-Fixed here in the same shape: `doctor` needed HEAD for every branch of the pin report, and
-without it **no branch fired and the line vanished entirely** — a pin of unknown age rendered as
-nothing at all, which reads exactly like a healthy one. It now says CANNOT BE DETERMINED, and
-says that is not the same as up to date.
+`doctor` follows that rule: every branch of the pin report needs HEAD, and without it the line
+would vanish entirely — a pin of unknown age rendered as nothing at all, which reads exactly like
+a healthy one. It says CANNOT BE DETERMINED instead, and says that is not the same as up to date.
 
-Same shape llm_chat hit: their `doctor` correctly detects that it is a different build from the
-one the hooks run, and that warning is useless to anyone whose problem is running the old copy.
+The same limit applies to a `doctor` that detects it is a different build from the one the hooks
+run: that warning is useless to anyone whose problem is running the old copy.
 
 ## Installing for yourself, not for the team
 
@@ -1322,15 +1301,15 @@ A `--local` install leaves `git status` **clean**. That is the whole promise, an
 exclusion goes in `.git/info/exclude` rather than the repo's `.gitignore`: `.gitignore` is
 source-controlled, so ignoring the payload there would make a private decision arrive as a tracked
 diff on everybody else's next pull. `info/exclude` is per-clone and needs nobody's agreement.
-game_loop's `--local` writes `.gitignore`; a consumer raised the asymmetry and was right, so this
-takes the stricter half.
+game_loop's `--local` writes `.gitignore`; this takes the stricter half.
 
 **A worktree consequence you only have if you run Crawlers.** `git worktree add` copies TRACKED
 files, so an untracked registration does not cross into a Crawler's tree by itself — a `--local`
 install would otherwise produce worktrees with no `.claude` at all, and therefore no worktree
-guard, no dispatch guard, no seat announcement and no reach gate, while the main checkout reported
+guard, no dispatch guard, no seat announcement and no reach gate, while the main checkout reports
 every one of them registered and healthy. `spawn` merges the untracked entries into each new tree
-for exactly this reason, and says so in its report.
+for exactly this reason, and says so in its report — and after provisioning it checks that every
+registered hook can find its directory in the tree, refusing the spawn when one cannot.
 
 **Do not end up in both layers.** Registration is idempotent within the file it writes and cannot
 see the other one, so `init` (tracked) followed by `worktree register --local` (untracked) leaves
@@ -1339,7 +1318,7 @@ to remove is a decision about whose file it is, so the tool reports and does not
 
 ## One copy of the code, every project's own config
 
-Per-project install is the **default** and stays the documented path. Central is opt-in, one
+Per-project install is the **default** and the documented path. Central is opt-in, one
 flag, and reversible in both directions:
 
 ```
@@ -1373,7 +1352,7 @@ DEFAULTS                              the tool's own answer
       .showrunner/config.local.json   THIS MACHINE, untracked
 ```
 
-There is still no `SHOWRUNNER_HOME` and none is needed: `XDG_CONFIG_HOME` already relocates the
+There is no `SHOWRUNNER_HOME` and none is needed: `XDG_CONFIG_HOME` already relocates the
 user level, and it is the same directory `roles.json` lives in — resolved through one helper so
 the two files cannot drift about where "user level" is.
 
@@ -1385,14 +1364,14 @@ overrides a user-level list rather than inheriting it. `doctor` prints which use
 merged (or that there was none), since a merged config cannot be asked where a value came from.
 
 **The PROJECT beats the USER here — the opposite of `roles.json` in that same directory,** and
-the difference is the kind of thing each file is. `roles.json` is PERMISSION: user level wins,
-because a project that could redefine its own role would widen the policy constraining the
-session editing it. `config.json` is PREFERENCE: the project wins, because a repo is the better
+the difference is the kind of thing each file is. `roles.json` is PERMISSION: it comes from user
+level ONLY, and a project's `roles` / `seat_roles` are reported and ignored — a project that could
+add a role could grant the session editing it any seat. `config.json` is PREFERENCE: the project wins, because a repo is the better
 authority on its own lanes, checks and resources.
 
 **Four keys are REFUSED at user level**, loudly, naming the file and the key: `project_name`
 (it feeds the chat channel prefix and the orchestrator identity, so machine-wide it gives every
-repo one prefix — the crossed-rooms collision already measured here), `lock_root` (one absolute
+repo one prefix — the crossed-rooms collision described above), `lock_root` (one absolute
 root shared by UNRELATED repos serializes them against each other: a mutex that is quietly the
 wrong mutex), and `graph.db` / `baseline`, which are one campaign's state.
 

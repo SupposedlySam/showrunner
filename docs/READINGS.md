@@ -76,3 +76,14 @@ Lines read end to end, in order, in one pass — not a search, not a section, no
 this file so I know what is in it". If a reading covered part of a file, say which part. A partial
 reading recorded as partial is worth having; recorded as whole it is worse than no entry, because
 it retires the question.
+- README.md — read whole at 8393679 on 2026-09-24 — stale: the `extensions.worktreeConfig` line said
+  "the shared config" (it is the repo's own `.git/config`), roles precedence still said a project
+  "may only add", `waiting` was said to return 0 for a chat-less inert Crawler (it reports BLOCKED),
+  the porcelain list lacked `scratch`, and `reap`, the empty-session rule and the campaign binding
+  predated their fixes. Then rewritten as a present-tense snapshot: incident stories, issue
+  numbers, dated figures and the doc's own confessions of past staleness removed, each lesson kept
+  as a reason.
+- llms.txt — read whole at 8393679 on 2026-09-24 — the same worktreeConfig and roles-precedence
+  claims; `worktree register` listed four hooks in one place and six in another; the prose-twin
+  list named `--body` (hand-declared) and missed stdin, nested verbs and required prose; a heading
+  said "two seams" over four hooks. Rewritten as a snapshot the same way.
