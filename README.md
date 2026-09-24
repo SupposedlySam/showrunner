@@ -431,6 +431,15 @@ decision has to be able to see one being made. A repo with no `origin/HEAD`, `ma
 or a detached HEAD, warns and allows: cannot-tell must not refuse. `showrunner show <leaf>` reports
 `crawler_base` — what was asked for, the resolved sha, the branch.
 
+**A base can also be behind in the other direction: the default branch may have deleted what the
+leaf is about to change.** An older base still has the file, so the Crawler changes it, tests it
+green and closes — for code that no longer exists on the default branch. `spawn` compares each
+declared leaf path between the base and `origin/<default>` (the local default branch when there is
+no remote ref; it does not fetch) and refuses a path deleted there since their merge-base, naming
+the commit, because its subject says whether the code moved or was removed.
+`showrunner spawn <leaf> --despite-deleted <path>` accepts it, naming each path. A path merely
+changed there is a note about a likely conflict, not a refusal. Both reach the brief.
+
 **A window reload does not cost the seat.** Reloading a VS Code window restarts the extension
 host under a new pid, so the recorded holder is dead, the lock correctly reports STALE, and the
 resolver correctly skips it — every step right and the outcome useless, because the same logical

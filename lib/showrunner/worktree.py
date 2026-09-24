@@ -798,7 +798,61 @@ def base_report(cfg, graph, leaf, base="HEAD", explicit=None):
     return out
 
 
-def spawn(cfg, leaf, actor="crawler", base="HEAD", branch=None, sparse=None):
+def drift_report(cfg, leaf, base_sha):
+    """What the default branch has done to this leaf's declared paths since the base.
+
+    A BASE CAN BE BEHIND IN A WAY THE DEPENDENCY CHECK CANNOT SEE. `base_report` asks whether
+    work this leaf NEEDS is in the base; this asks whether work the default branch has since
+    DONE undoes the leaf. A path deleted there is still present in an older base, so the Crawler
+    finds it, changes it, tests it green, and the work is for code that no longer exists — found
+    out only at merge.
+
+    Compared against `origin/<default>` when that ref exists, else the local default branch. It
+    does NOT fetch: a fetch per spawn is slow and a network failure would read as a clean
+    answer, so the report names the ref it read and says it was not fetched.
+
+    Returns {"ref", "merge_base", "deleted": [(path, "<sha> <subject>")], "modified": [...],
+    "unknown": reason-or-None}. Never raises.
+    """
+    out = {"ref": None, "merge_base": None, "deleted": [], "modified": [], "unknown": None}
+    paths = _leaf_list(leaf, "paths")
+    if not paths:
+        return out
+    default = default_branch(cfg)
+    if not default:
+        out["unknown"] = "this repo has no origin/HEAD, main or master to compare against"
+        return out
+    for ref in ("refs/remotes/origin/%s" % default, "refs/heads/%s" % default):
+        rc, _, _ = git(["rev-parse", "--verify", "--quiet", ref], cwd=cfg.root)
+        if rc == 0:
+            out["ref"] = ref.split("/", 2)[-1]
+            break
+    if not out["ref"] or not base_sha:
+        out["unknown"] = ("%s does not resolve" % default) if base_sha else "the base did not resolve"
+        return out
+    rc, mb, _ = git(["merge-base", base_sha, out["ref"]], cwd=cfg.root)
+    if rc != 0 or not mb.strip():
+        out["unknown"] = "the base shares no history with %s" % out["ref"]
+        return out
+    mb = out["merge_base"] = mb.strip()
+    span = "%s..%s" % (mb, out["ref"])
+    for path in paths:
+        rc, gone, _ = git(["log", "--diff-filter=D", "--format=%h %s", "-1", span, "--", path],
+                          cwd=cfg.root)
+        # Deleted AND still absent at the tip: a path deleted and later restored is a
+        # modification, not a removal.
+        rc2, _, _ = git(["cat-file", "-e", "%s:%s" % (out["ref"], path.strip("/"))],
+                        cwd=cfg.root)
+        if rc == 0 and gone.strip() and rc2 != 0:
+            out["deleted"].append((path, gone.strip()))
+            continue
+        rc, touched, _ = git(["log", "--format=%h %s", "-1", span, "--", path], cwd=cfg.root)
+        if rc == 0 and touched.strip():
+            out["modified"].append((path, touched.strip()))
+    return out
+
+
+def spawn(cfg, leaf, actor="crawler", base="HEAD", branch=None, sparse=None, drift=None):
     """Create everything a Crawler gets. Returns a record; raises on anything unsafe."""
     cfg.require_valid()
     name = crawler_name(leaf["id"], actor)
@@ -879,6 +933,7 @@ def spawn(cfg, leaf, actor="crawler", base="HEAD", branch=None, sparse=None):
         # RECORDED so a reviewer can see what the Crawler could not (#90).
         "sparse": ({"dirs": cone, "source": cone_source,
                     "misses": cone_misses(leaf, cone)} if cone else None),
+        "drift": drift if drift and (drift.get("deleted") or drift.get("modified")) else None,
         "created_ts": now(),
     }
     return record

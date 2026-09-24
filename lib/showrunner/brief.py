@@ -514,7 +514,7 @@ def build(cfg, leaf, spawn_record, decision=None, orchestrator_findings=None,
         # resolve to the shared directory. #15 replaced that workaround with an absolute path —
         # correctly — and this stayed relative, so the fix removed what had been masking it.
         scratch=cfg.abspath(spawn_record["scratch"]),
-        cone_block=_cone_block(spawn_record),
+        cone_block=_cone_block(spawn_record) + _drift_block(spawn_record),
     )
 
 
@@ -539,6 +539,28 @@ def _cone_block(spawn_record):
     if misses:
         lines += ["", "This leaf declares paths OUTSIDE the cone, so you WILL need to add their "
                       "directories: %s" % ", ".join("`%s`" % m for m in misses)]
+    return "\n".join(lines) + "\n"
+
+
+def _drift_block(spawn_record):
+    """What the default branch has done to this leaf's paths since the base (#92).
+
+    Said to the Crawler because its tree cannot show it: a file deleted on the default branch is
+    still present in an older base, and nothing in the worktree says it is gone.
+    """
+    d = spawn_record.get("drift")
+    if not d:
+        return ""
+    lines = [""]
+    if d.get("deleted"):
+        lines += ["**DELETED on `%s` since your base** — the orchestrator dispatched you anyway, "
+                  "so read the commit before changing these; it may have MOVED the code "
+                  "(follow it) or REMOVED it (say so and stop):" % d.get("ref")]
+        lines += ["- `%s` — %s" % (p, c) for p, c in d["deleted"]]
+    if d.get("modified"):
+        lines += ["", "Changed on `%s` since your base, so expect a conflict at merge:"
+                  % d.get("ref")]
+        lines += ["- `%s` — %s" % (p, c) for p, c in d["modified"]]
     return "\n".join(lines) + "\n"
 
 

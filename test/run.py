@@ -15873,9 +15873,86 @@ def test_a_crawler_tree_can_be_sparse_without_losing_its_rails():
     eq("...and says nothing at all for a full tree", brief._cone_block({"sparse": None}), "")
 
 
+def test_spawn_refuses_paths_the_default_branch_deleted():
+    group("spawn REFUSES a base whose declared paths the default branch has since DELETED (#92)")
+    if not have("git"):
+        skip("the deleted-path group", "git is not installed")
+        return
+    # REPORTED: a leaf spawned from a branch far behind main, to change files a merged PR had
+    # deleted on main. The Crawler did the work and every test went green, for code that no
+    # longer existed; the orchestrator found out from a later leaf's report.
+    cfg = make_repo(files={"README.md": "seed\n", "app/tour.dart": "x\n", "app/keep.dart": "x\n",
+                           "app/back.dart": "x\n", "app/other.dart": "x\n"})
+    sh(["git", "branch", "old"], cfg.root)
+    os.remove(os.path.join(cfg.root, "app", "tour.dart"))
+    os.remove(os.path.join(cfg.root, "app", "back.dart"))
+    with open(os.path.join(cfg.root, "app", "keep.dart"), "a") as fh:
+        fh.write("y\n")
+    sh(["git", "add", "-A"], cfg.root)
+    sh(["git", "commit", "-q", "-m", "remove the visual editor tour"], cfg.root)
+    with open(os.path.join(cfg.root, "app", "back.dart"), "w") as fh:
+        fh.write("restored\n")
+    sh(["git", "add", "-A"], cfg.root)
+    sh(["git", "commit", "-q", "-m", "bring back.dart back"], cfg.root)
+    g = new_graph(cfg)
+    g.add("trim the tour", leaf_id="D1",
+          paths=["app/tour.dart", "app/keep.dart", "app/back.dart", "app/other.dart"])
+    old = sh(["git", "rev-parse", "old"], cfg.root).stdout.strip()
+
+    d = worktree.drift_report(cfg, g.show("D1"), old)
+    eq("a path deleted on the default branch since the base is reported DELETED, with the "
+       "commit that did it", [(p, c.split(" ", 1)[1]) for p, c in d["deleted"]],
+       [("app/tour.dart", "remove the visual editor tour")])
+    eq("a path changed there is reported MODIFIED — and a path deleted then RESTORED is a "
+       "modification, not a removal", sorted(p for p, _ in d["modified"]),
+       ["app/back.dart", "app/keep.dart"])
+    head = sh(["git", "rev-parse", "HEAD"], cfg.root).stdout.strip()
+    eq("a base AT the default branch has nothing behind it",
+       worktree.drift_report(cfg, g.show("D1"), head)["deleted"], [])
+
+    def spawn(*extra):
+        return subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"),
+                               "spawn", "D1", "--no-claim", "--base", "old"] + list(extra),
+                              capture_output=True, text=True, cwd=cfg.root)
+
+    def tree_exists():
+        return os.path.isdir(os.path.join(cfg.worktree_root, "crawler-D1"))
+
+    p = spawn()
+    eq("spawn from a base that still has a path the default branch deleted REFUSES",
+       p.returncode, 3)
+    ok("...creates nothing", not tree_exists(), p.stdout)
+    ok("...and names the path AND the commit subject, which is what tells a refactor from a "
+       "removal", "app/tour.dart" in p.stderr and "remove the visual editor tour" in p.stderr,
+       p.stderr)
+    p = spawn("--despite-deleted", "app/keep.dart")
+    eq("an override naming a path that was NOT deleted is refused", p.returncode, 2)
+    ok("...and creates nothing either", not tree_exists(), p.stdout)
+    p = spawn("--despite-deleted", "app/tour.dart")
+    ok("naming the deleted path accepts it", p.returncode == 0, p.stderr[-600:])
+    ok("...and the spawn report still WARNS about it, and notes the modified paths",
+       "was DELETED on" in p.stdout and "changed on" in p.stdout, p.stdout[-800:])
+    brief_text = ""
+    brief_path = os.path.join(cfg.scratch_root, "crawler-D1", "BRIEF.md")
+    if os.path.exists(brief_path):
+        with open(brief_path) as fh:
+            brief_text = fh.read()
+    blk = brief._drift_block({"drift": {"ref": "origin/main", "deleted": [
+        ("app/a.dart", "abc123 remove the tour")], "modified": [("app/b.dart", "def456 tweak")]}})
+    ok("the brief block names each DELETED path with its commit, and says to follow a move or "
+       "stop on a removal", "app/a.dart" in blk and "abc123 remove the tour" in blk
+       and "MOVED" in blk and "REMOVED" in blk, blk)
+    ok("...and lists MODIFIED paths separately, as a likely conflict",
+       "app/b.dart" in blk and "conflict" in blk, blk)
+    eq("...and says nothing at all when nothing drifted", brief._drift_block({"drift": None}), "")
+    ok("...and the BRIEF tells the Crawler, whose tree cannot show that the file is gone",
+       "DELETED on" in brief_text and "app/tour.dart" in brief_text, brief_text[:0] or
+       "no brief found")
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

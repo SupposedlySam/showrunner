@@ -2471,6 +2471,48 @@ def _base_dependency_check(leaf, report, despite, rehearsing=False):
     die(msg, code=3)
 
 
+def _base_drift_check(leaf, drift, despite, rehearsing=False):
+    """REFUSE a base on which the leaf's declared paths still exist but the default branch has
+    DELETED them (#92). Named override: `--despite-deleted <path>`, for every such path.
+
+    Worth a refusal for the reason `_base_dependency_check` gives: the wrong tree is silent and
+    plausible. The file is there, the Crawler changes it, the tests go green, and the work is
+    for code that no longer exists — discovered only at merge. A MODIFIED path is not refused;
+    a conflict is likely, not certain, and it is printed.
+    """
+    deleted = drift.get("deleted") or []
+    named = set(despite or [])
+    unmatched = named - {p for p, _ in deleted}
+    if unmatched:
+        die("--despite-deleted named %s, which was not deleted on %s since this base.\n"
+            "An override copied from an earlier command is not a decision. Deleted here: %s"
+            % (", ".join(sorted(unmatched)), drift.get("ref") or "the default branch",
+               ", ".join(p for p, _ in deleted) or "(nothing)"), code=2)
+    uncovered = [(p, c) for p, c in deleted if p not in named]
+    if not uncovered:
+        if named:
+            print("%sACCEPTED PATHS DELETED ON %s on purpose (--despite-deleted %s)%s"
+                  % (YEL, drift.get("ref"), ", ".join(sorted(named)), OFF))
+        return
+    msg = ("%s declares path(s) that %s has DELETED since this base (merge-base %s):\n%s\n"
+           "The Crawler's tree still has them, so it can change them, test them green and close "
+           "— for code that no longer exists on %s. Read the commit: a refactor MOVED the code "
+           "(re-point the leaf with `showrunner edit`), a removal may make the leaf obsolete.\n"
+           "(%s as this checkout last fetched it — not fetched here.)\n"
+           "Cut from a newer base:\n"
+           "    showrunner spawn %s --base %s\n"
+           "or accept it deliberately by naming each path:\n"
+           "    showrunner spawn %s %s"
+           % (leaf["id"], drift.get("ref"), (drift.get("merge_base") or "?")[:12],
+              "\n".join("  %s — %s" % (p, c) for p, c in uncovered), drift.get("ref"),
+              drift.get("ref"), leaf["id"], drift.get("ref"), leaf["id"],
+              " ".join("--despite-deleted %s" % p for p, _ in uncovered)))
+    if rehearsing:
+        eprint("%sWOULD REFUSE: %s%s" % (RED, msg, OFF))
+        return
+    die(msg, code=3)
+
+
 def cmd_spawn(args):
     cfg = _cfg(args)
     g = _graph(cfg)
@@ -2541,6 +2583,9 @@ def cmd_spawn(args):
                          rehearsing=bool(getattr(args, "dry_run", False)))
     _base_dependency_check(leaf, base_seen, getattr(args, "despite_base", None) or [],
                            rehearsing=bool(getattr(args, "dry_run", False)))
+    drift = worktree.drift_report(cfg, leaf, base_seen.get("sha"))
+    _base_drift_check(leaf, drift, getattr(args, "despite_deleted", None) or [],
+                      rehearsing=bool(getattr(args, "dry_run", False)))
     if getattr(args, "dry_run", False):
         session = args.session or dispatch.new_session_id()
         model = dispatch.resolve_model(cfg, decision)
@@ -2558,7 +2603,8 @@ def cmd_spawn(args):
         return 0
 
     record = worktree.spawn(cfg, leaf, actor=args.actor, base=args.base or "HEAD",
-                            branch=args.branch, sparse=getattr(args, "sparse", None))
+                            branch=args.branch, sparse=getattr(args, "sparse", None),
+                            drift=drift)
     # THE ROOM IS OPENED HERE, BEFORE THE BRIEF, and that ordering is the whole fix. The
     # channel still has to be named before the brief is written — a room the agent is never
     # told about is one it never joins, indistinguishable from one that was never opened — but
@@ -2647,6 +2693,14 @@ def cmd_spawn(args):
         print("  cone     full checkout (no --sparse, no sparse_by_label match)")
     print("  branch   %s" % record["branch"])
     _print_base(base_seen)
+    for p, c in drift.get("deleted") or []:
+        print("  %sWARN%s     leaf path %s was DELETED on %s since the base (%s)"
+              % (YEL, OFF, p, drift.get("ref"), c))
+    for p, c in drift.get("modified") or []:
+        print("  note     leaf path %s changed on %s since the base (%s) — expect a conflict"
+              % (p, drift.get("ref"), c))
+    if drift.get("unknown"):
+        print("  note     leaf paths not compared with the default branch: %s" % drift["unknown"])
     print("  scratch  %s" % rel(record["scratch"], cfg.root))
     for line in record["injected"]:
         print("  inject   %s" % line)
@@ -3583,6 +3637,9 @@ def build_parser():
                    help="something you already checked; the Crawler is asked to confirm or refute it")
     s.add_argument("--despite-base", action="append", metavar="LEAF",
                    help="accept a base missing this dependency, naming which one (#73)")
+    s.add_argument("--despite-deleted", action="append", metavar="PATH",
+                   help="accept a base on which this declared leaf path still exists though the "
+                        "default branch has deleted it. Repeatable; must name every such path")
     s.add_argument("--sparse", nargs="+", metavar="DIR", default=None,
                    help="sparse-checkout cone for this Crawler's tree: only these top-level "
                         "directories are written (plus root files, .claude and every directory "
