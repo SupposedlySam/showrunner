@@ -305,6 +305,111 @@ _OWN_VERB = re.compile(r"^\s*(?:[A-Za-z_][A-Za-z_0-9]*=\S*\s+)*"    # leading FO
 _CHAINED = re.compile(r"[;&|<>\n]|\$\(|`")
 
 
+# Verbs whose OPERANDS are destroyed. `mv` is here because moving a directory away removes it
+# from where its owner will look; `find` only with -delete or an -exec of rm.
+_DESTROYING = {"rm", "rmdir", "unlink", "mv", "find", "git"}
+_OPERATORS = {";", "&&", "||", "|", "&", "|&"}
+
+
+def _argvs(command):
+    """Each command's argv, with quotes RESOLVED rather than emptied.
+
+    `reach._command_segments` empties quoted text so a phrase inside an argument is not read as
+    a command. Here the quoted text IS the subject — `rm -rf "/repo/.showrunner/..."` must see
+    its operand — so this tokenizes with the shell's own quoting rules and splits on operator
+    tokens, which leaves a `|` inside quotes as part of its word. Heredoc bodies are dropped.
+    """
+    import shlex
+    from .reach import _strip_heredocs
+    text = _strip_heredocs(command or "").replace("\n", " ; ")
+    lex = shlex.shlex(text, posix=True, punctuation_chars=";&|")
+    lex.whitespace_split = True
+    out, cur = [], []
+    try:
+        for tok in lex:
+            if tok in _OPERATORS:
+                if cur:
+                    out.append(cur)
+                cur = []
+            else:
+                cur.append(tok)
+    except ValueError:              # an unbalanced quote: nothing a shell would run either
+        return []
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _destroyed_operands(argv):
+    """The paths this argv would destroy, or [] if it destroys nothing."""
+    while argv and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", argv[0])
+                    or argv[0] in ("sudo", "command", "builtin", "nohup", "time")):
+        argv = argv[1:]
+    if not argv:
+        return []
+    verb = os.path.basename(argv[0])
+    if verb not in _DESTROYING:
+        return []
+    args = argv[1:]
+    if verb == "find":
+        if "-delete" in args or ("-exec" in args and "rm" in args):
+            return [a for a in args if not a.startswith("-") and not a.startswith("(")][:1] \
+                or ["."]
+        return []
+    if verb == "git":
+        # `git clean -x/-X` removes IGNORED files, and campaign state is ignored.
+        if args[:1] == ["clean"] and any(re.match(r"^-[a-zA-Z]*[xX]", a) for a in args[1:]):
+            paths = [a for a in args[1:] if not a.startswith("-")]
+            return paths or ["."]
+        return []
+    operands = [a for a in args if not a.startswith("-")]
+    if verb == "mv":
+        return operands[:-1]            # the sources; the destination is not destroyed
+    return operands
+
+
+def scratch_destruction(cfg, session, command, cwd=None):
+    """A Crawler's shell command that would destroy campaign scratch it does not own (#94).
+
+    Returns [(operand, resolved)] for each such target, or []. The scratch root holds every
+    Crawler's scratch and whatever the lead keeps there — briefs, recordings, evidence, often
+    the only copy — and a Crawler's own dir is the one part of it that is its to remove. A
+    consumer's write guard refused a Crawler's Write under that root and let its `rm -rf` of the
+    same tree through, fifteen seconds later; the Crawler had `mkdir -p`'d the folder it was
+    told to use and removed it as if it had made it.
+
+    ONLY CRAWLERS, and only USE: the verb must be at a command boundary and the path must be its
+    operand, so a path merely mentioned is not refused — the same line the rest of this guard
+    draws. Still uncovered, named: a path built from a shell variable, a script that deletes
+    once run, and a `python3 -c` that removes files.
+    """
+    if not command or not session:
+        return []
+    from .roles import crawler_scratch
+    own = crawler_scratch(cfg, session)
+    if not own:
+        return []
+    root = os.path.realpath(cfg.scratch_root)
+    campaigns = os.path.dirname(os.path.dirname(root))
+    protected = [root]
+    if os.path.basename(campaigns) == "campaigns":
+        protected = [os.path.join(campaigns, c, "scratch") for c in sorted(os.listdir(campaigns))]
+        protected = [os.path.realpath(p) for p in protected] or [root]
+    own = os.path.realpath(own)
+    base = cwd or os.getcwd()
+    hits = []
+    for argv in _argvs(command):
+        for operand in _destroyed_operands(argv):
+            path = os.path.realpath(os.path.join(base, os.path.expanduser(operand)))
+            inside = any(path == p or path.startswith(p + os.sep) for p in protected)
+            # A target that CONTAINS the protected root destroys it too (`rm -rf .showrunner`).
+            contains = any(p.startswith(path + os.sep) for p in protected)
+            mine = path == own or path.startswith(own + os.sep)
+            if (inside and not mine) or contains:
+                hits.append((operand, path))
+    return hits
+
+
 def own_command(command):
     """True when `command` is a showrunner worktree/lease invocation AND NOTHING ELSE.
 
@@ -411,6 +516,22 @@ def guard(cfg, session, tool=None, tool_input=None, cwd=None, sr=None):
                if isinstance(tool_input.get(k), str) and tool_input.get(k)]
     if cwd:
         targets.append(cwd)
+
+    # CAMPAIGN SCRATCH A CRAWLER DOES NOT OWN IS NOT ITS TO DESTROY (#94). A refusal on USE
+    # only — a destructive verb whose operand is the path — so it does not break the
+    # report-never-refuse rule for paths a command merely names, below.
+    doomed = scratch_destruction(cfg, session, command, cwd)
+    if doomed:
+        return False, (
+            "BLOCKED: this would destroy campaign scratch that is not yours:\n%s\n"
+            "The scratch root holds every Crawler's scratch and the lead's own files — briefs, "
+            "recordings, evidence — and often the only copy. Your own scratch dir is yours to "
+            "clean; nothing else under it is, even a folder you `mkdir -p`'d, because that "
+            "cannot tell you whether it already existed.\n"
+            "Delete only files you created, by exact path, inside your own scratch dir. If "
+            "something else there has to go, say so to the orchestrator."
+            % "\n".join("  %s -> %s" % (o, p) for o, p in doomed)), {
+                "scratch_destruction": [p for _, p in doomed], "tree": None, "holder": None}
 
     # A COMMAND THAT NAMES SOMEBODY ELSE'S TREE: reported, never refused (#58). Until now the
     # command string was not read at all, so `cd /tmp && python3 -c "open('/repo/.worktrees/

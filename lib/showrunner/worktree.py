@@ -241,6 +241,18 @@ def cone_gaps(cfg, tree, base="HEAD"):
     return gaps
 
 
+def live_crawler_in(cfg, name):
+    """The campaign record of a LIVE Crawler named `name`, or None.
+
+    Reporting posture (`campaign.live`): cannot-tell counts as live, which is the safe direction
+    for anything about to advise removing that Crawler's tree.
+    """
+    from . import campaign as _campaign
+    entry = next((c for c in _campaign.load(cfg).get("crawlers", [])
+                  if c.get("crawler") == name), None)
+    return entry if entry and _campaign.live(entry) else None
+
+
 def create(cfg, name, branch, base="HEAD", cone=None):
     """Create the worktree. Refuses rather than degrading if placement is unsafe.
 
@@ -253,6 +265,21 @@ def create(cfg, name, branch, base="HEAD", cone=None):
     ensure_root(cfg)
     path = worktree_path(cfg, name)
     if os.path.exists(path):
+        # A LIVE CRAWLER'S TREE IS NOT A LEFTOVER (#93). The way-out below is right for a tree a
+        # failed launch left behind and destructive for one a running Crawler stands in: an
+        # operator followed it, found the tree empty (two minutes in, nothing committed), removed
+        # it and its branch, and the live session lost its tree. `live` is the reporting posture
+        # — cannot-tell counts as live — which is the safe direction for advice about deleting.
+        entry = live_crawler_in(cfg, name)
+        if entry:
+            die("worktree path already exists: %s\n"
+                "  A LIVE Crawler is working in it: pid %s, session %s, recorded by this "
+                "campaign.\n"
+                "  This is NOT a leftover. Do NOT remove the tree or its branch — that deletes "
+                "the ground under a running session, and an empty `git status` only means it has "
+                "not committed yet.\n"
+                "  `showrunner status` shows it. Message it, or wait for it to close."
+                % (path, entry.get("pid"), entry.get("session") or "?"), code=3)
         # NAME THE WAY OUT. A launch whose post-checkout hook failed leaves the tree behind, so
         # the retry hits this refusal — and the operator then needs the tree AND the branch gone
         # before they can try again. Reported after hitting it twice in one night: the refusal
@@ -266,7 +293,8 @@ def create(cfg, name, branch, base="HEAD", cone=None):
             "(`showrunner reap` reports abandoned trees).\n"
             "\n"
             "  If a previous launch left it behind — a post-checkout hook can fail AFTER the\n"
-            "  tree is created — this is the way out, in order:\n"
+            "  tree is created — and `showrunner status` shows nothing running in it, this is\n"
+            "  the way out, in order:\n"
             "      git -C %s status --porcelain     # empty means nothing is lost\n"
             "      git worktree remove %s\n"
             "      git branch -D %s"

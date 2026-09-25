@@ -2513,10 +2513,35 @@ def _base_drift_check(leaf, drift, despite, rehearsing=False):
     die(msg, code=3)
 
 
+def _live_claim_check(leaf):
+    """REFUSE, before anything is created, a spawn whose leaf is held by a live process (#93).
+
+    The claim used to be taken AFTER the worktree, so a second spawn of a leaf whose Crawler was
+    already running stopped at "worktree path already exists" — a refusal whose way-out is to
+    remove the tree. Asked first, the answer is the true one: somebody has this leaf, and here is
+    who and where. Boot-scoped like `claim`'s own check, so a reused pid after a reboot does not
+    hold a leaf.
+    """
+    if leaf.get("status") != "in_progress" or not leaf.get("claim_pid"):
+        return
+    from .util import boot_token, pid_alive, same_boot
+    if leaf.get("claim_boot") and same_boot(leaf["claim_boot"], boot_token()) is False:
+        return
+    if not pid_alive(leaf.get("claim_pid")):
+        return
+    die("%s is already claimed by %s (pid %s, alive), working in %s.\n"
+        "Nothing was created. If that is a Crawler, it is running in that tree: do NOT remove "
+        "the tree or its branch. `showrunner status` shows it."
+        % (leaf["id"], leaf.get("actor") or "?", leaf.get("claim_pid"),
+           leaf.get("claim_tree") or "?"), code=3)
+
+
 def cmd_spawn(args):
     cfg = _cfg(args)
     g = _graph(cfg)
     leaf = g.show(args.id)
+    if not args.no_claim:
+        _live_claim_check(leaf)
     decision = lanes.route(cfg, leaf)
     lanes.log(cfg, [decision])
 

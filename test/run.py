@@ -15950,9 +15950,141 @@ def test_spawn_refuses_paths_the_default_branch_deleted():
        "no brief found")
 
 
+def test_a_refused_spawn_never_points_at_a_live_crawlers_tree():
+    group("a second spawn of a live leaf says who holds it, and never advises removing a LIVE "
+          "Crawler's tree (#93)")
+    if not have("git"):
+        skip("the live-tree group", "git is not installed")
+        return
+    # REPORTED: a spawn stopped at "worktree path already exists" and printed the way out —
+    # remove the tree and the branch. The tree belonged to a Crawler an earlier spawn had
+    # launched two minutes before; it was empty because nothing was committed yet. The operator
+    # followed the advice and the live session lost its tree.
+    cfg = make_repo()
+    cfg.data["harness"] = dict(cfg.data.get("harness") or {}, require=False)
+    g = new_graph(cfg)
+    g.add("held leaf", leaf_id="L1")
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+    try:
+        rec = worktree.spawn(cfg, g.show("L1"), actor="a")
+        g.claim("L1", "a", pid=sleeper.pid, tree=rec["worktree"])
+
+        # 1. THE CLAIM IS ASKED FIRST, so the refusal names the holder, not a directory.
+        p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "spawn",
+                            "L1", "--actor", "a"], capture_output=True, text=True, cwd=cfg.root)
+        eq("spawning a leaf a LIVE process holds is refused as held (exit 3)", p.returncode, 3)
+        ok("...naming the holder's pid and tree, and saying the tree must not be removed",
+           str(sleeper.pid) in p.stderr and rec["worktree"] in p.stderr
+           and "do NOT remove" in p.stderr, p.stderr[-600:])
+        ok("...and it does NOT print the leftover-tree way-out",
+           "git worktree remove" not in p.stderr, p.stderr[-600:])
+
+        # 2. THE TREE REFUSAL ITSELF, reached with no claim to ask (e.g. --no-claim): a tree the
+        #    campaign record says a live Crawler is in is not a leftover.
+        from showrunner.util import process_started, Refused
+        campaign.record_spawn(cfg, rec)    # what cmd_spawn writes; worktree.spawn does not
+        campaign.set_state(cfg, rec["crawler"], "running", pid=sleeper.pid,
+                           pid_started=process_started(sleeper.pid))
+        try:
+            worktree.create(cfg, rec["crawler"], rec["branch"] + "-again")
+            said = ""
+        except Refused as exc:
+            said = str(exc)
+        ok("a path a LIVE Crawler stands in is refused as LIVE, with its pid",
+           "LIVE Crawler" in said and str(sleeper.pid) in said, said[:400])
+        ok("...and without the removal commands, which are the destructive half",
+           "git worktree remove" not in said and "branch -D" not in said, said[:400])
+        live = worktree.live_crawler_in(cfg, rec["crawler"])
+        eq("live_crawler_in returns the record of the Crawler that is running there",
+           (live or {}).get("pid"), sleeper.pid)
+        eq("...and None for a name nothing recorded", worktree.live_crawler_in(cfg, "nobody"),
+           None)
+        campaign.set_state(cfg, rec["crawler"], "running", pid=sleeper.pid,
+                           pid_started=process_started(sleeper.pid) - 3600)
+        eq("...and None for a RECYCLED pid — alive, but started an hour away from the launch",
+           worktree.live_crawler_in(cfg, rec["crawler"]), None)
+        campaign.set_state(cfg, rec["crawler"], "running", pid=sleeper.pid,
+                           pid_started=process_started(sleeper.pid))
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+
+    # THE PAIR: once the Crawler is gone, the way out is exactly what the operator needs.
+    eq("with the process gone, live_crawler_in answers None",
+       worktree.live_crawler_in(cfg, rec["crawler"]), None)
+    try:
+        worktree.create(cfg, rec["crawler"], rec["branch"] + "-again")
+        said = ""
+    except Exception as exc:
+        said = str(exc)
+    ok("with the Crawler dead, the refusal still prints the way out for a genuine leftover",
+       "git worktree remove" in said and "LIVE Crawler" not in said, said[:400])
+    ok("...and asks for `showrunner status` to show nothing running first",
+       "showrunner status" in said, said[:400])
+
+
+def test_a_crawler_cannot_shell_delete_scratch_it_does_not_own():
+    group("a Crawler's rm -rf of campaign scratch it does not own is REFUSED, on use and never "
+          "on mention (#94)")
+    if not have("git"):
+        skip("the scratch-destruction group", "git is not installed")
+        return
+    # REPORTED: a consumer's write guard refused a Crawler's Write under the campaign scratch
+    # root, and fifteen seconds later the same Crawler `rm -rf`'d the lead's folder there — 105
+    # briefs and recordings with no other copy. It had `mkdir -p`'d the folder it was told to
+    # use, and removed it as if it had made it.
+    cfg = make_repo()
+    cfg.data["harness"] = dict(cfg.data.get("harness") or {}, require=False)
+    g = new_graph(cfg)
+    g.add("a leaf", leaf_id="R1")
+    rec = worktree.spawn(cfg, g.show("R1"), actor="c")
+    campaign.record_spawn(cfg, rec, session="S-CRAWLER-94")
+    own = os.path.realpath(cfg.abspath(rec["scratch"]))
+    lead = os.path.join(cfg.scratch_root, "fold-leaves")
+    os.makedirs(os.path.join(lead, "L1"))
+    with open(os.path.join(lead, "L1", "brief.md"), "w") as fh:
+        fh.write("the only copy\n")
+
+    def verdict(command, session="S-CRAWLER-94", cwd=None):
+        allow, msg, _ = lease.guard(cfg, session, tool="Bash", tool_input={"command": command},
+                                    cwd=cwd or rec["worktree"])
+        return allow, msg
+
+    a, m = verdict("rm -rf %s" % lead)
+    ok("the reported command — a Crawler's rm -rf of the lead's folder — is REFUSED",
+       a is False and "not yours" in m, m[:300])
+    ok("...naming the resolved target", os.path.realpath(lead) in m, m[:300])
+    for label, cmd, cwd in (
+            ("a QUOTED operand", 'rm -rf "%s"' % lead, None),
+            ("a RELATIVE operand, from the scratch root", "rm -rf fold-leaves", cfg.scratch_root),
+            ("mv away", "mv %s /tmp/elsewhere" % lead, None),
+            ("find -delete", "find %s -name '*.md' -delete" % lead, None),
+            ("a target CONTAINING the scratch root", "rm -rf %s" % os.path.join(cfg.root,
+                                                                                ".showrunner"),
+             None),
+            ("after another command", "cd /tmp && rm -r %s" % lead, None)):
+        ok("...and so is %s" % label, verdict(cmd, cwd=cwd)[0] is False, cmd)
+
+    # THE PAIRS. Without them every assertion above passes against a guard that refuses all rm.
+    ok("the Crawler's OWN scratch is its to clean",
+       verdict("rm -rf %s" % os.path.join(own, "tmp"))[0] is True, own)
+    ok("a path MENTIONED rather than destroyed is not refused — echo and grep of it pass",
+       verdict('echo "rm -rf %s" && grep -r x %s' % (lead, lead))[0] is True)
+    ok("a session that is NOT a Crawler (the lead) is not constrained by this",
+       verdict("rm -rf %s" % lead, session="S-LEAD-94", cwd=cfg.root)[0] is True)
+    ok("an rm of something outside the scratch root is not this guard's business",
+       verdict("rm -rf %s" % os.path.join(rec["worktree"], "build"))[0] is True)
+    ok("...and nothing was deleted by asking", os.path.exists(os.path.join(lead, "L1",
+                                                                          "brief.md")))
+
+    text = brief.build(cfg, g.show("R1"), rec)
+    ok("the brief says to delete only files you created, by exact path, never a directory",
+       "Delete only files you created" in text and "never a directory" in text)
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

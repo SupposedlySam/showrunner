@@ -154,6 +154,12 @@ showrunner integrate                 # serial merge, checks re-run on each MERGE
 # worktree is KEPT because it may hold the only copy of real work. `unpark` when fixed.
 # Deliberately not a rollback: steering a stale claim to `reap` can propose closing chat
 # rooms belonging to another agent's Crawlers, sweeping far wider than the failure.
+#
+# A LEAF A LIVE PROCESS HOLDS IS REFUSED FIRST (exit 3), before anything is created, naming the
+# holder's pid and tree — so a second spawn of a running Crawler's leaf never reaches the
+# "worktree path already exists" refusal. That refusal, in turn, checks the campaign record:
+# when a live Crawler is in the tree it says so and prints NO removal commands. An empty
+# `git status` there means the Crawler has not committed yet, not that nothing would be lost.
 
 # A chat room is NOT optional under --launch. A Crawler refused at its turn-end stays alive
 # and inert, and a message is the only thing that restarts it. Nothing is vendored:
@@ -469,6 +475,16 @@ without being written — an echo, a grep pattern, a message — and a guard tha
 `echo /other/tree` is one people learn to route around. Weaker evidence gets a weaker verdict.
 **Report, never refuse** is the permanent posture for path evidence; the LEASE is what protects
 a tree from whatever gets in anyway.
+
+**The one refusal on a Bash path is USE, not mention: a Crawler destroying campaign scratch it
+does not own.** `rm`, `rmdir`, `unlink`, `mv` (its sources), `find … -delete` or `-exec rm`, and
+`git clean -x/-X`, at a command boundary, whose OPERAND resolves under any campaign's scratch
+root and outside the calling Crawler's own scratch dir — or contains that root — are refused.
+Quotes are resolved rather than emptied, because here the quoted text is the operand. The scratch
+root holds every Crawler's scratch and the lead's own files, often the only copy, and a Crawler
+that `mkdir -p`'d a folder cannot tell whether it made it. Only Crawler sessions are held to it;
+the orchestrator is not. An `echo` or `grep` naming the same path passes. Still unseen: a path
+from a shell variable, a script that deletes once run, a `python3 -c` that removes files.
 
 **A LITERAL variable assignment IS resolved**, because that is the shape that occurs by default
 rather than the edge case — an orchestrator reaches its worktrees through variables, so
@@ -1092,6 +1108,11 @@ captured output, fixtures, before/after artifacts. Not a shared temp dir: two Cr
 the same obvious filename there can commit one's message onto the other's changes — a real
 commit, plausible message, describing work it does not contain, every gate green. You and your siblings are the same model solving similar tasks from similar prompts, so
 you converge on the same obvious filename far more often than independent actors would.
+
+**Delete only files you created, by exact path — never a directory.** Your scratch dir sits among
+other Crawlers' and the orchestrator's, and `mkdir -p` on an existing folder says nothing about
+who made it. A Crawler's `rm`/`mv`/`find -delete`/`git clean -x` of scratch it does not own is
+refused.
 
 **5. Run single-consumer commands through the lock**, never directly:
 

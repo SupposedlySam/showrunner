@@ -440,6 +440,12 @@ the commit, because its subject says whether the code moved or was removed.
 `showrunner spawn <leaf> --despite-deleted <path>` accepts it, naming each path. A path merely
 changed there is a note about a likely conflict, not a refusal. Both reach the brief.
 
+**A second spawn of a leaf a live process holds is refused before anything is created**, naming
+the holder's pid and tree. And the "worktree path already exists" refusal, whose way out is to
+remove the tree, checks the campaign record first: when a live Crawler stands in that tree it
+says so and prints no removal commands, because an empty `git status` there means only that the
+Crawler has not committed yet.
+
 **A window reload does not cost the seat.** Reloading a VS Code window restarts the extension
 host under a new pid, so the recorded holder is dead, the lock correctly reports STALE, and the
 resolver correctly skips it — every step right and the outcome useless, because the same logical
@@ -650,6 +656,10 @@ behaviour.
   own changes — a real commit, a plausible message, describing work it does not contain, every gate
   green. Crawlers are the same model solving similar tasks from similar
   prompts, so they converge on the same obvious filename far more often than independent actors would.
+  Only its own dir is its to delete: a Crawler's `rm`, `mv`, `find -delete` or `git clean -x`
+  aimed at other campaign scratch — a sibling's, or the lead's briefs and recordings — is refused
+  by the worktree guard. That is a refusal on USE (the path is the destroyed operand), so a path
+  merely mentioned in a command is still only reported.
 - **The gitignored files the build actually needs**, from an explicit configured list — symlinked
   where possible, added to the worktree's exclude file so `git add -A` cannot stage them, and verified
   after injection. A missing declared path **aborts the spawn**, because a Crawler that cannot reach a

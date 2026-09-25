@@ -201,6 +201,12 @@ including the artifact you cite as `--proof`. (It is kept only if it still holds
 changes, which yours should not once you have closed.) The scratch dir named above is in the main
 checkout and survives.
 
+**Delete only files you created in this session, by exact path — never a directory.** The
+scratch root around your dir holds other Crawlers' scratch and the orchestrator's own files,
+often the only copy. `mkdir -p` on a folder that already exists succeeds silently, so having
+run it tells you nothing about who made the folder. showrunner refuses a Crawler's `rm`,
+`rmdir`, `mv`, `find -delete` or `git clean -x` aimed at scratch that is not yours.
+
 **If a write guard refuses that path, the guard is out of date and the path is right.**
 Being outside your worktree is the POINT -- it is why your evidence outlives the tree --
 so a guard that allowlists only paths inside the worktree will refuse the one directory
