@@ -124,7 +124,8 @@ mkdir -p "$TARGET/.showrunner/hooks"
 # A per-file `cp` needs somebody to remember; a list is the thing the suite can compare against
 # what the registration actually names.
 for hook_name in worktree-guard.sh inert-crawler-gate.sh waiting-probe.sh whoami.sh \
-                 dispatch-guard.sh pipeline-status-gate.sh reach-gate.sh wake-gate.sh; do
+                 dispatch-guard.sh pipeline-status-gate.sh reach-gate.sh wake-gate.sh \
+                 write-guard.sh; do
   cp "$SRC/.showrunner/hooks/$hook_name" "$TARGET/.showrunner/hooks/$hook_name"
   chmod +x "$TARGET/.showrunner/hooks/$hook_name"
   case "$hook_name" in
@@ -136,6 +137,7 @@ for hook_name in worktree-guard.sh inert-crawler-gate.sh waiting-probe.sh whoami
     pipeline-status-gate.sh) note="PreToolUse on Bash: notices when \$? is about to read a pipe's truncator instead of the command" ;;
     reach-gate.sh)          note="PreToolUse: names the showrunner mechanism for what a call reached for; advice only, never refuses" ;;
     wake-gate.sh)           note="PreToolUse on Bash: says ONCE when long work starts with no mandate bound, so a wake has a goal to return to; advice only" ;;
+    write-guard.sh)         note="PreToolUse on the edit tools AND Bash: refuses a write the session's role may not make, heredocs and redirections included" ;;
   esac
   echo "  copied  .showrunner/hooks/$hook_name ($note)"
 done

@@ -7221,6 +7221,13 @@ def test_hook_registration():
         # a probe an agent can set is a watchdog an agent can switch off.
         "waiting-probe.sh": "arming the idle watchdog is a human decision; showrunner must not "
                             "wire the thing that would silence its own supervision",
+        # SHIPPED AND WIRED BY `worktree register` FOR CONSUMERS (#95), not wired HERE yet:
+        # registering it in this checkout enforces this repo's own roles on its development
+        # sessions, and the seat the owner agent holds here (campaign-lead) may not write lib/ or
+        # test/. Whether to change that role or that seat is the operator's call, not a side
+        # effect of shipping the guard.
+        "write-guard.sh": "enforcing this checkout's roles on its own development sessions is an "
+                          "operator decision about those roles, pending with the operator",
     }
     hooks = os.path.join(ROOT, ".showrunner", "hooks")
     settings = [os.path.join(ROOT, ".claude", n)
@@ -16082,9 +16089,193 @@ def test_a_crawler_cannot_shell_delete_scratch_it_does_not_own():
        "Delete only files you created" in text and "never a directory" in text)
 
 
+def test_shared_brief_boilerplate_does_not_make_every_pair_collide():
+    group("prose-word overlap from shared brief boilerplate is REPORTED, not a live-collision "
+          "refusal; named paths and backticked symbols still block (#96)")
+    if not have("git"):
+        skip("the boilerplate-collision group", "git is not installed")
+        return
+    # REPORTED: every second `spawn --launch` of a campaign day was refused, on files like
+    # `.ai/rules/...` and `.claude/hooks/...` that neither leaf touches — reached only because
+    # both briefs carried the same house-rules boilerplate, whose bare identifiers grep them.
+    cfg = make_repo(files={"README.md": "seed\n", "app/panel.dart": "class Panel {}\n",
+                           "app/profile.dart": "class Profile {}\n",
+                           "rules/house.md": "house_rules_pointer and run_flutter_analyze\n"})
+    g = new_graph(cfg)
+    boiler = " Follow house_rules_pointer; finish with run_flutter_analyze."
+    g.add("text panel", leaf_id="B1", body="Fix app/panel.dart padding." + boiler)
+    g.add("profile header", leaf_id="B2", body="Fix app/profile.dart header." + boiler)
+    g.add("panel again", leaf_id="B3", body="Also fix app/panel.dart colours." + boiler)
+    g.add("marks a symbol", leaf_id="B4", body="Rename `Panel` everywhere." + boiler)
+    files = collide.tracked_files(cfg.root)
+    live = [g.show("B1")]
+
+    est = collide.estimate(cfg, g.show("B2"), files)
+    ok("the boilerplate file IS still in the estimate — nothing is hidden",
+       "rules/house.md" in est["paths"], sorted(est["paths"]))
+    ok("...but it does not BLOCK, because the leaf has firm evidence (a named path)",
+       "rules/house.md" not in est["blocking"] and "app/profile.dart" in est["blocking"],
+       sorted(est["blocking"]))
+    found = collide.live_conflicts(cfg, g.show("B2"), live, files)
+    ok("two leaves that share only boilerplate do NOT block each other",
+       found and not found[0]["blocks"], found)
+    ok("...and the prose-only overlap is REPORTED, naming the file",
+       found and "rules/house.md" in found[0]["loose"], found)
+
+    # THE PAIRS. Without these every assertion above passes against a check that never blocks.
+    hit = collide.live_conflicts(cfg, g.show("B3"), live, files)
+    ok("two leaves naming the SAME path still block", hit and hit[0]["blocks"]
+       and "app/panel.dart" in hit[0]["files"], hit)
+    marked = collide.live_conflicts(cfg, g.show("B4"), live, files)
+    ok("a BACKTICKED symbol is firm evidence too: `Panel` reaches app/panel.dart and blocks",
+       marked and marked[0]["blocks"] and "app/panel.dart" in marked[0]["files"], marked)
+    g.add("prose only", leaf_id="B5", body="Tidy things." + boiler)
+    only = collide.estimate(cfg, g.show("B5"), files)
+    ok("a leaf with NOTHING firm still blocks on its prose matches — its only estimate",
+       "rules/house.md" in only["blocking"], sorted(only["blocking"]))
+
+    waves, _, _ = collide.plan_waves(cfg, [g.show("B1"), g.show("B2")], files)
+    ok("`plan` puts two boilerplate-sharing leaves in ONE wave", len(waves) == 1
+       and set(waves[0]) == {"B1", "B2"}, waves)
+
+
+def test_a_roles_writes_are_enforced_on_bash_too():
+    group("showrunner's write guard enforces a role's `writes` on the edit tools AND Bash — the "
+          "heredoc route around an Edit refusal is the same write (#95)")
+    if not have("git"):
+        skip("the write-guard group", "git is not installed")
+        return
+    from showrunner import writeguard
+    # REPORTED: a campaign-lead's subagent had an Edit in app/** refused by the project's guard,
+    # made the identical edit through a Python heredoc in Bash, and committed it. showrunner
+    # published `writes` and told the reader a hook of theirs must cover Bash; nothing did.
+    cfg = make_repo(files={"README.md": "seed\n", "app/x.dart": "class X {}\n",
+                           "docs/a.md": "doc\n"})
+    home = tempfile.mkdtemp(prefix="sr-wg-home-")
+    upath = os.path.join(home, "showrunner", "roles.json")
+    os.makedirs(os.path.dirname(upath))
+    with open(upath, "w") as fh:
+        json.dump({"roles": {"lead": {"acquire": "claim", "writes": ["docs/**", "*.md"]},
+                             "keeper": {"acquire": "claim", "writes": {"deny": ["app/**"]}}}},
+                  fh)
+    prev = roles.USER_PATH
+    roles.USER_PATH = upath
+    try:
+        roles.claim(cfg, "lead", "S-LEAD-95", pid=os.getpid())
+        roles.claim(cfg, "keeper", "S-KEEP-95", pid=os.getpid())
+
+        def v(tool, tin, session="S-LEAD-95"):
+            return writeguard.verdict(cfg, session, tool, tin, cwd=cfg.root)
+
+        heredoc = ("python3 - <<'PY'\np='app/x.dart'\ns=open(p).read()\n"
+                   "open(p,'w').write(s.replace('X','Y'))\nPY")
+        a, m = v("Bash", {"command": heredoc})
+        ok("the REPORTED bypass — a Python heredoc writing app/x.dart — is refused",
+           a is False and "app/x.dart" in m and "lead" in m, m[:300])
+        for label, tool, tin in (
+                ("an Edit of the same file", "Edit", {"file_path": "app/x.dart"}),
+                ("sed -i", "Bash", {"command": "sed -i 's/X/Y/' app/x.dart"}),
+                ("a redirection", "Bash", {"command": "echo y > app/x.dart"}),
+                ("tee", "Bash", {"command": "echo y | tee app/new.dart"}),
+                ("bash -c around a redirection", "Bash",
+                 {"command": "bash -c 'echo y >> app/x.dart'"})):
+            ok("...and so is %s" % label, v(tool, tin)[0] is False, tin)
+
+        # THE PAIRS: everything above passes against a guard that refuses all writes.
+        for label, tool, tin in (
+                ("a Write inside may-write docs/**", "Write", {"file_path": "docs/new.md"}),
+                ("a redirection into docs/", "Bash", {"command": "echo y > docs/b.md"}),
+                ("a *.md at any depth", "Write", {"file_path": "app/NOTES.md"}),
+                ("a READ of the denied file", "Bash", {"command": "cat app/x.dart | grep X"}),
+                ("a quoted mention of a redirect", "Bash", {"command": "echo 'y > app/x.dart'"}),
+                ("read-only inline Python", "Bash",
+                 {"command": "python3 -c \"print(open('app/x.dart').read())\""}),
+                ("a write OUTSIDE the repo", "Bash", {"command": "echo y > /tmp/sr-wg-out"})):
+            ok("%s is allowed" % label, v(tool, tin)[0] is True, tin)
+        for label, cmd in (
+                ("node -e writeFileSync", "node -e \"require('fs').writeFileSync('app/n.dart','x')\""),
+                ("python -c Path.write_text",
+                 "python3 -c \"import pathlib; pathlib.Path('app/p.dart').write_text('x')\"")):
+            ok("inline %s naming app/ is refused" % label,
+               v("Bash", {"command": cmd})[0] is False, cmd)
+        eq("_inline_paths returns the literal paths of code that writes",
+           writeguard._inline_paths("open('app/a.dart','w').write(x)"), ["app/a.dart"])
+        eq("...and nothing for code that only reads",
+           writeguard._inline_paths("print(open('app/a.dart').read())"), [])
+        ok("a deny-shaped policy refuses what it names and nothing else",
+           v("Write", {"file_path": "app/x.dart"}, "S-KEEP-95")[0] is False
+           and v("Write", {"file_path": "lib/y.py"}, "S-KEEP-95")[0] is True)
+        ok("a session with NO role is not constrained",
+           v("Bash", {"command": "echo y > app/x.dart"}, "S-NOBODY-95")[0] is True)
+
+        # THE VERB exits 3, never 2 — 2 is what argparse returns for an unknown verb.
+        env = dict(os.environ, XDG_CONFIG_HOME=home)
+        p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"),
+                            "write-guard", "--session", "S-LEAD-95", "--command",
+                            "sed -i s/X/Y/ app/x.dart"], capture_output=True, text=True,
+                           cwd=cfg.root, env=env)
+        eq("the verb refuses with exit 3, which the shim alone turns into Claude Code's 2",
+           p.returncode, 3)
+        ok("...with the reason on stderr", "may not write" in p.stderr, p.stderr[-300:])
+
+        # THE LABEL follows the REGISTRATION, not the code existing.
+        pol = {"writes": ["docs/**"]}
+        ok("unregistered, `writes` is announced PUBLISHED",
+           ("PUBLISHED", "may write: docs/**") in roles.enforced_lines(pol))
+        ok("...and with the guard registered, ENFORCED",
+           ("ENFORCED", "may write: docs/**") in roles.enforced_lines(pol, write_guard=True))
+        eq("write_guard_enforces is False before registration", lease.write_guard_enforces(cfg),
+           False)
+        bash_only = os.path.join(cfg.root, ".claude", "settings.local.json")
+        with open(bash_only, "w") as fh:
+            json.dump({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+                {"type": "command", "command": "x/.showrunner/hooks/write-guard.sh"}]}]}}, fh)
+        eq("a registration on Bash ALONE is not enforcement — the edit tools are the other half",
+           lease.write_guard_enforces(cfg), False)
+        os.remove(bash_only)
+        lease.register_write_guard(cfg)
+        eq("...and True once registered on the edit tools and Bash",
+           lease.write_guard_enforces(cfg), True)
+        banner = "\n".join(roles.whoami(cfg, "S-LEAD-95"))
+        ok("...and the seat announcement then says ENFORCED for `writes`, not PUBLISHED",
+           "ENFORCED  may write: docs/**" in banner and "PUBLISHED may write" not in banner,
+           banner[-600:])
+        d = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                           capture_output=True, text=True, cwd=cfg.root,
+                           env=dict(os.environ, XDG_CONFIG_HOME=home, NO_COLOR="1",
+                                    SHOWRUNNER_SESSION="S-LEAD-95"))
+        ok("...and `doctor` reports the role's `writes` as enforced by showrunner's own guard",
+           "own write guard is registered" in d.stdout, d.stdout[-800:])
+    finally:
+        roles.USER_PATH = prev
+
+    # THE SHIM: 3 becomes 2; a binary that cannot answer (exit 2 — an older pinned copy without
+    # the verb) is NOT a refusal, and allows loudly.
+    fake = tempfile.mkdtemp(prefix="sr-wg-shim-")
+    sh(["git", "init", "-q"], fake)
+    os.makedirs(os.path.join(fake, "bin"))
+    os.makedirs(os.path.join(fake, ".showrunner", "hooks"))
+    shim = os.path.join(fake, ".showrunner", "hooks", "write-guard.sh")
+    shutil.copy(os.path.join(ROOT, ".showrunner", "hooks", "write-guard.sh"), shim)
+    stub = os.path.join(fake, "bin", "showrunner")
+    for code, want, label in ((3, 2, "a refusal (3) reaches Claude Code as 2"),
+                              (2, 0, "an UNKNOWN-VERB exit 2 is not a refusal: it allows"),
+                              (0, 0, "an allow passes through")):
+        with open(stub, "w") as fh:
+            fh.write("#!/bin/sh\necho 'stub says no' >&2\nexit %d\n" % code)
+        os.chmod(stub, 0o755)
+        q = subprocess.run(["bash", shim], input="{}", capture_output=True, text=True, cwd=fake)
+        eq(label, q.returncode, want)
+    with open(stub, "w") as fh:
+        fh.write("#!/bin/sh\necho 'usage: unknown verb' >&2\nexit 2\n")
+    q = subprocess.run(["bash", shim], input="{}", capture_output=True, text=True, cwd=fake)
+    ok("...and the unknown-verb allow says the guard DID NOT RUN, naming why",
+       q.returncode == 0 and "DID NOT RUN" in q.stdout and "exited 2" in q.stdout, q.stdout)
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

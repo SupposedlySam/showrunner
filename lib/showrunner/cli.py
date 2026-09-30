@@ -603,19 +603,25 @@ def cmd_doctor(args):
             for _entry in (_data.get("hooks") or {}).get("PreToolUse", []) or []:
                 if "Bash" in (_entry.get("matcher") or ""):
                     _bash_seen = True
-        if not _read_any:
+        if lease.write_guard_enforces(cfg):
+            print("  %s a role declares `writes`, and showrunner's own write guard is registered "
+                  "on the edit tools and Bash, so it is ENFORCED — heredocs and redirections "
+                  "included" % (GRN + "ok   " + OFF))
+        elif not _read_any:
             print("  %s a role here declares `writes`, and no settings file could be read, so "
                   "whether anything enforces it is UNKNOWN — not none"
                   % (YEL + "warn " + OFF))
         elif not _bash_seen:
             print("  %s a role here declares `writes` and NO PreToolUse hook matches Bash. "
-                  "showrunner publishes that policy and does not enforce it; a hook of yours "
-                  "must, and one registered only for Write|Edit|NotebookEdit is walked past by "
-                  "every heredoc, `sed -i`, `tee` and `>` redirection. Add Bash to its matcher."
+                  "Nothing enforces it: `showrunner worktree register` wires showrunner's own "
+                  "write guard, which covers the edit tools AND Bash. A hook registered only for "
+                  "Write|Edit|NotebookEdit is walked past by every heredoc, `sed -i`, `tee` and "
+                  "`>` redirection."
                   % (RED + "ERROR" + OFF))
         else:
-            print("  %s a role declares `writes`, and a PreToolUse hook does match Bash — "
-                  "showrunner cannot tell WHICH hook enforces it, only that a reader exists"
+            print("  %s a role declares `writes`, and a PreToolUse hook does match Bash — but it "
+                  "is not showrunner's write guard, so showrunner cannot tell WHICH hook enforces "
+                  "it, only that a reader exists. `showrunner worktree register` wires its own"
                   % (GRN + "ok   " + OFF))
 
     # HOW MANY WORKTREES EXIST, because 178 is not a number anybody discovers on purpose (#75).
@@ -1531,7 +1537,10 @@ def cmd_worktree_register(args):
                               (lease.register_reach,
                                "reach gate (PreToolUse; advice, never refuses)"),
                               (lease.register_wake_gate,
-                               "wake gate (PreToolUse on Bash; advice, never refuses)")):
+                               "wake gate (PreToolUse on Bash; advice, never refuses)"),
+                              (lease.register_write_guard,
+                               "write guard (PreToolUse on the edit tools and Bash; refuses "
+                               "writes the role may not make)")):
         register = (lambda c, f=register_fn: f(c, local))
         changed, note = register(cfg)
         if changed:
@@ -1764,6 +1773,48 @@ def cmd_role_roster(args):
         eprint("NOTE: %d seat(s) read STALE — the holder is proved dead, so `_resolved` skips "
                "them and those sessions announce the fallback: %s" % (len(stale), ", ".join(stale)))
     return 0
+
+
+def cmd_write_guard(args):
+    """PreToolUse: refuse a write the session's ROLE may not make — edit tools and Bash (#95).
+
+    EXIT 3 REFUSES, NOT 2, and the shim translates. Claude Code blocks on 2, and argparse also
+    exits 2 on an unknown verb — so a pinned copy of showrunner older than this verb would read
+    as a refusal of every tool call. A distinct code keeps "refused" and "could not answer"
+    apart; the shim maps 3 to 2 and treats anything else as a binary that cannot answer.
+
+    Every failure path allows, loudly, for the reason `worktree guard` gives: this runs before
+    every edit and Bash call, and a bug that refused would lock the repo against its own repair.
+    """
+    from . import writeguard
+    payload, problem = _hook_payload()
+    if problem and not (args.command or args.path):
+        return _allow_loudly(
+            "⚠ THE WRITE GUARD DID NOT RUN — it could not read its PreToolUse payload (%s), so "
+            "this call was ALLOWED WITHOUT BEING CHECKED against this session's role." % problem)
+    try:
+        cfg = _cfg(args, guard=True)
+        session = (args.session or payload.get("session_id")
+                   or os.environ.get("SHOWRUNNER_SESSION") or "")
+        tool = args.tool or payload.get("tool_name") or ""
+        tool_input = payload.get("tool_input") or {}
+        if args.command is not None:
+            tool, tool_input = "Bash", {"command": args.command}
+        if args.path:
+            tool, tool_input = (args.tool or "Write"), {"file_path": args.path}
+        allowed, message = writeguard.verdict(cfg, session, tool, tool_input,
+                                              cwd=payload.get("cwd") or os.getcwd())
+    except Exception as exc:                                    # noqa: BLE001 — see docstring
+        return _allow_loudly(_fail_open_text(
+            "WRITE", exc, "This session's role is NOT being enforced on writes right now."))
+    if allowed:
+        return _allow_loudly(message) if message else 0
+    try:
+        events.emit(cfg, "write.denied", {"session": session, "tool": tool})
+    except Exception:                                           # noqa: BLE001
+        eprint("showrunner: (the denial below could not be journalled)")
+    eprint(message)
+    return 3
 
 
 def cmd_wake_gate(args):
@@ -2210,8 +2261,12 @@ def cmd_plan(args):
             if c["blocks"]:
                 print("  %sCOLLIDES%s %s  <->  %s (live)" % (RED, OFF, leaf_id, c["leaf"]))
             else:
-                print("  %sshared surface only%s %s <-> %s (live)"
-                      % (DIM, OFF, leaf_id, c["leaf"]))
+                print("  %s%s only%s %s <-> %s (live)"
+                      % (DIM, "shared surface" if c["shared"] else "prose-word overlap", OFF,
+                         leaf_id, c["leaf"]))
+                for f in c.get("loose", [])[:4]:
+                    print("      %sboth briefs use a word this file mentions, not blocking: "
+                          "%s%s" % (DIM, f, OFF))
             for f in c["files"][:8]:
                 print("      both estimate %s" % f)
             if c["blind"]:
@@ -2299,9 +2354,13 @@ def _live_collision_check(cfg, g, leaf, despite, rehearsing=False):
     found = collide.live_conflicts(cfg, leaf, live)
     blocking = [c for c in found if c["blocks"]]
     for c in found:
-        if not c["blocks"]:
+        if not c["blocks"] and c["shared"]:
             eprint("  %sshared surface with live %s (owed to serialised integration, not "
                    "blocking): %s%s" % (DIM, c["leaf"], ", ".join(c["shared"][:6]), OFF))
+        if not c["blocks"] and c.get("loose"):
+            eprint("  %sprose-only overlap with live %s (files that merely mention a word both "
+                   "briefs use — not blocking): %s%s"
+                   % (DIM, c["leaf"], ", ".join(c["loose"][:6]), OFF))
     if not blocking:
         return found
     named = set(despite)
@@ -3796,6 +3855,18 @@ def build_parser():
                    help="check this command instead of reading a hook payload — for testing the "
                         "rule without constructing a PreToolUse event")
     d.set_defaults(func=cmd_dispatch_guard)
+
+    s = sub.add_parser("write-guard",
+                       help="PreToolUse (Write|Edit|MultiEdit|NotebookEdit|Bash): refuse a write "
+                            "the session's resolved role may not make, including through a "
+                            "heredoc, sed -i, tee or a redirection. Exit 3 refuses (the shim "
+                            "turns it into the 2 Claude Code blocks on)")
+    s.add_argument("--session")
+    s.add_argument("--command", default=None,
+                   help="judge this Bash command instead of reading a hook payload")
+    s.add_argument("--path", default=None, help="judge a write to this path instead")
+    s.add_argument("--tool", default=None, help="the tool name, with --path (default Write)")
+    s.set_defaults(func=cmd_write_guard)
 
     s = sub.add_parser("wake-gate",
                        help="PreToolUse (Bash): when a session starts LONG work with no mandate "

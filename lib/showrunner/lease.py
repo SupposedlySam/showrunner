@@ -1028,6 +1028,43 @@ def register_wake_gate(cfg, local=False):
             lambda p: _registration(p, "PreToolUse", "wake-gate"), "wake gate")
 
 
+WRITE_SHIM = os.path.join(".showrunner", "hooks", "write-guard.sh")
+
+
+def register_write_guard(cfg, local=False):
+    """Register the write guard on PreToolUse, edit tools AND Bash (#95). (changed, message).
+
+    Both, in ONE matcher, because the failure it exists for is the route between them: a guard on
+    the edit tools alone is walked past by a heredoc, and the reported bypass was exactly that.
+    """
+    import json
+    from .util import atomic_write_json, file_lock
+    from .writeguard import MATCHER
+
+    path = settings_target(cfg.root, local)
+    entry = {"matcher": MATCHER,
+             "hooks": [{"type": "command",
+                        "command": "\"$CLAUDE_PROJECT_DIR\"/" + WRITE_SHIM,
+                        "timeout": 20,
+                        "statusMessage": "showrunner: may this role write there?"}]}
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with file_lock(_register_lock(cfg)):
+        return _register_locked(
+            cfg, path, entry, json, atomic_write_json, "PreToolUse",
+            lambda p: _registration(p, "PreToolUse", "write-guard"), "write guard")
+
+
+def write_guard_enforces(cfg):
+    """True only when the write guard is registered on Bash AND an edit tool, in either layer."""
+    try:
+        registered, matcher = _registration(settings_candidates(cfg.root), "PreToolUse",
+                                            "write-guard")
+    except Exception:                                   # noqa: BLE001
+        return False
+    m = matcher or ""
+    return bool(registered) and "Bash" in m and ("Edit" in m or "Write" in m)
+
+
 def register_whoami(cfg, local=False):
     """Announce the seat on SessionStart AND PostCompact (#36). Returns (changed, message).
 

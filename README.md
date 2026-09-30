@@ -401,6 +401,11 @@ The refusal is overridden by naming what it overrides — `--despite-live <leaf>
 every colliding leaf — because a guard answered by a reflexive `--force` teaches every later session
 to bypass it. It is an **estimate**, from declared paths and grepped symbols, and says so wherever it
 is printed: `overlap` measures, this guesses about work that has produced nothing measurable yet.
+Only firm evidence blocks — a path the brief names or declares, a file carrying a symbol it
+backticks, a configured glob. A file reached only because it mentions a bare identifier from the
+brief's prose is reported as prose-only overlap, because briefs in one campaign share boilerplate,
+and a refusal that fires on every pair turns `--despite-live` into a reflex. A leaf with nothing
+firmer still blocks on those matches, since they are its whole estimate.
 
 **A base that is missing work the leaf depends on is REFUSED, not reported.** `spawn` cuts from
 the primary checkout's HEAD unless told otherwise, and that default is invisible and
@@ -514,15 +519,17 @@ that spawn just started. If a guard of yours must be live for a Crawler's first 
 to be registered before the spawn — and in the tracked layer if you want git to carry it for you.
 
 **A line that says ENFORCED has to be one showrunner refuses.** Not every policy line is:
-showrunner publishes `writes` and ships no write guard at all, and a write guard registered for
-`Write|Edit|NotebookEdit` and not `Bash` is walked past by a heredoc. Announcing enforcement you
+`writes` is enforced only where a write guard covers Bash as well as the edit tools — one
+registered for `Write|Edit|NotebookEdit` alone is walked past by a heredoc. Announcing enforcement you
 do not perform is worse than announcing nothing: it is the sentence that stops somebody checking.
 
 `may_create` is enforced at **both** paths — the sanctioned `spawn --launch` as well as the raw
 `claude -p` the announcement steers you away from, from one shared function so the two cannot
-disagree. `writes` is labelled **PUBLISHED**, and `doctor` reports whether any PreToolUse hook
-matches Bash when a role declares one; it will not say *which* hook enforces it, because
-attributing another tool's job would be a guess.
+disagree. `writes` is **ENFORCED** by showrunner's own write guard, which `worktree register` wires
+on the edit tools AND Bash: it refuses a write the session's role does not permit, including a
+heredoc, `sed -i`, `tee`, a redirection or inline `python3` that writes — the route a subagent
+took around an Edit refusal. Until it is registered the line reads **PUBLISHED**, and `doctor`
+says which. `showrunner write-guard --command "<bash>"` judges a command by hand.
 
 **Roles are yours; showrunner checks the shape.** It never learns what a role *means* — the way
 lane rules already work. It knows two acquisition modes, `claim` (a session takes an open seat,

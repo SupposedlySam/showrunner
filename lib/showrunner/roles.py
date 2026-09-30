@@ -556,7 +556,7 @@ def seat(cfg):
                   "is said rather than left to look like an idle orchestrator")
 
 
-def enforced_lines(role_def):
+def enforced_lines(role_def, write_guard=False):
     """The ENFORCED block, GENERATED from the role's own fields (#40).
 
     Announcement prose in one place and enforcement in another is two independent statements of
@@ -580,7 +580,12 @@ def enforced_lines(role_def):
 
     Returns (label, text) pairs. `ENFORCED` means a showrunner guard refuses it; `PUBLISHED`
     means showrunner states it and something of yours has to act on it.
+
+    `write_guard` is whether showrunner's OWN write guard is registered on Bash and an edit tool
+    (#95) — then `writes` is enforced here and says so. Never assumed: a guard nobody registered
+    enforces nothing, and the label is a claim about registration, not about the code existing.
     """
+    wlabel = "ENFORCED" if write_guard else "PUBLISHED"
     d = role_def or {}
     out = []
     may = d.get("may_create") or []
@@ -594,16 +599,16 @@ def enforced_lines(role_def):
     # hand a mapping. Anything else is printed as-is rather than crashed on, because a renderer
     # that raises takes the whole announcement down and silence is the one unacceptable outcome.
     if isinstance(w, (list, tuple)) and w:
-        out.append(("PUBLISHED", "may write: %s" % ", ".join(str(x) for x in w)))
+        out.append((wlabel, "may write: %s" % ", ".join(str(x) for x in w)))
     elif isinstance(w, dict):
         if w.get("deny"):
-            out.append(("PUBLISHED", "may NOT write: %s"
+            out.append((wlabel, "may NOT write: %s"
                         % ", ".join(str(x) for x in w["deny"])))
         if w.get("allow") and not w.get("deny"):
-            out.append(("PUBLISHED", "may write: %s"
+            out.append((wlabel, "may write: %s"
                         % ", ".join(str(x) for x in w["allow"])))
     elif w:
-        out.append(("PUBLISHED", "writes: %s" % w))
+        out.append((wlabel, "writes: %s" % w))
     if d.get("reports_to"):
         out.append(("ENFORCED", "reports to: %s" % d["reports_to"]))
     if d.get("acquire"):
@@ -951,9 +956,11 @@ def whoami(cfg, session=None):
             out.append('      {"seat_roles": {"%s": "<one of your roles>"}}' % r["seat"])
             out.append("    A session cannot grant itself this, and that is the point of the "
                        "file being outside the repo.")
-        for label, line in enforced_lines(r["policy"]):
+        from .lease import write_guard_enforces
+        _wg = write_guard_enforces(cfg)
+        for label, line in enforced_lines(r["policy"], write_guard=_wg):
             out.append("    %-9s %s" % (label, line))
-        if any(label == "PUBLISHED" for label, _ in enforced_lines(r["policy"])):
+        if any(label == "PUBLISHED" for label, _ in enforced_lines(r["policy"], write_guard=_wg)):
             # SAID EVERY TIME, beside the line it qualifies. showrunner has no write guard: it
             # publishes `writes` and a hook of YOURS enforces it. The reporter's was registered
             # for Write|Edit|NotebookEdit and not Bash, so every heredoc, `sed -i`, `tee` and
@@ -962,6 +969,8 @@ def whoami(cfg, session=None):
                        "hook of yours must,")
             out.append("    and it must cover Bash or a heredoc walks straight past it. "
                        "`showrunner doctor` checks.")
+            out.append("    showrunner's own write guard does both: `showrunner worktree "
+                       "register` wires it, and this line then reads ENFORCED.")
         if r["notes"]:
             # `%s` on a list prints a Python repr on one line, so a multi-line note arrives as an
             # unreadable wall — and an announcement nobody can read is one that did not happen.

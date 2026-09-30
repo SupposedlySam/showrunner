@@ -155,6 +155,14 @@ showrunner integrate                 # serial merge, checks re-run on each MERGE
 # Deliberately not a rollback: steering a stale claim to `reap` can propose closing chat
 # rooms belonging to another agent's Crawlers, sweeping far wider than the failure.
 #
+# A LEAF WHOSE ESTIMATE COLLIDES WITH A LIVE CLAIM IS REFUSED (exit 3). The estimate is
+# built from paths the brief names or declares, files carrying symbols it BACKTICKS, and
+# configured globs — that evidence blocks. Files reached only through a bare snake_case or
+# camelCase word in its prose are printed as "prose-only overlap" and never block when the leaf
+# has anything firmer, because briefs share boilerplate and that made every pair collide. A
+# leaf with nothing firmer blocks on them, as its only estimate. `plan` groups waves the same
+# way. `showrunner spawn <leaf> --despite-live <leaf>` accepts a named collision.
+#
 # A LEAF A LIVE PROCESS HOLDS IS REFUSED FIRST (exit 3), before anything is created, naming the
 # holder's pid and tree — so a second spawn of a running Crawler's leaf never reaches the
 # "worktree path already exists" refusal. That refusal, in turn, checks the campaign record:
@@ -261,8 +269,9 @@ showrunner worktree guard            # PreToolUse: DENY a write into a tree anot
 showrunner worktree register         # put the hooks it owns in .claude/settings.json (idempotent).
                                      # --local writes settings.local.json (UNTRACKED) instead,
                                      # for a repo that keeps showrunner out of its history:
-                                     # the worktree guard, the dispatch guard, the REACH gate and
-                                     # the WAKE gate on PreToolUse, the inert-Crawler gate on Stop, and the
+                                     # the worktree guard, the dispatch guard, the REACH gate, the
+                                     # WAKE gate and the WRITE guard on PreToolUse, the inert-Crawler
+                                     # gate on Stop, and the
                                      # seat announcement on SessionStart AND PostCompact. The
                                      # list is the claim; a COUNT here rots the day it gains one.
 showrunner whoami                    # what this session IS — a seat DERIVED from where it stands
@@ -609,11 +618,30 @@ inventing one would refuse the dispatches of every consumer who never wrote any.
 
 **ENFORCED and PUBLISHED are different labels, and the block says which.** `may_create` is
 ENFORCED: `spawn --launch` AND `dispatch guard` both refuse from a seat that may not create.
-`writes` is PUBLISHED: showrunner states it and **ships no write guard** — a hook of yours has to
-enforce it, and it must cover **Bash** or every heredoc, `sed -i`, `tee`, `cp` and `>` redirection
-walks past it. `showrunner doctor` reports whether ANY PreToolUse hook matches Bash when a role
-declares `writes`; it cannot say which hook enforces it, because attributing another tool's job
-would be a guess.
+`writes` is ENFORCED when showrunner's write guard is registered on the edit tools AND Bash —
+`worktree register` wires it — and PUBLISHED otherwise, because a guard nobody registered
+enforces nothing and the label is a claim about registration. `showrunner doctor` says which:
+ok when the write guard is wired, an ERROR when a role declares `writes` and no PreToolUse hook
+matches Bash, and "a reader exists" when some other hook does, since it cannot say which.
+
+**The write guard** resolves the session's role exactly as `whoami --porcelain` publishes it, and
+refuses a write the role's `writes` does not permit — through Write, Edit, MultiEdit or
+NotebookEdit, and through Bash: redirections, `tee`, `sed -i`, `perl -i`, the destination of
+`cp`/`install`/`ln`/`rsync`, `mv`, `rm`, `rmdir`, `unlink`, `touch`, `truncate`, `mkdir`,
+`dd of=`, a `bash -c` string, and inline interpreter code (`python3 -c`, a heredoc fed to
+`python3 -`, `node -e`) that calls a write function — where every literal path it names counts,
+since which it writes cannot be told without running it. A subagent inherits its parent's session
+id, so it meets the same guard. Globs are gitignore-flavoured: a list is what the role MAY write,
+a mapping may carry `allow` and `deny` (deny wins), and a pattern without `/` matches a name at any
+depth. The Crawler's own scratch dir is always writable. Paths outside the repo are not a role's
+business. Unseen, and stated: a path from a variable, a script file that writes once run, and
+`git checkout`/`restore`/`apply`.
+
+`showrunner write-guard --command "<bash>"` or `showrunner write-guard --path <file> --tool Edit`
+judges a call without a hook payload; `showrunner write-guard --session <id>` picks the session.
+The verb refuses with exit **3** and the shim turns that into the 2 Claude Code blocks on, because
+argparse also exits 2 — a pinned copy older than the verb must read as "could not answer" (allowed,
+loudly), never as a refusal of every call.
 
 One `ENFORCED` banner over both would claim a write denial nothing performs — a guard registered
 for `Write|Edit|NotebookEdit` only is walked past by a heredoc. Announcing enforcement you do not
@@ -703,6 +731,8 @@ showrunner dispatch guard            # PreToolUse on BASH            (dispatch-g
 showrunner reach                     # PreToolUse on Write|Edit|NotebookEdit|Bash|TodoWrite
                                      #                               (reach-gate.sh)
 showrunner wake-gate                 # PreToolUse on BASH            (wake-gate.sh)
+showrunner write-guard               # PreToolUse on Write|Edit|MultiEdit|NotebookEdit|Bash
+                                     #                               (write-guard.sh)
 ```
 
 **`whoami` carries the campaign's STATE, not just a name.** A compacted agent that has lost which
@@ -960,11 +990,11 @@ authorisation" to satisfy a word-ban has traded a visible stall for an invisible
 transcript means ALLOWED WITHOUT BEING CHECKED, like every other guard here.
 
 Both run from tracked shims under `.showrunner/hooks/`, beside `worktree-guard.sh`,
-`inert-crawler-gate.sh`, `reach-gate.sh`, `wake-gate.sh` and `waiting-probe.sh`.
+`inert-crawler-gate.sh`, `reach-gate.sh`, `wake-gate.sh`, `write-guard.sh` and `waiting-probe.sh`.
 
 **`worktree register` does NOT wire all of them.** It writes the worktree guard, the
-inert-Crawler stop trigger, the seat announcement, the dispatch guard, the reach gate and the
-wake gate. The count is deliberately not stated here — there is no number that survives the
+inert-Crawler stop trigger, the seat announcement, the dispatch guard, the reach gate, the
+wake gate and the write guard. The count is deliberately not stated here — there is no number that survives the
 verb gaining one, and the table below is the thing that has to stay right. It does not touch:
 
 | hook | wired by | why not `register` |

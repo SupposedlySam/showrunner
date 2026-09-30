@@ -166,16 +166,29 @@ def _declared_paths(leaf, root, files):
 
 
 def _symbols(leaf):
+    firm, loose = _symbol_kinds(leaf)
+    return firm | loose
+
+
+def _symbol_kinds(leaf):
+    """(backticked, bare) — symbols the brief MARKED as code, and identifiers found in its prose.
+
+    Kept apart because they are different evidence. A backticked symbol is the author pointing
+    at code. A bare identifier is any snake_case or camelCase word, and briefs in one campaign
+    share boilerplate full of them — a house-rules pointer, a check command, a guardrail name —
+    so every leaf's bare set greps the same files and every pair "collides" (#96).
+    """
     text = _text_of(leaf)
-    syms = set()
+    firm, loose = set(), set()
     for m in _BACKTICKED.findall(text):
         token = m.strip()
         if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.\-]{2,60}", token) and "/" not in token:
-            syms.add(token)
+            firm.add(token)
     for m in _IDENT.findall(text):
         if m.lower() not in _STOPWORDS and len(m) >= 5:
-            syms.add(m)
-    return {s for s in syms if s.lower() not in _STOPWORDS}
+            loose.add(m)
+    firm = {s for s in firm if s.lower() not in _STOPWORDS}
+    return firm, {s for s in loose if s.lower() not in _STOPWORDS} - firm
 
 
 def _grep_symbols(root, files, symbols, limit_files=4000):
@@ -202,8 +215,11 @@ def estimate(cfg, leaf, files=None):
     root = cfg.root
     files = tracked_files(root) if files is None else files
     declared = _declared_paths(leaf, root, files)
-    symbols = _symbols(leaf)
-    grepped = _grep_symbols(root, files, symbols) if symbols else set()
+    marked, bare = _symbol_kinds(leaf)
+    symbols = marked | bare
+    grepped_marked = _grep_symbols(root, files, marked) if marked else set()
+    grepped_bare = _grep_symbols(root, files, bare) if bare else set()
+    grepped = grepped_marked | grepped_bare
     extra = set()
     for glob in (cfg.get("collision") or {}).get("extra_globs") or []:
         extra.update(f for f in files if fnmatch.fnmatch(f, glob))
@@ -211,6 +227,15 @@ def estimate(cfg, leaf, files=None):
     all_paths = declared | grepped | extra
     shared_globs = (cfg.get("collision") or {}).get("always_serialize") or []
     shared = {f for f in all_paths if any(fnmatch.fnmatch(f, g) for g in shared_globs)}
+    # WHAT MAY BLOCK (#96). Firm evidence — a path the brief names or declares, a file carrying a
+    # symbol it backticked, a configured glob — blocks. Files reached ONLY through a bare prose
+    # identifier are reported, not blocking, whenever the leaf has anything firm: shared
+    # boilerplate made every pair of briefs "collide" on files neither touches, and a refusal
+    # that fires on every pair trains `--despite-live` into a reflex, which is exactly when a
+    # real collision gets waved through. A leaf with NOTHING firm still blocks on its bare
+    # matches, because they are all the estimate it has, and an unknown radius is not a free one.
+    firm = declared | grepped_marked | extra
+    blocking = (firm if firm else grepped_bare) - shared
 
     if declared and grepped:
         basis = "%d path(s) named in the issue + %d file(s) mentioning %d symbol(s)" % (
@@ -226,6 +251,7 @@ def estimate(cfg, leaf, files=None):
         "leaf": leaf["id"],
         "paths": all_paths,
         "exclusive": all_paths - shared,
+        "blocking": blocking,
         "shared": shared,
         "symbols": symbols,
         "basis": basis,
@@ -258,10 +284,10 @@ def plan_waves(cfg, leaves, files=None):
             continue
         placed = False
         for i, taken in enumerate(wave_paths):
-            clash = taken & est["exclusive"]
+            clash = taken & est["blocking"]
             if not clash:
                 waves[i].append(leaf["id"])
-                taken |= est["exclusive"]
+                taken |= est["blocking"]
                 placed = True
                 break
             if i == 0:
@@ -272,7 +298,7 @@ def plan_waves(cfg, leaves, files=None):
                                            ", …" if len(clash) > 3 else ""))
         if not placed:
             waves.append([leaf["id"]])
-            wave_paths.append(set(est["exclusive"]))
+            wave_paths.append(set(est["blocking"]))
 
     for leaf_id in solo:
         waves.append([leaf_id])
@@ -356,12 +382,14 @@ def live_conflicts(cfg, leaf, live, files=None):
         if other["id"] == leaf["id"]:
             continue
         theirs = estimate(cfg, other, files)
-        clash = mine["exclusive"] & theirs["exclusive"]
+        clash = mine["blocking"] & theirs["blocking"]
+        # Overlap on prose-only evidence: printed beside the decision, never a refusal (#96).
+        loose = (mine["exclusive"] & theirs["exclusive"]) - clash
         shared = mine["shared"] & theirs["shared"]
         # A leaf whose radius cannot be estimated at all is treated as colliding with
         # everything here too — the same rule `plan_waves` applies, for the same reason.
         blind = not mine["estimable"] or not theirs["estimable"]
-        if not clash and not shared and not blind:
+        if not clash and not shared and not blind and not loose:
             continue
         out.append({
             "leaf": other["id"],
@@ -371,6 +399,7 @@ def live_conflicts(cfg, leaf, live, files=None):
             "pid": other.get("claim_pid"),
             "parked": bool(other.get("parked")),
             "files": sorted(clash),
+            "loose": sorted(loose),
             "shared": sorted(shared),
             "basis": theirs["basis"],
             "blind": blind,
