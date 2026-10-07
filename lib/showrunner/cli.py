@@ -613,15 +613,17 @@ def cmd_doctor(args):
                   % (YEL + "warn " + OFF))
         elif not _bash_seen:
             print("  %s a role here declares `writes` and NO PreToolUse hook matches Bash. "
-                  "Nothing enforces it: `showrunner worktree register` wires showrunner's own "
-                  "write guard, which covers the edit tools AND Bash. A hook registered only for "
+                  "Nothing enforces it: `showrunner worktree register --write-guard` wires "
+                  "showrunner's own write guard, which covers the edit tools AND Bash — map a "
+                  "role for every seat first, or the fallback refuses every write. A hook registered only for "
                   "Write|Edit|NotebookEdit is walked past by every heredoc, `sed -i`, `tee` and "
                   "`>` redirection."
                   % (RED + "ERROR" + OFF))
         else:
             print("  %s a role declares `writes`, and a PreToolUse hook does match Bash — but it "
                   "is not showrunner's write guard, so showrunner cannot tell WHICH hook enforces "
-                  "it, only that a reader exists. `showrunner worktree register` wires its own"
+                  "it, only that a reader exists. `showrunner worktree register --write-guard` "
+                  "wires its own"
                   % (GRN + "ok   " + OFF))
 
     # HOW MANY WORKTREES EXIST, because 178 is not a number anybody discovers on purpose (#75).
@@ -1519,6 +1521,29 @@ def _fail_open_text(which, exc, consequence):
             % (head, type(exc).__name__, exc, consequence))
 
 
+def _registered_hooks(write_guard=False):
+    """(register function, description) for every hook `worktree register` wires.
+
+    THE WRITE GUARD IS OPT-IN, NEVER BY DEFAULT. Every other hook here advises, or guards
+    something that cannot lock a repo; this one REFUSES writes, and on a seat no role maps the
+    fallback may write nothing. Wired by default it arrived through `install.sh` on a plain
+    upgrade and made a consumer's whole repo read-only from a tracked settings file — measured by
+    that consumer while the announcement said the opposite. A refusing guard has to arrive by a
+    decision, so it takes a flag.
+    """
+    hooks = [(lease.register_guard, "worktree guard"),
+             (lease.register_stop_trigger, "inert-Crawler stop trigger"),
+             (lease.register_whoami, "seat announcement (SessionStart+PostCompact)"),
+             (lease.register_dispatch_guard, "dispatch guard (PreToolUse on Bash)"),
+             (lease.register_reach, "reach gate (PreToolUse; advice, never refuses)"),
+             (lease.register_wake_gate, "wake gate (PreToolUse on Bash; advice, never refuses)")]
+    if write_guard:
+        hooks.append((lease.register_write_guard,
+                      "write guard (PreToolUse on the edit tools and Bash; refuses writes the "
+                      "role may not make)"))
+    return hooks
+
+
 def cmd_worktree_register(args):
     """Put the guard's PreToolUse entry in .claude/settings.json. Idempotent.
 
@@ -1552,19 +1577,7 @@ def cmd_worktree_register(args):
     # had needed hours earlier. A verb whose job is to say "the tool already does this" is
     # useless to anyone who does not already know it exists.
     rc = 0
-    for register_fn, what in ((lease.register_guard, "worktree guard"),
-                              (lease.register_stop_trigger, "inert-Crawler stop trigger"),
-                              (lease.register_whoami,
-                               "seat announcement (SessionStart+PostCompact)"),
-                              (lease.register_dispatch_guard,
-                               "dispatch guard (PreToolUse on Bash)"),
-                              (lease.register_reach,
-                               "reach gate (PreToolUse; advice, never refuses)"),
-                              (lease.register_wake_gate,
-                               "wake gate (PreToolUse on Bash; advice, never refuses)"),
-                              (lease.register_write_guard,
-                               "write guard (PreToolUse on the edit tools and Bash; refuses "
-                               "writes the role may not make)")):
+    for register_fn, what in _registered_hooks(getattr(args, "write_guard", False)):
         register = (lambda c, f=register_fn: f(c, local))
         changed, note = register(cfg)
         if changed:
@@ -3683,6 +3696,10 @@ def build_parser():
                                          ".claude/settings.json "
                                          "(idempotent). --local writes settings.local.json "
                                          "instead, for a repo that keeps showrunner untracked")
+    t.add_argument("--write-guard", action="store_true",
+                   help="ALSO wire the write guard, which REFUSES writes the session's role may "
+                        "not make (edit tools and Bash). Never wired by default: on a seat no "
+                        "role maps, the fallback may write nothing")
     t.add_argument("--local", action="store_true",
                    help="write .claude/settings.local.json (UNTRACKED) rather than "
                         "settings.json — the arrangement for a repo that keeps showrunner out "

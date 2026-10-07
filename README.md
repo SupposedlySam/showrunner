@@ -538,8 +538,10 @@ do not perform is worse than announcing nothing: it is the sentence that stops s
 
 `may_create` is enforced at **both** paths — the sanctioned `spawn --launch` as well as the raw
 `claude -p` the announcement steers you away from, from one shared function so the two cannot
-disagree. `writes` is **ENFORCED** by showrunner's own write guard, which `worktree register` wires
-on the edit tools AND Bash: it refuses a write the session's role does not permit, including a
+disagree. `writes` is **ENFORCED** by showrunner's own write guard, which is **opt-in** —
+`showrunner worktree register --write-guard` wires it on the edit tools AND Bash, and neither the
+installer nor a plain `worktree register` does, because on a seat no role maps the fallback may
+write nothing and an upgrade must never make a repo read-only. Once wired, it refuses a write the session's role does not permit, including a
 heredoc, `sed -i`, `tee`, a redirection or inline `python3` that writes — the route a subagent
 took around an Edit refusal. Until it is registered the line reads **PUBLISHED**, and `doctor`
 says which. `showrunner write-guard --command "<bash>"` judges a command by hand.

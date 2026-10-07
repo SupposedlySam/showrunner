@@ -281,9 +281,9 @@ showrunner worktree guard            # PreToolUse: DENY a write into a tree anot
 showrunner worktree register         # put the hooks it owns in .claude/settings.json (idempotent).
                                      # --local writes settings.local.json (UNTRACKED) instead,
                                      # for a repo that keeps showrunner out of its history:
-                                     # the worktree guard, the dispatch guard, the REACH gate, the
-                                     # WAKE gate and the WRITE guard on PreToolUse, the inert-Crawler
-                                     # gate on Stop, and the
+                                     # the worktree guard, the dispatch guard, the REACH gate and
+                                     # the WAKE gate on PreToolUse, the inert-Crawler gate on Stop,
+                                     # and the
                                      # seat announcement on SessionStart AND PostCompact. The
                                      # list is the claim; a COUNT here rots the day it gains one.
 showrunner whoami                    # what this session IS — a seat DERIVED from where it stands
@@ -631,7 +631,10 @@ inventing one would refuse the dispatches of every consumer who never wrote any.
 **ENFORCED and PUBLISHED are different labels, and the block says which.** `may_create` is
 ENFORCED: `spawn --launch` AND `dispatch guard` both refuse from a seat that may not create.
 `writes` is ENFORCED when showrunner's write guard is registered on the edit tools AND Bash —
-`worktree register` wires it — and PUBLISHED otherwise, because a guard nobody registered
+`showrunner worktree register --write-guard` wires it, and NOTHING wires it by default: the
+installer and a plain `worktree register` leave it off, because on a seat no role maps the
+fallback may write nothing, and a refusing guard must arrive by a decision rather than by an
+upgrade. Map a role for every seat that will run before wiring it. PUBLISHED otherwise, because a guard nobody registered
 enforces nothing and the label is a claim about registration. `showrunner doctor` says which:
 ok when the write guard is wired, an ERROR when a role declares `writes` and no PreToolUse hook
 matches Bash, and "a reader exists" when some other hook does, since it cannot say which.
@@ -1005,14 +1008,15 @@ Both run from tracked shims under `.showrunner/hooks/`, beside `worktree-guard.s
 `inert-crawler-gate.sh`, `reach-gate.sh`, `wake-gate.sh`, `write-guard.sh` and `waiting-probe.sh`.
 
 **`worktree register` does NOT wire all of them.** It writes the worktree guard, the
-inert-Crawler stop trigger, the seat announcement, the dispatch guard, the reach gate, the
-wake gate and the write guard. The count is deliberately not stated here — there is no number that survives the
+inert-Crawler stop trigger, the seat announcement, the dispatch guard, the reach gate and the
+wake gate — and the write guard ONLY with `--write-guard`. The count is deliberately not stated here — there is no number that survives the
 verb gaining one, and the table below is the thing that has to stay right. It does not touch:
 
 | hook | wired by | why not `register` |
 |---|---|---|
 | `future-tense-gate.sh` | by hand | outside the verb's set; registering it is a one-line settings edit |
 | `pipeline-status-gate.sh` | by hand | same |
+| `write-guard.sh` | `showrunner worktree register --write-guard` | OPT-IN: it REFUSES writes, and on a seat no role maps the fallback may write nothing — wired by default, an upgrade alone would make a repo read-only |
 | `waiting-probe.sh` | **NOBODY — deliberately** | arming an idle watchdog is a human decision, stated under "First thing, every session": *a probe an agent can set is a watchdog an agent can switch off* |
 
 Enforced by a default-deny check: every hook file present is registered in a settings file or

@@ -16699,9 +16699,51 @@ def test_provisioning_and_inert_helpers_directly():
        st.stdout[-400:] + st.stderr[-300:])
 
 
+def test_the_write_guard_is_never_wired_by_default():
+    group("the write guard is OPT-IN: a plain `worktree register` — what the installer runs on an "
+          "upgrade — never wires it")
+    if not have("git"):
+        skip("the opt-in group", "git is not installed")
+        return
+    # REPORTED BY A CONSUMER the hour it shipped: an upgrade ran the installer, the installer ran
+    # `worktree register`, and that wired the refusing write guard into a TRACKED settings file.
+    # With no role mapped, the fallback writes nothing — so the upgrade alone made the repo
+    # read-only, through Edit and Bash, for every clone. The announcement said it would not.
+    exe = os.path.join(ROOT, "bin", "showrunner")
+    for local in (False, True):
+        cfg = make_repo()
+        flag = ["--local"] if local else []
+        name = "settings.local.json" if local else "settings.json"
+        p = subprocess.run([sys.executable, exe, "worktree", "register"] + flag,
+                           capture_output=True, text=True, cwd=cfg.root, stdin=subprocess.DEVNULL)
+        with open(os.path.join(cfg.root, ".claude", name)) as fh:
+            body = fh.read()
+        ok("a plain `worktree register%s` does NOT wire the write guard" % (" --local" if local
+                                                                            else ""),
+           p.returncode == 0 and "write-guard" not in body and "worktree-guard" in body,
+           p.stdout[-300:] + p.stderr[-300:])
+        q = subprocess.run([sys.executable, exe, "worktree", "register", "--write-guard"] + flag,
+                           capture_output=True, text=True, cwd=cfg.root, stdin=subprocess.DEVNULL)
+        with open(os.path.join(cfg.root, ".claude", name)) as fh:
+            body = fh.read()
+        ok("...and `--write-guard` wires it, on the edit tools and Bash",
+           q.returncode == 0 and "write-guard.sh" in body
+           and "Write|Edit|MultiEdit|NotebookEdit|Bash" in body, q.stderr[-300:])
+    from showrunner import cli
+    ok("the default hook set does not contain the write guard",
+       lease.register_write_guard not in [f for f, _ in cli._registered_hooks()])
+    ok("...and the opted-in set does", lease.register_write_guard in
+       [f for f, _ in cli._registered_hooks(write_guard=True)])
+    fresh = make_repo()
+    subprocess.run([sys.executable, exe, "worktree", "register"], capture_output=True, text=True,
+                   cwd=fresh.root, stdin=subprocess.DEVNULL)
+    eq("...so after a plain register, `writes` is not enforced and the banner keeps PUBLISHED",
+       lease.write_guard_enforces(fresh), False)
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

@@ -970,7 +970,8 @@ def whoami(cfg, session=None):
             out.append("    and it must cover Bash or a heredoc walks straight past it. "
                        "`showrunner doctor` checks.")
             out.append("    showrunner's own write guard does both: `showrunner worktree "
-                       "register` wires it, and this line then reads ENFORCED.")
+                       "register --write-guard` wires it (opt-in), and this line then reads "
+                       "ENFORCED.")
         if r["notes"]:
             # `%s` on a list prints a Python repr on one line, so a multi-line note arrives as an
             # unreadable wall — and an announcement nobody can read is one that did not happen.
