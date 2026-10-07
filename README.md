@@ -102,6 +102,9 @@ true*, not a wish in a prompt.
 showrunner lock run device --holder crawler-a -- ./deploy.sh
 ```
 
+The command runs in the caller's own directory, so from a Crawler's worktree `./deploy.sh` is that
+branch's script, not the main checkout's.
+
 The holder is a **live PID** — the consuming process itself. A dead holder is stale and reclaimable; a
 holder recorded on a previous boot cannot possibly still be running. Named resources are independent,
 so unrelated work never queues behind unrelated work, and the lock root is **one absolute path shared
@@ -249,7 +252,17 @@ retroactively and is **dry-run by default**. Three conditions are all required, 
 not one of them: merged, clean, and not alive. `reconcile` answers clean/dirty/**unknown**, and a
 failed read must never license a delete, with somebody's only copy of their work on the other
 side of it. Everything held back is printed with its reason, and `doctor` reports how many trees
-exist, because that count is not a number anyone discovers on purpose.
+exist, because that count is not a number anyone discovers on purpose. What `spawn` itself wrote
+into a tree — its hook registrations above all — is fingerprinted when it writes it and is not
+counted as uncommitted work, until the Crawler edits it. `status` names `gc` once the worktree
+count passes `gc_nudge_at`.
+
+**A stopped Crawler is resumed, not respawned.** `showrunner resume <leaf>` restarts its recorded
+session in its own worktree with its uncommitted work intact — after a spend limit, a usage
+window or a crash — and records the new process so `waiting` and `reap` see it. It refuses when
+the tree is gone or a live process still owns the session.
+`showrunner resume <leaf> --prompt-file -` says what to tell it, and
+`showrunner resume <leaf> --dry-run` shows the command.
 
 **What a compacted agent gets back.** An agent several compactions deep can lose which campaign
 it is on and what verbs exist, and stop using the tool at all — doing the work by hand in a repo

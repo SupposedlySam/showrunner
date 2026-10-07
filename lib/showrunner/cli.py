@@ -953,7 +953,31 @@ def cmd_status(args):
         eprint("  A finished session does not idle: it keeps polling whatever it was told to "
                "poll, and that is a SHARED cost — the run that notices is usually not the run "
                "that pays.")
+    _gc_nudge(cfg)
     return 0
+
+
+GC_NUDGE_AT = 10
+
+
+def _gc_nudge(cfg):
+    """Say when worktrees pile up (#99), from a COUNT, so `status` stays cheap.
+
+    Which trees are reclaimable is a git question per tree — `gc` asks it. This only counts the
+    directories, which is one listing, and names the verb that answers the expensive half. Trees
+    pile up silently because nothing in a normal run looks at the worktree root; the reported
+    campaign reached 54 and a host that crawled before anyone counted.
+    """
+    try:
+        at = int((cfg.get("gc_nudge_at") if hasattr(cfg, "get") else None) or GC_NUDGE_AT)
+        n = len([d for d in os.listdir(cfg.worktree_root)
+                 if os.path.isdir(os.path.join(cfg.worktree_root, d))])
+    except (OSError, TypeError, ValueError):
+        return
+    if n >= at:
+        print("  %s%d worktrees on disk%s — `showrunner gc` lists which are merged and clean, and "
+              "`showrunner gc --apply` removes those. Showrunner's own provisioning is not "
+              "counted as uncommitted work." % (YEL, n, OFF))
 
 
 # ------------------------------------------------------------------ graph
@@ -2191,7 +2215,12 @@ def cmd_lock_run(args):
     rc = None
     try:
         import subprocess
-        rc = subprocess.call(cmd, cwd=cfg.root)
+        # THE CALLER'S DIRECTORY, NOT THE MAIN CHECKOUT (#100). This ran every command at
+        # `cfg.root`, so `lock run ... -- ./cli/tool` from a Crawler's worktree ran the MAIN
+        # checkout's tool against main's code, wrote build output into the tree other sessions
+        # were using, and said nothing. The lock is about the RESOURCE; where the command runs
+        # is the caller's business, exactly as for every other wrapper.
+        rc = subprocess.call(cmd, cwd=os.getcwd())
         return rc
     finally:
         lock.release(pid=os.getpid(), force=True)
@@ -2868,6 +2897,46 @@ def cmd_spawn(args):
         else:
             print("  command  %s" % " ".join(out["cmd"][:2] + ["<brief>"] + out["cmd"][3:]))
             print("  (dry run — nothing started)")
+    return 0
+
+
+def cmd_resume(args):
+    """Restart a stopped Crawler's recorded session in its existing worktree (#97)."""
+    cfg = _cfg(args)
+    g = _graph(cfg)
+    leaf = g.show(args.id)
+    entries = [c for c in campaign.load(cfg).get("crawlers", []) if c.get("leaf") == leaf["id"]]
+    if not entries:
+        die("no Crawler was ever spawned for %s in this campaign, so there is no session or "
+            "tree to resume. `showrunner spawn %s --launch` starts one." % (leaf["id"], leaf["id"]),
+            code=2)
+    entry = entries[-1]
+    # THE SAME SEAT CHECK AS `spawn --launch`: resuming starts a session, and a restriction
+    # enforced on one sanctioned path and not the other restricts nothing.
+    _me = args.session or caller_session()
+    _ok, _role, _seat, _ = dispatch.may_dispatch(cfg, _me)
+    if not _ok and not args.dry_run:
+        die("resuming %s would START a session, and this seat may not (role %s)."
+            % (leaf["id"], _role), code=3)
+    prompt = args.prompt or (
+        "Continue your leaf %s from where you stopped. Your brief is %s; your uncommitted work "
+        "is still in this worktree — read `git status` before doing anything else."
+        % (leaf["id"], os.path.join(cfg.abspath(entry["scratch"]), "BRIEF.md")))
+    out = dispatch.resume(cfg, entry, lanes.route(cfg, leaf), prompt,
+                          dry_run=bool(args.dry_run))
+    print("%sResume %s%s%s" % (BOLD, entry["crawler"], OFF,
+                               " (dry run — nothing started)" if args.dry_run else ""))
+    print("  leaf     %s — %s (%s)" % (leaf["id"], leaf.get("title", ""), leaf.get("status")))
+    print("  worktree %s" % rel(out["worktree"], cfg.root))
+    print("  session  %s" % out["session"])
+    print("  model    %s" % (out["model"] or "(inherited)"))
+    if not out["launched"]:
+        print("  command  %s" % " ".join(out["cmd"][:2] + ["<prompt>"] + out["cmd"][3:]))
+        return 0
+    if leaf.get("status") == "in_progress" and leaf.get("claim_pid"):
+        g.rebind_claim(leaf["id"], out["pid"])
+    print("  pid      %s" % out["pid"])
+    print("  log      %s" % out["log"])
     return 0
 
 
@@ -3871,6 +3940,16 @@ def build_parser():
                         "rule without constructing a PreToolUse event")
     d.set_defaults(func=cmd_dispatch_guard)
 
+    s = sub.add_parser("resume",
+                       help="restart a stopped Crawler's RECORDED session in its EXISTING worktree, "
+                            "keeping its uncommitted work. Refuses when the tree is gone or a "
+                            "live process still owns the session")
+    s.add_argument("id")
+    s.add_argument("--prompt", help="what to tell it; defaults to 'continue, read git status'")
+    s.add_argument("--session", help="the calling session, for the may-dispatch check")
+    s.add_argument("--dry-run", action="store_true", help="show the command and start nothing")
+    s.set_defaults(func=cmd_resume)
+
     s = sub.add_parser("write-guard",
                        help="PreToolUse (Write|Edit|MultiEdit|NotebookEdit|Bash): refuse a write "
                             "the session's resolved role may not make, including through a "
@@ -3990,7 +4069,7 @@ def build_parser():
 # DERIVED, NOT ENUMERATED. The twins are generated by walking the parser, so an option added
 # later gets one without anybody remembering — the same move game_loop used, and the reason a
 # reader grepping for a specific twin name finds nothing and concludes wrongly that none exists.
-PROSE_OPTS = ("reason", "title", "who", "stale-proof-reason", "note")
+PROSE_OPTS = ("reason", "title", "who", "stale-proof-reason", "note", "prompt")
 
 # Long prose on a command line is the shape that invites a heredoc, and a heredoc is where
 # backticks live. Bounded so the refusal arrives before the damage rather than after it.

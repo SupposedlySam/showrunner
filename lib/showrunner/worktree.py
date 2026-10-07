@@ -427,6 +427,130 @@ def dirty(path, tracked_only=False):
     return [line for line in out.splitlines() if line.strip()]
 
 
+# ----------------------------------------------- provisioning is not work (#99)
+# `spawn` writes into every tree it makes — merged hook registrations in `.claude/settings.json`
+# above all — and `git status` cannot tell those from a Crawler's edits. So `gc`'s rule "never
+# delete uncommitted work" held every tree on a campaign of 54, and the operator removed 39 by
+# hand to get disk back. The rule stays total; what changes is that showrunner's OWN writes are
+# not counted as anybody's work.
+
+def status_path(line):
+    """The path a `git status --porcelain` line names (the destination, for a rename)."""
+    p = line[3:] if len(line) > 3 else ""
+    if " -> " in p:
+        p = p.split(" -> ", 1)[1]
+    return p.strip().strip('"').rstrip("/")
+
+
+def _digest(path):
+    """Content digest of a file, or of a directory's files and names; None if absent."""
+    import hashlib
+    h = hashlib.sha256()
+    if os.path.isfile(path):
+        with open(path, "rb") as fh:
+            h.update(fh.read())
+        return h.hexdigest()
+    if os.path.isdir(path):
+        for dirpath, dirs, files in os.walk(path):
+            dirs.sort()
+            for name in sorted(files):
+                full = os.path.join(dirpath, name)
+                h.update(os.path.relpath(full, path).encode())
+                try:
+                    with open(full, "rb") as fh:
+                        h.update(fh.read())
+                except OSError:
+                    h.update(b"\0unreadable")
+        return h.hexdigest()
+    return None
+
+
+def provisioning_fingerprint(tree):
+    """{path: digest} for everything `git status` reports in a tree spawn has just provisioned.
+
+    Taken AFTER provisioning and BEFORE any Crawler runs, so every entry is showrunner's own
+    write. A later edit to one of these files changes its digest and counts as work again.
+    None when git could not be read — an unknown baseline discounts nothing.
+    """
+    found = dirty(tree)
+    if found is None:
+        return None
+    return {p: _digest(os.path.join(tree, p)) for p in (status_path(l) for l in found) if p}
+
+
+def _hook_commands(settings):
+    out = set()
+    for entries in ((settings or {}).get("hooks") or {}).values():
+        for entry in entries or []:
+            for h in (entry or {}).get("hooks") or []:
+                if isinstance(h, dict) and h.get("command"):
+                    out.add(h["command"])
+    return out
+
+
+def _settings_are_provisioning(cfg, tree):
+    """Is the ONLY change to this tree's `.claude/settings.json` hooks the main checkout registers?
+
+    For trees spawned before fingerprints existed. Structural, not a guess: nothing removed,
+    no key other than `hooks` changed, and every ADDED hook command is one already registered in
+    the main checkout's settings layers — which is exactly what spawn's merge carries across.
+    Anything else, including an edit to an existing entry, is the Crawler's.
+    """
+    import json
+    try:
+        with open(os.path.join(tree, ".claude", "settings.json")) as fh:
+            cur = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    rc, out, _ = git(["show", "HEAD:.claude/settings.json"], cwd=tree)
+    try:
+        head = json.loads(out) if rc == 0 else {}
+    except ValueError:
+        return False
+    if not isinstance(cur, dict) or not isinstance(head, dict):
+        return False
+    if {k: v for k, v in cur.items() if k != "hooks"} != \
+            {k: v for k, v in head.items() if k != "hooks"}:
+        return False
+    main = set()
+    for name in ("settings.json", "settings.local.json"):
+        try:
+            with open(os.path.join(cfg.root, ".claude", name)) as fh:
+                main |= _hook_commands(json.load(fh))
+        except (OSError, ValueError):
+            continue
+    head_hooks, cur_hooks = head.get("hooks") or {}, cur.get("hooks") or {}
+    for event, entries in head_hooks.items():
+        have = [json.dumps(e, sort_keys=True) for e in cur_hooks.get(event) or []]
+        if any(json.dumps(e, sort_keys=True) not in have for e in entries or []):
+            return False                        # something was removed or rewritten
+    for event, entries in cur_hooks.items():
+        base = [json.dumps(e, sort_keys=True) for e in head_hooks.get(event) or []]
+        for e in entries or []:
+            if json.dumps(e, sort_keys=True) in base:
+                continue
+            cmds = _hook_commands({"hooks": {event: [e]}})
+            if not cmds or not cmds <= main:
+                return False
+    return True
+
+
+def split_provisioning(cfg, tree, lines, fingerprint=None):
+    """(work, provisioning) — the status lines that are somebody's work, and spawn's own writes."""
+    work, prov = [], []
+    for line in lines or []:
+        p = status_path(line)
+        if fingerprint and p in fingerprint and fingerprint[p] is not None \
+                and _digest(os.path.join(tree, p)) == fingerprint[p]:
+            prov.append(line)
+        elif not fingerprint and p == ".claude/settings.json" \
+                and _settings_are_provisioning(cfg, tree):
+            prov.append(line)
+        else:
+            work.append(line)
+    return work, prov
+
+
 # ------------------------------------------------------------------ scratch
 def scratch_for(cfg, name):
     """A private scratch dir, created at spawn and named for the Crawler.
@@ -927,6 +1051,8 @@ def spawn(cfg, leaf, actor="crawler", base="HEAD", branch=None, sparse=None, dri
 
     # LAST, after everything spawn copies in: every registered hook must find its directory.
     problems += hook_gaps(cfg, path)
+    # What spawn itself changed in the tree, so `gc` never counts it as the Crawler's work (#99).
+    provisioned_files = provisioning_fingerprint(path)
 
     if problems:
         # Fail the spawn loudly rather than handing over a half-built environment — and undo
@@ -962,6 +1088,7 @@ def spawn(cfg, leaf, actor="crawler", base="HEAD", branch=None, sparse=None, dri
         "sparse": ({"dirs": cone, "source": cone_source,
                     "misses": cone_misses(leaf, cone)} if cone else None),
         "drift": drift if drift and (drift.get("deleted") or drift.get("modified")) else None,
+        "provisioned_files": provisioned_files,
         "created_ts": now(),
     }
     return record

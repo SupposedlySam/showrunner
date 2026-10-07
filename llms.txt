@@ -188,7 +188,19 @@ showrunner gc                        # remove worktrees whose branch is MERGED a
                                      # unreadable and unmerged trees are reported and KEPT.
                                      # `integrate` already does this on success (--keep-trees
                                      # opts out); gc is for the backlog and for trees
-                                     # integrate did not remove
+                                     # integrate did not remove. What SPAWN wrote into a tree
+                                     # (hook registrations above all) is not uncommitted work:
+                                     # it is fingerprinted at spawn and at launch, and counts
+                                     # again the moment the Crawler edits it. `status` says when
+                                     # worktrees pile past `gc_nudge_at` (default 10)
+showrunner resume <leaf>             # restart a STOPPED Crawler's recorded session IN ITS OWN
+                                     # worktree, keeping its uncommitted work — after a spend
+                                     # limit, a usage window or a crash. Lane model and flags as
+                                     # spawn used; --prompt / --prompt-file add what to say;
+                                     # --dry-run shows the command. Records the new pid WITH its
+                                     # start time, so `waiting` and `reap` see it. Refuses (exit 3)
+                                     # when the tree is gone, no session was recorded, or a live
+                                     # process still owns the session
 showrunner reconcile                 # on resume: merged / abandoned / live / BLOCKED — ask FIRST
 showrunner amend <leaf> --premise .. # correct a CLOSED leaf's premise by SUPERSEDING it: the
                                      # original verdict stays readable, because a record that can
@@ -1150,6 +1162,9 @@ refused.
 showrunner lock run <resource> --holder <you> -- <command>
 ```
 
+The command runs where YOU stand — your worktree, not the main checkout — so `./tool` is your
+branch's tool and its build output lands in your tree.
+
 The lock is a guarantee only where the *consumer* takes it. `lock guard` catches the honest mistake; a
 raw command that matches no pattern escapes it.
 
@@ -1178,9 +1193,19 @@ showrunner park <leaf> --reason "usage limit — window resets at <time>"
 showrunner unpark <leaf>
 ```
 
+When the limit resets, `showrunner resume <leaf>` restarts its recorded session in its own
+worktree. Do not respawn it: `spawn` cuts a NEW tree and abandons the uncommitted work.
+
 A parked leaf is excluded from `reap`, does not block `stop-gate`, and does not block the
 inert-Crawler gate either — but it is still reported, and the report says when a parked Crawler
 is ALSO inert so its owner learns the run is stalled.
+
+**What counts as working since a block**, before the gate calls a Crawler inert: a commit on its
+branch, a tracked-file change in its tree, a write to its scratch dir, its session transcript
+written after the block, or a process it STARTED after the block — a test run or a build changes
+no tracked file while it runs. Children that predate the block (MCP servers, a language server)
+do not count, or every Crawler would look busy forever. When none of that could be read, the
+report says COULD NOT DETERMINE rather than "doing nothing" — do not reap on unreadable.
 
 The inert-Crawler gate is a different gate from `stop-gate`, and it consults the parked flag
 too. That matters in a checkout running two campaigns: hooks read the DEFAULT campaign regardless

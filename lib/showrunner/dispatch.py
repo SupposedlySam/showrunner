@@ -428,6 +428,13 @@ def launch(cfg, record, decision, brief, session_id, dry_run=False, chat=None):
     elif channel:
         chat_ok, chat_detail, _joined = provision_chat(cfg, record, channel, session_id)
 
+    # THE LAST MOMENT THE TREE IS STILL ONLY SHOWRUNNER'S (#99): the stop gate and chat wiring
+    # above write into it too, and none of that is the Crawler's work.
+    from . import worktree as _worktree
+    _prov = _worktree.provisioning_fingerprint(wt)
+    if _prov is not None:
+        campaign.set_state(cfg, record["crawler"], "dispatching", provisioned_files=_prov)
+
     log = os.path.join(cfg.abspath(record["scratch"]), "session.log")
     os.makedirs(os.path.dirname(log), exist_ok=True)
     try:
@@ -446,6 +453,54 @@ def launch(cfg, record, decision, brief, session_id, dry_run=False, chat=None):
             "channel": channel if (chat_ok and _joined) else None,
             "joined": bool(_joined), "chat": chat_detail, "cmd": cmd, "pid": proc.pid, "log": rel(log, cfg.root),
             "stop_gate": gate_detail if gate_ok else None, "launched": True}
+
+
+def resume(cfg, entry, decision, prompt, dry_run=False):
+    """Restart a Crawler's RECORDED session in its EXISTING worktree (#97).
+
+    A Crawler stopped by a spend limit, a usage window or a crash holds uncommitted work in its
+    tree, and `spawn` would cut a NEW tree from the primary checkout — abandoning it. The
+    reported workaround was `claude -p ... --resume <session>` by hand plus a hand-edited
+    campaign record, and the result was invisible to `waiting`: the record's pid had no
+    `pid_started`, so a process started after the original dispatch read as a recycled pid.
+
+    Refuses when the tree is gone, when no session was recorded, and when a live process
+    already owns the session — two processes resuming one session is two writers of one
+    transcript. Records the new pid WITH its start time, so `waiting`, `reap` and the watchdog
+    see it as this Crawler's.
+    """
+    wt = cfg.abspath(entry.get("worktree") or "")
+    if not entry.get("worktree") or not os.path.isdir(wt):
+        raise Refused("%s has no worktree at %s — nothing to resume; `spawn` makes a new one"
+                      % (entry.get("crawler"), wt or "?"), code=3)
+    session_id = entry.get("session")
+    if not session_id:
+        raise Refused("%s has no recorded session, so there is nothing to resume — it was "
+                      "spawned without --launch" % entry.get("crawler"), code=3)
+    if campaign.live(entry):
+        raise Refused("%s's session %s is still owned by a LIVE process (pid %s). Resuming it "
+                      "would put two writers on one session. Message it, or wait for it to "
+                      "exit." % (entry.get("crawler"), session_id, entry.get("pid")), code=3)
+    model = entry.get("model_declared") or resolve_model(cfg, decision)
+    cmd = build_command(cfg, entry, model, session_id, prompt)
+    i = cmd.index("--session-id")
+    cmd[i] = "--resume"
+    if dry_run:
+        return {"session": session_id, "model": model, "cmd": cmd, "launched": False,
+                "worktree": wt}
+    log = os.path.join(cfg.abspath(entry["scratch"]), "session.log")
+    os.makedirs(os.path.dirname(log), exist_ok=True)
+    try:
+        with open(log, "ab") as fh:
+            proc = subprocess.Popen(cmd, cwd=wt, stdout=fh, stderr=subprocess.STDOUT,
+                                    stdin=subprocess.DEVNULL, start_new_session=True)
+    except OSError as exc:
+        raise Refused("could not resume %s: %s" % (entry.get("crawler"), exc))
+    campaign.set_state(cfg, entry["crawler"], "running", pid=proc.pid, dispatched_at=now(),
+                       pid_started=process_started(proc.pid), resumed_at=now(),
+                       resumes=int(entry.get("resumes") or 0) + 1)
+    return {"session": session_id, "model": model, "cmd": cmd, "pid": proc.pid,
+            "log": rel(log, cfg.root), "launched": True, "worktree": wt}
 
 
 def observed_models(cfg, entry):

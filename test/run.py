@@ -16292,9 +16292,416 @@ def test_a_roles_writes_are_enforced_on_bash_too():
        q.returncode == 0 and "DID NOT RUN" in q.stdout and "exited 2" in q.stdout, q.stdout)
 
 
+def test_lock_run_keeps_the_callers_directory():
+    group("`lock run` runs its command where the CALLER stands, not in the main checkout (#100)")
+    if not have("git"):
+        skip("the lock-run cwd group", "git is not installed")
+        return
+    # REPORTED: `lock run local-stack -- ./cli/tool dev` from a linked worktree ran the main
+    # checkout's tool, so a device walk meant to exercise a branch exercised main, and the build
+    # wrote generated files into the tree three other sessions were using. The reporter named
+    # the refutation: the child must report the WORKTREE as its cwd.
+    cfg = make_repo({"resources": [{"name": "stack", "match": [r"\bstack\b"]}]})
+    tree = os.path.join(cfg.root, ".worktrees", "cwd-probe")
+    sh(["git", "worktree", "add", "-q", "-b", "cwd-probe", tree], cfg.root)
+    exe = os.path.join(ROOT, "bin", "showrunner")
+
+    def child_cwd(where):
+        p = subprocess.run([sys.executable, exe, "lock", "run", "stack", "--holder", "t", "--",
+                            "python3", "-c", "import os; print(os.getcwd())"],
+                           cwd=where, capture_output=True, text=True)
+        lines = [l for l in p.stdout.splitlines() if l.strip()]
+        return os.path.realpath(lines[-1]) if lines else p.stderr[-300:]
+
+    eq("from a linked worktree, the command runs IN that worktree", child_cwd(tree),
+       os.path.realpath(tree))
+    eq("...and from the main checkout, in the main checkout", child_cwd(cfg.root),
+       os.path.realpath(cfg.root))
+    sub = os.path.join(tree, "nested")
+    os.makedirs(sub)
+    eq("...and from a subdirectory, in that subdirectory, as any wrapper would",
+       child_cwd(sub), os.path.realpath(sub))
+
+
+def test_gc_does_not_count_spawns_own_provisioning_as_work():
+    group("gc reclaims a merged tree whose only change is what spawn itself wrote; a Crawler's "
+          "edit still holds it (#99)")
+    if not have("git"):
+        skip("the provisioning-is-not-work group", "git is not installed")
+        return
+    # REPORTED: 54 worktrees, `gc` reclaimed none — every one HELD for "1 uncommitted change",
+    # which in 39 of them was the hook registration spawn writes into every tree. 39 removed by
+    # hand took the host from 79 GB free to 261 GB.
+    cfg = make_repo(files={"README.md": "x\n",
+                           ".claude/settings.json": json.dumps({"hooks": {}}) + "\n"})
+    lease.register_guard(cfg, local=True)
+    cfg.data["harness"] = dict(cfg.data.get("harness") or {}, require=False)
+    g = new_graph(cfg)
+    names = {}
+    for leaf_id in ("P1", "P2", "P3", "P4"):
+        g.add("leaf %s" % leaf_id, leaf_id=leaf_id)
+        rec = worktree.spawn(cfg, g.show(leaf_id), actor="a")
+        campaign.record_spawn(cfg, rec)
+        names[leaf_id] = rec
+    rec = names["P1"]
+    ok("spawn fingerprints what IT changed in the tree",
+       ".claude/settings.local.json" in (rec.get("provisioned_files") or {}),
+       rec.get("provisioned_files"))
+    ok("...and that file really shows in git status, so without the fingerprint it would hold",
+       any("settings.local.json" in l for l in worktree.dirty(rec["worktree"]) or []))
+
+    # P2: the Crawler edits a provisioned file after spawn. P3: the Crawler writes a real file.
+    with open(os.path.join(names["P2"]["worktree"], ".claude", "settings.local.json"), "a") as fh:
+        fh.write("\n")
+    with open(os.path.join(names["P3"]["worktree"], "notes.txt"), "w") as fh:
+        fh.write("the only copy\n")
+    # P4: a tree from before fingerprints, whose tracked settings.json gained ONLY hooks the main
+    # checkout registers — and then gained something else too.
+    campaign.set_state(cfg, names["P4"]["crawler"], "spawned", provisioned_files=None)
+    with open(os.path.join(cfg.root, ".claude", "settings.local.json")) as fh:
+        main_local = json.load(fh)
+    tracked = os.path.join(names["P4"]["worktree"], ".claude", "settings.json")
+    with open(tracked, "w") as fh:
+        json.dump({"hooks": main_local["hooks"]}, fh)
+    os.remove(os.path.join(names["P4"]["worktree"], ".claude", "settings.local.json"))
+
+    take, held = campaign.reclaimable(cfg, g)
+    taken = {t["crawler"] for t in take}
+    heldw = {h["crawler"]: h["why"] for h in held}
+    ok("a merged tree whose only change is spawn's provisioning is RECLAIMABLE",
+       names["P1"]["crawler"] in taken, heldw.get(names["P1"]["crawler"]))
+    ok("a provisioned file the Crawler EDITED afterwards is work again, and holds the tree",
+       names["P2"]["crawler"] in heldw, sorted(taken))
+    ok("a real untracked file still holds the tree — the guarantee is unchanged for work",
+       names["P3"]["crawler"] in heldw, sorted(taken))
+    ok("an older tree whose settings.json gained ONLY the main checkout's hooks is recognised as "
+       "provisioning", names["P4"]["crawler"] in taken, heldw.get(names["P4"]["crawler"]))
+    with open(tracked) as fh:
+        d = json.load(fh)
+    d["permissions"] = {"allow": ["Bash(rm:*)"]}
+    with open(tracked, "w") as fh:
+        json.dump(d, fh)
+    take2, held2 = campaign.reclaimable(cfg, g)
+    ok("...but not once anything OTHER than those hooks changed in it",
+       names["P4"]["crawler"] in {h["crawler"] for h in held2},
+       sorted(t["crawler"] for t in take2))
+
+    # THE NUDGE: a count, so `status` stays cheap; `gc` says which.
+    import io
+    from contextlib import redirect_stdout
+    from showrunner import cli
+    cfg.data["gc_nudge_at"] = 2
+    out = io.StringIO()
+    with redirect_stdout(out):
+        cli._gc_nudge(cfg)
+    ok("`status` says when worktrees pile up, and names gc", "worktrees on disk" in out.getvalue()
+       and "showrunner gc" in out.getvalue(), out.getvalue())
+    cfg.data["gc_nudge_at"] = 99
+    quiet = io.StringIO()
+    with redirect_stdout(quiet):
+        cli._gc_nudge(cfg)
+    eq("...and says nothing below the threshold", quiet.getvalue(), "")
+
+
+def test_a_crawler_running_tests_is_not_inert():
+    group("a Crawler running tests after a refused turn-end is WORKING: the transcript and the "
+          "processes it started count, and unreadable says so (#98)")
+    if not have("git"):
+        skip("the inert-evidence group", "git is not installed")
+        return
+    # REPORTED: the inert-Crawler gate refused the lead's turn-end twice over Crawlers that were
+    # running an 11,421-test suite and a comparison in a probe worktree — no tracked file changes
+    # while tests run, so tree-only evidence read real work as nothing, and pointed at a reap.
+    cfg = make_repo()
+    from showrunner import events as EV
+    from showrunner.util import transcript_path
+    wt = os.path.join(cfg.worktree_root, "c-tests")
+    sh(["git", "worktree", "add", "-q", wt, "-b", "showrunner/c-tests"], cfg.root)
+    for name in os.listdir(wt):
+        if name != ".git":
+            p_ = os.path.join(wt, name)
+            if os.path.isfile(p_):
+                os.utime(p_, (1, 1))
+    old_child = subprocess.Popen(["sleep", "60"])        # a long-lived child from BEFORE the block
+    time.sleep(1.2)
+    EV.emit(cfg, "crawler.blocked", {"crawler": "c-tests", "leaf": "T1", "why": "refused"})
+    since = EV.latest(cfg, ("crawler.blocked",), "crawler", "c-tests")["ts"]
+    me = os.getpid()
+    try:
+        got, why = campaign.work_since_block(cfg, "c-tests", None, wt, session="S-T98", pid=me)
+        ok("a child process that predates the block (an MCP server, a language server) is NOT "
+           "evidence — otherwise every Crawler looks busy forever", got is False, (got, why))
+
+        time.sleep(1.2)
+        new_child = subprocess.Popen(["sleep", "60"])
+        try:
+            got, why = campaign.work_since_block(cfg, "c-tests", None, wt, session="S-T98",
+                                                 pid=me)
+            ok("a process STARTED after the block — a test run, a build — IS evidence of work",
+               got is True and "started" in why, (got, why))
+        finally:
+            new_child.kill()
+            new_child.wait()
+
+        tp = transcript_path(wt, "S-T98")
+        os.makedirs(os.path.dirname(tp), exist_ok=True)
+        with open(tp, "w") as fh:
+            fh.write("{}\n")
+        os.utime(tp, (since - 30, since - 30))
+        got, why = campaign.work_since_block(cfg, "c-tests", None, wt, session="S-T98", pid=None)
+        ok("a transcript last written BEFORE the block is not evidence", got is False, (got, why))
+        os.utime(tp, (since + 30, since + 30))
+        got, why = campaign.work_since_block(cfg, "c-tests", None, wt, session="S-T98", pid=None)
+        ok("a transcript written AFTER the block is — the session did not stop",
+           got is True and "transcript" in why, (got, why))
+    finally:
+        old_child.kill()
+        old_child.wait()
+
+    got, why = campaign.work_since_block(cfg, "c-tests", None, "/nonexistent/tree-98")
+    ok("with NOTHING readable — no tree, no session, no pid — the answer says COULD NOT "
+       "DETERMINE rather than implying the Crawler is doing nothing",
+       got is False and "COULD NOT DETERMINE" in why, (got, why))
+    got, why = campaign.work_since_block(cfg, "c-tests", None, wt)
+    ok("...while a readable tree with no work says nothing extra — the gate still refuses",
+       got is False and why == "", (got, why))
+
+
+def test_resume_restarts_a_crawler_in_its_own_tree():
+    group("`resume` restarts a stopped Crawler's recorded session in its EXISTING worktree, and "
+          "`waiting` sees it (#97)")
+    if not have("git"):
+        skip("the resume group", "git is not installed")
+        return
+    # REPORTED: a spend limit stopped two Crawlers with uncommitted edits. `spawn` would cut a NEW
+    # tree and abandon them, so the operator ran `claude -p ... --resume` by hand and edited the
+    # campaign record — and `waiting` still said no dispatched work had a live owner, because a
+    # hand-set pid has no recorded start time and reads as a recycled one.
+    cfg = make_repo()
+    cfg.data["harness"] = dict(cfg.data.get("harness") or {}, require=False)
+    stub_dir = tempfile.mkdtemp(prefix="sr-r97-")
+    argv_log = os.path.join(stub_dir, "argv")
+    stub = os.path.join(stub_dir, "claude")
+    with open(stub, "w") as fh:
+        fh.write("#!/bin/sh\npwd > %s\nprintf '%%s\\n' \"$@\" >> %s\nexec sleep 60\n"
+                 % (argv_log, argv_log))
+    os.chmod(stub, 0o755)
+    cfg.data["dispatch"] = dict(cfg.data.get("dispatch") or {}, claude_bin=stub)
+    with open(os.path.join(cfg.root, ".showrunner", "config.local.json"), "w") as fh:
+        json.dump({"dispatch": {"claude_bin": stub}}, fh)
+    g = new_graph(cfg)
+    g.add("stopped leaf", leaf_id="R1")
+    rec = worktree.spawn(cfg, g.show("R1"), actor="a")
+    campaign.record_spawn(cfg, rec, session="S-R97")
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    campaign.set_state(cfg, rec["crawler"], "running", pid=gone.pid, dispatched_at=1)
+    with open(os.path.join(rec["worktree"], "half-done.txt"), "w") as fh:
+        fh.write("uncommitted work\n")
+    exe = os.path.join(ROOT, "bin", "showrunner")
+
+    def resume(*extra):
+        return subprocess.run([sys.executable, exe, "resume", "R1"] + list(extra),
+                              capture_output=True, text=True, cwd=cfg.root,
+                              stdin=subprocess.DEVNULL)
+
+    dry = resume("--dry-run")
+    ok("--dry-run shows the command with --resume <session> and starts nothing",
+       dry.returncode == 0 and "--resume S-R97" in dry.stdout and not os.path.exists(argv_log),
+       dry.stdout[-400:] + dry.stderr[-300:])
+    p = resume("--prompt", "the limit reset; carry on")
+    started = None
+    try:
+        ok("resume starts the session", p.returncode == 0, p.stderr[-400:])
+        for _ in range(50):
+            if os.path.exists(argv_log) and "--resume" in open(argv_log).read():
+                break
+            time.sleep(0.1)
+        logged = open(argv_log).read() if os.path.exists(argv_log) else ""
+        lines = logged.splitlines()
+        ok("...IN the recorded worktree, not a new one", lines and os.path.realpath(lines[0])
+           == os.path.realpath(rec["worktree"]), lines[:1])
+        ok("...resuming the RECORDED session, with the prompt appended",
+           "--resume" in lines and "S-R97" in lines and "the limit reset; carry on" in lines,
+           lines)
+        ok("...and the uncommitted work is still there",
+           os.path.exists(os.path.join(rec["worktree"], "half-done.txt")))
+        entry = [c for c in campaign.load(cfg)["crawlers"] if c["crawler"] == rec["crawler"]][0]
+        started = entry.get("pid")
+        ok("the new pid is recorded WITH its start time, so liveness reads it as this Crawler's",
+           entry.get("pid_started") is not None and campaign.live(entry), entry)
+        again = resume()
+        eq("a second resume while that process is live is REFUSED (two writers, one session)",
+           again.returncode, 3)
+        ok("...naming the live pid", str(started) in again.stderr, again.stderr[-300:])
+    finally:
+        if started:
+            try:
+                os.kill(started, 9)
+            except OSError:
+                pass
+    time.sleep(0.3)
+    shutil.rmtree(rec["worktree"])
+    sh(["git", "worktree", "prune"], cfg.root)
+    gone_tree = resume()
+    eq("with the worktree gone there is nothing to resume, and it says so (exit 3)",
+       gone_tree.returncode, 3)
+    g.add("never launched", leaf_id="R2")
+    rec2 = worktree.spawn(cfg, g.show("R2"), actor="a")
+    campaign.record_spawn(cfg, rec2)
+    q = subprocess.run([sys.executable, exe, "resume", "R2"], capture_output=True, text=True,
+                       cwd=cfg.root, stdin=subprocess.DEVNULL)
+    ok("a Crawler spawned without --launch has no session, and resume refuses rather than "
+       "inventing one", q.returncode == 3 and "no recorded session" in q.stderr, q.stderr[-300:])
+
+
+def test_provisioning_and_inert_helpers_directly():
+    group("the #98/#99 helpers, asked directly — each decision the integration groups only reach "
+          "through one path")
+    if not have("git"):
+        skip("the helper group", "git is not installed")
+        return
+    import hashlib
+    import io
+    from contextlib import redirect_stdout
+    from showrunner import cli
+    d = tempfile.mkdtemp(prefix="sr-helpers-")
+    f = os.path.join(d, "a.txt")
+    with open(f, "w") as fh:
+        fh.write("one\n")
+    eq("_digest of a file is the sha256 of its bytes", worktree._digest(f),
+       hashlib.sha256(b"one\n").hexdigest())
+    eq("_digest of a missing path is None, never a digest of nothing",
+       worktree._digest(os.path.join(d, "nope")), None)
+    sub = os.path.join(d, "dir")
+    os.makedirs(os.path.join(sub, "deep"))
+    with open(os.path.join(sub, "deep", "x"), "w") as fh:
+        fh.write("1")
+    before = worktree._digest(sub)
+    with open(os.path.join(sub, "deep", "x"), "w") as fh:
+        fh.write("2")
+    ok("_digest of a directory changes when a NESTED file changes", before is not None
+       and worktree._digest(sub) != before)
+
+    eq("a status line's path, and a rename's destination", [worktree.status_path(" M a/b.json"),
+       worktree.status_path("?? dir/"), worktree.status_path("R  old -> new")],
+       ["a/b.json", "dir", "new"])
+
+    cfg = make_repo(files={"README.md": "x\n",
+                           ".claude/settings.json": json.dumps({"hooks": {}, "model": "m"}) + "\n"})
+    eq("provisioning_fingerprint is None outside a git tree — an unknown baseline discounts "
+       "nothing", worktree.provisioning_fingerprint(d), None)
+    with open(os.path.join(cfg.root, "fresh.txt"), "w") as fh:
+        fh.write("p\n")
+    fp = worktree.provisioning_fingerprint(cfg.root)
+    ok("...and in a tree, it fingerprints what git status reports — the new file with its digest",
+       (fp or {}).get("fresh.txt") == hashlib.sha256(b"p\n").hexdigest()
+       and set(fp) == {worktree.status_path(l) for l in worktree.dirty(cfg.root)}, fp)
+    work, prov = worktree.split_provisioning(cfg, cfg.root, ["?? fresh.txt"], fp)
+    ok("split: a path still matching its fingerprint is provisioning", prov == ["?? fresh.txt"]
+       and work == [], (work, prov))
+    with open(os.path.join(cfg.root, "fresh.txt"), "a") as fh:
+        fh.write("edited\n")
+    work, prov = worktree.split_provisioning(cfg, cfg.root, ["?? fresh.txt"], fp)
+    ok("split: the same path after an edit is WORK", work == ["?? fresh.txt"] and prov == [],
+       (work, prov))
+    work, prov = worktree.split_provisioning(cfg, cfg.root, ["?? other.txt"], fp)
+    ok("split: a path the fingerprint never named is WORK", work == ["?? other.txt"], (work, prov))
+
+    hook = {"matcher": "Bash", "hooks": [{"type": "command", "command": "MAIN-HOOK"}]}
+    with open(os.path.join(cfg.root, ".claude", "settings.local.json"), "w") as fh:
+        json.dump({"hooks": {"PreToolUse": [hook]}}, fh)
+    sh(["git", "add", ".claude/settings.json"], cfg.root)
+    sh(["git", "commit", "-q", "-m", "settings"], cfg.root)
+    # A LINKED tree: the main checkout's own settings are what "registered there" means, so the
+    # tree under test must be a different one.
+    tree = os.path.join(d, "linked")
+    sh(["git", "worktree", "add", "-q", "-b", "linked-h", tree], cfg.root)
+    tracked = os.path.join(tree, ".claude", "settings.json")
+    with open(tracked) as fh:
+        base = json.load(fh)                # whatever HEAD carries, hooks included
+
+    def plus(extra_entry=None, **keys):
+        dct = json.loads(json.dumps(base))
+        dct.update(keys)
+        if extra_entry:
+            dct.setdefault("hooks", {}).setdefault("PreToolUse", []).append(extra_entry)
+        return dct
+
+    def settings(dct):
+        with open(tracked, "w") as fh:
+            json.dump(dct, fh)
+        return worktree._settings_are_provisioning(cfg, tree)
+
+    ok("settings: adding ONLY a hook the main checkout registers is provisioning",
+       settings(plus(hook)) is True)
+    on_start = json.loads(json.dumps(base))
+    on_start.setdefault("hooks", {}).setdefault("SessionStart", []).append(
+        {"hooks": [{"type": "command", "command": "MAIN-HOOK"}]})
+    ok("settings: the same main-checkout hook added on a DIFFERENT event is provisioning too",
+       settings(on_start) is True)
+    ok("settings: adding a hook the main checkout does NOT register is not",
+       settings(plus({"matcher": "Bash", "hooks": [
+           {"type": "command", "command": "SOMETHING-ELSE"}]})) is False)
+    ok("settings: changing any key other than hooks is not",
+       settings(plus(hook, model="other")) is False)
+    settings(plus(hook))
+    sh(["git", "add", "-A"], tree)
+    sh(["git", "commit", "-q", "-m", "hook in HEAD"], tree)
+    base = json.loads(json.dumps(base))
+    ok("settings: REMOVING an entry HEAD carries is not",
+       settings(base) is False)
+
+    eq("_undetermined with nothing readable says COULD NOT DETERMINE",
+       "COULD NOT DETERMINE" in campaign._undetermined([]), True)
+    eq("...and says nothing once any evidence was readable", campaign._undetermined(["tree"]), "")
+    plain = tempfile.mkdtemp(prefix="sr-not-git-")
+    from showrunner import events as EV
+    EV.emit(cfg, "crawler.blocked", {"crawler": "c-plain", "leaf": "Z", "why": "refused"})
+    got, why = campaign.work_since_block(cfg, "c-plain", None, plain)
+    ok("a tree that EXISTS but git cannot read is also COULD NOT DETERMINE — not 'no work'",
+       got is False and "COULD NOT DETERMINE" in why, (got, why))
+    eq("_children_since with no pid has nothing it could read", campaign._children_since(None, 0),
+       ([], False))
+    lone = subprocess.Popen(["sleep", "30"])
+    try:
+        eq("...a pid with no children is readable and empty",
+           campaign._children_since(lone.pid, 0), ([], True))
+    finally:
+        lone.kill()
+        lone.wait()
+    kid = subprocess.Popen(["sleep", "30"])
+    try:
+        found, readable = campaign._children_since(os.getpid(), 0)
+        ok("...and a child started after `since` is NAMED with its pid",
+           readable and any("pid %d" % kid.pid in x and "sleep" in x for x in found), found)
+    finally:
+        kid.kill()
+        kid.wait()
+
+    trees = os.path.join(d, "trees")
+    for n in ("a", "b", "c"):
+        os.makedirs(os.path.join(trees, n))
+    cfg.data["worktree_root"] = trees
+    cfg.data["gc_nudge_at"] = 3
+    out = io.StringIO()
+    with redirect_stdout(out):
+        cli._gc_nudge(cfg)
+    ok("the nudge fires AT the threshold and states the count", "3 worktrees on disk" in
+       out.getvalue(), out.getvalue())
+    ok("...and names the verb that removes them", "gc --apply" in out.getvalue(), out.getvalue())
+    with open(os.path.join(cfg.root, ".showrunner", "config.local.json"), "w") as fh:
+        json.dump({"worktree_root": trees, "gc_nudge_at": 3}, fh)
+    st = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "status"],
+                        capture_output=True, text=True, cwd=cfg.root, stdin=subprocess.DEVNULL,
+                        env=dict(os.environ, NO_COLOR="1"))
+    ok("...and the real `status` command prints it", "3 worktrees on disk" in st.stdout,
+       st.stdout[-400:] + st.stderr[-300:])
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

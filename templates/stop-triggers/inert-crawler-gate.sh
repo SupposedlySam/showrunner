@@ -119,17 +119,18 @@ for c in d.get("blocked_crawlers") or []:
 [ -n "$blocked" ] || exit 0
 
 {
-  echo "STOP REFUSED — a Crawler is ALIVE AND DOING NOTHING. It needs a message, not time."
+  echo "STOP REFUSED — a Crawler is ALIVE, was refused at its turn-end, and shows no work since."
+  echo "It needs a message, not time — unless a line below says that could not be determined."
   echo
   printf '%s\n' "$blocked"
   echo
   echo "Ending your turn here leaves it inert until a human notices the run has stalled."
   echo "That has happened; it is why this gate exists."
   echo
-  echo "THE TREE WAS ASKED. A Crawler whose worktree shows a commit or a tracked-file change"
-  echo "since the block was recorded is NOT listed above — it is working without a channel to"
-  echo "report on, and this gate releases for it. The ones named here showed neither, so the"
-  echo "block report and the tree agree."
+  echo "THE SESSION AND THE TREE WERE ASKED. A Crawler whose transcript was written, or which"
+  echo "started a process (a test run, a build), or whose worktree shows a commit or a tracked-file"
+  echo "change since the block was recorded is NOT listed above — it is working, and this gate"
+  echo "releases for it. Do not reap a Crawler marked COULD NOT DETERMINE: unreadable is not idle."
   echo
   echo "IF THE ACTOR NAMED ABOVE IS NOT YOU, THIS IS NOT YOURS TO FIX. Tell them. You were not"
   echo "the one who briefed it, and you do not have the context its work needs — this gate fires"

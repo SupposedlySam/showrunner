@@ -111,6 +111,8 @@ DEFAULTS = {
     "lanes": [],
     "default_lane": "serialized",
     "worktree_root": ".worktrees",
+    # `status` says so once this many worktrees exist (#99); `gc` says which can go.
+    "gc_nudge_at": 10,
     "scratch_root": ".showrunner/scratch",
     "inject": [],
     "checks": [],

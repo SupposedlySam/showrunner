@@ -552,6 +552,8 @@ def reconcile(cfg, graph, base="HEAD", deep=True):
             "branch": entry.get("branch"),
             "worktree": entry.get("worktree"),
             "scratch": entry.get("scratch"),
+            "session": entry.get("session"),
+            "pid": entry.get("pid"),
             "state": entry.get("state"),
             "alive": live(entry),
             "branch_exists": branch_exists(cfg, entry.get("branch") or "", known),
@@ -592,7 +594,12 @@ def reconcile(cfg, graph, base="HEAD", deep=True):
             # garbage. Guarded by `worktree_exists` today, which makes it unlikely rather than
             # unreachable: a tree can exist and still be unreadable by git.
             found = worktree.dirty(wt)
-            f["uncommitted"] = [] if found is None else found
+            # SPAWN'S OWN WRITES ARE NOT WORK (#99): discounted only while they still match what
+            # spawn wrote, so a Crawler's later edit to the same file counts again.
+            work, prov = worktree.split_provisioning(cfg, wt, found or [],
+                                                     entry.get("provisioned_files"))
+            f["uncommitted"] = [] if found is None else work
+            f["provisioning"] = [] if found is None else prov
             f["uncommitted_unknown"] = found is None
         # THE TREE IS EVIDENCE, AND UNKNOWN IS NOT CLEAN. Read once here because the verdict
         # ladder below asks it three times, and because "clean" is the only answer that licenses
@@ -991,7 +998,31 @@ def reap(cfg, graph, base="HEAD", apply=False):
     return actions, warnings
 
 
-def work_since_block(cfg, crawler, branch, worktree, scratch=None):
+def _children_since(pid, since):
+    """Processes `pid` started AFTER `since`: (list of "name (pid)", readable).
+
+    Only children started after the block count. A session keeps long-lived children from the
+    start — MCP servers, a language server — and counting those would make every Crawler look
+    busy forever; a test run or build started after the refusal is new, and is the work.
+    """
+    from .util import process_started
+    if not pid:
+        return [], False
+    rc, out, _ = run(["pgrep", "-P", str(pid)])
+    if rc not in (0, 1):
+        return [], False
+    found = []
+    for line in (out or "").split():
+        if not line.isdigit():
+            continue
+        started = process_started(int(line))
+        if started is not None and started > since:
+            rc2, name, _ = run(["ps", "-o", "comm=", "-p", line])
+            found.append("%s (pid %s)" % (os.path.basename((name or "?").strip()) or "?", line))
+    return found, True
+
+
+def work_since_block(cfg, crawler, branch, worktree, scratch=None, session=None, pid=None):
     """Has this Crawler worked SINCE showrunner recorded it blocked? (issue #54)
 
     `harness.stop_gate` says outright that `blocked` alone is a fact about the past: it reports
@@ -1023,14 +1054,33 @@ def work_since_block(cfg, crawler, branch, worktree, scratch=None):
             return True, "committed on %s after the block was recorded" % branch
 
     tree = worktree if os.path.isabs(worktree or "") else os.path.join(cfg.root, worktree or "")
+    readable = []
+    # THE SESSION ITSELF, asked first (#98). A Crawler running a long test suite, a build or an
+    # analysis changes no tracked file for many minutes, and the tree-based evidence below read
+    # that as inert — pointing the lead at a reap that would have discarded an hour of work. A
+    # transcript written after the block means the session did not stop.
+    if session and os.path.isdir(tree):
+        from .util import transcript_activity
+        act = transcript_activity(tree, session)
+        if act.get("mtime") is not None:
+            readable.append("transcript")
+            if act["mtime"] > since:
+                return True, ("its session transcript was written after the block was recorded "
+                              "— it kept working past the refused turn-end")
+    kids, kids_readable = _children_since(pid, since)
+    if kids_readable:
+        readable.append("processes")
+    if kids:
+        return True, ("it started %s after the block was recorded — a test run or a build "
+                      "changes no tracked file while it runs" % ", ".join(kids[:3]))
     if not os.path.isdir(tree):
-        return False, ""
+        return False, _undetermined(readable)
     # TRACKED files only. An untracked build artefact, a log the harness writes, or an editor
     # swapfile would all report "work" without anybody having done any -- and this signal
     # releases a gate, so a false positive here is the expensive direction.
     rc, out, _ = run(["git", "ls-files", "-z"], cwd=tree)
     if rc != 0:
-        return False, ""
+        return False, _undetermined(readable)
     newest = 0
     for rel in (out or "").split("\0"):
         if not rel:
@@ -1074,6 +1124,14 @@ def work_since_block(cfg, crawler, branch, worktree, scratch=None):
     return False, ""
 
 
+def _undetermined(readable):
+    """The `why` when NONE of the evidence could be read: "could not determine", never "nothing"."""
+    if readable:
+        return ""
+    return ("COULD NOT DETERMINE whether it has worked since the block — its transcript, its "
+            "processes and its tree could not be read, which is not the same as doing nothing")
+
+
 def waiting(cfg, graph, base="HEAD"):
     """Is this orchestrator legitimately waiting on work it dispatched? (game_loop#32)
 
@@ -1101,7 +1159,8 @@ def waiting(cfg, graph, base="HEAD"):
         worked, why_worked = (False, "")
         if f["blocked"]:
             worked, why_worked = work_since_block(cfg, f["crawler"], f.get("branch"),
-                                                  f.get("worktree") or "", f.get("scratch"))
+                                                  f.get("worktree") or "", f.get("scratch"),
+                                                  session=f.get("session"), pid=f.get("pid"))
         if f["parked"]:
             # PARKED IS CHECKED FIRST, and that ordering is the whole bug (#62). It used to sit
             # after `blocked`, so a Crawler that was parked AND refused at a turn-end never
@@ -1142,7 +1201,8 @@ def waiting(cfg, graph, base="HEAD"):
             except Exception:                                   # noqa: BLE001
                 _who = {}
             blocked.append(dict({"crawler": f["crawler"], "leaf": f["leaf"],
-                                 "why": f["blocked_detail"]}, **_who))
+                                 "why": f["blocked_detail"] + (
+                                     " — " + why_worked if why_worked else "")}, **_who))
         elif f["blocked"] and worked:
             # Blocked report, and the TREE disagrees. It is working without a phone line --
             # which is legitimate waiting, and the case that produced this issue.
