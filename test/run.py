@@ -16216,6 +16216,25 @@ def test_a_roles_writes_are_enforced_on_bash_too():
                            cwd=cfg.root, env=env)
         eq("the verb refuses with exit 3, which the shim alone turns into Claude Code's 2",
            p.returncode, 3)
+        # AN OPEN STDIN THAT NEVER CLOSES. The test above passed here and hung for seven days
+        # inside a release tool's suite run, whose stdin is a pipe nobody closes: the verb read it before
+        # looking at --command. Reproduced with that stdin, both for the verb told what to judge
+        # and for a guard that has to read a payload.
+        for label, argv in (("write-guard --command", ["write-guard", "--session", "S-LEAD-95",
+                                                       "--command", "echo y > docs/z.md"]),
+                            ("worktree guard reading a payload", ["worktree", "guard"])):
+            hung = subprocess.Popen([sys.executable, os.path.join(ROOT, "bin", "showrunner")]
+                                    + argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, cwd=cfg.root, env=env)
+            try:
+                hung.wait(timeout=30)
+                finished = True
+            except subprocess.TimeoutExpired:
+                hung.kill()
+                finished = False
+            hung.stdin.close()
+            hung.communicate()
+            ok("%s RETURNS when stdin is an open pipe that never delivers" % label, finished)
         ok("...with the reason on stderr", "may not write" in p.stderr, p.stderr[-300:])
 
         # THE LABEL follows the REGISTRATION, not the code existing.

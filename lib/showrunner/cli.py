@@ -1553,6 +1553,9 @@ def cmd_worktree_register(args):
     return rc
 
 
+HOOK_STDIN_WAIT = 3
+
+
 def _hook_payload():
     """The PreToolUse JSON on stdin. Returns (payload, problem).
 
@@ -1564,6 +1567,18 @@ def _hook_payload():
     try:
         if sys.stdin is None or sys.stdin.isatty():
             return {}, "no stdin (not running as a hook)"
+        # AN OPEN PIPE THAT NEVER CLOSES BLOCKS `read()` FOREVER, and "never blocks" above was
+        # false until this wait. `write-guard --command` inherited such a stdin from a release
+        # tool's suite run and sat there for seven days, so the release never finished. A hook
+        # is handed its payload at once; waiting a bounded time for it to become readable keeps
+        # every real hook working and turns a silent hang into "no payload".
+        import select
+        try:
+            ready, _, _ = select.select([sys.stdin], [], [], HOOK_STDIN_WAIT)
+        except (OSError, ValueError, TypeError):
+            ready = [sys.stdin]         # not selectable (e.g. a test's StringIO): just read it
+        if not ready:
+            return {}, "stdin was open but delivered nothing within %ss" % HOOK_STDIN_WAIT
         raw = sys.stdin.read()
     except (OSError, ValueError) as exc:
         return {}, "stdin could not be read (%s)" % exc
@@ -1787,7 +1802,7 @@ def cmd_write_guard(args):
     every edit and Bash call, and a bug that refused would lock the repo against its own repair.
     """
     from . import writeguard
-    payload, problem = _hook_payload()
+    payload, problem = ({}, None) if (args.command is not None or args.path) else _hook_payload()
     if problem and not (args.command or args.path):
         return _allow_loudly(
             "⚠ THE WRITE GUARD DID NOT RUN — it could not read its PreToolUse payload (%s), so "
