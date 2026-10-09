@@ -334,6 +334,64 @@ def lingering_crawlers(cfg):
     return out
 
 
+def orphans_in(entry, wt, cwds):
+    """Processes still running inside a DEAD Crawler's worktree (#101).
+
+    When a Crawler's session ends, the test runners and build daemons it started can keep
+    running in its tree — reported: two test runners alive 2h42m after their leaf closed, on a
+    machine loaded enough to stall other agents, and no verb said so. The parent link is gone by
+    then (they are reparented to init), so the tie is the working directory.
+
+    `proven` is the bar for ACTING on one, and it is deliberately high: reparented to init (it
+    lost its parent — a human's shell sitting in the tree still has its terminal) AND started
+    no earlier than this Crawler was dispatched. Anything else is reported and left alone.
+    """
+    if not cwds or not wt:
+        return []
+    from .util import process_ppid_command, process_started
+    wt = os.path.realpath(wt)
+    me = {os.getpid(), os.getppid()}
+    dispatched = entry.get("dispatched_at")
+    out = []
+    for pid, cwd in sorted(cwds.items()):
+        if pid in me or not cwd:
+            continue
+        real = os.path.realpath(cwd)
+        if real != wt and not real.startswith(wt + os.sep):
+            continue
+        ppid, command = process_ppid_command(pid)
+        if command is None:
+            continue                        # gone since the listing
+        started = process_started(pid)
+        out.append({
+            "pid": pid, "ppid": ppid, "command": command[:160],
+            "age": (now() - int(started)) if started else None,
+            "proven": bool(ppid == 1 and started and dispatched
+                           and started >= float(dispatched) - 5),
+        })
+    return out
+
+
+def orphan_processes(cfg, cwds=None):
+    """Every process running inside the worktree of a Crawler that is no longer alive."""
+    entries = [e for e in load(cfg).get("crawlers", [])
+               if e.get("worktree") and not live(e)
+               and os.path.isdir(cfg.abspath(e.get("worktree")))]
+    if not entries:
+        return [], True
+    if cwds is None:
+        from .util import process_cwds
+        cwds = process_cwds()
+    if cwds is None:
+        return [], False
+    found = []
+    for e in entries:
+        for o in orphans_in(e, cfg.abspath(e["worktree"]), cwds):
+            found.append(dict(o, crawler=e.get("crawler"), leaf=e.get("leaf"),
+                              worktree=e.get("worktree")))
+    return found, True
+
+
 def live(entry):
     """A Crawler is live only if its PID responds AND it was recorded this boot."""
     # THE SHARED COMPARISON, not a third copy of the rule. This site was named in #68's blast
@@ -414,6 +472,11 @@ def reclaimable(cfg, graph, base="HEAD"):
         orphan = head_in_no_ref(cfg, cfg.abspath(f.get("worktree")))
         if f.get("alive"):
             row["why"] = "its session is ALIVE — this is somebody's workspace right now"
+        elif f.get("orphans"):
+            row["why"] = ("%d process(es) still running in it (pid %s) — removing a tree under a "
+                          "running process is worse than either. `showrunner reap --apply` stops "
+                          "the ones proven to be this Crawler's"
+                          % (len(f["orphans"]), ", ".join(str(o["pid"]) for o in f["orphans"])))
         elif f.get("tree") == "unknown":
             row["why"] = ("git could not be read in it, so whether it holds uncommitted work is "
                           "UNKNOWN — which is not the same as clean, and the difference is "
@@ -543,6 +606,7 @@ def reconcile(cfg, graph, base="HEAD", deep=True):
     base = base_branch(cfg, base)
     known = existing_branches(cfg)
     findings = []
+    _cwds = [None]          # one process listing per call, and only if a dead tree needs it
     for entry in data.get("crawlers", []):
         wt = cfg.abspath(entry.get("worktree"))
         scratch = cfg.abspath(entry.get("scratch"))
@@ -601,6 +665,12 @@ def reconcile(cfg, graph, base="HEAD", deep=True):
             f["uncommitted"] = [] if found is None else work
             f["provisioning"] = [] if found is None else prov
             f["uncommitted_unknown"] = found is None
+        f["orphans"] = []
+        if f["worktree_exists"] and deep and not f["alive"]:
+            if _cwds[0] is None:
+                from .util import process_cwds
+                _cwds[0] = process_cwds() or {}
+            f["orphans"] = orphans_in(entry, wt, _cwds[0])
         # THE TREE IS EVIDENCE, AND UNKNOWN IS NOT CLEAN. Read once here because the verdict
         # ladder below asks it three times, and because "clean" is the only answer that licenses
         # the words "safe to clean up". A failed read must not collapse into it: `reap` already
@@ -757,6 +827,27 @@ def finish(cfg, leaf_id, why="leaf closed"):
 
 
 # -------------------------------------------------------------------- reap
+def _terminate(pid):
+    """SIGTERM `pid` and watch briefly for the exit: (stopped, error). THE one signal site.
+
+    Never SIGKILL: a process that ignores a term is a finding, not something to escalate against
+    silently. Two callers, each of which has PROVED the pid is the one it means before reaching
+    here: a lingering Crawler (`dispatch.lingering` refuses across a boot and checks the recorded
+    start time), and an orphan in a dead Crawler's tree (#101) — observed alive in THIS boot's
+    process table moments earlier, reparented to init, and started after that Crawler's dispatch.
+    """
+    import signal as _sig
+    try:
+        os.kill(pid, _sig.SIGTERM)
+    except OSError as exc:
+        return False, str(exc)
+    for _ in range(20):
+        if not pid_alive(pid):
+            return True, None
+        time.sleep(0.1)
+    return not pid_alive(pid), None
+
+
 def reap(cfg, graph, base="HEAD", apply=False):
     """Reclaim claims and locks whose owners are dead. Loud, and never destructive.
 
@@ -860,7 +951,6 @@ def reap(cfg, graph, base="HEAD", apply=False):
     #     to escalate against silently. Left stacking, these are what fills a machine under
     #     repeated fan-out.
     from . import dispatch as _dispatch
-    import signal as _signal
     for entry in load(cfg).get("crawlers", []):
         ling = _dispatch.lingering(entry)
         if not ling:
@@ -874,22 +964,18 @@ def reap(cfg, graph, base="HEAD", apply=False):
             "action": "SIGTERM" if apply else "would SIGTERM",
         })
         if apply:
-            try:
-                os.kill(ling["pid"], _signal.SIGTERM)
-            except OSError as exc:
-                warnings.append("could not terminate pid %s: %s" % (ling["pid"], exc))
+            stopped, err = _terminate(ling["pid"])
+            if err:
+                warnings.append("could not terminate pid %s: %s" % (ling["pid"], err))
                 continue
             # PROVE IT ACTED. `os.kill` returning without error means the SIGNAL WAS
             # DELIVERED, not that the process stopped — two different facts, and recording
             # "retired" off the first is the effector reporting a result it never observed.
             # A process is free to ignore SIGTERM, and this module's own comment says one
             # that does is a FINDING rather than something to escalate against. So: watch
-            # for the exit, briefly, and say which of the two actually happened.
-            for _ in range(20):
-                if not pid_alive(ling["pid"]):
-                    break
-                time.sleep(0.1)
-            if pid_alive(ling["pid"]):
+            # for the exit, briefly, and say which of the two actually happened — `_terminate`
+            # does the watching.
+            if not stopped:
                 # State stays `finished`, so `lingering` reports it again next run rather
                 # than a record that claims a retirement nobody witnessed.
                 set_state(cfg, entry["crawler"], "finished",
@@ -900,6 +986,37 @@ def reap(cfg, graph, base="HEAD", apply=False):
                     "to look at, not something to kill quietly." % ling["pid"])
             else:
                 set_state(cfg, entry["crawler"], "retired", retired_at=now())
+
+    # 2b'. Processes a DEAD Crawler started, still running in its tree (#101). SIGTERM only the
+    #      ones PROVEN to be its own — reparented to init and started after it was dispatched;
+    #      a process merely sitting in the tree (a human's shell, an editor) is reported and
+    #      never signalled, because "in the tree" is not "the Crawler's".
+    orphans, looked = orphan_processes(cfg)
+    if not looked:
+        warnings.append("the process table could not be listed, so processes left running in "
+                        "dead Crawlers' trees were NOT checked — not the same as none")
+    for o in orphans:
+        if not o["proven"]:
+            actions.append({
+                "kind": "orphan", "crawler": o["crawler"], "leaf": o["leaf"],
+                "why": "pid %s is running in %s (%s), but cannot be proved this Crawler's — its "
+                       "parent %s is not init, or it predates the dispatch"
+                       % (o["pid"], o["worktree"], o["command"][:60], o["ppid"]),
+                "action": "SURFACED, not signalled"})
+            continue
+        actions.append({
+            "kind": "orphan", "crawler": o["crawler"], "leaf": o["leaf"],
+            "why": "pid %s (%s) outlived its Crawler in %s for %ss"
+                   % (o["pid"], o["command"][:60], o["worktree"], o["age"]),
+            "action": "SIGTERM" if apply else "would SIGTERM"})
+        if apply:
+            stopped, err = _terminate(o["pid"])
+            if err:
+                warnings.append("could not terminate pid %s: %s" % (o["pid"], err))
+                continue
+            if not stopped:
+                warnings.append("pid %s was sent SIGTERM and is still alive — NOT escalating to "
+                                "SIGKILL" % o["pid"])
 
     # 2c. Rooms belonging to Crawlers that are done. A channel per Crawler is right while it
     #     works and a leak once it stops; closing on `close` covers the normal path, and this
@@ -1149,7 +1266,16 @@ def waiting(cfg, graph, base="HEAD"):
     most of showrunner: when in doubt it reports NOT waiting, because a false "waiting"
     silences a watchdog that exists to catch a genuinely wedged run.
     """
-    live, parked, blocked = [], [], []
+    live, parked, blocked, stalled = [], [], [], []
+    # STALLED IS NOT WAITING (#101). `stalled_claims` already knows a live session whose
+    # transcript has frozen — `status` prints it in red — but this put every alive Crawler in
+    # `live`, so `waiting` exited 0 for exactly the case the stall detector exists for, and the
+    # watchdog that reads this stayed quiet. A graph that cannot answer leaves it empty: the
+    # verdict below is then today's, never a stricter one.
+    try:
+        _stalls = {leaf["id"]: (leaf, why) for leaf, why in graph.stalled_claims()}
+    except Exception:                                           # noqa: BLE001
+        _stalls = {}
     # SHALLOW (#76). `waiting` reads alive, parked, blocked and the ids; it never touches
     # merged, empty, uncommitted, tree, harness, model or session_health. It was paying for all
     # of them on every Crawler the campaign had ever recorded, which is what put it past the 15s
@@ -1208,6 +1334,14 @@ def waiting(cfg, graph, base="HEAD"):
             # which is legitimate waiting, and the case that produced this issue.
             live.append({"crawler": f["crawler"], "leaf": f["leaf"], "branch": f["branch"],
                          "was_blocked": True, "evidence": why_worked})
+        elif f["alive"] and f.get("leaf") in _stalls:
+            _leaf, _why = _stalls[f["leaf"]]
+            from .util import transcript_activity, transcript_last_action
+            _act = transcript_activity(_leaf.get("claim_tree"), _leaf.get("claim_session"))
+            _last = transcript_last_action(_act.get("path")) if _act.get("path") else None
+            stalled.append({"crawler": f["crawler"], "leaf": f["leaf"],
+                            "idle": _act.get("idle"),
+                            "why": _why + ("; last action: %s" % _last if _last else "")})
         elif f["alive"]:
             live.append({"crawler": f["crawler"], "leaf": f["leaf"], "branch": f["branch"]})
 
@@ -1216,6 +1350,7 @@ def waiting(cfg, graph, base="HEAD"):
         "live_crawlers": live,
         "parked_crawlers": parked,
         "blocked_crawlers": blocked,
+        "stalled_crawlers": stalled,
         "basis": "a live owning PID recorded at spawn, or an explicit park — never a guess "
                  "about activity. A Crawler refused at a turn-end is counted in neither: it "
                  "is alive and doing nothing, and calling that waiting silences the watchdog "
@@ -1236,6 +1371,7 @@ def waiting(cfg, graph, base="HEAD"):
                 "live": len(live),
                 "parked": len(parked),
                 "blocked": len(blocked),
+                "stalled": len(stalled),
                 "leaves": [c["leaf"] for c in live + parked],
                 "blocked_leaves": [c["leaf"] for c in blocked],
             }, sort_keys=True) + "\n")

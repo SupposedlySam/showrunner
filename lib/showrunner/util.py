@@ -374,6 +374,76 @@ def transcript_path(tree, session):
     return os.path.join(projects_root(), _TRANSCRIPT_SLUG.sub("-", tree), "%s.jsonl" % session)
 
 
+def process_cwds():
+    """{pid: cwd} for every process this user can see, or None when they cannot be listed.
+
+    /proc where it exists; otherwise ONE `lsof` over every process's cwd, which is the only
+    portable way to ask macOS. None is "could not look", never "nothing found" — a caller that
+    reads it as empty would report a tree with a test runner in it as quiet.
+    """
+    if os.path.isdir("/proc/self"):
+        out = {}
+        for d in os.listdir("/proc"):
+            if d.isdigit():
+                try:
+                    out[int(d)] = os.readlink("/proc/%s/cwd" % d)
+                except OSError:
+                    continue
+        return out
+    rc, out, _ = run(["lsof", "-d", "cwd", "-F", "pn", "-w"])
+    if rc not in (0, 1) or not (out or "").strip():
+        return None
+    found, pid = {}, None
+    for line in out.splitlines():
+        if line.startswith("p") and line[1:].isdigit():
+            pid = int(line[1:])
+        elif line.startswith("n") and pid is not None:
+            found[pid] = line[1:]
+    return found
+
+
+def process_ppid_command(pid):
+    """(ppid, command) for a live pid, or (None, None)."""
+    rc, out, _ = run(["ps", "-o", "ppid=,command=", "-p", str(pid)])
+    line = (out or "").strip()
+    if rc != 0 or not line:
+        return None, None
+    head, _, cmd = line.partition(" ")
+    try:
+        return int(head), cmd.strip()
+    except ValueError:
+        return None, None
+
+
+def transcript_last_action(path):
+    """The last tool call a transcript records, as "Tool: detail", or None.
+
+    Read from the tail only — a transcript can be large, and the question is what happened LAST.
+    """
+    import json as _json
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - 262144))
+            tail = fh.read().decode("utf-8", "replace")
+    except (OSError, TypeError):
+        return None
+    for line in reversed(tail.splitlines()):
+        try:
+            rec = _json.loads(line)
+        except ValueError:
+            continue
+        content = ((rec.get("message") or {}).get("content")) if isinstance(rec, dict) else None
+        for part in reversed(content if isinstance(content, list) else []):
+            if isinstance(part, dict) and part.get("type") == "tool_use":
+                inp = part.get("input") or {}
+                detail = inp.get("command") or inp.get("file_path") or inp.get("description") \
+                    or ""
+                return ("%s: %s" % (part.get("name"), str(detail).replace("\n", " ")))[:160]
+    return None
+
+
 def transcript_activity(tree, session):
     """When this session last wrote anything: {"path", "idle", "mtime", "why"}.
 

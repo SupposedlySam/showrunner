@@ -183,6 +183,13 @@ showrunner reap                      # dry run; --apply to reclaim dead Crawlers
                                      # It also SURFACES stalled claims and never touches them:
                                      # a live process whose transcript has stopped moving. Not
                                      # even --apply reclaims one — see below.
+                                     # And processes a DEAD Crawler left running in its tree (a
+                                     # test runner, a build daemon), found by working directory:
+                                     # --apply SIGTERMs only those PROVEN its own — reparented to
+                                     # init and started after its dispatch. A process merely
+                                     # sitting in the tree (your shell) is reported, never
+                                     # signalled. `status` and `reconcile` list them; `gc` will
+                                     # not remove a tree with a process still running in it
 showrunner gc                        # remove worktrees whose branch is MERGED and whose tree is
                                      # CLEAN. Dry-run by default; --apply performs it. Dirty,
                                      # unreadable and unmerged trees are reported and KEPT.
@@ -1081,6 +1088,9 @@ Supported. Do NOT read `ready` and claim its first entry — everyone gets the s
 ```
 showrunner claim --next --actor <you>    # atomically take any free leaf; exit 1 when dry
 showrunner waiting                       # exit 0 waiting · 1 not waiting · 3 a Crawler is BLOCKED
+                                         # or STALLED (alive, transcript frozen past the stall
+                                         # window — `stalled_crawlers` in --porcelain, with the
+                                         # quiet age and its last action). Prompt it; never reap
                                          # COST IS PART OF THE CONTRACT: bounded by how many
                                          # Crawlers are ALIVE, never by how many the campaign
                                          # has ever recorded. Safe under a fixed probe timeout

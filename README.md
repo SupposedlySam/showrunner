@@ -821,10 +821,17 @@ resource** you have configured. Both refuse loudly instead of waiting silently, 
 multi-minute silent wait is indistinguishable from a hang.
 
 `showrunner waiting` answers in three codes: **0** waiting, **1** not waiting, **3** a Crawler is
-BLOCKED. That is the recomputable fact an idle watchdog needs, since it cannot see a subagent. A
+BLOCKED or STALLED — alive with a frozen transcript, wedged mid-tool-call or looping, reported
+with how long it has been quiet and its last action, so a watchdog wired to `waiting` rings for a
+stall with no cron of your own. That is the recomputable fact an idle watchdog needs, since it cannot see a subagent. A
 Crawler refused at a turn-end is live and is deliberately counted as NEITHER waiting nor parked:
 it is doing nothing, only a message restarts it, and calling that "waiting" would silence the
 watchdog on the one run that needs it.
+
+Processes a dead Crawler left running in its worktree — a test runner, a build daemon — are found
+by working directory and listed by `status` and `reconcile`. `gc` will not remove a tree with one
+running in it, and `showrunner reap --apply` stops only those proven to be the Crawler's
+(reparented to init and started after its dispatch); one merely sitting in the tree is reported.
 
 BLOCKED has its own exit code so that the case a gate exists for never produces the same number as
 an ordinary quiet campaign. Build on `--porcelain`: a verb whose finding, verdict and

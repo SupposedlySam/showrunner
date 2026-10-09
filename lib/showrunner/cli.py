@@ -955,6 +955,14 @@ def cmd_status(args):
         eprint("  A finished session does not idle: it keeps polling whatever it was told to "
                "poll, and that is a SHARED cost — the run that notices is usually not the run "
                "that pays.")
+    _orphans, _looked = campaign.orphan_processes(cfg)
+    if _orphans:
+        print("  %s%d process(es) still running in dead Crawlers' trees%s — `showrunner reap` "
+              "lists them, `reap --apply` stops the ones proven to be the Crawler's:"
+              % (YEL, len(_orphans), OFF))
+        for o in _orphans[:5]:
+            print("        pid %s in %s, %ss — %s" % (o["pid"], o["worktree"], o["age"],
+                                                     o["command"][:70]))
     _gc_nudge(cfg)
     return 0
 
@@ -3085,6 +3093,10 @@ def cmd_reconcile(args):
         print("%s%-28s%s %s" % (colour, f["crawler"], OFF, f["verdict"]))
         print("    leaf %s (%s) · branch %s%s" % (
             f["leaf"], f["leaf_status"], f["branch"], "" if f["branch_exists"] else " [gone]"))
+        for o in f.get("orphans") or []:
+            print("    %sprocess still running in this dead Crawler's tree%s: pid %s, %ss, %s%s"
+                  % (YEL, OFF, o["pid"], o["age"], o["command"][:70],
+                     "" if o["proven"] else " (not provably its own — reap will not signal it)"))
         if f.get("uncommitted_unknown"):
             print("    %sCOULD NOT READ %s — git failed there, so whether it holds uncommitted "
                   "work is UNKNOWN%s" % (YEL, f["worktree"], OFF))
@@ -3375,7 +3387,14 @@ def cmd_waiting(args):
     # 3 is chosen so the wrong reading becomes LOUD rather than staying quiet: a caller that
     # treats non-zero as "no" now gets a different number for the case it must not miss, and one
     # that only knew 0/1 sees an unexpected code instead of a false negative.
-    if detail.get("blocked_crawlers"):
+    for c in detail.get("stalled_crawlers") or []:
+        msg = ("STALLED %s (%s) — %s. Alive with a frozen transcript; prompt it, and do NOT "
+               "reap it — its process may hold the only copy of the work." % (
+                   c["crawler"], c["leaf"], c["why"]))
+        if not args.porcelain:
+            print(msg)
+        eprint("  %s%s%s" % (RED, msg, OFF))
+    if detail.get("blocked_crawlers") or detail.get("stalled_crawlers"):
         return 3
     return 0 if is_waiting else 1
 

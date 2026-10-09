@@ -10710,12 +10710,13 @@ def test_publishable():
             if "pid_alive(" in line and not line.strip().startswith(("#", "from", "import")):
                 readers.append("%s:%d" % (name, i))
     # Eight: campaign.live, dispatch.lingering, graph.stale_claims, graph.stalled_claims,
-    # graph.claim, locks._live, and TWO in reap's terminate block — added when SIGTERM stopped
-    # claiming a retirement it had not witnessed. Those two are safe without their own boot
-    # check for a reason worth writing down rather than assuming: they run only after
-    # `lingering()` returned non-None, and `lingering` refuses across a boot. The pid is known
-    # to be this boot before either call is reached, so the audit is inherited THROUGH A GUARD
-    # rather than skipped.
+    # graph.claim, locks._live, and TWO in `campaign._terminate`, reap's one signal site — added
+    # when SIGTERM stopped claiming a retirement it had not witnessed. Those two are safe without
+    # their own boot check for a reason worth writing down rather than assuming: every caller
+    # proves the pid first. `lingering()` refuses across a boot; an orphan (#101) was observed
+    # alive in THIS boot's process table moments earlier, reparented to init and started after
+    # its Crawler's dispatch. The audit is inherited THROUGH A GUARD rather than skipped, and a
+    # second termination path went through the one site instead of adding another.
     #
     # `graph.stalled_claims` (#69) is the eighth, and this is its justification rather than an
     # inherited pass. It scopes by boot FIRST and in the opposite direction to its siblings: a
@@ -16741,9 +16742,133 @@ def test_the_write_guard_is_never_wired_by_default():
        lease.write_guard_enforces(fresh), False)
 
 
+def test_waiting_rings_for_a_stall_and_orphans_are_found():
+    group("`waiting` reports a STALLED Crawler (exit 3) so the watchdog rings, and processes left "
+          "running in a dead Crawler's tree are found, held and — only when proven — stopped (#101)")
+    if not have("git"):
+        skip("the stall/orphan group", "git is not installed")
+        return
+    from showrunner.util import process_started, transcript_path
+    cfg = make_repo()
+    cfg.data["harness"] = dict(cfg.data.get("harness") or {}, require=False)
+    g = new_graph(cfg)
+    exe = os.path.join(ROOT, "bin", "showrunner")
+
+    # PART 1. REPORTED: a lead ran its own cron to find Crawlers wedged mid-tool-call, because
+    # `waiting` counted them as live and exited 0 — the answer the watchdog reads as "fine".
+    g.add("wedged", leaf_id="W1")
+    rec = worktree.spawn(cfg, g.show("W1"), actor="a")
+    campaign.record_spawn(cfg, rec, session="S-W101")
+    alive = subprocess.Popen(["sleep", "120"])
+    try:
+        campaign.set_state(cfg, rec["crawler"], "running", pid=alive.pid,
+                           pid_started=process_started(alive.pid), dispatched_at=int(time.time()))
+        g.claim("W1", "a", pid=alive.pid, tree=rec["worktree"], session="S-W101")
+        tp = transcript_path(rec["worktree"], "S-W101")
+        os.makedirs(os.path.dirname(tp), exist_ok=True)
+        with open(tp, "w") as fh:
+            fh.write(json.dumps({"message": {"content": [{"type": "tool_use", "name": "Bash",
+                                 "input": {"command": "pytest -x tests/"}}]}}) + "\n")
+        os.utime(tp, (time.time() - 3600, time.time() - 3600))
+
+        is_waiting, detail = campaign.waiting(cfg, g)
+        st = detail.get("stalled_crawlers") or []
+        ok("a live Crawler whose transcript froze is STALLED, not live", len(st) == 1
+           and not detail["live_crawlers"], detail)
+        ok("...and its why names its last action, which is what tells wedged from thinking",
+           st and "pytest -x tests/" in st[0]["why"], st)
+        w = subprocess.run([sys.executable, exe, "waiting"], capture_output=True, text=True,
+                           cwd=cfg.root, stdin=subprocess.DEVNULL)
+        eq("`waiting` exits 3 for a stall — the code a watchdog's probe rings on", w.returncode, 3)
+        ok("...and says not to reap it", "do NOT reap" in w.stdout + w.stderr, w.stdout[-300:])
+        from showrunner.util import transcript_last_action
+        tl = os.path.join(tempfile.mkdtemp(prefix="sr-tl-"), "t.jsonl")
+
+        def use(name, inp):
+            return json.dumps({"message": {"content": [{"type": "tool_use", "name": name,
+                                                        "input": inp}]}})
+        with open(tl, "w") as fh:
+            fh.write("\n".join([use("Bash", {"command": "first"}),
+                                 json.dumps({"message": {"content": [{"type": "text",
+                                                                      "text": "thinking"}]}}),
+                                 use("Edit", {"file_path": "app/x.dart"})]) + "\n")
+        eq("the LAST tool call wins, and a file tool names its path",
+           transcript_last_action(tl), "Edit: app/x.dart")
+        with open(tl, "w") as fh:
+            fh.write(use("Bash", {"command": "make\ntest"}) + "\n")
+        eq("...a multi-line command is flattened to one line", transcript_last_action(tl),
+           "Bash: make test")
+        with open(tl, "w") as fh:
+            fh.write(json.dumps({"message": {"content": [{"type": "text", "text": "x"}]}}) + "\n")
+        eq("...a transcript with no tool call has no last action", transcript_last_action(tl),
+           None)
+        eq("...and a missing transcript is None, not an error",
+           transcript_last_action(tl + ".gone"), None)
+        os.utime(tp, None)
+        is_waiting, detail = campaign.waiting(cfg, g)
+        ok("THE PAIR: with a moving transcript the same Crawler is live, and this is waiting",
+           is_waiting and not detail.get("stalled_crawlers") and detail["live_crawlers"], detail)
+    finally:
+        alive.kill()
+        alive.wait()
+
+    # PART 2. REPORTED: two test runners still alive 2h42m after their leaf closed, holding
+    # memory on a loaded machine; reconcile, reap, gc and status said nothing.
+    g.add("finished", leaf_id="O1")
+    rec2 = worktree.spawn(cfg, g.show("O1"), actor="a")
+    campaign.record_spawn(cfg, rec2, session="S-O101")
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    campaign.set_state(cfg, rec2["crawler"], "finished", pid=gone.pid,
+                       dispatched_at=int(time.time()) - 10)
+    pidfile = os.path.join(tempfile.mkdtemp(prefix="sr-orph-"), "pid")
+    # Double-forked, so its parent exits and it is reparented to init — what a dead Crawler's
+    # test runner looks like.
+    subprocess.run(["sh", "-c", "cd '%s' && (sleep 120 & echo $! > '%s')" % (rec2["worktree"],
+                                                                            pidfile)])
+    for _ in range(50):
+        if os.path.exists(pidfile) and open(pidfile).read().strip():
+            break
+        time.sleep(0.05)
+    orphan = int(open(pidfile).read().strip())
+    sitter = subprocess.Popen(["sleep", "120"], cwd=rec2["worktree"])   # parent is us: not proven
+    try:
+        time.sleep(0.3)
+        found, looked = campaign.orphan_processes(cfg)
+        mine = {o["pid"]: o for o in found}
+        ok("the process table could be listed", looked)
+        ok("a process reparented to init, started after dispatch, in the dead tree is PROVEN",
+           orphan in mine and mine[orphan]["proven"], found)
+        ok("a process that merely SITS in the tree (its parent is alive) is found but NOT proven",
+           sitter.pid in mine and not mine[sitter.pid]["proven"], found)
+        take, held = campaign.reclaimable(cfg, g)
+        hw = {h["crawler"]: h["why"] for h in held}
+        ok("gc HOLDS a tree with processes running in it", "process(es) still running" in
+           hw.get(rec2["crawler"], ""), hw)
+        acts, _ = campaign.reap(cfg, g, apply=False)
+        kinds = {(a["kind"], a["action"]) for a in acts if a.get("crawler") == rec2["crawler"]}
+        ok("reap (dry run) would SIGTERM the proven one and only SURFACE the other",
+           ("orphan", "would SIGTERM") in kinds and ("orphan", "SURFACED, not signalled")
+           in kinds, kinds)
+        campaign.reap(cfg, g, apply=True)
+        for _ in range(30):
+            if not util.pid_alive(orphan):
+                break
+            time.sleep(0.1)
+        ok("reap --apply stops the PROVEN orphan", not util.pid_alive(orphan))
+        ok("...and leaves the unproven process running", util.pid_alive(sitter.pid))
+    finally:
+        sitter.kill()
+        sitter.wait()
+        try:
+            os.kill(orphan, 9)
+        except OSError:
+            pass
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,
