@@ -687,7 +687,10 @@ behaviour.
   `sparse_by_label`), with `.claude/` and every hook directory always included.
 - **Its own scratch directory**, in the **main checkout** rather than the worktree, because it must
   outlive the tree: `gc` treats a dead Crawler's scratch as possibly the only copy of real work. A
-  write guard that judges by path may therefore refuse it, correctly; a long close reason goes on
+  write guard that judges a path by the TREE it is in would read it as the main checkout, so a
+  directory inside a Crawler's recorded scratch resolves to THAT Crawler's seat — the record names
+  it exactly as it names the worktree, and nothing else under the scratch root does. A long close
+  reason still goes on
   stdin instead (`--reason-file -`), so no file needs writing at all. Two Crawlers reaching for
   `commitmsg.txt` in one shared temp dir means one can commit the other's commit message onto its
   own changes — a real commit, a plausible message, describing work it does not contain, every gate

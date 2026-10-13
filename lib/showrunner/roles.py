@@ -415,6 +415,31 @@ def crawler_leaf(cfg):
     return crawler_leaf_detail(cfg)[0]
 
 
+def scratch_owner(cfg):
+    """The campaign record's entry for the Crawler whose scratch dir THIS config stands in.
+
+    #104: a Crawler's scratch dir is in the main checkout, so a write there resolved to the
+    `orchestrator` seat and its fallback — `spawn` printed the path as the Crawler's and the
+    Crawler could not write it. The record names each Crawler's scratch dir exactly as it names
+    its worktree, so the same rule applies to both: only a directory the record NAMES resolves.
+    """
+    from . import campaign as _campaign
+    here = getattr(cfg, "here", None)
+    if not here:
+        return None
+    try:
+        crawlers = _campaign.load(cfg).get("crawlers") or []
+    except Exception:                                           # noqa: BLE001
+        return None
+    for c in crawlers:
+        if not c.get("scratch"):
+            continue
+        sp = os.path.realpath(cfg.abspath(c["scratch"]))
+        if here == sp or here.startswith(sp + os.sep):
+            return c
+    return None
+
+
 def crawler_leaf_detail(cfg):
     """(leaf, why). The leaf the campaign record names for THIS worktree, and how it knows.
 
@@ -433,6 +458,10 @@ def crawler_leaf_detail(cfg):
     tree = getattr(cfg, "tree", None)
     if not tree:
         return None, "no worktree path is known for this session"
+    owner = scratch_owner(cfg) if tree == os.path.realpath(cfg.root) else None
+    if owner:
+        return owner.get("leaf"), ("the campaign record for %s names this scratch dir for %s"
+                                   % (cfg.campaign or "(repo-wide)", owner.get("crawler")))
     here = os.path.basename(tree)
     where = cfg.campaign or "(repo-wide)"
     try:
@@ -544,6 +573,10 @@ def seat(cfg):
                          % (os.path.basename(tree), why,
                             " %s" % leaf if leaf else ""))
 
+    owner = scratch_owner(cfg)
+    if owner:
+        return CRAWLER, ("standing in %s's scratch dir, which the campaign record names for it "
+                         "(leaf %s)" % (owner.get("crawler"), owner.get("leaf")))
     try:
         crawlers = _campaign.load(cfg).get("crawlers") or []
     except Exception:                                           # noqa: BLE001

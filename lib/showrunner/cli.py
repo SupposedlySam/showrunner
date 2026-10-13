@@ -1862,7 +1862,12 @@ def cmd_write_guard(args):
             "⚠ THE WRITE GUARD DID NOT RUN — it could not read its PreToolUse payload (%s), so "
             "this call was ALLOWED WITHOUT BEING CHECKED against this session's role." % problem)
     try:
-        cfg = _cfg(args, guard=True)
+        # FROM THE SESSION'S OWN DIRECTORY (#104). The shim `cd`s to the repo root before calling
+        # this, so config loaded from the process directory made every session the main
+        # checkout's seat — a Crawler resolved as `orchestrator` and got the fallback's policy.
+        _where = payload.get("cwd")
+        cfg = (config.load(start=_where, required=True, fallback=package_root())
+               if _where and os.path.isdir(_where) else _cfg(args, guard=True))
         session = (args.session or payload.get("session_id")
                    or os.environ.get("SHOWRUNNER_SESSION") or "")
         tool = args.tool or payload.get("tool_name") or ""

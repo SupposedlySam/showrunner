@@ -17001,9 +17001,84 @@ def test_a_drifted_body_file_is_caught_before_spawn():
     eq("...and forgetting a leaf never recorded changes nothing", bodyfile._load(cfg), before)
 
 
+def test_a_crawler_can_write_the_scratch_spawn_gave_it():
+    group("a directory inside a Crawler's RECORDED scratch resolves to that Crawler's seat, and the "
+          "write guard resolves the seat from the session's own directory (#104)")
+    if not have("git"):
+        skip("the scratch-seat group", "git is not installed")
+        return
+    # REPORTED: `whoami` in the Crawler's tree said `worker`, but its Write into the scratch dir
+    # spawn created for it resolved to seat `orchestrator` and the fallback — the dir is in the
+    # main checkout, and the seat was derived from the git top level.
+    from showrunner import writeguard
+    cfg = make_repo(files={"README.md": "x\n", "app/x.dart": "x\n"})
+    cfg.data["harness"] = dict(cfg.data.get("harness") or {}, require=False)
+    home = tempfile.mkdtemp(prefix="sr-104-home-")
+    upath = os.path.join(home, "showrunner", "roles.json")
+    os.makedirs(os.path.dirname(upath))
+    with open(upath, "w") as fh:
+        json.dump({"roles": {"worker": {"acquire": "assign", "writes": ["app/**"]}},
+                   "seat_roles": {"crawler": "worker"}}, fh)
+    prev = roles.USER_PATH
+    roles.USER_PATH = upath
+    try:
+        g = new_graph(cfg)
+        g.add("templates leaf", leaf_id="T5417")
+        rec = worktree.spawn(cfg, g.show("T5417"), actor="t")
+        campaign.record_spawn(cfg, rec, session="S-104")
+        scratch = cfg.abspath(rec["scratch"])
+
+        at = lambda d: config.load(start=d)
+        where, why = roles.seat(at(scratch))
+        ok("standing in the Crawler's scratch dir is the CRAWLER seat, named by the record",
+           where == roles.CRAWLER and rec["crawler"] in why, (where, why))
+        eq("...and it resolves to the Crawler's mapped role, not the fallback",
+           roles.resolution(at(scratch), "S-104")["role"], "worker")
+        nested = os.path.join(scratch, "evidence")
+        os.makedirs(nested)
+        eq("...including a directory INSIDE it", roles.resolution(at(nested), "S-104")["role"],
+           "worker")
+        eq("THE PAIR: the main checkout itself is still the orchestrator seat",
+           roles.seat(at(cfg.root))[0], roles.ORCHESTRATOR)
+        lead = os.path.join(cfg.scratch_root, "lead-notes")
+        os.makedirs(lead)
+        eq("...and so is a directory under the scratch root that NO record names — only a "
+           "recorded dir resolves, exactly as for worktrees", roles.seat(at(lead))[0],
+           roles.ORCHESTRATOR)
+
+        # THE SHIM CDs TO THE ROOT, so the write guard must take the seat from the payload.
+        exe = os.path.join(ROOT, "bin", "showrunner")
+        env = dict(os.environ, XDG_CONFIG_HOME=home)
+
+        def guard(cwd, path):
+            payload = {"session_id": "S-104", "tool_name": "Write", "cwd": cwd,
+                       "tool_input": {"file_path": path}}
+            return subprocess.run([sys.executable, exe, "write-guard"], input=json.dumps(payload),
+                                  capture_output=True, text=True, cwd=cfg.root, env=env)
+        q = guard(rec["worktree"], os.path.join(rec["worktree"], "app", "y.dart"))
+        eq("run from the ROOT, the guard resolves the Crawler's seat from the payload's cwd and "
+           "allows its role's write", q.returncode, 0)
+        q = guard(rec["worktree"], os.path.join(rec["worktree"], "README.md"))
+        ok("...and refuses what that role may not write, naming the role it really has",
+           q.returncode == 3 and "role worker" in q.stderr, q.stderr[-300:])
+        q = guard(rec["worktree"], os.path.join(scratch, "report.md"))
+        eq("...and the Crawler's OWN scratch dir is writable", q.returncode, 0)
+        bash = {"session_id": "S-104", "tool_name": "Bash", "cwd": rec["worktree"],
+                "tool_input": {"command": "echo y > README.md"}}
+        q = subprocess.run([sys.executable, exe, "write-guard"], input=json.dumps(bash),
+                           capture_output=True, text=True, cwd=cfg.root, env=env)
+        ok("...a Bash redirect from the worktree is judged under the Crawler's role too",
+           q.returncode == 3 and "role worker" in q.stderr, q.stderr[-300:])
+        q = guard(scratch, os.path.join(cfg.root, "README.md"))
+        ok("...and a session standing IN its scratch dir is the Crawler as well, not the "
+           "orchestrator", q.returncode == 3 and "role worker" in q.stderr, q.stderr[-300:])
+    finally:
+        roles.USER_PATH = prev
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

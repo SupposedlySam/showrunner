@@ -1167,9 +1167,11 @@ outside this repo's trees falls back to the main checkout, and a refusal names t
 from.
 
 **4. Write non-repo files in YOUR OWN scratch dir**, the one named in your brief. It is in the MAIN
-checkout, not your worktree, because it has to outlive the tree — so a write guard that judges by
-path may refuse it, and that guard is not wrong. Say so rather than routing around it through Bash;
-`whoami --porcelain` publishes the path as `scratch` for a guard to allow. Commit messages,
+checkout, not your worktree, because it has to outlive the tree. A directory inside it resolves to
+YOUR seat — the campaign record names it for you exactly as it names your worktree — so a guard
+that asks `whoami --porcelain` from there gets your role, not the orchestrator's; nothing else
+under the scratch root resolves that way. If a guard still refuses it, say so rather than routing
+around it through Bash; `whoami --porcelain` also publishes the path as `scratch`. Commit messages,
 captured output, fixtures, before/after artifacts. Not a shared temp dir: two Crawlers that pick
 the same obvious filename there can commit one's message onto the other's changes — a real
 commit, plausible message, describing work it does not contain, every gate green. You and your siblings are the same model solving similar tasks from similar prompts, so

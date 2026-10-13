@@ -275,7 +275,7 @@ def _campaign_from_config(data):
 
 
 class Config:
-    def __init__(self, data, root, path, campaign=None, tree=None, user_path=None):
+    def __init__(self, data, root, path, campaign=None, tree=None, user_path=None, here=None):
         self.data = data
         self.root = root          # the MAIN checkout, absolute
         self.path = path          # where config.json was read from (may not exist)
@@ -302,6 +302,11 @@ class Config:
         # this makes `seat` say UNKNOWN, which is honest; quietly falling back to the process
         # cwd would restore exactly the defect this field exists to remove.
         self.tree = os.path.realpath(tree) if tree else None
+        # THE EXACT DIRECTORY, beside the tree it sits in (#104). `tree` is the git top level, so
+        # a Crawler's scratch dir — inside the MAIN checkout by design — reads as the main
+        # checkout, and the seat resolves to `orchestrator`. `here` lets `roles.seat` see that
+        # the directory is one the campaign record names for a Crawler.
+        self.here = os.path.realpath(here) if here else None
         # CAPTURED ONCE, NOT READ ON EVERY ACCESS. The first version resolved the campaign
         # lazily from the environment inside each path property, so a loaded Config changed its
         # answers when os.environ moved — two configs loaded for two campaigns both reported the
@@ -767,7 +772,8 @@ def load(start=None, required=False, campaign=None, fallback=None):
     if not os.path.exists(path):
         if required:
             die("no %s — run `showrunner init` first" % path, code=2)
-        return Config(merged, root, path, campaign=campaign, tree=tree, user_path=user_path)
+        return Config(merged, root, path, campaign=campaign, tree=tree, user_path=user_path,
+                  here=start or os.getcwd())
     merged = deep_merge(merged, read_config_file(path))
 
     # A LOCAL, UNTRACKED OVERLAY, and the absence of one is what caused a real leak. Some
@@ -783,7 +789,8 @@ def load(start=None, required=False, campaign=None, fallback=None):
     local = read_config_file(os.path.join(root, STATE_DIR, CONFIG_LOCAL_NAME))
     if local is not None:
         merged = deep_merge(merged, local)
-    return Config(merged, root, path, campaign=campaign, tree=tree, user_path=user_path)
+    return Config(merged, root, path, campaign=campaign, tree=tree, user_path=user_path,
+                  here=start or os.getcwd())
 
 
 def write(cfg):
