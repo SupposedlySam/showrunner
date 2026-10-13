@@ -122,6 +122,9 @@ DEFAULTS = {
     # dirs/companions default to detection; rule_files are compared byte-for-byte so a
     # Crawler cannot end up running under quietly weaker rules than the orchestrator.
     "harness": {"provision": "auto", "require": True},
+    # `spawn.default_base`: the ref an unnamed --base means (#103). Unset, it is the primary
+    # checkout's HEAD — refused when that is off, or behind, the default branch.
+    "spawn": {"default_base": None},
 }
 
 

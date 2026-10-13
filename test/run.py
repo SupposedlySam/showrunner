@@ -16866,9 +16866,144 @@ def test_waiting_rings_for_a_stall_and_orphans_are_found():
             pass
 
 
+def test_an_implicit_base_behind_its_upstream_is_refused():
+    group("an implicit base ON the default branch but BEHIND origin/<default> is refused, with the "
+          "count; spawn.default_base makes the upstream the default (#103)")
+    if not have("git"):
+        skip("the stale-base group", "git is not installed")
+        return
+    # REPORTED: local main 176 commits behind origin/main; the spawn printed `base main @ ...`
+    # and nothing else. Three Crawlers built on it; one fix deleted state a newer commit relied
+    # on and had to be redone.
+    cfg = make_repo()
+    cfg.data["harness"] = dict(cfg.data.get("harness") or {}, require=False)
+    old = sh(["git", "rev-parse", "HEAD"], cfg.root).stdout.strip()
+    for i in range(2):
+        with open(os.path.join(cfg.root, "new%d.txt" % i), "w") as fh:
+            fh.write("x\n")
+        sh(["git", "add", "new%d.txt" % i], cfg.root)     # only these: config stays untracked
+        sh(["git", "commit", "-q", "-m", "landed %d" % i], cfg.root)
+    newer = sh(["git", "rev-parse", "HEAD"], cfg.root).stdout.strip()
+    branch = sh(["git", "rev-parse", "--abbrev-ref", "HEAD"], cfg.root).stdout.strip()
+    sh(["git", "update-ref", "refs/remotes/origin/%s" % branch, newer], cfg.root)
+    sh(["git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/%s" % branch],
+       cfg.root)
+    sh(["git", "reset", "-q", "--hard", old], cfg.root)
+    g = new_graph(cfg)
+    exe = os.path.join(ROOT, "bin", "showrunner")
+
+    def spawn(leaf, *extra):
+        g.add("leaf %s" % leaf, leaf_id=leaf)
+        return subprocess.run([sys.executable, exe, "spawn", leaf, "--no-claim"] + list(extra),
+                              capture_output=True, text=True, cwd=cfg.root,
+                              stdin=subprocess.DEVNULL)
+
+    def tree(leaf):
+        return os.path.isdir(os.path.join(cfg.worktree_root, "crawler-%s" % leaf.lower()))
+
+    p = spawn("B1")
+    eq("an IMPLICIT base on the default branch but behind its upstream is REFUSED (exit 3)",
+       p.returncode, 3)
+    ok("...naming how far behind, and the upstream to cut from",
+       "2 commit(s) behind origin/%s" % branch in p.stderr
+       and "--base origin/%s" % branch in p.stderr, p.stderr[-500:])
+    ok("...creating nothing", not tree("B1"))
+    p = spawn("B2", "--base", "HEAD")
+    ok("`--base HEAD` is the acknowledgement: it proceeds, and still says how far behind",
+       p.returncode == 0 and "behind origin/%s" % branch in p.stderr, p.stderr[-400:])
+    p = spawn("B3", "--base", "origin/%s" % branch)
+    ok("cutting from the upstream proceeds with no behind warning",
+       p.returncode == 0 and "behind origin" not in p.stderr, p.stderr[-400:])
+    with open(os.path.join(cfg.root, ".showrunner", "config.local.json"), "w") as fh:
+        json.dump({"spawn": {"default_base": "origin/%s" % branch}}, fh)
+    p = spawn("B4")
+    ok("with spawn.default_base set, an unnamed base IS the upstream, and says where it came "
+       "from", p.returncode == 0 and "spawn.default_base" in p.stdout
+       and "behind origin" not in p.stderr, p.stdout[-400:] + p.stderr[-300:])
+    os.remove(os.path.join(cfg.root, ".showrunner", "config.local.json"))
+    sh(["git", "reset", "-q", "--hard", newer], cfg.root)
+    p = spawn("B5")
+    ok("THE PAIR: a checkout level with its upstream spawns implicitly, as before",
+       p.returncode == 0, p.stderr[-400:])
+
+
+def test_a_drifted_body_file_is_caught_before_spawn():
+    group("a leaf whose --body-file changed after it was stored is caught at spawn, not briefed "
+          "from the stale copy (#102)")
+    if not have("git"):
+        skip("the body-file group", "git is not installed")
+        return
+    # REPORTED: hand-offs appended to the draft body files after `add` were missing from five
+    # spawned BRIEF.md files; two were silently never done.
+    cfg = make_repo()
+    cfg.data["harness"] = dict(cfg.data.get("harness") or {}, require=False)
+    exe = os.path.join(ROOT, "bin", "showrunner")
+    drafts = tempfile.mkdtemp(prefix="sr-bodies-")
+
+    def sr(*argv):
+        return subprocess.run([sys.executable, exe] + list(argv), capture_output=True, text=True,
+                              cwd=cfg.root, stdin=subprocess.DEVNULL)
+
+    def draft(name, text):
+        path = os.path.join(drafts, name)
+        with open(path, "w") as fh:
+            fh.write(text)
+        return path
+
+    for leaf in ("D1", "D2", "D3", "D4", "D5"):
+        f = draft(leaf + ".md", "Fix the thing.\n")
+        p = sr("add", "leaf " + leaf, "--id", leaf, "--body-file", f)
+        ok("add %s from a body file" % leaf, p.returncode == 0, p.stderr[-300:])
+    hand = "\nHanded to you by the lead: also cover the empty case.\n"
+    for leaf in ("D1", "D2", "D3", "D4"):
+        with open(os.path.join(drafts, leaf + ".md"), "a") as fh:
+            fh.write(hand)
+
+    p = sr("spawn", "D1", "--no-claim")
+    eq("spawn of a leaf whose body file moved on since `add` is REFUSED (exit 3)", p.returncode, 3)
+    ok("...naming the file, what changed, and the edit that stores it",
+       "D1.md" in p.stderr and "line(s) added" in p.stderr
+       and "showrunner edit D1 --body-file" in p.stderr, p.stderr[-500:])
+    ok("...and creating nothing",
+       not os.path.isdir(os.path.join(cfg.worktree_root, "crawler-d1")))
+    st = sr("status")
+    ok("`status` lists the drifted leaf too, before anyone spawns it",
+       "body file drifted" in st.stdout and "D2" in st.stdout, st.stdout[-600:])
+    p = sr("spawn", "D2", "--no-claim", "--despite-stale-body")
+    ok("--despite-stale-body proceeds on the stored body, and says so",
+       p.returncode == 0 and "despite-stale-body" in p.stdout, p.stderr[-300:])
+    sr("edit", "D3", "--body-file", os.path.join(drafts, "D3.md"))
+    p = sr("spawn", "D3", "--no-claim")
+    ok("after `edit --body-file` stores the current file, spawn proceeds — and the brief carries "
+       "the hand-off", p.returncode == 0 and "Handed to you by the lead" in
+       (g_body := sr("show", "D3").stdout), p.stderr[-300:])
+    sr("edit", "D4", "--body", "Rewritten inline.")
+    p = sr("spawn", "D4", "--no-claim")
+    ok("a body set INLINE stops being compared with the old file", p.returncode == 0,
+       p.stderr[-300:])
+    p = sr("spawn", "D5", "--no-claim")
+    ok("THE PAIR: an unchanged body file spawns as before", p.returncode == 0, p.stderr[-300:])
+
+    from showrunner import bodyfile
+    f6 = draft("D6.md", "v1\n")
+    leaf6 = {"id": "D6", "body": "v1\n"}
+    bodyfile.record(cfg, "D6", f6, "v1\n")
+    with open(f6, "a") as fh:
+        fh.write("v2\n")
+    ok("direct: a recorded file that changed IS drift", bodyfile.drift(cfg, leaf6) is not None)
+    bodyfile.forget(cfg, "D6")
+    eq("direct: after forget, the same changed file is no longer compared",
+       bodyfile.drift(cfg, leaf6), None)
+    ok("...because the record is GONE from the store, not merely ignored",
+       "D6" not in bodyfile._load(cfg))
+    before = dict(bodyfile._load(cfg))
+    bodyfile.forget(cfg, "NEVER-RECORDED")
+    eq("...and forgetting a leaf never recorded changes nothing", bodyfile._load(cfg), before)
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

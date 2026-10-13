@@ -924,10 +924,22 @@ def base_report(cfg, graph, leaf, base="HEAD", explicit=None):
     # do not, because it is right for every caller that never had the distinction.
     out = {"base": base, "sha": sha, "branch": named,
            "explicit": (base != "HEAD") if explicit is None else bool(explicit),
-           "missing": [], "present": [], "unknown": []}
+           "missing": [], "present": [], "unknown": [], "upstream": None, "behind": None}
     if not sha:
         out["unknown"].append("git cannot resolve %r in %s" % (base, cfg.root))
         return out
+    # HOW FAR BEHIND THE UPSTREAM (#103), from the LAST-FETCHED ref — no fetch, so the number is
+    # a floor and the report says so. A checkout ON the default branch and far behind it is the
+    # commoner way for a base to be wrong than one off it: a human's working checkout is often
+    # stale and dirty, so nobody pulls it for the agents.
+    _default = default_branch(cfg)
+    if _default:
+        _up = "origin/%s" % _default
+        rc, _, _ = git(["rev-parse", "--verify", "--quiet", "refs/remotes/%s" % _up], cwd=cfg.root)
+        if rc == 0:
+            rc, n, _ = git(["rev-list", "--count", "%s..%s" % (sha, _up)], cwd=cfg.root)
+            if rc == 0 and n.strip().isdigit():
+                out["upstream"], out["behind"] = _up, int(n.strip())
 
     try:
         deps = graph.deps_of(leaf["id"])

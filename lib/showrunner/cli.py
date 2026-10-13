@@ -955,6 +955,12 @@ def cmd_status(args):
         eprint("  A finished session does not idle: it keeps polling whatever it was told to "
                "poll, and that is a SHARED cost — the run that notices is usually not the run "
                "that pays.")
+    from . import bodyfile as _bf
+    for _leaf in (g.ready() if hasattr(g, "ready") else []):
+        _d = _bf.drift(cfg, _leaf)
+        if _d:
+            print("  %sbody file drifted%s %s — %s (%s). `showrunner edit %s --body-file %s`"
+                  % (YEL, OFF, _leaf["id"], _d["path"], _d["summary"], _leaf["id"], _d["path"]))
     _orphans, _looked = campaign.orphan_processes(cfg)
     if _orphans:
         print("  %s%d process(es) still running in dead Crawlers' trees%s — `showrunner reap` "
@@ -1002,6 +1008,9 @@ def cmd_add(args):
                     labels=args.label or [], paths=args.path or [])
     for parent in args.after or []:
         g.dep(leaf_id, parent)
+    if args.body_file and args.body_file != "-" and os.path.isfile(args.body_file):
+        from . import bodyfile
+        bodyfile.record(cfg, leaf_id, args.body_file, body)
     events.emit(cfg, "leaf.added", {"leaf": leaf_id, "title": args.title, "leaf_kind": args.kind,
                 "labels": args.label or [], "after": args.after or []})
     # AT ADD TIME, not only at `plan`. `plan` already refuses to be neutral about an unmatched
@@ -2373,9 +2382,13 @@ def _print_base(report):
     the full argv — except this. One line would have caught the reported failure, because `main`
     was obviously wrong to the operator the moment they saw it.
     """
-    origin = "explicit --base" if report.get("explicit") else "primary checkout HEAD"
+    origin = ("spawn.default_base" if report.get("configured") else
+              "explicit --base" if report.get("explicit") else "primary checkout HEAD")
     print("  base     %s @ %s (%s)" % (report.get("branch") or "?",
                                        (report.get("sha") or "?")[:12], origin))
+    if report.get("behind"):
+        eprint("  %sbase is %d commit(s) behind %s%s (as last fetched — `git fetch` may make it "
+               "more)" % (YEL, report["behind"], report["upstream"], OFF))
     for dep, dep_branch in report.get("missing") or []:
         eprint("  %sBASE IS MISSING A DEPENDENCY: %s (%s) is NOT an ancestor of this base.%s"
                % (RED, dep, dep_branch, OFF))
@@ -2497,6 +2510,27 @@ def _implicit_base_check(cfg, leaf, report, rehearsing=False):
     """
     if report.get("explicit"):
         return
+    # ON THE DEFAULT BRANCH AND BEHIND IT (#103) — the commoner wrong base. Reported: local
+    # `main` 176 commits behind `origin/main`, three Crawlers built on it, one fix deleted state
+    # a newer commit relied on and had to be redone. The spawn printed the base and nothing else.
+    if report.get("behind"):
+        msg = ("%s would be cut from the primary checkout's HEAD, which is %d commit(s) behind %s "
+               "(as last fetched).\n"
+               "  base %s @ %s\n"
+               "You did not name a base, so this is wherever the checkout happens to be — and a "
+               "working checkout is routinely stale. The Crawler builds on old code, and its fix "
+               "can conflict with, or undo, work that has already landed.\n"
+               "Cut from the upstream:\n"
+               "    showrunner spawn %s --base %s\n"
+               "or confirm the stale checkout is what you mean:\n"
+               "    showrunner spawn %s --base HEAD\n"
+               "A project can make the upstream the default with `spawn.default_base` in config."
+               % (leaf["id"], report["behind"], report["upstream"], report.get("branch") or "?",
+                  (report.get("sha") or "?")[:12], leaf["id"], report["upstream"], leaf["id"]))
+        if rehearsing:
+            eprint("%sWOULD REFUSE: %s%s" % (RED, msg, OFF))
+            return
+        die(msg, code=3)
     default = worktree.default_branch(cfg)
     rc, head, _ = git(["symbolic-ref", "--short", "--quiet", "HEAD"], cwd=cfg.root)
     head = head.strip() if rc == 0 else ""
@@ -2590,6 +2624,36 @@ def _base_dependency_check(leaf, report, despite, rehearsing=False):
         # The rehearsal must preview the refusal and still create nothing, for the reason
         # `_live_collision_check` gives: a dry run that shows a clean dispatch and then a real
         # spawn that refuses is worse than no rehearsal.
+        eprint("%sWOULD REFUSE: %s%s" % (RED, msg, OFF))
+        return
+    die(msg, code=3)
+
+
+def _stale_body_check(cfg, leaf, despite, rehearsing=False):
+    """REFUSE a spawn whose body FILE has moved on since it was stored (#102).
+
+    The brief is built from the body the graph holds, which is the file as it was at `add` or the
+    last `edit`. A lead appending hand-offs to that file afterwards had them silently never reach
+    five Crawlers. `--despite-stale-body` proceeds on the stored body, deliberately.
+    """
+    from . import bodyfile
+    d = bodyfile.drift(cfg, leaf)
+    if not d:
+        return
+    if despite:
+        print("%sSPAWNING FROM THE STORED BODY on purpose (--despite-stale-body): %s has %s%s"
+              % (YEL, d["path"], d["summary"], OFF))
+        return
+    msg = ("%s's brief would be built from its STORED body, but the file it came from has "
+           "changed since:\n  %s — %s\n"
+           "Anything added to that file since is not in the graph, so the Crawler would never see "
+           "it.\n"
+           "Store the current file:\n"
+           "    showrunner edit %s --body-file %s\n"
+           "or spawn from the stored body deliberately:\n"
+           "    showrunner spawn %s --despite-stale-body"
+           % (leaf["id"], d["path"], d["summary"], leaf["id"], d["path"], leaf["id"]))
+    if rehearsing:
         eprint("%sWOULD REFUSE: %s%s" % (RED, msg, OFF))
         return
     die(msg, code=3)
@@ -2690,8 +2754,14 @@ def cmd_spawn(args):
     # computed twice — once inside the dry-run branch and once after it — which is two callers
     # of one check, free to drift apart, and the drift would be invisible because both look
     # right in isolation.
-    base_seen = worktree.base_report(cfg, g, leaf, args.base or "HEAD",
-                                     explicit=args.base is not None)
+    # A CONFIGURED DEFAULT IS A DECISION (#103): `spawn.default_base` (e.g. "origin/main") is the
+    # project naming its base once, so it counts as explicit — the implicit-base refusals exist
+    # for the base nobody chose.
+    _configured = (cfg.get("spawn") or {}).get("default_base") if hasattr(cfg, "get") else None
+    _base = args.base or _configured or "HEAD"
+    base_seen = worktree.base_report(cfg, g, leaf, _base,
+                                     explicit=args.base is not None or bool(_configured))
+    base_seen["configured"] = args.base is None and bool(_configured)
     # MAY THIS SEAT DISPATCH AT ALL (#77)? Asked at the SANCTIONED path, not only at the raw one.
     # `dispatch guard` watches `claude -p` — which `whoami` tells you not to use — while
     # `spawn --launch`, which it tells you to use two lines earlier, never asked. A seat
@@ -2732,6 +2802,8 @@ def cmd_spawn(args):
                          rehearsing=bool(getattr(args, "dry_run", False)))
     _base_dependency_check(leaf, base_seen, getattr(args, "despite_base", None) or [],
                            rehearsing=bool(getattr(args, "dry_run", False)))
+    _stale_body_check(cfg, leaf, getattr(args, "despite_stale_body", False),
+                      rehearsing=bool(getattr(args, "dry_run", False)))
     drift = worktree.drift_report(cfg, leaf, base_seen.get("sha"))
     _base_drift_check(leaf, drift, getattr(args, "despite_deleted", None) or [],
                       rehearsing=bool(getattr(args, "dry_run", False)))
@@ -2751,7 +2823,7 @@ def cmd_spawn(args):
         print("  command  %s" % " ".join(cmd))
         return 0
 
-    record = worktree.spawn(cfg, leaf, actor=args.actor, base=args.base or "HEAD",
+    record = worktree.spawn(cfg, leaf, actor=args.actor, base=_base,
                             branch=args.branch, sparse=getattr(args, "sparse", None),
                             drift=drift)
     # THE ROOM IS OPENED HERE, BEFORE THE BRIEF, and that ordering is the whole fix. The
@@ -2972,6 +3044,11 @@ def cmd_edit(args):
                   paths=(args.path.split(",") if args.path else None),
                   labels=(args.label.split(",") if args.label else None),
                   add_labels=(args.add_label or []), remove_labels=(args.remove_label or []))
+    from . import bodyfile
+    if args.body_file and args.body_file != "-" and os.path.isfile(args.body_file):
+        bodyfile.record(cfg, leaf["id"], args.body_file, body)
+    elif args.body is not None:
+        bodyfile.forget(cfg, leaf["id"])        # the body is inline now, not from a file
     print("edited %s" % leaf["id"])
     print("  title %s" % leaf.get("title"))
     print("  body  %d chars" % len(leaf.get("body") or ""))
@@ -3841,6 +3918,9 @@ def build_parser():
                    help="something you already checked; the Crawler is asked to confirm or refute it")
     s.add_argument("--despite-base", action="append", metavar="LEAF",
                    help="accept a base missing this dependency, naming which one (#73)")
+    s.add_argument("--despite-stale-body", action="store_true",
+                   help="spawn from the body stored in the graph even though the file that "
+                        "body came from has changed since")
     s.add_argument("--despite-deleted", action="append", metavar="PATH",
                    help="accept a base on which this declared leaf path still exists though the "
                         "default branch has deleted it. Repeatable; must name every such path")

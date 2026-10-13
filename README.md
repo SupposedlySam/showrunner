@@ -449,6 +449,21 @@ decision has to be able to see one being made. A repo with no `origin/HEAD`, `ma
 or a detached HEAD, warns and allows: cannot-tell must not refuse. `showrunner show <leaf>` reports
 `crawler_base` — what was asked for, the resolved sha, the branch.
 
+**An implicit base on the default branch is refused when it is behind its upstream.** A working
+checkout is routinely stale and dirty, so nobody pulls it for the agents, and a Crawler built on it
+can conflict with, or undo, work that has already landed. `spawn` counts how far the base is behind
+the last-fetched `origin/<default>` (it does not fetch, so the count is a floor) and refuses an
+unnamed base that is behind, naming `--base origin/<default>`; `--base HEAD` acknowledges it.
+`spawn.default_base` in config — `"origin/main"`, say — makes the upstream what an unnamed base
+means, and that counts as a decision.
+
+**A leaf's body is the text stored at `add` or the last `edit`, not the file it came from.** Lines
+appended to a `--body-file` afterwards never reach the Crawler, so the file's path is remembered
+and `spawn` refuses when it has drifted from the stored body.
+`showrunner edit <leaf> --body-file <file>` stores the current file;
+`showrunner spawn <leaf> --despite-stale-body` proceeds on the stored copy. `status` lists leaves
+whose body file has drifted.
+
 **A base can also be behind in the other direction: the default branch may have deleted what the
 leaf is about to change.** An older base still has the file, so the Crawler changes it, tests it
 green and closes — for code that no longer exists on the default branch. `spawn` compares each
