@@ -210,6 +210,17 @@ showrunner gc                        # remove worktrees whose branch is MERGED a
                                      # it is fingerprinted at spawn and at launch, and counts
                                      # again the moment the Crawler edits it. `status` says when
                                      # worktrees pile past `gc_nudge_at` (default 10)
+showrunner gc --idle 24h             # EVERY registered worktree unused that long — campaign or not,
+                                     # merged or not, dirty or not. KEPT, with the reason: locked,
+                                     # `--keep <tree>`, a live Crawler, an in-progress claim, a held
+                                     # lease, a process inside it, or activity in the window (HEAD
+                                     # commit time; its git index/HEAD/logs mtimes; dirty files'
+                                     # mtimes). Unknown is never idle. --apply ARCHIVES first —
+                                     # .patch of the uncommitted diff, .untracked.tgz, a .json, and
+                                     # refs/worktree-archive/<name> when no ref holds HEAD — then
+                                     # removes the tree; the branch is kept. Unregistered dirs under
+                                     # the worktree root are reported, never removed. It cannot see
+                                     # an agent that means to come back; the archive is the answer
 showrunner resume <leaf>             # restart a STOPPED Crawler's recorded session IN ITS OWN
                                      # worktree, keeping its uncommitted work — after a spend
                                      # limit, a usage window or a crash. Lane model and flags as

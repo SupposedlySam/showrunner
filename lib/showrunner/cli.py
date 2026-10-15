@@ -646,6 +646,19 @@ def cmd_doctor(args):
               % (GRN + "ok   " + OFF if len(_trees) < 12 else YEL + "warn " + OFF,
                  len(_trees), rel(cfg.worktree_root, cfg.root),
                  "" if _bytes is None else " (%s)" % _human(_bytes)))
+        # THE FIX BESIDE THE WARNING (#105). `gc` above only touches campaign trees that are
+        # merged and clean; most of a busy checkout is neither. Counted only when the warning
+        # fires, because classifying asks git about every tree.
+        if len(_trees) >= 12:
+            try:
+                from . import idle as _idle
+                _found, _kept, _unreg = _idle.classify(cfg, _graph(cfg), 86400)
+            except Exception:                                   # noqa: BLE001
+                _found = None
+            if _found:
+                print("        %d of them have been idle over 24h, campaign or not — "
+                      "`showrunner gc --idle 24h` lists them; --apply archives and removes"
+                      % len(_found))
 
     # HOW MANY CALLS WENT UNCHECKED, because until now nothing downstream ever asked. A guard
     # that fails open says so — correctly — as hook output beside a SUCCESSFUL tool result, and
@@ -2064,6 +2077,8 @@ def cmd_gc(args):
     discrimination `reap` already makes, applied to the trees of leaves that succeeded.
     """
     cfg = _cfg(args)
+    if getattr(args, "idle", None):
+        return _gc_idle(cfg, args)
     take, held = campaign.reclaimable(cfg, _graph(cfg), base=args.base)
     print("%sWorktree reclaim%s%s" % (BOLD, OFF, "" if args.apply else " (dry run — use --apply)"))
     removed = []
@@ -2080,6 +2095,46 @@ def cmd_gc(args):
     else:
         _report_reclaim(take, held, False)
     return 0
+
+
+def _gc_idle(cfg, args):
+    """`gc --idle <duration>`: every registered worktree that nobody has used lately (#105).
+
+    Archive first, then remove — the branch is never touched — so the idle bar can be aggressive.
+    Dry run by default, like every verb here that deletes.
+    """
+    from . import idle
+    seconds = idle.parse_duration(args.idle)
+    if not seconds:
+        die("--idle wants a duration like 90m, 24h, 2d or 1w — got %r" % args.idle, code=64)
+    found, kept, unregistered = idle.classify(cfg, _graph(cfg), seconds, keep=args.keep or [])
+    if found is None:
+        die("git could not list this repo's worktrees, so nothing was classified", code=2)
+    print("%sIdle worktrees (no use for %s)%s%s"
+          % (BOLD, args.idle, OFF, "" if args.apply else " — dry run, use --apply"))
+    failed = 0
+    for row in found:
+        if not args.apply:
+            print("  would archive + remove  %s  (%s)" % (rel(row["path"], cfg.root), row["why"]))
+            continue
+        record, why = idle.reclaim(cfg, row)
+        if record is None:
+            failed += 1
+            eprint("  %sKEPT%s %s — %s" % (RED, OFF, rel(row["path"], cfg.root), why))
+        else:
+            print("  archived + removed  %s -> %s%s"
+                  % (rel(row["path"], cfg.root), rel(record["archive"], cfg.root),
+                     " (HEAD pinned at %s)" % record["pinned"] if record["pinned"] else ""))
+    for row in kept:
+        print("  %skept%s  %s — %s" % (DIM, OFF, rel(row["path"], cfg.root), row["why"]))
+    for path in unregistered:
+        print("  %sunregistered%s  %s — a directory under the worktree root that git does not "
+              "know as a worktree; showrunner never removes it" % (YEL, OFF, rel(path, cfg.root)))
+    print("%d idle, %d kept, %d unregistered%s"
+          % (len(found), len(kept), len(unregistered),
+             ". Restore one: `git worktree add <path> <branch>`, then `git apply` its .patch "
+             "and untar its .untracked.tgz from the archive" if found else ""))
+    return 2 if failed else 0
 
 
 def cmd_reach(args):
@@ -4169,6 +4224,12 @@ def build_parser():
                                   "clean; dry-run by default")
     s.add_argument("--base", default="HEAD")
     s.add_argument("--apply", action="store_true", help="actually remove them")
+    s.add_argument("--idle", metavar="DURATION",
+                   help="instead: EVERY registered worktree unused for this long (90m, 24h, 2d), "
+                        "campaign or not — archived (patch, untracked files, pinned HEAD) before "
+                        "removal; the branch is kept")
+    s.add_argument("--keep", action="append", metavar="TREE",
+                   help="with --idle: keep this tree whatever its idleness (path or name)")
     s.set_defaults(func=cmd_gc)
 
     s = sub.add_parser("reach", help="PreToolUse: name the mechanism for what a call reached "

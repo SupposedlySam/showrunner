@@ -204,7 +204,7 @@ sr_added=0
 for entry in "bin/" "lib/" "graph.db" "graph.db-*" "locks/" "scratch/" "campaigns/" \
              "sessions.json" "campaign.json" \
              "routing.jsonl" "waiting.jsonl" "events.jsonl" "*.lock" "baseline.json" \
-             "integration-commit.json" "config.local.json" "seen-issues.json" \
+             "integration-commit.json" "archive/" "config.local.json" "seen-issues.json" \
              "wake-gate-seen.json" "waker-state.json" \
              "hook-heartbeat.jsonl" "fail-open.jsonl"; do
   if ! grep -qxF "$entry" "$sr_ignore" 2>/dev/null; then

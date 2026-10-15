@@ -257,6 +257,17 @@ into a tree — its hook registrations above all — is fingerprinted when it wr
 counted as uncommitted work, until the Crawler edits it. `status` names `gc` once the worktree
 count passes `gc_nudge_at`.
 
+**Every idle worktree, not only the campaign's.** A busy checkout accumulates trees made by other
+tooling, trees dirty only with harness output and refuted work kept on purpose, none of which plain
+`gc` touches. `showrunner gc --idle 24h` covers every worktree git has registered, keeps any tree
+in use — locked, named with `--keep`, a live Crawler, an in-progress claim, a held lease, a process
+inside it, or activity inside the window — and with `--apply` archives the rest before removing
+them: the uncommitted diff as a patch, the untracked files as a tarball, a JSON record, and a
+pinned `refs/worktree-archive/<name>` when no branch holds HEAD. The branch is never touched, so
+removal is lossless and the bar can be aggressive. Directories under the worktree root that git
+does not know are reported, never removed. `doctor` counts the idle ones beside its worktree
+warning. `showrunner gc --idle 24h --keep <tree>` keeps one tree regardless.
+
 **A stopped Crawler is resumed, not respawned.** `showrunner resume <leaf>` restarts its recorded
 session in its own worktree with its uncommitted work intact — after a spend limit, a usage
 window or a crash — and records the new process so `waiting` and `reap` see it. It refuses when

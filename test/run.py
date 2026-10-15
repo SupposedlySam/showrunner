@@ -17286,9 +17286,146 @@ def test_the_github_waker_rings_and_stays_quiet():
        q.returncode == 0 and "usage" not in q.stderr, (q.returncode, q.stderr))
 
 
+def test_gc_idle_reclaims_any_idle_tree_and_archives_first():
+    group("`gc --idle` covers EVERY registered worktree, keeps any in use, and archives before it "
+          "removes — so idle can be aggressive and still lossless (#105)")
+    if not have("git"):
+        skip("the idle-tree group", "git is not installed")
+        return
+    from showrunner import idle
+    import tarfile
+    # REPORTED: 172 registered worktrees, ~97 GB; `gc` reclaimed almost none — most were not in
+    # a campaign record, were dirty only with harness output, or were unmerged on purpose.
+    cfg = make_repo()
+    g = new_graph(cfg)
+    old = int(time.time()) - 3 * 86400
+    oldenv = dict(os.environ, GIT_COMMITTER_DATE="%d +0000" % old,
+                  GIT_AUTHOR_DATE="%d +0000" % old)
+    wt_root = cfg.worktree_root
+    os.makedirs(wt_root, exist_ok=True)
+
+    def tree(name, detach=False):
+        path = os.path.join(wt_root, name)
+        sh(["git", "worktree", "add", "-q"] + (["--detach"] if detach else ["-b", name])
+           + [path], cfg.root)
+        with open(os.path.join(path, "work-%s.txt" % name), "w") as fh:
+            fh.write(name + "\n")
+        subprocess.run(["git", "add", "-A"], cwd=path, env=oldenv, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "old work " + name], cwd=path, env=oldenv,
+                       capture_output=True)
+        return path
+
+    def age(path):
+        out = sh(["git", "--no-optional-locks", "status", "--porcelain"], path).stdout
+        gd = sh(["git", "rev-parse", "--absolute-git-dir"], path).stdout.strip()
+        for rel_ in ("index", "HEAD", os.path.join("logs", "HEAD")):
+            p_ = os.path.join(gd, rel_)
+            if os.path.exists(p_):
+                os.utime(p_, (old, old))
+        for line in out.splitlines():
+            p_ = os.path.join(path, line[3:].strip())
+            if os.path.exists(p_):
+                os.utime(p_, (old, old))
+
+    review = tree("pr-review")            # made by other tooling: in no campaign record
+    with open(os.path.join(review, "README.md"), "a") as fh:
+        fh.write("an uncommitted edit\n")
+    with open(os.path.join(review, "notes-untracked.txt"), "w") as fh:
+        fh.write("only copy\n")
+    age(review)
+    loose = tree("detached-scratch", detach=True)    # HEAD on no branch at all
+    age(loose)
+    loose_head = sh(["git", "rev-parse", "HEAD"], loose).stdout.strip()
+    recent = tree("in-use")                          # used just now
+    with open(os.path.join(recent, "fresh.txt"), "w") as fh:
+        fh.write("x\n")
+    locked = tree("locked-tree"); age(locked)
+    sh(["git", "worktree", "lock", locked], cfg.root)
+    kept_by_name = tree("keep-me"); age(kept_by_name)
+    claimed = tree("claimed-tree"); age(claimed)
+    g.add("claimed leaf", leaf_id="I1")
+    g.claim("I1", "lead", pid=os.getpid(), tree=claimed)
+    occupied = tree("occupied"); age(occupied)
+    sitter = subprocess.Popen(["sleep", "60"], cwd=occupied)
+    stray = os.path.join(wt_root, "not-a-worktree")
+    os.makedirs(stray)
+    try:
+        found, kept, unreg = idle.classify(cfg, g, 86400, keep=["keep-me"])
+        names = {os.path.basename(r["path"]) for r in found}
+        why = {os.path.basename(r["path"]): r["why"] for r in kept}
+        eq("idle: the review tree and the detached tree — NEITHER in any campaign record",
+           names, {"pr-review", "detached-scratch"})
+        ok("kept: a tree used just now", "active" in why.get("in-use", ""), why)
+        ok("kept: a LOCKED tree", "LOCKED" in why.get("locked-tree", ""), why)
+        ok("kept: a tree named by --keep", "--keep" in why.get("keep-me", ""), why)
+        ok("kept: a tree an in-progress claim names", "claim" in why.get("claimed-tree", ""), why)
+        ok("kept: a tree a process is working in", "process" in why.get("occupied", ""), why)
+        eq("an unregistered directory under the worktree root is REPORTED",
+           [os.path.basename(p_) for p_ in unreg], ["not-a-worktree"])
+
+        p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "gc",
+                            "--idle", "24h", "--keep", "keep-me"], capture_output=True,
+                           text=True, cwd=cfg.root, stdin=subprocess.DEVNULL)
+        ok("the dry run lists them and removes nothing", p.returncode == 0
+           and "would archive + remove" in p.stdout and os.path.isdir(review), p.stdout[-500:])
+        ok("...prints every KEPT tree with its reason", "kept" in p.stdout
+           and "LOCKED" in p.stdout and "in-use" in p.stdout, p.stdout[-600:])
+        ok("...names the unregistered directory", "unregistered" in p.stdout
+           and "not-a-worktree" in p.stdout, p.stdout[-400:])
+        ok("...and totals them", "2 idle" in p.stdout, p.stdout[-200:])
+        bad = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "gc",
+                              "--idle", "soon"], capture_output=True, text=True, cwd=cfg.root,
+                             stdin=subprocess.DEVNULL)
+        eq("a duration it cannot read is a usage error (64), not 'nothing idle'",
+           bad.returncode, 64)
+
+        again, _, _ = idle.classify(cfg, g, 86400, keep=["keep-me"])
+        eq("LOOKING does not make a tree active: after the dry run they are still idle",
+           {os.path.basename(r["path"]) for r in again}, {"pr-review", "detached-scratch"})
+        rows = {os.path.basename(r["path"]): r for r in found}
+        branch_head = sh(["git", "rev-parse", "HEAD"], kept_by_name).stdout.strip()
+        eq("_contained: a HEAD a branch holds is contained", idle._contained(cfg, branch_head),
+           True)
+        eq("...a detached HEAD on no branch is not", idle._contained(cfg, loose_head), False)
+        eq("...and a sha git cannot resolve is CANNOT TELL, never 'no'",
+           idle._contained(cfg, "0" * 40), None)
+        row = rows.get("pr-review")
+        record, err = idle.reclaim(cfg, row) if row else (None, "pr-review was not classified")
+        ok("reclaim archives then removes the idle tree", record and not os.path.isdir(review),
+           err)
+        base = record["archive"] if record else ""
+        patch = os.path.join(base, "pr-review.patch")
+        ok("...the archive holds its UNCOMMITTED diff", os.path.exists(patch)
+           and "an uncommitted edit" in open(patch).read())
+        tgz = os.path.join(base, "pr-review.untracked.tgz")
+        ok("...and its UNTRACKED files", os.path.exists(tgz)
+           and "notes-untracked.txt" in tarfile.open(tgz).getnames())
+        ok("...and a record of branch and HEAD", os.path.exists(os.path.join(base,
+                                                                             "pr-review.json")))
+        ok("...and the BRANCH survives the tree", sh(["git", "rev-parse", "--verify", "-q",
+                                                      "refs/heads/pr-review"], cfg.root,
+                                                     check=False).returncode == 0)
+        row2 = rows.get("detached-scratch")
+        record2, err2 = (idle.reclaim(cfg, row2) if row2
+                         else (None, "detached-scratch was not classified"))
+        ok("a HEAD no branch contains is PINNED before its tree goes",
+           record2 and record2["pinned"] and sh(["git", "rev-parse", record2["pinned"]],
+                                                cfg.root).stdout.strip() == loose_head, err2)
+        ok("...and an unregistered directory is never removed", os.path.isdir(stray))
+    finally:
+        sitter.kill()
+        sitter.wait()
+    eq("durations parse: 90m, 24h, 2d, 1w", [idle.parse_duration(x) for x in
+                                             ("90m", "24h", "2d", "1w", "soon")],
+       [5400, 86400, 172800, 604800, None])
+    eq("...with surrounding spaces, and nothing for a bare number", [idle.parse_duration(x)
+                                                                     for x in (" 3h ", "3")],
+       [10800, None])
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_the_github_waker_rings_and_stays_quiet, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

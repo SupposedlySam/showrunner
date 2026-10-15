@@ -81,7 +81,7 @@ STATE_IGNORE_SECTIONS = [
       "routing.jsonl",
       "waiting.jsonl", "events.jsonl", "hook-heartbeat.jsonl", "fail-open.jsonl",
       "*.lock", "baseline.json",
-      "integration-commit.json"]),
+      "integration-commit.json", "archive/"]),
     ("# Machine-specific overrides and per-machine observations. The docs point people here for\n"
      "# absolute paths, and without these lines the files land NEITHER TRACKED NOR IGNORED --\n"
      "# the exact state doctor flags elsewhere, and the state that reopens the leak\n"
