@@ -86,7 +86,7 @@ STATE_IGNORE_SECTIONS = [
      "# absolute paths, and without these lines the files land NEITHER TRACKED NOR IGNORED --\n"
      "# the exact state doctor flags elsewhere, and the state that reopens the leak\n"
      "# config.local.json exists to prevent.",
-     [CONFIG_LOCAL_NAME, "seen-issues.json", "wake-gate-seen.json"]),
+     [CONFIG_LOCAL_NAME, "seen-issues.json", "wake-gate-seen.json", "waker-state.json"]),
     ("# The TOOL, not this project — replaced wholesale on upgrade.",
      ["bin/", "lib/"]),
 ]
@@ -125,6 +125,9 @@ DEFAULTS = {
     # `spawn.default_base`: the ref an unnamed --base means (#103). Unset, it is the primary
     # checkout's HEAD — refused when that is off, or behind, the default branch.
     "spawn": {"default_base": None},
+    # The GitHub waker: what to watch. Empty means the hook exits at once (see waker.py).
+    "waker": {"repos": [], "upstream": [], "trusted_logins": [], "trusted_names": [],
+              "signature": "", "poll_sec": 300, "budget_sec": 1800},
 }
 
 

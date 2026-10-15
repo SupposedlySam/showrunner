@@ -763,6 +763,16 @@ showrunner dispatch guard            # PreToolUse on BASH            (dispatch-g
 showrunner reach                     # PreToolUse on Write|Edit|NotebookEdit|Bash|TodoWrite
                                      #                               (reach-gate.sh)
 showrunner wake-gate                 # PreToolUse on BASH            (wake-gate.sh)
+showrunner waker                     # Stop, asyncRewake (github-waker.sh): while the session is
+                                     # idle, ONE GraphQL query every poll_sec over the repos the
+                                     # `waker` config names; WAKES it on a new issue or PR, a
+                                     # comment, a REVIEW verdict or inline review comment, and a
+                                     # merge/close/reopen. Quiet on its own signed writing; never
+                                     # runs in a linked worktree; inert until configured.
+                                     # `showrunner waker --once` looks once;
+                                     # `showrunner waker --probe` exits 0 — how the shim tells
+                                     # a binary that knows the verb from an older one.
+                                     # SHOWRUNNER_GH names the gh binary when it is not on PATH
 showrunner write-guard               # PreToolUse on Write|Edit|MultiEdit|NotebookEdit|Bash
                                      #                               (write-guard.sh)
 ```
@@ -1034,6 +1044,7 @@ verb gaining one, and the table below is the thing that has to stay right. It do
 | `future-tense-gate.sh` | by hand | outside the verb's set; registering it is a one-line settings edit |
 | `pipeline-status-gate.sh` | by hand | same |
 | `write-guard.sh` | `showrunner worktree register --write-guard` | OPT-IN: it REFUSES writes, and on a seat no role maps the fallback may write nothing — wired by default, an upgrade alone would make a repo read-only |
+| `github-waker.sh` | `worktree register` (inert until `waker` is configured) | — it IS registered; listed so its config is findable: `waker.repos`, `waker.upstream` ({repo, author}), `waker.trusted_logins`, `waker.trusted_names`, `waker.signature`, `waker.poll_sec` |
 | `waiting-probe.sh` | **NOBODY — deliberately** | arming an idle watchdog is a human decision, stated under "First thing, every session": *a probe an agent can set is a watchdog an agent can switch off* |
 
 Enforced by a default-deny check: every hook file present is registered in a settings file or

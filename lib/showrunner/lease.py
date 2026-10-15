@@ -1028,6 +1028,32 @@ def register_wake_gate(cfg, local=False):
             lambda p: _registration(p, "PreToolUse", "wake-gate"), "wake gate")
 
 
+WAKER_SHIM = os.path.join(".showrunner", "hooks", "github-waker.sh")
+
+
+def register_waker(cfg, local=False):
+    """Register the GitHub waker on Stop with asyncRewake. Returns (changed, message).
+
+    REGISTERED BY DEFAULT, because it is inert until a project configures `waker`: unconfigured,
+    it exits at once. And in a linked worktree it exits at once too, so the Crawlers that inherit
+    the registration are never held at their turn-end by it.
+    """
+    import json
+    from .util import atomic_write_json, file_lock
+
+    path = settings_target(cfg.root, local)
+    entry = {"hooks": [{"type": "command",
+                        "command": "\"$CLAUDE_PROJECT_DIR\"/" + WAKER_SHIM,
+                        "asyncRewake": True,
+                        "timeout": 1860,
+                        "statusMessage": "showrunner: watching GitHub for activity"}]}
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with file_lock(_register_lock(cfg)):
+        return _register_locked(
+            cfg, path, entry, json, atomic_write_json, "Stop",
+            lambda p: _registration(p, "Stop", "github-waker"), "GitHub waker")
+
+
 WRITE_SHIM = os.path.join(".showrunner", "hooks", "write-guard.sh")
 
 

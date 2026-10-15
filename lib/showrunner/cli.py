@@ -1553,7 +1553,9 @@ def _registered_hooks(write_guard=False):
              (lease.register_whoami, "seat announcement (SessionStart+PostCompact)"),
              (lease.register_dispatch_guard, "dispatch guard (PreToolUse on Bash)"),
              (lease.register_reach, "reach gate (PreToolUse; advice, never refuses)"),
-             (lease.register_wake_gate, "wake gate (PreToolUse on Bash; advice, never refuses)")]
+             (lease.register_wake_gate, "wake gate (PreToolUse on Bash; advice, never refuses)"),
+             (lease.register_waker, "GitHub waker (Stop, asyncRewake; inert until `waker` is "
+                                    "configured)")]
     if write_guard:
         hooks.append((lease.register_write_guard,
                       "write guard (PreToolUse on the edit tools and Bash; refuses writes the "
@@ -1842,6 +1844,33 @@ def cmd_role_roster(args):
         eprint("NOTE: %d seat(s) read STALE — the holder is proved dead, so `_resolved` skips "
                "them and those sessions announce the fallback: %s" % (len(stale), ", ".join(stale)))
     return 0
+
+
+def cmd_waker(args):
+    """Stop hook (asyncRewake): wake the idle session when configured GitHub activity arrives.
+
+    `--probe` answers 0 and does nothing: the shim asks it first, because a pinned copy older
+    than this verb exits 2 on the unknown verb — and 2 from an asyncRewake hook
+    IS a wake, carrying argparse's usage text. Every failure inside is quiet (exit 0): a waker
+    must never be the thing that breaks a turn.
+    """
+    if args.probe:
+        return 0
+    from . import waker
+    try:
+        cfg = _cfg(args, required=False)
+        code, text = waker.run(cfg, once=args.once)
+    except Exception as exc:                                    # noqa: BLE001
+        if args.once:
+            eprint("waker: %s" % exc)
+            return 1
+        return 0
+    if code == 2:
+        eprint(text)
+        return 2
+    if text and (args.once or code == 1):
+        (eprint if code else print)(text)
+    return code
 
 
 def cmd_write_guard(args):
@@ -4070,6 +4099,19 @@ def build_parser():
     s.add_argument("--session", help="the calling session, for the may-dispatch check")
     s.add_argument("--dry-run", action="store_true", help="show the command and start nothing")
     s.set_defaults(func=cmd_resume)
+
+    s = sub.add_parser("waker",
+                       help="Stop hook (asyncRewake): poll the GitHub repos in `waker` config while "
+                            "idle and WAKE the session on new issues, PRs, comments, reviews and "
+                            "merge/close changes. One GraphQL query per poll. Inert unconfigured")
+    s.description = ("exit codes:\n"
+                     "  0  nothing new, nothing configured, or a linked worktree\n"
+                     "  1  --once could not look at GitHub (NOT the same as nothing new)\n"
+                     "  2  WAKE: activity arrived; the text on stderr is the wake message")
+    s.formatter_class = argparse.RawDescriptionHelpFormatter
+    s.add_argument("--once", action="store_true", help="look once and report, instead of waiting")
+    s.add_argument("--probe", action="store_true", help="exit 0: this binary knows the verb")
+    s.set_defaults(func=cmd_waker)
 
     s = sub.add_parser("write-guard",
                        help="PreToolUse (Write|Edit|MultiEdit|NotebookEdit|Bash): refuse a write "

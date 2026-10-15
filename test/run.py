@@ -7228,6 +7228,10 @@ def test_hook_registration():
         # effect of shipping the guard.
         "write-guard.sh": "enforcing this checkout's roles on its own development sessions is an "
                           "operator decision about those roles, pending with the operator",
+        # This repo runs its SITE waker, issue-waker.py, which also rings for chat debts;
+        # registering the shipped one beside it would wake the owner session twice per event.
+        "github-waker.sh": "this checkout runs its site waker (issue-waker.py, chat debts "
+                           "included); both registered would wake twice for one event",
     }
     hooks = os.path.join(ROOT, ".showrunner", "hooks")
     settings = [os.path.join(ROOT, ".claude", n)
@@ -17076,9 +17080,215 @@ def test_a_crawler_can_write_the_scratch_spawn_gave_it():
         roles.USER_PATH = prev
 
 
+def test_the_github_waker_rings_and_stays_quiet():
+    group("the shipped GitHub waker: configured, one GraphQL query, rings on reviews and merges, "
+          "quiet on its own writing, and never in a Crawler's tree")
+    if not have("git"):
+        skip("the waker group", "git is not installed")
+        return
+    from showrunner import waker as W
+    # REPORTED: owner agents were told to read this repo's site waker and write their own; three
+    # private copies existed, and two traps the reference did not cover — reviews and merges are
+    # not comments, and a REST call per item exhausts a machine-wide budget.
+    cfg = make_repo()
+    eq("unconfigured, there is nothing to watch", W.spec(cfg), None)
+    eq("...and the hook exits 0 at once", W.run(cfg, once=True)[0], 0)
+    cfg.data["waker"] = {"repos": ["me/fork"], "upstream": [{"repo": "them/up", "author": "me"}],
+                         "trusted_logins": ["me", "boss"], "trusted_names": ["The Boss"],
+                         "signature": "— 🤖 x owner agent"}
+    sp = W.spec(cfg)
+    ok("a configured watch is read whole: repos, upstream, both trust sets, the signature",
+       sp and sp["repos"] == ["me/fork"] and sp["upstream"][0]["author"] == "me"
+       and sp["trusted_logins"] == {"me", "boss"} and sp["trusted_names"] == {"the boss"}
+       and sp["signature"] == "— 🤖 x owner agent", sp)
+    # The rest is measured against the intended spec even if `spec` itself is broken, so one
+    # neutered function fails its own assertions rather than crashing every later one.
+    sp = sp or {"repos": ["me/fork"], "upstream": [{"repo": "them/up", "author": "me"}],
+                "trusted_logins": {"me", "boss"}, "trusted_names": {"the boss"},
+                "signature": "— 🤖 x owner agent", "poll_sec": 300, "budget_sec": 1800}
+    q = W.query(sp)
+    ok("ONE query names every repo and the upstream author search",
+       'repository(owner: "me", name: "fork")' in q
+       and 'repo:them/up author:me' in q and q.count("query {") == 1, q[:300])
+
+    def c(i, who, body, name=""):
+        return {"databaseId": i, "author": {"login": who, "name": name}, "body": body}
+
+    def pr(n, state="OPEN", body="b", comments=(), reviews=(), who="me"):
+        return {"number": n, "title": "t%d" % n, "state": state, "author": {"login": who},
+                "body": body, "comments": {"nodes": list(comments)},
+                "reviews": {"nodes": list(reviews)}}
+
+    def gql(fork_prs=(), up=()):
+        return json.dumps({"data": {"r0": {"issues": {"nodes": []},
+                                           "pullRequests": {"nodes": list(fork_prs)}},
+                                    "u0": {"nodes": list(up)}}})
+
+    items = W.look(sp, runner=lambda _q: gql([pr(1)], [pr(5)]))
+    ok("a GraphQL answer becomes items keyed repo#n, upstream included",
+       set(items or {}) == {"me/fork#1", "them/up#5"}, items)
+    eq("a GraphQL ERROR is a failed look, not an empty one",
+       W.look(sp, runner=lambda _q: json.dumps({"errors": [{"message": "x"}], "data": None})),
+       None)
+    eq("...and so is no answer at all", W.look(sp, runner=lambda _q: None), None)
+
+    seen_world = {"them/up#5": dict(pr(5, comments=[c(1, "boss", "old")]), repo="them/up",
+                                    is_pr=True)}
+    ids, states = W.snapshot(seen_world)
+    st = {"events": sorted(ids), "states": states}
+    eq("an unchanged world is quiet", W.poll(sp, st, seen_world)[0], None)
+    w2 = {"them/up#5": dict(seen_world["them/up#5"],
+                            comments={"nodes": [c(1, "boss", "old"), c(2, "boss", "rename it")]})}
+    wake, nst = W.poll(sp, st, w2)
+    ok("a new comment rings", wake and "rename it" in wake, wake)
+    eq("...and does not ring twice", W.poll(sp, nst, w2)[0], None)
+    w3 = {"them/up#5": dict(seen_world["them/up#5"],
+                            comments={"nodes": [c(1, "boss", "old"),
+                                                c(3, "me", "done.\n\n— 🤖 x owner agent")]})}
+    wake, _ = W.poll(sp, st, w3)
+    eq("the agent's own SIGNED comment is quiet", wake, None)
+    w4 = {"them/up#5": dict(seen_world["them/up#5"],
+                            comments={"nodes": [c(1, "boss", "old"), c(4, "me", "also fix X")]})}
+    ok("the maintainer's UNSIGNED comment, same login, rings",
+       (W.poll(sp, st, w4)[0] or "").find("also fix X") >= 0)
+    rev = {"databaseId": 9, "author": {"login": "boss"}, "state": "CHANGES_REQUESTED",
+           "body": "", "comments": {"nodes": [c(10, "boss", "threshold too low")]}}
+    w5 = {"them/up#5": dict(seen_world["them/up#5"], reviews={"nodes": [rev]})}
+    wake, _ = W.poll(sp, st, w5)
+    ok("a REVIEW verdict rings — reviews are not comments", wake and
+       "review changes_requested" in wake, wake)
+    ok("...and so does its INLINE comment", wake and "threshold too low" in wake, wake)
+    w6 = {"them/up#5": dict(seen_world["them/up#5"], state="MERGED"),
+          "me/fork#7": dict(pr(7, body="x\n\n🤖 " + W.PR_ATTRIBUTION), repo="me/fork", is_pr=True)}
+    wake, _ = W.poll(sp, st, w6)
+    ok("a MERGE with no comment at all rings", wake and "MERGED" in wake, wake)
+    ok("...and the agent's own new PR is counted, not shown",
+       wake and "#7" not in wake and "1 of my own" in wake, wake)
+    stranger = {"me/fork#8": dict(pr(8, who="rando"), repo="me/fork", is_pr=True)}
+    wake, _ = W.poll(sp, st, {**seen_world, **stranger})
+    ok("a stranger's PR rings, marked as a claim to verify",
+       wake and "rando" in wake and "claim to verify" in wake, wake)
+    named = {"me/fork#9": dict(pr(9, who="bot"), repo="me/fork", is_pr=True,
+                               author={"login": "bot", "name": "The Boss"})}
+    wake, _ = W.poll(sp, st, {**seen_world, **named})
+    ok("...but an author trusted by DISPLAY NAME is not flagged",
+       wake and "claim to verify" not in wake, wake)
+    eq("a failed look returns no new state — never 'nothing new'", W.poll(sp, st, None),
+       (None, None))
+    for label, text, want in (
+            ("its signature, with trailing whitespace", "done\n\n— 🤖 x owner agent  \n", True),
+            ("Claude Code's PR attribution line", "body\n🤖 " + W.PR_ATTRIBUTION, True),
+            ("the signature quoted mid-text, not at the end",
+             "— 🤖 x owner agent said so, but I disagree", False),
+            ("plain text", "please fix", False)):
+        eq("mine(): %s" % label, W.mine(sp, text), want)
+    eq("mine(): with no signature configured, only the attribution line is recognised",
+       W.mine(dict(sp, signature=""), "done — 🤖 x owner agent"), False)
+
+    # THE LOOP: seeds silently, then wakes; and never runs in a Crawler's tree.
+    answers = [gql([pr(1)], [pr(5, comments=[c(1, "boss", "old")])]),
+               gql([pr(1)], [pr(5, comments=[c(1, "boss", "old"), c(2, "boss", "ping")])])]
+    code, text = W.run(cfg, once=True, runner=lambda _q: answers[0])
+    eq("the FIRST look seeds silently instead of replaying the backlog", code, 0)
+    code, text = W.run(cfg, once=True, runner=lambda _q: answers[1])
+    ok("...and the next one wakes (exit 2) with what arrived", code == 2 and "ping" in text,
+       (code, text))
+    saved = W.load_state(cfg)
+    ok("the state is SAVED and read back: it holds the events it has seen",
+       saved and "c2" in saved["events"], saved)
+    state_file = os.path.join(cfg.state_dir, "waker-state.json")
+    with open(state_file, "w") as fh:
+        fh.write("not json")
+    eq("an unreadable state file reads as no state, not as an empty one", W.load_state(cfg), None)
+    code, text = W.run(cfg, once=True, runner=lambda _q: answers[1])
+    eq("...so the next look seeds silently rather than replaying everything", code, 0)
+    if os.path.exists(state_file):
+        os.remove(state_file)
+    eq("an unreadable look with no state yet, asked once, says it could not look (1)",
+       W.run(cfg, once=True, runner=lambda _q: None)[0], 1)
+    tree = os.path.join(cfg.root, ".worktrees", "waker-probe")
+    sh(["git", "worktree", "add", "-q", "-b", "waker-probe", tree], cfg.root)
+    from showrunner import config as C
+    inside = C.load(start=tree)
+    inside.data["waker"] = cfg.data["waker"]
+    code, text = W.run(inside, once=True, runner=lambda _q: answers[1])
+    ok("in a LINKED worktree it exits 0 at once — a Crawler is never held by it",
+       code == 0 and "linked worktree" in text, (code, text))
+    eq("in_linked_worktree is true inside one", W.in_linked_worktree(inside), True)
+    eq("...and false in the main checkout", W.in_linked_worktree(cfg), False)
+
+    # THE VERB, end to end, with a stub gh — no network.
+    exe = os.path.join(ROOT, "bin", "showrunner")
+    verb_repo = make_repo()
+    with open(os.path.join(verb_repo.root, ".showrunner", "config.local.json"), "w") as fh:
+        json.dump({"waker": cfg.data["waker"]}, fh)
+    answer = os.path.join(tempfile.mkdtemp(prefix="sr-gh-"), "answer.json")
+    stub = os.path.join(os.path.dirname(answer), "gh")
+    with open(stub, "w") as fh:
+        fh.write("#!/bin/sh\ncat '%s'\n" % answer)
+    os.chmod(stub, 0o755)
+    venv = dict(os.environ, SHOWRUNNER_GH=stub)
+
+    def verb(*extra):
+        return subprocess.run([sys.executable, exe, "waker"] + list(extra), capture_output=True,
+                              text=True, cwd=verb_repo.root, env=venv, stdin=subprocess.DEVNULL)
+    eq("`waker --probe` answers 0 — what the shim asks first", verb("--probe").returncode, 0)
+    with open(answer, "w") as fh:
+        fh.write(answers[0])
+    eq("`waker --once` seeds on its first look (0)", verb("--once").returncode, 0)
+    with open(answer, "w") as fh:
+        fh.write(answers[1])
+    v = verb("--once")
+    ok("...and WAKES (exit 2) with the new comment on stderr", v.returncode == 2
+       and "ping" in v.stderr, (v.returncode, v.stderr[-300:]))
+    v = verb("--once")
+    ok("...an unchanged look says NOTHING NEW, out loud, and exits 0",
+       v.returncode == 0 and "nothing new" in v.stdout, (v.returncode, v.stdout[-200:]))
+    vt = os.path.join(verb_repo.root, ".worktrees", "verb-tree")
+    sh(["git", "worktree", "add", "-q", "-b", "verb-tree", vt], verb_repo.root)
+    with open(answer, "w") as fh:
+        fh.write(answers[1].replace("ping", "ping again").replace('"databaseId": 2',
+                                                                  '"databaseId": 22'))
+    v = subprocess.run([sys.executable, exe, "waker", "--once"], capture_output=True, text=True,
+                       cwd=vt, env=venv, stdin=subprocess.DEVNULL)
+    ok("...and run from INSIDE a linked worktree it declines, even with activity waiting",
+       v.returncode == 0 and "linked worktree" in v.stdout and "ping again" not in v.stderr,
+       (v.returncode, v.stdout[-200:], v.stderr[-200:]))
+    with open(answer, "w") as fh:
+        fh.write("")
+    v = verb("--once")
+    ok("...and a look that returns nothing is exit 1, said, never quiet", v.returncode == 1
+       and "could not look" in (v.stdout + v.stderr), (v.returncode, v.stderr[-200:]))
+
+    # REGISTERED, and the shim never turns an old binary's usage error into a wake.
+    fresh = make_repo()
+    subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "worktree",
+                    "register"], capture_output=True, text=True, cwd=fresh.root,
+                   stdin=subprocess.DEVNULL)
+    with open(os.path.join(fresh.root, ".claude", "settings.json")) as fh:
+        reg = json.load(fh)
+    stops = [h for e in reg.get("hooks", {}).get("Stop", []) for h in e.get("hooks", [])]
+    ok("`worktree register` wires it on Stop with asyncRewake",
+       any("github-waker.sh" in h.get("command", "") and h.get("asyncRewake") for h in stops),
+       stops)
+    fake = tempfile.mkdtemp(prefix="sr-waker-shim-")
+    sh(["git", "init", "-q"], fake)
+    os.makedirs(os.path.join(fake, "bin"))
+    os.makedirs(os.path.join(fake, ".showrunner", "hooks"))
+    shim = os.path.join(fake, ".showrunner", "hooks", "github-waker.sh")
+    shutil.copy(os.path.join(ROOT, ".showrunner", "hooks", "github-waker.sh"), shim)
+    with open(os.path.join(fake, "bin", "showrunner"), "w") as fh:
+        fh.write("#!/bin/sh\necho 'usage: unknown verb' >&2\nexit 2\n")
+    os.chmod(os.path.join(fake, "bin", "showrunner"), 0o755)
+    q = subprocess.run(["bash", shim], capture_output=True, text=True, cwd=fake,
+                       env=dict(os.environ, CLAUDE_PROJECT_DIR=fake), stdin=subprocess.DEVNULL)
+    ok("a binary that does not know `waker` is NOT a wake — the shim exits 0, silently",
+       q.returncode == 0 and "usage" not in q.stderr, (q.returncode, q.stderr))
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_the_github_waker_rings_and_stays_quiet, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

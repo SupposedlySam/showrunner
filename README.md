@@ -473,6 +473,18 @@ the commit, because its subject says whether the code moved or was removed.
 `showrunner spawn <leaf> --despite-deleted <path>` accepts it, naming each path. A path merely
 changed there is a note about a likely conflict, not a refusal. Both reach the brief.
 
+**An owner agent is woken by GitHub, not by remembering to look.** `worktree register` wires a
+Stop hook with `asyncRewake` that, while the session is idle, polls the repositories the `waker`
+section of config names — one GraphQL query per poll, because the REST budget is shared by every
+agent on the machine — and wakes the session on a new issue or pull request, a comment, a review
+verdict or inline review comment, and a merge, close or reopen, which arrive as no comment at
+all. `waker.upstream` watches only the items one author opened on somebody else's repository.
+The agent's own writing, recognised by `waker.signature`, is counted and never reported; anything
+from outside `waker.trusted_logins`/`trusted_names` is marked as a claim to verify. It never runs
+in a Crawler's worktree, and with nothing configured it exits at once.
+`showrunner waker --once` looks once and reports; `SHOWRUNNER_GH` names the `gh` binary when it
+is not on PATH.
+
 **A second spawn of a leaf a live process holds is refused before anything is created**, naming
 the holder's pid and tree. And the "worktree path already exists" refusal, whose way out is to
 remove the tree, checks the campaign record first: when a live Crawler stands in that tree it
