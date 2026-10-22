@@ -175,6 +175,13 @@ showrunner integrate                 # serial merge, checks re-run on each MERGE
 # leaf with nothing firmer blocks on them, as its only estimate. `plan` groups waves the same
 # way. `showrunner spawn <leaf> --despite-live <leaf>` accepts a named collision.
 #
+# A LEAF WHOSE BRANCH IS NEVER INTEGRATED — an A/B evaluation arm — cannot collide, because a
+# collision costs something only where two branches meet at merge. Mark it once:
+# `showrunner add <title> --no-integrate` (or `showrunner edit <leaf> --no-integrate`; undo with
+# `showrunner edit <leaf> --integrate`). The live-overlap refusal and `plan`'s waves pass any pair
+# that includes one, and `integrate` records it as never-integrated instead of merging it —
+# a failure only when it was asked for by name.
+#
 # A LEAF A LIVE PROCESS HOLDS IS REFUSED FIRST (exit 3), before anything is created, naming the
 # holder's pid and tree — so a second spawn of a running Crawler's leaf never reaches the
 # "worktree path already exists" refusal. That refusal, in turn, checks the campaign record:

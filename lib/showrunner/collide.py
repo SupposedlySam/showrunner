@@ -44,6 +44,20 @@ _IDENT = re.compile(r"\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+|[A-Z][a-zA-Z0-9]*[a-z][A-
 
 MAX_GREP_BYTES = 400_000
 
+# A leaf whose branch is NEVER integrated — an A/B evaluation arm, a spike kept for comparison
+# (#107). A collision costs something only where two branches meet at integration; two that never
+# meet cannot collide, so the overlap checks pass any pair that includes one, and `integrate`
+# refuses to merge one.
+NO_INTEGRATE = "no-integrate"
+
+
+def never_integrated(leaf):
+    """Does this leaf carry the no-integrate label?"""
+    labels = leaf.labels_list if hasattr(leaf, "labels_list") else (leaf.get("labels") or [])
+    if isinstance(labels, str):
+        labels = [x.strip() for x in labels.split(",") if x.strip()]
+    return NO_INTEGRATE in labels
+
 
 def tracked_files(root):
     rc, out, _ = run(["git", "ls-files"], cwd=root)
@@ -274,6 +288,14 @@ def plan_waves(cfg, leaves, files=None):
 
     for leaf in leaves:
         est = estimates[leaf["id"]]
+        if never_integrated(leaf):
+            # Never merged, so it cannot collide with anything: it joins the first wave and
+            # occupies nothing there.
+            if not waves:
+                waves.append([])
+                wave_paths.append(set())
+            waves[0].append(leaf["id"])
+            continue
         if not est["estimable"]:
             solo.append(leaf["id"])
             notes.append(
@@ -376,10 +398,12 @@ def live_conflicts(cfg, leaf, live, files=None):
     nothing measurable yet.
     """
     files = tracked_files(cfg.root) if files is None else files
+    if never_integrated(leaf):
+        return []                       # its branch never meets anything at integration
     mine = estimate(cfg, leaf, files)
     out = []
     for other in live:
-        if other["id"] == leaf["id"]:
+        if other["id"] == leaf["id"] or never_integrated(other):
             continue
         theirs = estimate(cfg, other, files)
         clash = mine["blocking"] & theirs["blocking"]

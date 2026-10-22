@@ -1041,8 +1041,10 @@ def cmd_add(args):
     if args.body_file:
         with open(args.body_file) as fh:
             body = fh.read()
+    from .collide import NO_INTEGRATE
     leaf_id = g.add(args.title, body=body, kind=args.kind, leaf_id=args.id,
-                    labels=args.label or [], paths=args.path or [])
+                    labels=(args.label or []) + ([NO_INTEGRATE] if args.no_integrate else []),
+                    paths=args.path or [])
     for parent in args.after or []:
         g.dep(leaf_id, parent)
     if args.body_file and args.body_file != "-" and os.path.isfile(args.body_file):
@@ -3156,7 +3158,10 @@ def cmd_edit(args):
     leaf = g.edit(args.id, title=args.title, body=body,
                   paths=(args.path.split(",") if args.path else None),
                   labels=(args.label.split(",") if args.label else None),
-                  add_labels=(args.add_label or []), remove_labels=(args.remove_label or []))
+                  add_labels=(args.add_label or []) + (
+                      ["no-integrate"] if getattr(args, "no_integrate", False) else []),
+                  remove_labels=(args.remove_label or []) + (
+                      ["no-integrate"] if getattr(args, "integrate", False) else []))
     from . import bodyfile
     if args.body_file and args.body_file != "-" and os.path.isfile(args.body_file):
         bodyfile.record(cfg, leaf["id"], args.body_file, body)
@@ -3785,6 +3790,9 @@ def build_parser():
     s.add_argument("--label", action="append")
     s.add_argument("--path", action="append")
     s.add_argument("--after", action="append", help="leaf id that must close first")
+    s.add_argument("--no-integrate", action="store_true",
+                   help="this leaf's branch is NEVER integrated (an A/B evaluation arm): live "
+                        "overlap checks pass any pair that includes it, and `integrate` refuses it")
     s.set_defaults(func=cmd_add)
 
     s = sub.add_parser("dep", help="declare that CHILD is blocked by PARENT")
@@ -3814,6 +3822,11 @@ def build_parser():
     s.add_argument("--add-label", action="append", help="add one label, keeping the rest")
     s.add_argument("--remove-label", action="append",
                    help="remove one label; REFUSES if the leaf does not carry it")
+    _ni = s.add_mutually_exclusive_group()
+    _ni.add_argument("--no-integrate", action="store_true",
+                     help="mark this leaf's branch as never integrated (an A/B evaluation arm)")
+    _ni.add_argument("--integrate", action="store_true",
+                     help="clear --no-integrate: the branch is integrated after all")
     s.set_defaults(func=cmd_edit)
 
     s = sub.add_parser("show", help="show one leaf")

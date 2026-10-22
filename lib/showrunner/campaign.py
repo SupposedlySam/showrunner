@@ -1442,12 +1442,17 @@ def _integrate_locked(cfg, graph, base=None, only=None, dry_run=False):
         if is_merged(cfg, branch, base):
             continue
         leaf_status = "unknown"
+        _leaf = None
         try:
-            leaf_status = graph.show(entry["leaf"])["status"]
+            _leaf = graph.show(entry["leaf"])
+            leaf_status = _leaf["status"]
         except Exception:
             pass
         if leaf_status not in ("closed", "refuted"):
             continue
+        from .collide import never_integrated
+        if _leaf is not None and never_integrated(_leaf):
+            entry = dict(entry, _never=True)
         # Do not merge work certified by a gate that was answering a different question.
         wt = cfg.abspath(entry.get("worktree"))
         if wt and os.path.isdir(wt):
@@ -1502,8 +1507,21 @@ def _integrate_locked(cfg, graph, base=None, only=None, dry_run=False):
                      "detail": (outcome.get("detail") or "")[:200] or None,
                      "merged_proof": outcome.get("merged_proof")})
 
+    refused_never = False
     for entry in candidates:
         branch = entry["branch"]
+        if entry.get("_never"):
+            # REFUSED, NOT MERGED (#107): the leaf says its branch is never integrated — an
+            # evaluation arm kept for comparison. Reported rather than silently skipped, and a
+            # failure only when it was asked for by name.
+            record({"crawler": entry["crawler"], "branch": branch, "status": "never-integrated",
+                    "report": ["%s carries the no-integrate label: its branch is kept for "
+                               "comparison and never merged. `showrunner edit %s --integrate` "
+                               "removes the label if that has changed."
+                               % (entry.get("leaf"), entry.get("leaf"))]})
+            if only and (entry.get("crawler") in only or entry.get("leaf") in only):
+                refused_never = True
+            continue
         if entry.get("_harness_block"):
             record({
                 "crawler": entry["crawler"], "branch": branch,
@@ -1592,4 +1610,4 @@ def _integrate_locked(cfg, graph, base=None, only=None, dry_run=False):
              "merged_proof": rel(proof_path, cfg.root) if proof_path else None,
              "proof_tracked": _is_tracked(cfg, proof_path) if proof_path else None})
         save(cfg, data)
-    return results, True
+    return results, not refused_never

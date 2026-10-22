@@ -433,6 +433,12 @@ brief's prose is reported as prose-only overlap, because briefs in one campaign 
 and a refusal that fires on every pair turns `--despite-live` into a reflex. A leaf with nothing
 firmer still blocks on those matches, since they are its whole estimate.
 
+**A leaf whose branch is never integrated cannot collide.** An A/B evaluation runs one task twice,
+each arm on its own branch, and compares them; the briefs are near-identical by design, so every
+pair "overlaps", and the overlap costs nothing because the branches never meet at merge.
+`showrunner add <title> --no-integrate` marks such a leaf: the live-overlap refusal and `plan`
+pass any pair that includes it, and `integrate` refuses to merge it.
+
 **A base that is missing work the leaf depends on is REFUSED, not reported.** `spawn` cuts from
 the primary checkout's HEAD unless told otherwise, and that default is invisible and
 context-dependent: the identical command is right or wrong depending on where an unrelated checkout

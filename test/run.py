@@ -17508,9 +17508,77 @@ def test_hook_gaps_checks_the_file_a_hook_runs():
        len(gaps) == 2, gaps)
 
 
+def test_never_integrated_leaves_do_not_collide():
+    group("a leaf marked --no-integrate (an A/B arm) never collides — the overlap checks pass it — "
+          "and `integrate` refuses to merge it (#107)")
+    if not have("git"):
+        skip("the no-integrate group", "git is not installed")
+        return
+    # REPORTED: two arms of one evaluation, near-identical briefs by design, cut from different
+    # bases and NEVER merged. Spawning the second while the first was live was refused for an
+    # overlap that can never cost anything, and --despite-live on every spawn was the way past.
+    cfg = make_repo(files={"README.md": "x\n", "app/task.dart": "x\n"})
+    cfg.data["harness"] = dict(cfg.data.get("harness") or {}, require=False)
+    exe = os.path.join(ROOT, "bin", "showrunner")
+
+    def sr(*argv):
+        return subprocess.run([sys.executable, exe] + list(argv), capture_output=True, text=True,
+                              cwd=cfg.root, stdin=subprocess.DEVNULL)
+
+    for leaf, extra in (("A1", ["--no-integrate"]), ("B1", ["--no-integrate"]),
+                        ("C1", []), ("D1", [])):
+        p = sr("add", "arm " + leaf, "--id", leaf, "--path", "app/task.dart", "--label",
+               "backend", *extra)
+        ok("add %s" % leaf, p.returncode == 0, p.stderr[-200:])
+    g = new_graph(cfg)
+    ok("--no-integrate is recorded as the leaf's label",
+       collide.never_integrated(g.show("A1")) and not collide.never_integrated(g.show("C1")))
+    g.claim("A1", "arm-a", pid=os.getpid())
+    g.claim("C1", "plain-c", pid=os.getpid())
+    files = collide.tracked_files(cfg.root)
+    eq("an A/B arm spawned while the other arm is live does NOT collide with it",
+       collide.live_conflicts(cfg, g.show("B1"), [g.show("A1")], files), [])
+    eq("...nor with a live leaf that IS integrated: one side never meets the other at merge",
+       collide.live_conflicts(cfg, g.show("B1"), [g.show("C1")], files), [])
+    hit = collide.live_conflicts(cfg, g.show("D1"), [g.show("C1")], files)
+    ok("THE PAIR: two integrated leaves naming the same file still block",
+       hit and hit[0]["blocks"], hit)
+    waves, _, _ = collide.plan_waves(cfg, [g.show("A1"), g.show("B1")], files)
+    eq("`plan` puts the two arms in ONE wave, overlap or not", waves, [["A1", "B1"]])
+    waves2, _, _ = collide.plan_waves(cfg, [g.show("C1"), g.show("D1")], files)
+    eq("...while two integrated leaves on the same file are serialised", len(waves2), 2)
+
+    # INTEGRATE REFUSES IT, by name and in a batch.
+    g.add("eval arm", leaf_id="E1", labels=[collide.NO_INTEGRATE])
+    rec = worktree.spawn(cfg, g.show("E1"), actor="e")
+    campaign.record_spawn(cfg, rec)
+    with open(os.path.join(rec["worktree"], "arm.txt"), "w") as fh:
+        fh.write("arm work\n")
+    sh(["git", "add", "arm.txt"], rec["worktree"])
+    sh(["git", "commit", "-q", "-m", "arm work"], rec["worktree"])
+    g.claim("E1", "e", pid=os.getpid())
+    g.close("E1", "closed", rec["worktree"], "arm finished")
+    results, ok_all = campaign.integrate(cfg, g)
+    mine = [r for r in results if r.get("crawler") == rec["crawler"]]
+    ok("`integrate` records the arm as NEVER-INTEGRATED instead of merging it",
+       mine and mine[0]["status"] == "never-integrated", results)
+    ok("...and its branch really is not merged", not campaign.is_merged(cfg, rec["branch"],
+                                                                       "HEAD"))
+    ok("...which is not a failure of the batch", ok_all, results)
+    _, ok_named = campaign.integrate(cfg, g, only=["E1"])
+    eq("...but asked for BY NAME, integrate refuses (not ok)", ok_named, False)
+    sr("add", "open arm", "--id", "F1", "--no-integrate")
+    p = sr("edit", "F1", "--integrate")
+    ok("`edit --integrate` clears the label on an open leaf", p.returncode == 0
+       and not collide.never_integrated(new_graph(cfg).show("F1")), p.stderr[-300:])
+    p = sr("edit", "F1", "--no-integrate")
+    ok("...and `edit --no-integrate` sets it", p.returncode == 0
+       and collide.never_integrated(new_graph(cfg).show("F1")), p.stderr[-300:])
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,
