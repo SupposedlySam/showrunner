@@ -350,7 +350,22 @@ def make_repo(extra_config=None, files=None):
              "hooks": [{"type": "command",
                         "command": "$CLAUDE_PROJECT_DIR/.showrunner/hooks/worktree-guard.sh"}]}
         ]}}, fh)
+    # LIKE A REAL INSTALL (#106). The shims sat untracked AND unignored, the one state no install
+    # produces: spawn provisioned the guard, found it stageable, removed it again and went on — so
+    # every Crawler this suite spawned ran with the worktree guard OFF, and the directory-only
+    # hook check passed over the empty directory. `--local` excludes the payload; so does this.
+    with open(os.path.join(d, ".git", "info", "exclude"), "a") as fh:
+        fh.write("\n.showrunner/hooks/\n")
     return cfg
+
+
+def unexclude_hooks(cfg):
+    """Put a fixture back in the untracked-AND-unignored state, for the tests about that state."""
+    path = os.path.join(cfg.root, ".git", "info", "exclude")
+    with open(path) as fh:
+        lines = [l for l in fh.read().splitlines() if l.strip() != ".showrunner/hooks/"]
+    with open(path, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
 
 
 def new_graph(cfg):
@@ -4896,21 +4911,25 @@ def test_worktree_lease():
     # branch, and integrating it collides with the same untracked path in the main checkout —
     # found by the suite the moment provisioning was wired in, on the merge assertion.
     neither = make_repo(files={"README.md": "seed\n", ".gitignore": ".worktrees/\n"})
+    unexclude_hooks(neither)
     nh = os.path.join(neither.root, lease.GUARD_HOOKS_DIR)
     os.makedirs(nh, exist_ok=True)
     with open(os.path.join(nh, "worktree-guard.sh"), "w") as fh:
         fh.write("#!/usr/bin/env bash\nexit 0\n")
     gn2 = new_graph(neither)
     gn2.add("neither-nor", leaf_id="p3", labels=["backend"])
-    nrec = worktree.spawn(neither, gn2.show("p3"), actor="crawler-n")
-    ok("a shim that is NEITHER tracked NOR ignored is NOT provisioned — copying it would hand "
-       "the Crawler a file its own `git add -A` commits, which then wedges the merge",
-       not os.path.exists(os.path.join(nrec["worktree"], lease.GUARD_SHIM)),
-       nrec.get("provisioned"))
+    n_path = worktree.worktree_path(neither, worktree.crawler_name("p3", "crawler-n"))
+    _made_n, _msg_n = attempt_message(
+        lambda: worktree.spawn(neither, gn2.show("p3"), actor="crawler-n"))
+    # REFUSED, not provisioned-and-warned (#106). It used to spawn with a NOT PROVISIONED line
+    # and the worktree guard absent — a Crawler with that gate off; the warning scrolled past.
+    ok("a shim that is NEITHER tracked NOR ignored REFUSES the spawn — it cannot be copied (a "
+       "Crawler's `git add -A` would commit it), so the Crawler would run with that gate off",
+       _made_n is None and "NOT in the Crawler's tree" in _msg_n, _msg_n[:300])
     ok("...and the refusal names BOTH fixes, because either one works and the reader cannot be "
        "expected to derive which suits their repo",
-       any("TRACK the hooks" in a and "IGNORE them" in a
-           for a in nrec.get("provisioned") or []), nrec.get("provisioned"))
+       "TRACK the hooks" in _msg_n and "IGNORE them" in _msg_n, _msg_n[:400])
+    ok("...and leaves no tree behind", not os.path.exists(n_path), n_path)
 
     # ---- is the guard WIRED? (the check one level out from 'does it work') -----------
     # A guard verb nobody registers has never once run. That was true of `lock guard` for this
@@ -5010,6 +5029,7 @@ def test_worktree_lease():
     # about now. An IGNORED shim is fine since `spawn` provisions it (#31) — warning there
     # would name the one action a repo that excludes `.showrunner` on purpose has already
     # ruled out, which is a remedy that reads as "you are holding it wrong".
+    unexclude_hooks(cfg)
     untracked = [m for l, m in lease.guard_health(cfg) if l == "warn"]
     ok("a shim that is NEITHER tracked NOR ignored is reported — git will not carry it and "
        "provisioning refuses to, so it is absent in every worktree",
@@ -13875,6 +13895,10 @@ def test_the_stall_detector_can_actually_measure_under_a_campaign():
     init = sr("init")
     ok("`init` succeeds, so the reconcile output below is a real run", init.returncode == 0,
        init.stderr[-300:])
+    # `init` leaves .showrunner/hooks untracked AND unignored, which spawn now refuses (#106);
+    # this probe is about rendering, so it takes the --local arrangement.
+    with open(os.path.join(live, ".git", "info", "exclude"), "a") as fh:
+        fh.write("\n.showrunner/hooks/\n")
     lcfg = config.load(live, campaign="render-probe")
     lg = new_graph(lcfg)
     lg.add("a leaf whose crawler says nothing", leaf_id="q1", labels=["backend"])
@@ -15860,12 +15884,16 @@ def test_a_crawler_tree_can_be_sparse_without_losing_its_rails():
         json.dump({"hooks": {"Stop": [{"hooks": [
             {"type": "command", "command": '"$CLAUDE_PROJECT_DIR"/.thirdtool/bin/t'}]}]}}, fh)
     os.makedirs(os.path.join(cfg.root, ".thirdtool", "bin"), exist_ok=True)
+    with open(os.path.join(cfg.root, ".thirdtool", "bin", "t"), "w") as fh:
+        fh.write("#!/bin/sh\nexit 0\n")      # the FILE the hook runs (#106 checks files)
     gaps = worktree.hook_gaps(cfg, tree)
     ok("an UNTRACKED registered hook directory missing from the tree is a gap — the --local case "
        "the cone check cannot see", any(".thirdtool/" in g for g in gaps), gaps)
-    os.makedirs(os.path.join(tree, ".thirdtool"), exist_ok=True)
+    os.makedirs(os.path.join(tree, ".thirdtool", "bin"), exist_ok=True)
+    shutil.copy(os.path.join(cfg.root, ".thirdtool", "bin", "t"),
+                os.path.join(tree, ".thirdtool", "bin", "t"))
     os.makedirs(os.path.join(tree, ".game_loop"), exist_ok=True)
-    eq("...and once every hook finds a directory, there are no gaps", worktree.hook_gaps(cfg, tree), [])
+    eq("...and once every hook finds what it runs, there are no gaps", worktree.hook_gaps(cfg, tree), [])
     # ONE OF, NOT ALL: game_loop's commands name a gitignored `.game_loop_self` first and fall
     # back to `.game_loop`. Requiring both would refuse every spawn; the fallback satisfies it.
     os.makedirs(os.path.join(cfg.root, ".game_loop_self"), exist_ok=True)
@@ -17423,9 +17451,66 @@ def test_gc_idle_reclaims_any_idle_tree_and_archives_first():
        [10800, None])
 
 
+def test_hook_gaps_checks_the_file_a_hook_runs():
+    group("hook_gaps checks the FILE a registered hook runs, not just its directory — a project "
+          "guard inside the harness dir is caught (#106)")
+    if not have("git"):
+        skip("the hook-file group", "git is not installed")
+        return
+    # REPORTED: a project registered its own guards at .game_loop/guard-*.sh; the harness
+    # installer provisioned only the harness's files, the directory arrived, the guards did not,
+    # and hook_gaps passed because the directory existed. ~37 Crawlers ran with three gates off.
+    cfg = make_repo()
+    gl = os.path.join(cfg.root, ".gl")
+    os.makedirs(os.path.join(gl, "bin"))
+    for rel_ in ("bin/real.sh", "guard-foo.sh"):
+        with open(os.path.join(gl, rel_), "w") as fh:
+            fh.write("#!/bin/sh\nexit 0\n")
+    fallback = ('d="$CLAUDE_PROJECT_DIR/.gl_self"; [ -x "$d/bin/real.sh" ] || '
+                'd="$CLAUDE_PROJECT_DIR/.gl"; exec "$d"/bin/real.sh')
+    with open(os.path.join(cfg.root, ".claude", "settings.local.json"), "w") as fh:
+        json.dump({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [
+            {"type": "command", "command": '"$CLAUDE_PROJECT_DIR"/.gl/guard-foo.sh'},
+            {"type": "command", "command": fallback}]}]}}, fh)
+    tree = os.path.join(cfg.root, ".worktrees", "hookfile")
+    sh(["git", "worktree", "add", "-q", "-b", "hookfile", tree], cfg.root)
+    os.makedirs(os.path.join(tree, ".gl", "bin"))          # what the harness installer provides
+    shutil.copy(os.path.join(gl, "bin", "real.sh"), os.path.join(tree, ".gl", "bin", "real.sh"))
+
+    # The fixture also registers showrunner's own hooks, which this hand-made (unprovisioned)
+    # tree correctly lacks; only the .gl hooks are under test here.
+    mine = lambda: [g for g in worktree.hook_gaps(cfg, tree) if ".gl" in g]
+    gaps = mine()
+    ok("the project's guard is a GAP although its directory exists in the tree",
+       len(gaps) == 1 and ".gl/guard-foo.sh" in gaps[0], gaps)
+    ok("...and the refusal names both ways out",
+       gaps and "absolute path" in gaps[0] and "harness.installer" in gaps[0], gaps)
+    ok("game_loop's own fallback shape still passes: the directory IS what it names",
+       not any("real.sh" in g for g in gaps), gaps)
+    d = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                       capture_output=True, text=True, cwd=cfg.root, stdin=subprocess.DEVNULL,
+                       env=dict(os.environ, NO_COLOR="1"))
+    ok("`doctor` names an EXISTING tree whose registered hook file is missing",
+       "silently OFF in them" in d.stdout and "hookfile" in d.stdout, d.stdout[-800:])
+    ok("...naming the file, not just the tree", ".gl/guard-foo.sh" in d.stdout, d.stdout[-800:])
+    ok("...as an ERROR with the count of trees affected, not a passing note",
+       "ERROR" in d.stdout and "1 existing worktree(s) lack a file" in d.stdout, d.stdout[-800:])
+    shutil.copy(os.path.join(gl, "guard-foo.sh"), os.path.join(tree, ".gl", "guard-foo.sh"))
+    eq("THE PAIR: with the file present there is no gap", mine(), [])
+    d2 = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
+                        capture_output=True, text=True, cwd=cfg.root, stdin=subprocess.DEVNULL,
+                        env=dict(os.environ, NO_COLOR="1"))
+    ok("...and `doctor` stops naming that file once it is there",
+       ".gl/guard-foo.sh" not in d2.stdout, d2.stdout[-600:])
+    shutil.rmtree(os.path.join(tree, ".gl"))
+    gaps = mine()
+    ok("...and with the whole directory gone, both commands are gaps",
+       len(gaps) == 2, gaps)
+
+
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

@@ -660,6 +660,30 @@ def cmd_doctor(args):
                       "`showrunner gc --idle 24h` lists them; --apply archives and removes"
                       % len(_found))
 
+    # TREES ALREADY SPAWNED WITH A GATE OFF (#106). `spawn` refuses a new tree whose registered
+    # hook files are missing; the trees made before that check, or before a project added a
+    # guard, are the ones nobody is looking at.
+    try:
+        from . import idle as _idle2
+        _reg = _idle2.registered(cfg) or []
+    except Exception:                                           # noqa: BLE001
+        _reg = []
+    _gapped = []
+    for _t in _reg:
+        if os.path.realpath(_t["path"]) == os.path.realpath(cfg.root) or \
+                not os.path.isdir(_t["path"]):
+            continue
+        _g = worktree.hook_gaps(cfg, _t["path"])
+        if _g:
+            _gapped.append((_t["path"], _g))
+    if _gapped:
+        print("  %s %d existing worktree(s) lack a file a registered hook runs — those gates are "
+              "silently OFF in them:" % (RED + "ERROR" + OFF, len(_gapped)))
+        for _path, _g in _gapped[:5]:
+            # Every gate that is off, not the first: a tree missing two guards shows two.
+            for _line in _g[:3]:
+                print("        %s: %s" % (rel(_path, cfg.root), _line))
+
     # HOW MANY CALLS WENT UNCHECKED, because until now nothing downstream ever asked. A guard
     # that fails open says so — correctly — as hook output beside a SUCCESSFUL tool result, and
     # an agent concentrating on something else skims it. The reporter said exactly that about

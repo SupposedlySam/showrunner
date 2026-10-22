@@ -138,9 +138,11 @@ showrunner integrate                 # serial merge, checks re-run on each MERGE
 # that nothing reports.
 #
 # AND FOR EVERY SPAWN, sparse or not: after all provisioning, each registered hook must find at
-# least one directory it names in the finished tree — tracked OR untracked, which is what covers a
-# `--local` install of a tool spawn does not copy in. "At least one", so a `.game_loop_self ->
-# .game_loop` fallback passes. A gap refuses and removes the tree.
+# least one PATH it names in the finished tree — the FILE it runs (`.game_loop/guard-foo.sh`), not
+# merely its directory — tracked OR untracked, which is what covers a `--local` install of a tool
+# spawn does not copy in, and a project guard placed inside a harness directory the harness
+# installer does not provision. "At least one", so a `.game_loop_self -> .game_loop` fallback
+# passes. A gap refuses and removes the tree; `doctor` reports EXISTING trees with such a gap.
 #
 # An `inject` entry OUTSIDE the cone is skipped, and the spawn report says `skip inject <path> —
 # outside the cone`: nothing in the tree can use it, and the .gitignore covering it usually lives
@@ -337,9 +339,11 @@ the shim needs one of two arrangements, and `doctor` names which one you are in:
   shared repo that keeps `.showrunner/` out of its history (`.git/info/exclude`), where "commit
   it" is the one action you cannot take.
 
-**Neither is the only state with no answer**, and it warns: git will not carry the file, and
-provisioning refuses to, because copying it would hand the Crawler something its own `git add -A`
-commits onto its branch — which then collides with the same untracked path in the main checkout.
+**Neither is the only state with no answer**, and `spawn` REFUSES in it: git will not carry the
+file, and provisioning refuses to, because copying it would hand the Crawler something its own
+`git add -A` commits onto its branch — so the Crawler would run with that guard off. The refusal
+names both fixes: track `.showrunner/hooks/`, or ignore it. A fresh `showrunner init` leaves it in
+this state until one of the two is done.
 
 `showrunner doctor` reports the shim, its arrangement and its registration separately, because a
 guard nobody registered has never once run.
@@ -1444,7 +1448,7 @@ install would otherwise produce worktrees with no `.claude` at all, and therefor
 guard, no dispatch guard, no seat announcement and no reach gate, while the main checkout reports
 every one of them registered and healthy. `spawn` merges the untracked entries into each new tree
 for exactly this reason, and says so in its report — and after provisioning it checks that every
-registered hook can find its directory in the tree, refusing the spawn when one cannot.
+registered hook can find the file it runs in the tree, refusing the spawn when one cannot.
 
 **Do not end up in both layers.** Registration is idempotent within the file it writes and cannot
 see the other one, so `init` (tracked) followed by `worktree register --local` (untracked) leaves

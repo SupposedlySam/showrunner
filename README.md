@@ -320,8 +320,10 @@ or `sparse_by_label` in config, writes only those directories plus root files �
 lands, not afterwards. Every cone also carries `.claude/` and each tracked directory a registered
 hook points into, derived from both settings layers; the tree is checked for them after checkout
 and a gap refuses the spawn, because a hook whose file is missing fails open and silently. And for
-**every** spawn, sparse or not, each registered hook must find its directory in the finished tree
-— tracked or untracked, which covers a `--local` install of any tool — or the spawn is refused.
+**every** spawn, sparse or not, each registered hook must find the FILE it runs in the finished
+tree — not merely its directory, because a project guard inside a harness directory the harness
+installer does not provision arrives as a present directory and a missing gate — tracked or
+untracked, or the spawn is refused. `doctor` reports existing trees with such a gap.
 Declared paths outside the cone are warned at spawn and named in the brief. An `inject` entry
 outside the cone is skipped and named in the spawn report: nothing in that tree can use it, and
 the `.gitignore` covering it usually sits beside it, outside the cone too. The main checkout

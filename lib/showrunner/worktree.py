@@ -178,27 +178,33 @@ def cone_misses(leaf, cone):
 
 
 def hook_gaps(cfg, tree):
-    """Registered hooks that would find NONE of their directories in the finished tree.
+    """Registered hooks that would find NONE of the files they run in the finished tree.
 
     THE CHECK THAT MATTERS FOR EVERY TREE, not just a sparse one (game_loop's owner, #90). A
-    hook whose file is missing exits non-zero WITHOUT blocking, so a tree lacking a hook's
-    directory is a Crawler with that gate silently off. `cone_gaps` only sees TRACKED
-    directories, because only those can be in a cone — but `install.sh --local` registers hooks in
-    the untracked `settings.local.json` against an untracked directory, and a plain worktree gets
-    neither. showrunner's own hooks and game_loop's harness are copied in by `spawn`; anything
-    else registered that way was not, and nothing said so.
+    hook whose file is missing exits non-zero WITHOUT blocking, so a tree lacking it is a Crawler
+    with that gate silently off. `cone_gaps` only sees TRACKED directories, because only those can
+    be in a cone — but `install.sh --local` registers hooks in the untracked
+    `settings.local.json`, and a plain worktree gets neither.
+
+    THE FILE, NOT ITS DIRECTORY (#106). A project registered three guards of its own at
+    `.game_loop/guard-*.sh`; the harness installer provisions only the harness's own files, so the
+    directory arrived and the guards did not — and this passed, because it checked the directory.
+    About 37 Crawlers ran with three guards silently off. So each command's paths are taken WHOLE
+    (`.game_loop/guard-foo.sh`, not `.game_loop`), and a path must exist in the tree as it does in
+    the main checkout.
 
     PER COMMAND, "at least one of". game_loop's commands try a pinned `.game_loop_self` first and
-    fall back to `.game_loop`, and the pinned copy is gitignored — so requiring every directory a
-    command names would refuse every spawn. A command is satisfied when ANY directory it names is
-    present. Only names that exist in the main checkout count, which keeps `$HOME/...` paths out.
+    fall back to `.game_loop`, and the pinned copy is gitignored — so requiring every path a
+    command names would refuse every spawn. A command is satisfied when ANY path it names is
+    present. Only paths that exist in the main checkout count, which keeps `$HOME/...` and
+    `"$d"/bin/x` (relative to another variable, not the project) out.
 
     Returns human-readable strings, one per unsatisfied command. Run AFTER all provisioning.
     """
     import json as _json
     import re as _re
     var_path = _re.compile(
-        r'\$\{?[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\}?"?/([^/\s"\';]+)(?=[/"\s\';]|$)')
+        r'\$\{?[A-Za-z_][A-Za-z0-9_]*(?::-[^}]*)?\}?"?/([^\s"\';|&)]+)')
     out = []
     for name in ("settings.json", "settings.local.json"):
         try:
@@ -210,12 +216,35 @@ def hook_gaps(cfg, tree):
             for entry in entries or []:
                 for h in (entry.get("hooks") or []) if isinstance(entry, dict) else []:
                     cmd = (h or {}).get("command") or ""
-                    names = {m.group(1) for m in var_path.finditer(cmd)}
-                    names = {n for n in names if os.path.exists(os.path.join(cfg.root, n))}
-                    if names and not any(os.path.isdir(os.path.join(tree, n)) for n in names):
+                    paths = {m.group(1).rstrip("/") for m in var_path.finditer(cmd)}
+                    paths = {p for p in paths if p and os.path.exists(os.path.join(cfg.root, p))}
+                    if not paths or any(os.path.exists(os.path.join(tree, p)) for p in paths):
+                        continue
+                    present_dir = sorted(p for p in paths if os.sep in p
+                                         and os.path.isdir(os.path.join(tree, os.path.dirname(p))))
+                    own = sorted(p for p in paths if p.startswith(".showrunner/hooks/"))
+                    if own:
+                        # showrunner's OWN shim: provisioning copied it and took it back out,
+                        # because a shim neither tracked nor ignored is one a Crawler's
+                        # `git add -A` commits. The fix is the repo's, and there are two.
+                        out.append(
+                            "showrunner's own guard %s is NOT in the Crawler's tree: "
+                            ".showrunner/hooks/ is neither tracked nor ignored, so spawn will not "
+                            "copy it in (a Crawler's `git add -A` would commit it) and that gate "
+                            "would be silently OFF. TRACK the hooks (`git add .showrunner/hooks`) "
+                            "or IGNORE them (`.showrunner/hooks/` in .git/info/exclude)"
+                            % " or ".join(own))
+                    elif present_dir:
+                        out.append(
+                            "a %s hook in %s runs %s, which is NOT in the Crawler's tree although "
+                            "its directory is — the harness installer provisions only the "
+                            "harness's own files, so that gate would be silently OFF. Register it "
+                            "by absolute path into the main checkout, or provision it in "
+                            "`harness.installer`" % (event, name, " or ".join(present_dir)))
+                    else:
                         out.append("a %s hook in %s needs %s, and the Crawler's tree has none of "
                                    "them — that gate would be silently OFF"
-                                   % (event, name, " or ".join(sorted(n + "/" for n in names))))
+                                   % (event, name, " or ".join(sorted(paths))))
     return out
 
 
