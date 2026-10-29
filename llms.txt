@@ -1355,7 +1355,7 @@ mistake this paragraph exists to prevent.
 ## The work graph
 
 ```
-showrunner add "<title>" [--id X] [--body-file F] [--label L] [--after <blocking-leaf>]
+showrunner add "<title>" [--id X] [--body-file F] [--label L] [--path P ...] [--after <blocking-leaf>]
 showrunner dep <child> <parent>      # child is blocked by parent
 showrunner edit <leaf> [--title T] [--body-file F] [--path P ...]
                        [--label L] [--add-label L] [--remove-label L]
@@ -1367,7 +1367,8 @@ Crawler works from, so a wrong one dispatches a wrong task — and without this 
 back: `add` refuses an existing id, and the only exit would be to close the leaf, which spends the
 proof-of-done gate on a decision that never happened. It refuses on a leaf that is not open, so it
 cannot rewrite the instructions under a Crawler already working from them. Fix the body *before*
-you spawn.
+you spawn. `edit --path` REPLACES the leaf's paths with every one it is given; on both verbs,
+repeat the flag or separate paths with commas.
 
 Backend is `auto`: an existing `br` graph is used when present, otherwise a vendored `sqlite3` graph.
 Everything else in showrunner talks to one interface and never learns which it got. Note that `br`
@@ -1454,7 +1455,6 @@ A `--local` install leaves `git status` **clean**. That is the whole promise, an
 exclusion goes in `.git/info/exclude` rather than the repo's `.gitignore`: `.gitignore` is
 source-controlled, so ignoring the payload there would make a private decision arrive as a tracked
 diff on everybody else's next pull. `info/exclude` is per-clone and needs nobody's agreement.
-game_loop's `--local` writes `.gitignore`; this takes the stricter half.
 
 **A worktree consequence you only have if you run Crawlers.** `git worktree add` copies TRACKED
 files, so an untracked registration does not cross into a Crawler's tree by itself — a `--local`

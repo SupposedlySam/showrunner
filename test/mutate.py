@@ -1053,6 +1053,12 @@ TARGETS = [
      "lib/showrunner/locks.py",
      r"(    def stale_held_by\(self, names\):\n)",
      "        return []\n    def _neutered_stale_held_by(self, names):\n"),
+    # The last flag only is argparse's own answer for a non-append --path, and the reported shape:
+    # a leaf re-scoped to its last path, whose Crawler is then denied every other write.
+    ("every --path a leaf is given", "cli._path_args",
+     "lib/showrunner/cli.py",
+     r"(def _path_args\(values\):\n)",
+     "    return (values or [])[-1:]\ndef _neutered_path_args(values):\n"),
     # None is "the harness gave no refusal time", and the gate then measures from when showrunner
     # noticed — so a neutered reader silently restores the false-inert window it exists to close.
     ("refusal time (when the harness blocked)", "harness._earliest_block",

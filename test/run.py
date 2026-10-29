@@ -14476,10 +14476,9 @@ def test_install_local_reaches_nobody():
         theirs = fh.read()
     ok("...and their own pre-existing hook is untouched", "their-own-hook" in theirs, theirs[:200])
 
-    # THE PAYLOAD IS EXCLUDED LOCALLY, NOT IGNORED IN A TRACKED FILE. game_loop's --local appends
-    # to .gitignore, which is itself source-controlled — a private decision arriving as a tracked
-    # diff, which is the thing the flag exists to avoid. The consumer who reported this raised the
-    # same asymmetry and used .git/info/exclude; it needs nobody's agreement.
+    # THE PAYLOAD IS EXCLUDED LOCALLY, NOT IGNORED IN A TRACKED FILE. .gitignore is itself
+    # source-controlled — a private decision arriving as a tracked diff, which is the thing the
+    # flag exists to avoid. .git/info/exclude needs nobody's agreement.
     ignored = subprocess.run(["git", "check-ignore", "-v", ".showrunner/config.json"],
                              cwd=consumer, capture_output=True, text=True).stdout
     ok("the payload is excluded", ".showrunner/" in ignored, ignored[:200])
@@ -14493,6 +14492,57 @@ def test_install_local_reaches_nobody():
     with open(os.path.join(consumer, ".git", "info", "exclude")) as fh:
         excl = fh.read()
     eq("a second --local install adds no second exclusion", excl.count(".showrunner/"), 1)
+
+    # IT MUST NOT TELL YOU TO COMMIT WHAT IT JUST EXCLUDED. A consumer following the default
+    # mode's "COMMIT THIS" and "git add .showrunner/hooks/" under --local would have committed
+    # the payload the mode exists to keep out of history.
+    ok("the --local installer never says to commit the hooks it excluded",
+       "COMMIT THIS" not in said and "git add .showrunner/hooks" not in said,
+       [l for l in said.splitlines() if "COMMIT" in l or "git add" in l])
+    ok("...and says what happens instead: spawn provisions them into each tree",
+       "provisions" in said, said[-600:])
+    # THE SUMMARY IS THE REGISTRATION, not a sentence about it. It named two hooks while every
+    # one was wired, and the reader re-ran `worktree register` for the rest.
+    from showrunner import cli as _cli_l
+    _whats = [w.split(" (")[0] for _, w in _cli_l._registered_hooks()]
+    _unnamed = [w for w in _whats if w not in said]
+    ok("the installer's summary names EVERY hook it registered (%d)" % len(_whats),
+       _whats and not _unnamed, {"unnamed": _unnamed, "said": said[-800:]})
+
+
+def test_add_and_edit_take_every_path_they_are_given():
+    group("`add` and `edit` keep EVERY --path, repeated or comma-separated — `edit` kept only the "
+          "last, and a re-scoped leaf's Crawler was denied every write its brief needed")
+    if not have("git"):
+        skip("the --path group", "git is not installed")
+        return
+    cfg = make_repo(files={"README.md": "x\n"})
+    exe = os.path.join(ROOT, "bin", "showrunner")
+
+    def sr(*argv):
+        return subprocess.run([sys.executable, exe] + list(argv), capture_output=True, text=True,
+                              cwd=cfg.root, stdin=subprocess.DEVNULL)
+
+    def paths(leaf):
+        return [x for x in (new_graph(cfg).show(leaf).get("paths") or "").split(",") if x]
+
+    want = ["tool/desk/**", "tool/lead_update.dart", "test/**"]
+    # THE REPORTER'S COMMAND, then the class around it: the comma form, and both mixed.
+    sr("add", "desk", "--id", "P1", "--path", "a")
+    p = sr("edit", "P1", "--path", "tool/desk/**", "--path", "tool/lead_update.dart",
+           "--path", "test/**")
+    eq("`edit` with a repeated --path keeps every one", (p.returncode, paths("P1")), (0, want))
+    sr("edit", "P1", "--path", "tool/desk/**,tool/lead_update.dart,test/**")
+    eq("...the comma form still works", paths("P1"), want)
+    sr("edit", "P1", "--path", "tool/desk/**,tool/lead_update.dart", "--path", "test/**")
+    eq("...and the two forms mix", paths("P1"), want)
+    sr("edit", "P1", "--title", "renamed")
+    eq("...and an edit naming no --path leaves the paths alone", paths("P1"), want)
+
+    p = sr("add", "desk two", "--id", "P2", "--path", "tool/desk/**,tool/lead_update.dart",
+           "--path", "test/**")
+    eq("`add` takes both forms too",
+       (p.returncode, paths("P2")), (0, want))
 
 
 def test_a_hook_registered_in_both_layers_is_reported():
@@ -17733,7 +17783,7 @@ def test_never_integrated_leaves_do_not_collide():
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

@@ -129,7 +129,13 @@ for hook_name in worktree-guard.sh inert-crawler-gate.sh waiting-probe.sh whoami
   cp "$SRC/.showrunner/hooks/$hook_name" "$TARGET/.showrunner/hooks/$hook_name"
   chmod +x "$TARGET/.showrunner/hooks/$hook_name"
   case "$hook_name" in
-    worktree-guard.sh)      note="COMMIT THIS — it must cross into worktrees" ;;
+    # --local EXCLUDES THIS FILE, so "commit it" would undo the mode: `spawn` provisions an
+    # ignored shim into each worktree, and doctor says so.
+    worktree-guard.sh)      if [ "$LOCAL" = "1" ]; then
+                              note="PreToolUse: confines each Crawler to its worktree; excluded, so \`spawn\` provisions it into each tree"
+                            else
+                              note="COMMIT THIS — it must cross into worktrees"
+                            fi ;;
     inert-crawler-gate.sh)  note="Stop: refuses a turn-end while a Crawler is inert" ;;
     waiting-probe.sh)       note="answers a harness watchdog; NOT wired by this script — arming a wait is a human decision, see the note at the end" ;;
     whoami.sh)              note="SessionStart + PostCompact: announces the derived seat" ;;
@@ -279,8 +285,13 @@ if [ "$LOCAL" = "1" ]; then
   REG_ARGS="--local"
   REG_FILE=".claude/settings.local.json"
 fi
-if (cd "$TARGET" && "$SRC/bin/showrunner" worktree register $REG_ARGS 2>/dev/null | grep -q registered); then
-  echo "  hooked  $REG_FILE — PreToolUse (worktree guard) and Stop (inert-Crawler gate)"
+# THE VERB'S OWN LINES, not a summary of them. A fixed sentence here named two hooks while the
+# verb wired every one, and a reader who believed it ran `worktree register` again to get the
+# rest. A refusal goes through too: dropping stderr hid a hook the verb could not register.
+REG_OUT=$(cd "$TARGET" && "$SRC/bin/showrunner" worktree register $REG_ARGS 2>&1 || true)
+if [ -n "$REG_OUT" ]; then
+  echo "  hooked  $REG_FILE:"
+  printf '%s\n' "$REG_OUT" | sed 's/^/            /'
 fi
 
 # A HOOK REGISTERED IN BOTH LAYERS FIRES TWICE, and the two arrangements compose without either
@@ -303,8 +314,7 @@ if [ "$LOCAL" = "1" ]; then
   # `.git/info/exclude`, NOT the repo's `.gitignore`, and the distinction is the whole promise of
   # the flag. `.gitignore` is source-controlled: appending to it makes a private decision a
   # tracked diff that reaches the team, which is the thing --local exists to avoid. info/exclude
-  # is per-clone and needs nobody's agreement. game_loop's --local writes .gitignore; a consumer
-  # raised the asymmetry (#81) and they are right, so showrunner takes the stricter one.
+  # is per-clone and needs nobody's agreement.
   # RESOLVED AGAINST THE TARGET, NOT THE CALLER'S CWD. `rev-parse --git-common-dir` answers
   # RELATIVE to the repo it was asked about — plain `.git` for an ordinary checkout — so joining
   # it to the installer's own working directory silently writes the exclude file of whatever repo
@@ -436,11 +446,21 @@ echo "       or worktrees outside the repo. A mutex that is quietly a no-op is w
 # PreToolUse entry and the guard ran twice per tool call, which `_guard_registration` does not
 # notice because it returns on the first match. The literal JSON also lived in two places with
 # different quoting and no timeout; `lease.register_guard` is the only copy now.
+# UNDER --local THERE IS NOTHING TO COMMIT, and saying "commit" would undo the mode: the
+# payload is in .git/info/exclude, and `spawn` provisions the untracked hooks into each tree.
+if [ "$LOCAL" = "1" ]; then
+echo "  3. Commit NOTHING — this install is excluded in .git/info/exclude on purpose."
+echo "       \`git worktree add\` copies tracked files only, so \`spawn\` provisions these hooks"
+echo "       into each Crawler's tree itself, and refuses a spawn when one cannot find its file."
+echo "       (Re-register any time with: ./.showrunner/bin/showrunner worktree register --local"
+echo "        — it is idempotent.)"
+else
 echo "  3. git add .showrunner/hooks/ && commit — the guard is registered already, but"
 echo "       \`git worktree add\` copies TRACKED files only, so until it is committed the guard"
 echo "       is present here and ABSENT in every worktree, which is the one place it runs."
 echo "       (Re-register any time with: ./.showrunner/bin/showrunner worktree register —"
 echo "        it is idempotent. doctor reports both states as errors until they are fixed.)"
+fi
 echo "  4. OPTIONAL — arm your harness's idle watchdog against this orchestrator:"
 echo "       .showrunner/hooks/waiting-probe.sh answers \"is this session legitimately waiting"
 echo "       on work it dispatched\" from the campaign record. An orchestrator that fanned work"

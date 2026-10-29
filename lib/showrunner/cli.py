@@ -1046,7 +1046,7 @@ def cmd_add(args):
     from .collide import NO_INTEGRATE
     leaf_id = g.add(args.title, body=body, kind=args.kind, leaf_id=args.id,
                     labels=(args.label or []) + ([NO_INTEGRATE] if args.no_integrate else []),
-                    paths=args.path or [])
+                    paths=_path_args(args.path))
     for parent in args.after or []:
         g.dep(leaf_id, parent)
     if args.body_file and args.body_file != "-" and os.path.isfile(args.body_file):
@@ -3174,6 +3174,18 @@ def cmd_resume(args):
     return 0
 
 
+def _path_args(values):
+    """Every path a repeatable --path named, each value also split on commas.
+
+    BOTH FORMS, ONE MEANING, for `add` and `edit` alike. `edit` took a single comma-separated
+    value, so `edit --path a --path b` kept only b (argparse keeps the last): the leaf was
+    silently re-scoped, and the layer guard then denied the Crawler every write its brief asked
+    for. Paths are stored comma-joined and globs are fnmatch, which has no `{a,b}`, so a comma
+    is never part of a pattern.
+    """
+    return [p.strip() for v in (values or []) for p in v.split(",") if p.strip()]
+
+
 def cmd_edit(args):
     cfg = _cfg(args)
     g = _graph(cfg)
@@ -3182,7 +3194,7 @@ def cmd_edit(args):
         with open(args.body_file) as fh:
             body = fh.read()
     leaf = g.edit(args.id, title=args.title, body=body,
-                  paths=(args.path.split(",") if args.path else None),
+                  paths=(_path_args(args.path) or None),
                   labels=(args.label.split(",") if args.label else None),
                   add_labels=(args.add_label or []) + (
                       ["no-integrate"] if getattr(args, "no_integrate", False) else []),
@@ -3814,7 +3826,8 @@ def build_parser():
     s.add_argument("--body-file")
     s.add_argument("--kind", default="task", choices=["task", "epic"])
     s.add_argument("--label", action="append")
-    s.add_argument("--path", action="append")
+    s.add_argument("--path", action="append",
+                   help="a path glob this leaf touches; repeat the flag or separate with commas")
     s.add_argument("--after", action="append", help="leaf id that must close first")
     s.add_argument("--no-integrate", action="store_true",
                    help="this leaf's branch is NEVER integrated (an A/B evaluation arm): live "
@@ -3841,7 +3854,8 @@ def build_parser():
     s.add_argument("--title")
     s.add_argument("--body")
     s.add_argument("--body-file")
-    s.add_argument("--path")
+    s.add_argument("--path", action="append",
+                   help="REPLACE the leaf's paths; repeat the flag or separate with commas")
     s.add_argument("--label", help="REPLACE the label set (comma-separated). Labels pick the "
                                    "lane, so a typo queues the leaf against the default lane's "
                                    "resource")
