@@ -1045,8 +1045,20 @@ TARGETS = [
      r"(def emit\(cfg, kind, fields=None\):\n)",
      "    return False\ndef _neutered_emit(cfg, kind, fields=None):\n"),
     ("blocked-vs-working (a refused turn-end)", "harness.stop_gate", "lib/showrunner/harness.py",
-     r"(def stop_gate\(cfg, worktree_path, session\):\n)",
-     "    return None, ''\ndef _neutered_stop_gate(cfg, worktree_path, session):\n"),
+     r"(def stop_gate\(cfg, worktree_path, session, seen=None\):\n)",
+     "    return None, ''\ndef _neutered_stop_gate(cfg, worktree_path, session, seen=None):\n"),
+    # [] is "this Crawler holds no dead locks" — what a broken matcher says too, and then resume
+    # leaves the lock STALE for a lead to clear by hand, which is the report it exists for (#108).
+    ("a resumed Crawler's own dead locks", "locks.LockSet.stale_held_by",
+     "lib/showrunner/locks.py",
+     r"(    def stale_held_by\(self, names\):\n)",
+     "        return []\n    def _neutered_stale_held_by(self, names):\n"),
+    # None is "the harness gave no refusal time", and the gate then measures from when showrunner
+    # noticed — so a neutered reader silently restores the false-inert window it exists to close.
+    ("refusal time (when the harness blocked)", "harness._earliest_block",
+     "lib/showrunner/harness.py",
+     r"(def _earliest_block\(attachments\):\n)",
+     "    return None\ndef _neutered_earliest_block(attachments):\n"),
     # An empty list is "no inject path conflicts with the harness" — the reassuring answer, and
     # the one a broken detector also gives. Neutered, doctor goes quiet and every spawn goes back
     # to aborting with a message blaming the harness for a config conflict (#22).

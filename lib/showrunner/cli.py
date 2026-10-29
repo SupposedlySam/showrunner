@@ -952,7 +952,9 @@ def cmd_status(args):
     for name in ls.names():
         state, h = locks.Lock(ls.root, name).state()
         if state != locks.FREE:
-            print("  lock %-10s %s by pid %s (%s)" % (name, state, h.get("pid"), h.get("who")))
+            print("  lock %-10s %s by pid %s (%s)%s"
+                  % (name, state, h.get("pid"), h.get("who"),
+                     " — " + locks.STALE_NOTE if state == locks.STALE else ""))
     try:
         stale = g.stale_claims()
     except Refused:
@@ -1309,7 +1311,9 @@ def cmd_lock_status(args):
         if state == locks.FREE:
             print("%-14s FREE" % name)
         else:
-            print("%-14s %s by pid %s (%s) since %s" % (name, state, h.get("pid"), h.get("who"), h.get("ts")))
+            print("%-14s %s by pid %s (%s) since %s%s"
+                  % (name, state, h.get("pid"), h.get("who"), h.get("ts"),
+                     " — " + locks.STALE_NOTE if state == locks.STALE else ""))
     return 0
 
 
@@ -3112,8 +3116,16 @@ def cmd_resume(args):
     """Restart a stopped Crawler's recorded session in its existing worktree (#97)."""
     cfg = _cfg(args)
     g = _graph(cfg)
-    leaf = g.show(args.id)
-    entries = [c for c in campaign.load(cfg).get("crawlers", []) if c.get("leaf") == leaf["id"]]
+    crawlers = campaign.load(cfg).get("crawlers", [])
+    # THE CRAWLER'S NAME IS ACCEPTED TOO (#108). Every watcher message names the Crawler, so the
+    # natural copy-paste was refused as "no such leaf". A leaf id is looked up first; a name that
+    # is no leaf resolves through the campaign record to the leaf that Crawler was spawned for.
+    named = [c for c in crawlers if c.get("crawler") == args.id and c.get("leaf")]
+    if named and args.id not in {lf.get("id") for lf in g.list()}:
+        leaf = g.show(named[-1]["leaf"])
+    else:
+        leaf = g.show(args.id)
+    entries = [c for c in crawlers if c.get("leaf") == leaf["id"]]
     if not entries:
         die("no Crawler was ever spawned for %s in this campaign, so there is no session or "
             "tree to resume. `showrunner spawn %s --launch` starts one." % (leaf["id"], leaf["id"]),
@@ -3138,6 +3150,20 @@ def cmd_resume(args):
     print("  worktree %s" % rel(out["worktree"], cfg.root))
     print("  session  %s" % out["session"])
     print("  model    %s" % (out["model"] or "(inherited)"))
+    # ITS OWN DEAD LOCKS, released and named (#108). A Crawler that exited holding a lock left it
+    # STALE; the next acquire would reclaim it, but the lead cannot tell that from `status` and
+    # cleared it by hand. Matched on the holder or session it recorded, and PROVED DEAD only.
+    stale = locks.LockSet(cfg).stale_held_by([entry.get("crawler"), leaf["id"],
+                                              entry.get("session")])
+    for lock, h in stale:
+        if not out["launched"]:
+            print("  lock     would release %s (STALE, held by %s, pid %s)"
+                  % (lock.name, h.get("who"), h.get("pid")))
+        elif lock.release(force=True):
+            events.emit(cfg, "lock.released", {"resource": lock.name, "forced": True,
+                                               "path": "resume", "held_by": h.get("who")})
+            print("  lock     released %s (STALE, held by %s, pid %s)"
+                  % (lock.name, h.get("who"), h.get("pid")))
     if not out["launched"]:
         print("  command  %s" % " ".join(out["cmd"][:2] + ["<prompt>"] + out["cmd"][3:]))
         return 0

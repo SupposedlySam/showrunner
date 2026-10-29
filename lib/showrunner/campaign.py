@@ -546,7 +546,8 @@ def _shallow_tail(cfg, graph, entry, f, wt):
     f["blocked"], f["blocked_detail"] = (None, "")
     if f["alive"] and f["worktree_exists"]:
         from . import harness as _h
-        f["blocked"], f["blocked_detail"] = _h.stop_gate(cfg, wt, entry.get("session"))
+        seen = {}
+        f["blocked"], f["blocked_detail"] = _h.stop_gate(cfg, wt, entry.get("session"), seen)
         # JOURNALLED AS A TRANSITION, not as a state. reconcile computes `blocked` fresh on
         # every call and a watchdog may call it every few seconds, so emitting the state
         # would give a viewer one identical line per poll — the signal drowning in its own
@@ -562,7 +563,8 @@ def _shallow_tail(cfg, graph, entry, f, wt):
                                  "crawler", f["crawler"])
             if (prev or {}).get("kind") != kind:
                 events.emit(cfg, kind, {"crawler": f["crawler"], "leaf": f["leaf"],
-                                        "why": f["blocked_detail"] or None})
+                                        "why": f["blocked_detail"] or None,
+                                        "since": seen.get("since") if f["blocked"] else None})
     return f
 
 
@@ -995,14 +997,33 @@ def reap(cfg, graph, base="HEAD", apply=False):
     if not looked:
         warnings.append("the process table could not be listed, so processes left running in "
                         "dead Crawlers' trees were NOT checked — not the same as none")
+    # ONE LINE PER DETACHED TREE (#108). A `flutter run` and its dart children are one thing to
+    # stop, and listing each child as its own unprovable process buried the root that mattered.
+    in_tree = {o["pid"] for o in orphans}
+    kids = {}
+    for o in orphans:
+        if o["ppid"] in in_tree:
+            kids.setdefault(o["ppid"], []).append(o["pid"])
     for o in orphans:
         if not o["proven"]:
+            if o["ppid"] in in_tree:
+                continue                    # folded into its parent's line
+            tree_pids = [o["pid"]] + sorted(kids.get(o["pid"], []))
+            # SAY WHICH TEST FAILED, and how to stop it. "Cannot be proved" alone left a device
+            # run and a hung upload sitting for an hour: the operator was told what reap would
+            # not do and not what they could.
+            failed = ("its parent %s is not init — something still owns it" % o["ppid"]
+                      if o["ppid"] != 1 else
+                      "it started before this Crawler was last dispatched — another session, "
+                      "or the lead, may have started it")
             actions.append({
                 "kind": "orphan", "crawler": o["crawler"], "leaf": o["leaf"],
-                "why": "pid %s is running in %s (%s), but cannot be proved this Crawler's — its "
-                       "parent %s is not init, or it predates the dispatch"
-                       % (o["pid"], o["worktree"], o["command"][:60], o["ppid"]),
-                "action": "SURFACED, not signalled"})
+                "why": "pid %s is running in %s (%s)%s, but cannot be proved this Crawler's: %s"
+                       % (o["pid"], o["worktree"], o["command"][:60],
+                          " with %d child process(es)" % (len(tree_pids) - 1)
+                          if len(tree_pids) > 1 else "", failed),
+                "action": "SURFACED, not signalled — if it is a leftover, stop it: kill %s"
+                          % " ".join(str(p) for p in tree_pids)})
             continue
         actions.append({
             "kind": "orphan", "crawler": o["crawler"], "leaf": o["leaf"],
@@ -1164,6 +1185,13 @@ def work_since_block(cfg, crawler, branch, worktree, scratch=None, session=None,
     since = (ev or {}).get("ts")
     if not isinstance(since, int):
         return False, ""                    # never recorded blocked here: not our call to make
+    # THE REFUSAL, NOT THE NOTICING. `ts` is when a reconcile first saw the block, which can
+    # trail the refusal itself: a Crawler refused, then kept working, wrote its transcript and
+    # started a test run in that gap — all "before the block" by `ts`, so it stayed listed as
+    # inert. The harness's own time is used only when it is EARLIER, so this still only releases.
+    refused = ev.get("since")
+    if isinstance(refused, int) and refused < since:
+        since = refused
 
     if branch:
         rc, out, _ = run(["git", "log", "-1", "--format=%ct", branch], cwd=cfg.root)

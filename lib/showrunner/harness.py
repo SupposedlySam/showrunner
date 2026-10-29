@@ -504,7 +504,7 @@ def follow_up(cfg):
     return out
 
 
-def stop_gate(cfg, worktree_path, session):
+def stop_gate(cfg, worktree_path, session, seen=None):
     """Is this Crawler INERT at a refused turn-end rather than working? (issue #24)
 
     The failure this exists for is one showrunner helped build. Before its turn-end gate was
@@ -532,6 +532,12 @@ def stop_gate(cfg, worktree_path, session):
     a turn-end was refused and when; it cannot report that nothing has happened since, and the
     session that experienced it could not tell from inside either. `blocked` plus a stale
     transcript is evidence; `blocked` alone is a fact about the past.
+
+    WHEN, FROM THE PARTY THAT REFUSED. `seen`, when given, receives `since`: the epoch of the
+    earliest refusal the harness still holds, or None. showrunner otherwise knows only when IT
+    first noticed the block, which can trail the refusal by minutes — and every transcript
+    write, test run or build in that gap read as "before the block", so a Crawler that was
+    refused once and kept working stayed listed as inert.
     """
     if not session:
         return None, ""
@@ -552,6 +558,8 @@ def stop_gate(cfg, worktree_path, session):
             return False, ""
         att = seam.get("attachments") or {}
         who = ", ".join(sorted(att)) or "an unnamed attachment"
+        if seen is not None:
+            seen["since"] = _earliest_block(att)
         # `limit` bounds REPEATED blocking by one attachment. It does not bound a single block:
         # a session that never attempts another turn-end never increments again, so the
         # stand-down is never reached. The harness says so in `bound_covers`; repeated here
@@ -561,6 +569,23 @@ def stop_gate(cfg, worktree_path, session):
                       "session that never tries another turn-end never increments again)"
                       % (who, seam.get("blocks_total") or 0, seam.get("limit")))
     return None, ""
+
+
+def _earliest_block(attachments):
+    """Epoch of the earliest `at` among blocking attachments, or None when none can be read.
+
+    The harness writes `at` as a naive local ISO time, which `fromisoformat` reads as local too.
+    """
+    import datetime
+    found = []
+    for rec in attachments.values():
+        if not isinstance(rec, dict) or rec.get("verdict") not in (None, "blocked"):
+            continue
+        try:
+            found.append(int(datetime.datetime.fromisoformat(str(rec.get("at"))).timestamp()))
+        except (TypeError, ValueError):
+            continue
+    return min(found) if found else None
 
 
 def owns_path(cfg, path):

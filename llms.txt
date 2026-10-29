@@ -199,6 +199,9 @@ showrunner reap                      # dry run; --apply to reclaim dead Crawlers
                                      # Crawler's by its recorded start time, since pids recycle
                                      # within a boot; cannot-tell never signals. `close` already closed the room and
                                      # marked the Crawler finished; this catches what died badly.
+                                     # A process in a dead tree that is NOT proved its own is
+                                     # surfaced with the proof that failed and a `kill <pids>`
+                                     # covering it and its children; reap never signals it.
                                      # It also SURFACES stalled claims and never touches them:
                                      # a live process whose transcript has stopped moving. Not
                                      # even --apply reclaims one — see below.
@@ -237,7 +240,9 @@ showrunner resume <leaf>             # restart a STOPPED Crawler's recorded sess
                                      # --dry-run shows the command. Records the new pid WITH its
                                      # start time, so `waiting` and `reap` see it. Refuses (exit 3)
                                      # when the tree is gone, no session was recorded, or a live
-                                     # process still owns the session
+                                     # process still owns the session. Takes the leaf id OR the
+                                     # Crawler's name, and releases the Crawler's own locks whose
+                                     # holder is proved dead, naming each
 showrunner reconcile                 # on resume: merged / abandoned / live / BLOCKED — ask FIRST
 showrunner amend <leaf> --premise .. # correct a CLOSED leaf's premise by SUPERSEDING it: the
                                      # original verdict stays readable, because a record that can
@@ -1263,7 +1268,9 @@ is ALSO inert so its owner learns the run is stalled.
 branch, a tracked-file change in its tree, a write to its scratch dir, its session transcript
 written after the block, or a process it STARTED after the block — a test run or a build changes
 no tracked file while it runs. Children that predate the block (MCP servers, a language server)
-do not count, or every Crawler would look busy forever. When none of that could be read, the
+do not count, or every Crawler would look busy forever. "After the block" means after the
+harness REFUSED the turn-end — the time game_loop records on the blocking attachment — not after
+showrunner first noticed it, which can be minutes later. When none of that could be read, the
 report says COULD NOT DETERMINE rather than "doing nothing" — do not reap on unreadable.
 
 The inert-Crawler gate is a different gate from `stop-gate`, and it consults the parked flag

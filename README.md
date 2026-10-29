@@ -271,7 +271,8 @@ warning. `showrunner gc --idle 24h --keep <tree>` keeps one tree regardless.
 **A stopped Crawler is resumed, not respawned.** `showrunner resume <leaf>` restarts its recorded
 session in its own worktree with its uncommitted work intact — after a spend limit, a usage
 window or a crash — and records the new process so `waiting` and `reap` see it. It refuses when
-the tree is gone or a live process still owns the session.
+the tree is gone or a live process still owns the session. It takes the leaf id or the Crawler's
+name, and releases any lock that Crawler held whose holder is proved dead, naming each one.
 `showrunner resume <leaf> --prompt-file -` says what to tell it, and
 `showrunner resume <leaf> --dry-run` shows the command.
 
@@ -713,7 +714,9 @@ behaviour.
   sibling-directory instinct is wrong: a Crawler's own write guard treats everything outside the
   project as read-only, so a sibling worktree is a workspace it is structurally forbidden to work in.
   Inside also means each Crawler gets its own copy of the harness — **a Crawler editing the guard can
-  only brick itself**, not the whole party.
+  only brick itself**, not the whole party. Some test runners skip dot-directories when they look
+  for packages (Dart's `sip test` is one), so a Crawler under `.worktrees/` can silently run zero
+  tests; set `worktree_root` to a visible directory such as `worktrees` in a repo whose runner does.
 - **Optionally, a sparse tree** — only the directories its leaf needs (`--sparse`, or
   `sparse_by_label`), with `.claude/` and every hook directory always included.
 - **Its own scratch directory**, in the **main checkout** rather than the worktree, because it must

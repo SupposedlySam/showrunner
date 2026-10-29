@@ -459,19 +459,23 @@ def test_locks():
     os.makedirs(corrupt.dir, exist_ok=True)
     with open(os.path.join(corrupt.dir, "boot"), "w") as fh:
         fh.write(boot_token_for_test())
+    os.makedirs(corrupt.dir, exist_ok=True)
     with open(os.path.join(corrupt.dir, "holder"), "w") as fh:
         fh.write("crawler-a")
     for label, raw in (("binary", b"\x00\x01rubbish"), ("empty", b"")):
+        os.makedirs(corrupt.dir, exist_ok=True)
         with open(os.path.join(corrupt.dir, "pid"), "wb") as fh:
             fh.write(raw)
         eq("a %s pid reads UNREADABLE, never STALE — STALE is a licence to delete the lock"
            % label, corrupt.state()[0], locks.UNREADABLE)
     # The control: this must not have become "never reclaim anything". A pid that parses and
     # does not respond, recorded this boot, is still proved dead and still reclaimable.
+    os.makedirs(corrupt.dir, exist_ok=True)
     with open(os.path.join(corrupt.dir, "pid"), "w") as fh:
         fh.write("999999")
     eq("...while a readable pid that is genuinely gone is still STALE, so reclaiming still "
        "works", corrupt.state()[0], locks.STALE)
+    os.makedirs(corrupt.dir, exist_ok=True)
     with open(os.path.join(corrupt.dir, "pid"), "wb") as fh:
         fh.write(b"\x00rubbish")
     raises("acquiring against an unreadable lock REFUSES rather than reclaiming or silently "
@@ -512,6 +516,9 @@ def test_locks():
            "pg-port" in msg and "free" in msg, msg)
 
         # INV5: a guard that blocks its own holder is a guard that gets switched off.
+        # The directory is made, not assumed: under a neutered `acquire` it was never created,
+        # and this fixture write must make the assertions below FAIL rather than crash the group.
+        os.makedirs(device.dir, exist_ok=True)
         with open(os.path.join(device.dir, "session"), "w") as fh:
             fh.write("sess-A\n")
         allow, msg = ls.guard("frontend deploy", session="sess-A")
@@ -543,6 +550,7 @@ def test_locks():
     _host, _scheme, _val = util._boot_parts(locks.boot_token())
     other_boot = ("%s:%s:%s" % (_host, _scheme, "0" if _val != "0" else "1") if _scheme == "sec"
                   else "%s:uuid:00000000-0000-0000-0000-000000000000" % _host)
+    os.makedirs(device.dir, exist_ok=True)
     with open(os.path.join(device.dir, "boot"), "w") as fh:
         fh.write(other_boot + "\n")
     state, _ = device.state()
@@ -554,6 +562,7 @@ def test_locks():
     # orchestrator's own live seat read STALE, and False here is the answer that licenses taking
     # a live holder's lock.
     if _scheme == "uuid":
+        os.makedirs(device.dir, exist_ok=True)
         with open(os.path.join(device.dir, "boot"), "w") as fh:
             fh.write("a-different-name:uuid:%s\n" % _val)
         renamed, _ = device.state()
@@ -573,9 +582,11 @@ def test_locks():
     _orig_bt = locks.boot_token
     locks.boot_token = lambda: "%s:unknown" % os.uname().nodename
     try:
+        os.makedirs(device.dir, exist_ok=True)
         with open(os.path.join(device.dir, "boot"), "w") as fh:
             fh.write("some-host:1\n")
         unknown_now, _ = device.state()
+        os.makedirs(device.dir, exist_ok=True)
         with open(os.path.join(device.dir, "boot"), "w") as fh:
             fh.write("%s:unknown\n" % os.uname().nodename)
         unknown_stored, _ = device.state()
@@ -2221,6 +2232,55 @@ def test_harness_provisioning():
         H.run = _orig_run
     ok("a working Crawler is not", blocked is False, blocked)
 
+    # THE REFUSAL'S OWN TIME. Without it the only clock is when a reconcile first noticed, and
+    # work done between the refusal and that noticing read as "before the block".
+    H.run = _canned_run(json.dumps({"stop_gate": {
+        "blocked": True, "blocks_total": 1, "limit": 3,
+        "attachments": {"showrunner-stop-gate": {"verdict": "blocked", "consecutive": 1,
+                                                 "at": "2026-10-28T17:12:50"},
+                        "later": {"verdict": "blocked", "at": "2026-10-28T17:20:00"},
+                        "passed": {"verdict": "allowed", "at": "2026-10-28T09:00:00"}}}}))
+    _seen = {}
+    try:
+        H.stop_gate(post, (rec8.get("worktree") or ""), "some-session-id", _seen)
+    finally:
+        H.run = _orig_run
+    import datetime as _dt
+    ok("a block reports WHEN the harness refused — the earliest blocking attachment's `at`, not "
+       "an allowing one's", _seen.get("since") == int(_dt.datetime.fromisoformat(
+           "2026-10-28T17:12:50").timestamp()), _seen)
+    H.run = _canned_run(json.dumps({"stop_gate": {
+        "blocked": True, "attachments": {"x": {"verdict": "blocked", "at": "garbage"}}}}))
+    _seen = {"since": "stale"}
+    try:
+        H.stop_gate(post, (rec8.get("worktree") or ""), "some-session-id", _seen)
+    finally:
+        H.run = _orig_run
+    ok("...and an unreadable `at` is None, never a guess", _seen.get("since") is None, _seen)
+    H.run = _canned_run(json.dumps({"stop_gate": {
+        "blocked": True, "attachments": {"x": {"verdict": "blocked", "at": "garbage"},
+                                         "y": {"verdict": "blocked",
+                                               "at": "2026-10-29T08:00:00"}}}}))
+    _seen = {}
+    try:
+        H.stop_gate(post, (rec8.get("worktree") or ""), "some-session-id", _seen)
+    finally:
+        H.run = _orig_run
+    H.run = _canned_run(json.dumps({"stop_gate": {
+        "blocked": True, "attachments": {"z": {"verdict": "blocked",
+                                               "at": "2026-10-29T08:00:00.750000"}}}}))
+    _seen_frac = {}
+    try:
+        H.stop_gate(post, (rec8.get("worktree") or ""), "some-session-id", _seen_frac)
+    finally:
+        H.run = _orig_run
+    ok("...and a sub-second `at` is read too, truncated to the second the events use",
+       _seen_frac.get("since") == int(_dt.datetime.fromisoformat(
+           "2026-10-29T08:00:00").timestamp()), _seen_frac)
+    ok("...while a readable one beside it is still reported — one bad record does not hide the "
+       "refusal time", _seen.get("since") == int(_dt.datetime.fromisoformat(
+           "2026-10-29T08:00:00").timestamp()), _seen)
+
     H.run = _canned_run("not json at all")
     try:
         blocked, _ = H.stop_gate(post, (rec8.get("worktree") or ""), "some-session-id")
@@ -2243,13 +2303,23 @@ def test_harness_provisioning():
     _orig_sg = campaign_harness_stop_gate = __import__(
         "showrunner.harness", fromlist=["harness"]).stop_gate
     import showrunner.harness as _HH
-    _HH.stop_gate = lambda c, w, s: (True, "refused at turn-end by showrunner-stop-gate")
+    def _blocked_sg(c, w, s, seen=None):
+        if seen is not None:
+            # LATER than the noticing, so it is carried but cannot release: this asserts the
+            # wiring, and the fixture's own commits must not read as work since the block.
+            seen["since"] = int(time.time()) + 10 ** 6
+        return True, "refused at turn-end by showrunner-stop-gate"
+    _HH.stop_gate = _blocked_sg
     try:
         f9 = next((f for f in campaign.reconcile(post, gp)
                    if f["crawler"] == (rec9.get("crawler") or "")), {})
         is_waiting, detail = campaign.waiting(post, gp)
     finally:
         _HH.stop_gate = _orig_sg
+    _ev9 = __import__("showrunner.events", fromlist=["events"]).latest(
+        post, ("crawler.blocked",), "crawler", f9.get("crawler"))
+    ok("the recorded block carries the harness's refusal time, so work done before anybody "
+       "noticed still counts as after the block", ((_ev9 or {}).get("since") or 0) > time.time(), _ev9)
     ok("reconcile ranks BLOCKED above LIVE — it IS live, and that is the whole problem",
        (f9.get("verdict") or "").startswith("BLOCKED"), f9.get("verdict"))
     ok("...and `waiting` counts it as NEITHER waiting nor parked, so the orchestrator's own "
@@ -2454,6 +2524,22 @@ def test_work_since_block():
     got, why = campaign.work_since_block(cfg, "c-work", None, wt)
     ok("...but an UNTRACKED file is not evidence, so harness noise in the tree cannot release "
        "a gate on a Crawler that has genuinely stopped", got is False, (got, why))
+
+    # THE GAP BETWEEN THE REFUSAL AND ITS NOTICING. Reported: refused once, kept working in the
+    # same turn, and listed as inert because every write predated the moment a reconcile saw it.
+    EV.emit(cfg, "crawler.blocked", {"crawler": "c-gap", "leaf": "L1", "why": "refused",
+                                     "since": blocked_at - 120})
+    noticed = EV.latest(cfg, ("crawler.blocked",), "crawler", "c-gap")["ts"]
+    os.utime(tracked, (noticed - 30, noticed - 30))
+    got, why = campaign.work_since_block(cfg, "c-gap", None, wt)
+    ok("work AFTER the harness refused but BEFORE showrunner noticed is work since the block",
+       got is True, (got, why))
+    EV.emit(cfg, "crawler.blocked", {"crawler": "c-late", "leaf": "L1", "why": "refused",
+                                     "since": noticed + 3600})
+    got, why = campaign.work_since_block(cfg, "c-late", None, wt)
+    ok("...but a refusal time LATER than the noticing is ignored, so it can only ever release",
+       got is False, (got, why))
+    os.utime(tracked, (blocked_at - 60, blocked_at - 60))
 
     # Every unknown must land on today's behaviour, never on a stricter one.
     got, why = campaign.work_since_block(cfg, "c-work", None,
@@ -3796,6 +3882,7 @@ def test_worktree_lease():
     d.acquire("session-dead", who="ghost", pid=999999, basis="ancestor-claude")
     eq("a lease whose process is gone is STALE, so a tree is never wedged by a dead session",
        d.state()[0], locks.STALE)
+    os.makedirs(d.lock.dir, exist_ok=True)     # absent under a neutered acquire: fail, not crash
     with open(os.path.join(d.lock.dir, "pid"), "wb") as fh:
         fh.write(b"\x00rubbish")
     eq("...while an UNREADABLE pid stays UNREADABLE — a partial write by a LIVE holder reads "
@@ -3934,6 +4021,7 @@ def test_worktree_lease():
     # partial write by a LIVE holder is indistinguishable from a dead one.
     lease.Lease(cfg, "enter-probe").release(force=True)
     lease.Lease(cfg, "enter-probe").acquire("sess-x", who="x", pid=999999, basis="b")
+    os.makedirs(lease.Lease(cfg, "enter-probe").lock.dir, exist_ok=True)
     with open(os.path.join(lease.Lease(cfg, "enter-probe").lock.dir, "pid"), "wb") as fh:
         fh.write(b"\x00rubbish")
     v, _ = lease.enter(cfg, "sess-4", path=ent)
@@ -4274,6 +4362,7 @@ def test_worktree_lease():
                                 tool_input={"file_path": os.path.join(gpath, "x")}, cwd=gpath)
     ok("a tree whose holder is provably DEAD stops being defended — a crashed session must not "
        "wedge a tree against everyone forever", allow, msg)
+    os.makedirs(lease.Lease(cfg, gt).lock.dir, exist_ok=True)
     with open(os.path.join(lease.Lease(cfg, gt).lock.dir, "pid"), "wb") as fh:
         fh.write(b"\x00rubbish")
     allow, msg, _ = lease.guard(cfg, "sess-INTRUDER", tool="Write",
@@ -5850,11 +5939,14 @@ def test_role_seat_verbs():
     ok("...and states the liveness basis rather than only success — a claim whose pid exits "
        "reports success too, which is what made the failure silent", "liveness basis" in out, out)
 
-    entries = json.loads(sr("role", "roster", "--json")[1])
+    try:
+        entries = json.loads(sr("role", "roster", "--json")[1])
+    except ValueError:
+        entries = []                # unparseable is a FAILED assertion below, not a crash
     eq("...and the roster shows that seat HELD",
-       [(e["role"], e["state"]) for e in entries], [("campaign-lead#0", locks.HELD)])
+       [(e.get("role"), e.get("state")) for e in entries], [("campaign-lead#0", locks.HELD)])
     ok("...with the basis recorded on the holder, so a reader sees which fact liveness rests on",
-       (entries[0].get("holder") or {}).get("pid_basis"), entries)
+       ((entries[0] if entries else {}).get("holder") or {}).get("pid_basis"), entries)
 
     rc, out, _err = sr("whoami", "--session", "sess-1")
     ok("`whoami` announces the CLAIMED role — the whole path from CLI to announcement, which "
@@ -5935,14 +6027,16 @@ def test_role_seat_verbs():
     R.release(cfg, "campaign-lead", force=True)
     rc, out, _err = sr("role", "claim", "campaign-lead", "--session", "sess-4")
     eq("claiming through the verb succeeds", rc, 0)
+    try:
+        _after = json.loads(sr("role", "roster", "--json")[1])
+    except ValueError:
+        _after = []
     eq("...and the seat is still HELD once the claiming process has EXITED — the CLI process is "
        "gone by the time this reads, which is exactly the case that produced STALE",
-       [(e["role"], e["state"]) for e in json.loads(sr("role", "roster", "--json")[1])],
-       [("campaign-lead#0", locks.HELD)])
+       [(e.get("role"), e.get("state")) for e in _after], [("campaign-lead#0", locks.HELD)])
     ok("...on a pid that is NOT the exited CLI process, which is the whole mechanism",
-       (json.loads(sr("role", "roster", "--json")[1])[0].get("holder") or {}).get("pid_basis")
-       in ("ancestor-claude", "ppid-fallback"),
-       json.loads(sr("role", "roster", "--json")[1]))
+       ((_after[0] if _after else {}).get("holder") or {}).get("pid_basis")
+       in ("ancestor-claude", "ppid-fallback"), _after)
     R.release(cfg, "campaign-lead", force=True)
 
 
@@ -12391,7 +12485,7 @@ def test_observability():
     gt.claim("B1", "stuck", pid=os.getpid(), tree=tr.root)
     import showrunner.harness as _HB
     _orig_sg = _HB.stop_gate
-    _HB.stop_gate = lambda c, w, s: (True, "refused at turn-end")
+    _HB.stop_gate = lambda c, w, s, seen=None: (True, "refused at turn-end")
     try:
         campaign.reconcile(tr, gt)
         mine = lambda k: [e for e in EV.read(tr)[0]
@@ -12406,7 +12500,7 @@ def test_observability():
            "in identical lines", len(after_three), 1)
         # And the other edge: coming back must be seen, or a viewer shows a rescued Crawler as
         # permanently stuck. An edge detector that only fires one way is half a detector.
-        _HB.stop_gate = lambda c, w, s: (False, "")
+        _HB.stop_gate = lambda c, w, s, seen=None: (False, "")
         campaign.reconcile(tr, gt)
         unblocked = mine("crawler.unblocked")
         eq("...and the return to working is journalled too, so a rescued Crawler stops looking "
@@ -16521,7 +16615,9 @@ def test_resume_restarts_a_crawler_in_its_own_tree():
     os.chmod(stub, 0o755)
     cfg.data["dispatch"] = dict(cfg.data.get("dispatch") or {}, claude_bin=stub)
     with open(os.path.join(cfg.root, ".showrunner", "config.local.json"), "w") as fh:
-        json.dump({"dispatch": {"claude_bin": stub}}, fh)
+        json.dump({"dispatch": {"claude_bin": stub},
+                   "resources": [{"name": "device-r97"}, {"name": "other-r97"},
+                                 {"name": "sess-r97"}]}, fh)
     g = new_graph(cfg)
     g.add("stopped leaf", leaf_id="R1")
     rec = worktree.spawn(cfg, g.show("R1"), actor="a")
@@ -16542,7 +16638,40 @@ def test_resume_restarts_a_crawler_in_its_own_tree():
     ok("--dry-run shows the command with --resume <session> and starts nothing",
        dry.returncode == 0 and "--resume S-R97" in dry.stdout and not os.path.exists(argv_log),
        dry.stdout[-400:] + dry.stderr[-300:])
+
+    # #108: the Crawler took a lock and exited. `lock acquire` records its own short-lived pid,
+    # so both of these are STALE the moment it returns — exactly the state the lead found.
+    def cli(*argv):
+        return subprocess.run([sys.executable, exe] + list(argv), capture_output=True,
+                              text=True, cwd=cfg.root, stdin=subprocess.DEVNULL)
+    cli("lock", "acquire", "device-r97", "--holder", rec["crawler"])
+    cli("lock", "acquire", "other-r97", "--holder", "somebody-else")
+    cli("lock", "acquire", "sess-r97", "--holder", "manual", "--session", "S-R97")
+    st = cli("lock", "status", "device-r97")
+    ok("a STALE lock says the next acquire reclaims it, so nobody clears it by hand (#108)",
+       "STALE" in st.stdout and "next `lock acquire` reclaims it" in st.stdout, st.stdout)
+    by_name = subprocess.run([sys.executable, exe, "resume", rec["crawler"], "--dry-run"],
+                             capture_output=True, text=True, cwd=cfg.root,
+                             stdin=subprocess.DEVNULL)
+    ok("resume accepts the CRAWLER's name, which is what every watcher message prints (#108)",
+       by_name.returncode == 0 and "R1" in by_name.stdout and "--resume S-R97" in by_name.stdout,
+       by_name.stdout[-400:] + by_name.stderr[-300:])
+    ok("...and the dry run names the dead lock it would release, and only that one",
+       "would release device-r97" in by_name.stdout and "other-r97" not in by_name.stdout,
+       by_name.stdout[-400:])
+    ok("...matching a lock by the SESSION it recorded too, when its holder name says nothing",
+       "would release sess-r97" in by_name.stdout, by_name.stdout[-400:])
+    unknown = subprocess.run([sys.executable, exe, "resume", "no-such-anything"],
+                             capture_output=True, text=True, cwd=cfg.root,
+                             stdin=subprocess.DEVNULL)
+    ok("...while a name that is neither a leaf nor a Crawler is still refused",
+       unknown.returncode != 0 and "no such leaf" in unknown.stderr, unknown.stderr[-300:])
     p = resume("--prompt", "the limit reset; carry on")
+    ok("a real resume RELEASES the Crawler's own stale lock and says so",
+       "released device-r97" in p.stdout
+       and "FREE" in cli("lock", "status", "device-r97").stdout, p.stdout[-400:])
+    ok("...and leaves somebody else's stale lock alone",
+       "STALE" in cli("lock", "status", "other-r97").stdout)
     started = None
     try:
         ok("resume starts the session", p.returncode == 0, p.stderr[-400:])
@@ -16864,6 +16993,15 @@ def test_waiting_rings_for_a_stall_and_orphans_are_found():
         time.sleep(0.05)
     orphan = int(open(pidfile).read().strip())
     sitter = subprocess.Popen(["sleep", "120"], cwd=rec2["worktree"])   # parent is us: not proven
+    # A shell with a child, both in the tree: what a `flutter run` and its dart VM look like.
+    tree_root = subprocess.Popen(["sh", "-c", "sleep 120; true"], cwd=rec2["worktree"])
+    tree_kid = None
+    for _ in range(50):
+        r = subprocess.run(["pgrep", "-P", str(tree_root.pid)], capture_output=True, text=True)
+        if r.stdout.split():
+            tree_kid = int(r.stdout.split()[0])
+            break
+        time.sleep(0.05)
     try:
         time.sleep(0.3)
         found, looked = campaign.orphan_processes(cfg)
@@ -16878,10 +17016,22 @@ def test_waiting_rings_for_a_stall_and_orphans_are_found():
         ok("gc HOLDS a tree with processes running in it", "process(es) still running" in
            hw.get(rec2["crawler"], ""), hw)
         acts, _ = campaign.reap(cfg, g, apply=False)
-        kinds = {(a["kind"], a["action"]) for a in acts if a.get("crawler") == rec2["crawler"]}
+        kinds = {(a["kind"], a["action"].split(" — ")[0]) for a in acts
+                 if a.get("crawler") == rec2["crawler"]}
         ok("reap (dry run) would SIGTERM the proven one and only SURFACE the other",
            ("orphan", "would SIGTERM") in kinds and ("orphan", "SURFACED, not signalled")
            in kinds, kinds)
+        surfaced = {a["why"].split()[1]: a for a in acts if a.get("crawler") == rec2["crawler"]
+                    and a["action"].startswith("SURFACED")}
+        sat = surfaced.get(str(sitter.pid)) or {}
+        ok("...naming WHICH proof failed, and the command that stops it (#108)",
+           "is not init" in sat.get("why", "") and
+           sat.get("action", "").endswith("kill %d" % sitter.pid), sat)
+        ok("...and a detached TREE is one line: the root, its child count, and every pid to stop",
+           str(tree_root.pid) in surfaced and str(tree_kid) not in surfaced
+           and "with 1 child" in surfaced[str(tree_root.pid)]["why"]
+           and surfaced[str(tree_root.pid)]["action"].endswith(
+               "kill %d %d" % (tree_root.pid, tree_kid)), surfaced)
         campaign.reap(cfg, g, apply=True)
         for _ in range(30):
             if not util.pid_alive(orphan):
@@ -16892,10 +17042,13 @@ def test_waiting_rings_for_a_stall_and_orphans_are_found():
     finally:
         sitter.kill()
         sitter.wait()
-        try:
-            os.kill(orphan, 9)
-        except OSError:
-            pass
+        for pid in (orphan, tree_kid):
+            try:
+                os.kill(pid, 9)
+            except (OSError, TypeError):
+                pass
+        tree_root.kill()
+        tree_root.wait()
 
 
 def test_an_implicit_base_behind_its_upstream_is_refused():
@@ -17558,15 +17711,17 @@ def test_never_integrated_leaves_do_not_collide():
     sh(["git", "commit", "-q", "-m", "arm work"], rec["worktree"])
     g.claim("E1", "e", pid=os.getpid())
     g.close("E1", "closed", rec["worktree"], "arm finished")
-    results, ok_all = campaign.integrate(cfg, g)
+    results, ok_all = attempt(lambda: campaign.integrate(cfg, g), ([], False))
     mine = [r for r in results if r.get("crawler") == rec["crawler"]]
     ok("`integrate` records the arm as NEVER-INTEGRATED instead of merging it",
        mine and mine[0]["status"] == "never-integrated", results)
     ok("...and its branch really is not merged", not campaign.is_merged(cfg, rec["branch"],
                                                                        "HEAD"))
     ok("...which is not a failure of the batch", ok_all, results)
-    _, ok_named = campaign.integrate(cfg, g, only=["E1"])
+    named, ok_named = attempt(lambda: campaign.integrate(cfg, g, only=["E1"]), (None, None))
     eq("...but asked for BY NAME, integrate refuses (not ok)", ok_named, False)
+    ok("...and the refusal is integrate's verdict on the arm, not a refusal to run at all",
+       named is not None and any(r.get("status") == "never-integrated" for r in named), named)
     sr("add", "open arm", "--id", "F1", "--no-integrate")
     p = sr("edit", "F1", "--integrate")
     ok("`edit --integrate` clears the label on an open leaf", p.returncode == 0

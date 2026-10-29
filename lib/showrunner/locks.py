@@ -239,6 +239,12 @@ class Lock:
         return True
 
 
+# SAID WHERE STALE IS PRINTED (#108). A lead read STALE as "something has to release this" and
+# ran `release --force` by hand before resuming — but `acquire` already reclaims a proved-dead
+# holder itself, so the remedy was the next acquire, not a manual repair.
+STALE_NOTE = "holder proved dead — the next `lock acquire` reclaims it, no release needed"
+
+
 class LockSet:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -278,6 +284,21 @@ class LockSet:
             if os.path.isdir(self.root):
                 self.on_disk_error = str(e)
             return []
+
+    def stale_held_by(self, names):
+        """Configured locks that are STALE and whose holder or session is one of `names`.
+
+        PROVED DEAD only: an UNREADABLE lock is never in this list, for the reason the module
+        header gives — a partial write by a live holder reads exactly like a dead one.
+        """
+        names = {n for n in names if n}
+        out = []
+        for name in self.names():
+            lock = Lock(self.root, name)
+            state, h = lock.state()
+            if state == STALE and ({h.get("who"), h.get("session")} & names):
+                out.append((lock, h))
+        return out
 
     def existing(self, name):
         """A lock to RELEASE. Configured, or merely present — releasing is the remedial path.
