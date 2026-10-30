@@ -648,6 +648,45 @@ def close_channel(cfg, entry):
     return CLOSE_FAILED, (p.stderr or p.stdout).strip()[:160]
 
 
+def announce_finished(cfg, entry, outcome, reason=None):
+    """Tell the orchestrator, in the Crawler's room, that this leaf just closed. (ok, detail).
+
+    THE CLOSE ITSELF WAKES NOBODY. `close` announces the closure FROM the orchestrator's own
+    identity with no audience, so the one message the room gets is one its reader skips as its
+    own. A Crawler that closed without speaking first left its orchestrator idle: measured by a
+    consumer at 77 minutes between a leaf closing and anybody noticing, with a waker alive the
+    whole time. This is the message that rings, sent before the room closes.
+
+    AS THE CRAWLER, FROM ITS OWN TREE AND SESSION, for the reason `join_crawler` gives: llm_chat
+    keys membership to the session, and posting from the orchestrator's would be the orchestrator
+    talking to itself. Never raises: a close must not fail over a notice.
+    """
+    channel = entry.get("channel")
+    if not channel:
+        return False, "no room"
+    cli = chat_path(cfg, "cli")
+    if not cli or not os.path.exists(cli):
+        return False, "no chat CLI configured"
+    wt = cfg.abspath(entry.get("worktree") or "")
+    session = entry.get("session")
+    if not session or not wt or not os.path.isdir(wt):
+        return False, "no Crawler session or tree to post from"
+    first = ((reason or "").strip().splitlines() or [""])[0][:200]
+    text = "%s: leaf %s %s%s\n" % (entry.get("crawler"), entry.get("leaf", "?"), outcome,
+                                   (" — " + first) if first else "")
+    env = dict(os.environ, CLAUDE_PROJECT_DIR=wt, CLAUDE_CODE_SESSION_ID=session)
+    try:
+        p = subprocess.run([cli, "say", channel, "--as", entry["crawler"],
+                            "--to", orchestrator_identity(cfg), "--file", "-"],
+                           input=text, capture_output=True, text=True, timeout=60, cwd=wt,
+                           env=env)
+    except (OSError, subprocess.SubprocessError) as exc:            # noqa: BLE001
+        return False, "could not post: %s" % exc
+    if p.returncode != 0:
+        return False, "say exited %d: %s" % (p.returncode, (p.stderr or p.stdout).strip()[:140])
+    return True, "told %s" % orchestrator_identity(cfg)
+
+
 def lingering(entry, grace=LINGER_GRACE_SECONDS):
     """Is this Crawler's process still running well after its work ended?
 

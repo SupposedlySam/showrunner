@@ -801,7 +801,7 @@ def reconcile(cfg, graph, base="HEAD", deep=True):
 
 
 
-def finish(cfg, leaf_id, why="leaf closed"):
+def finish(cfg, leaf_id, why="leaf closed", outcome=None, reason=None):
     """Mark every Crawler on this leaf finished, and close its room. Called when a leaf closes.
 
     The SAFE half of spin-down, and it runs immediately because nothing here can damage work:
@@ -815,14 +815,19 @@ def finish(cfg, leaf_id, why="leaf closed"):
     for entry in load(cfg).get("crawlers", []):
         if entry.get("leaf") != leaf_id or entry.get("state") in ("finished", "retired"):
             continue
+        # BEFORE THE ROOM CLOSES: the closure itself wakes nobody, so this is how the
+        # orchestrator learns the leaf finished at all.
+        told, told_detail = ((_dispatch.announce_finished(cfg, entry, outcome, reason))
+                             if outcome else (False, "no outcome to announce"))
         state, detail = _dispatch.close_channel(cfg, entry)
         # ONLY AN OBSERVED CLOSURE IS RECORDED. UNKNOWN leaves channel_closed False so the room
         # is retried, rather than writing down a closure nobody watched happen — a rate-limited
         # close that records success leaves a room open with the record saying otherwise, and
         # nothing ever looks again.
         set_state(cfg, entry["crawler"], "finished", finished_at=now(), finished_why=why,
-                  channel_closed=(state == _dispatch.CLOSE_DONE))
+                  channel_closed=(state == _dispatch.CLOSE_DONE), announced=told)
         done.append({"crawler": entry["crawler"], "channel": detail,
+                     "announced": told, "announce_detail": told_detail,
                      "channel_closed": state == _dispatch.CLOSE_DONE,
                      "channel_state": state})
     return done

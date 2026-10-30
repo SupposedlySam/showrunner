@@ -1279,8 +1279,16 @@ def cmd_close(args):
     # Spin the Crawler down as soon as its leaf closes: mark it finished and close its room.
     # The process is left alone here on purpose — it is mid-call at this exact moment, having
     # just run this very command. `reap` takes it if it is still alive after the grace window.
-    for done in campaign.finish(cfg, leaf["id"]):
+    _closed = g.show(leaf["id"]) or leaf
+    for done in campaign.finish(cfg, leaf["id"], outcome=_outcome,
+                                reason=_closed.get("close_reason") or args.reason):
         print("  %sspun down %s — %s%s" % (DIM, done["crawler"], done["channel"], OFF))
+        if done.get("announce_detail") != "no room":
+            # SAID WHEN IT FAILED: an orchestrator that was not told is idle until somebody asks.
+            print("  %s%s%s" % (DIM if done["announced"] else YEL,
+                                ("announced in the room — " if done["announced"] else
+                                 "NOT announced, so the orchestrator was not woken — ")
+                                + done["announce_detail"], OFF))
     for n in notes:
         print("  %s%s%s" % (DIM, n, OFF))
     return 0

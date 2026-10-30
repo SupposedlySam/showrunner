@@ -163,7 +163,10 @@ agent yourself** — `plan → route → spawn → integrate` without `--launch`
 anything.
 
 **A finished Crawler spins itself down.** Closing a leaf marks its Crawler finished and
-closes its chat room immediately — both safe, because the leaf is already closed. The
+closes its chat room immediately — both safe, because the leaf is already closed. Before the
+room closes, the Crawler posts the leaf's outcome and the first line of its reason, addressed to
+the orchestrator: the closure itself is announced with no audience, so without that message
+nothing wakes an idle orchestrator, and `close` says so when the post fails. The
 *process* is deliberately left alone at that moment: a Crawler closes its own leaf from inside
 its own session, so it is mid-call right then, and terminating it would truncate the work it
 just certified. `showrunner reap` takes a process that is still alive well after its leaf

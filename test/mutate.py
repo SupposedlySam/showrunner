@@ -981,8 +981,8 @@ TARGETS = [
      r"(def chat_path\(cfg, key\):\n)",
      "    return None\ndef _neutered_chat_path(cfg, key):\n"),
     ("spin-down on close", "campaign.finish", "lib/showrunner/campaign.py",
-     r"(def finish\(cfg, leaf_id, why=\"leaf closed\"\):\n)",
-     "    return []\ndef _neutered_finish(cfg, leaf_id, why=\"x\"):\n"),
+     r"(def finish\(cfg, leaf_id, why=\"leaf closed\", outcome=None, reason=None\):\n)",
+     "    return []\ndef _neutered_finish(cfg, leaf_id, why=\"x\", outcome=None, reason=None):\n"),
     ("lingering process detection", "dispatch.lingering", "lib/showrunner/dispatch.py",
      r"(def lingering\(entry, grace=LINGER_GRACE_SECONDS\):\n)",
      "    return None\ndef _neutered_lingering(entry, grace=LINGER_GRACE_SECONDS):\n"),
@@ -1053,6 +1053,12 @@ TARGETS = [
      "lib/showrunner/locks.py",
      r"(    def stale_held_by\(self, names\):\n)",
      "        return []\n    def _neutered_stale_held_by(self, names):\n"),
+    # (False, ...) is "could not post", which is also what a spin-down that never told anyone
+    # looks like — and then an orchestrator waits idle for a leaf that already closed.
+    ("telling the orchestrator a leaf closed", "dispatch.announce_finished",
+     "lib/showrunner/dispatch.py",
+     r"(def announce_finished\(cfg, entry, outcome, reason=None\):\n)",
+     "    return False, 'neutered'\ndef _neutered_announce_finished(cfg, entry, outcome, reason=None):\n"),
     # The last flag only is argparse's own answer for a non-append --path, and the reported shape:
     # a leaf re-scoped to its last path, whose Crawler is then denied every other write.
     ("every --path a leaf is given", "cli._path_args",

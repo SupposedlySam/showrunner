@@ -11314,6 +11314,45 @@ def test_dispatch():
     eq("...and spinning down twice does nothing the second time, so reap is safe to re-run",
        campaign.finish(fcfg, "L1"), [])
 
+    # THE CLOSE WAKES NOBODY. `close` announces from the orchestrator's own identity with no
+    # audience, so a Crawler that closed without speaking left its orchestrator idle — measured at
+    # 77 minutes by a consumer whose waker was alive throughout. Spin-down must post, as the
+    # Crawler and addressed to the orchestrator, BEFORE the room closes.
+    _log_cli = _fake_cli('#!/bin/sh\nd="$(dirname "$0")"\n'
+                         'echo "$* session=$CLAUDE_CODE_SESSION_ID" >> "$d/calls"\n'
+                         '[ "$1" = say ] && cat > "$d/said"\nexit 0\n')
+    _ld = os.path.dirname(dispatch.chat_path(_log_cli, "cli"))
+    _say_wt = os.path.join(_log_cli.root, ".worktrees", "c-say")
+    os.makedirs(_say_wt, exist_ok=True)
+    campaign.record_spawn(_log_cli, {"crawler": "c-say", "leaf": "L9", "branch": "b",
+                                     "worktree": _say_wt,
+                                     "scratch": os.path.join(_log_cli.root, ".showrunner",
+                                                             "scratch", "c-say")},
+                          pid=None, session="sess-say")
+    campaign.set_state(_log_cli, "c-say", "running", channel="room_c-say")
+    _dn = campaign.finish(_log_cli, "L9", outcome="closed",
+                          reason="all six checks green\nsecond line stays out")
+    _calls = open(os.path.join(_ld, "calls")).read().splitlines() \
+        if os.path.exists(os.path.join(_ld, "calls")) else []
+    _orch = dispatch.orchestrator_identity(_log_cli)
+    _say = [c for c in _calls if c.startswith("say ")]
+    ok("spin-down tells the orchestrator the leaf closed — addressed --to it, so it is woken",
+       _say and ("--to %s" % _orch) in _say[0], _calls)
+    ok("...as the CRAWLER, from the Crawler's own session, so it is not the orchestrator "
+       "talking to itself", _say and "--as c-say" in _say[0] and "session=sess-say" in _say[0],
+       _say)
+    ok("...BEFORE the room closes, since a closed room delivers nothing",
+       [c.split()[0] for c in _calls][:2] == ["say", "close"], _calls)
+    _said = open(os.path.join(_ld, "said")).read() if os.path.exists(os.path.join(_ld, "said")) \
+        else ""
+    ok("...carrying the leaf, its outcome and the reason's first line, and only the first",
+       "L9" in _said and "closed" in _said and "all six checks green" in _said
+       and "second line" not in _said, _said)
+    ok("...and the spin-down record says it was announced",
+       _dn and _dn[0].get("announced") is True, _dn)
+    _nos = [c for c in campaign.load(_log_cli)["crawlers"] if c["crawler"] == "c-say"][0]
+    eq("...and so does the campaign record", _nos.get("announced"), True)
+
     # DONE IS NOT ABANDONED. Observed on a real spin-down: a Crawler that finished, closed its
     # leaf and was cleanly retired came back as "ABANDONED — the work is not integrated",
     # which is false once the close gate has demanded an artifact. Under fan-out every

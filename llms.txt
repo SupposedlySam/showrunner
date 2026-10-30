@@ -567,6 +567,15 @@ heredoc body, a path assembled from parts, and a variable assigned outside the c
 is executed to find out, which is the line that decides what is coverable at all — a guard that
 runs a command to decide whether to allow it is not a guard.
 
+### Spin-down tells the orchestrator first
+
+`close` wakes nobody by itself: the chat tool announces a closure from the orchestrator's own
+identity with no audience. So before closing the room, spin-down posts one message as the
+Crawler, from the Crawler's tree and session, `--to` the orchestrator identity: the leaf, its
+outcome, and the first line of its close reason. The campaign record keeps `announced`, and
+`showrunner close` prints the failure when the post did not land, since an orchestrator that was
+not told stays idle until somebody asks.
+
 ### Spin-down closes a room in FOUR outcomes
 
 `close_channel` answers `closed`, `unknown`, `indeterminate` or `failed`, and only `closed` is
