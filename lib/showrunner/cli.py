@@ -2851,6 +2851,37 @@ def _live_claim_check(leaf):
            leaf.get("claim_tree") or "?"), code=3)
 
 
+def _child_session_check(cfg, child, caller, rehearsing=False):
+    """Refuse a pinned Crawler session id that already belongs to somebody (#109).
+
+    A session id IS an identity here: seats, campaign bindings, claims and room membership all
+    resolve per session. A child launched under its caller's id, or under any held seat's, is a
+    second process wearing that identity, and every guard then judges it as the wrong agent.
+    """
+    if not child:
+        return
+    from .util import same_session
+    owner = None
+    if same_session(child, caller):
+        owner = "the calling session"
+    else:
+        for entry in roles.roster(cfg):
+            holder = entry.get("holder") or {}
+            if entry.get("state") == locks.HELD and same_session(holder.get("session"), child):
+                owner = "the session holding the %s seat" % entry.get("role")
+                break
+    if not owner:
+        return
+    msg = ("--child-session %s is %s. A Crawler launched under it resolves that session's seat "
+           "and campaign, so every guard judges it as the wrong agent.\n"
+           "Omit --child-session and spawn mints a fresh id; `--session` names the caller only."
+           % (short_session(child), owner))
+    if rehearsing:
+        eprint("%sWOULD REFUSE: %s%s" % (RED, msg, OFF))
+        return
+    die(msg, code=2)
+
+
 def cmd_spawn(args):
     cfg = _cfg(args)
     g = _graph(cfg)
@@ -2925,6 +2956,9 @@ def cmd_spawn(args):
             else:
                 die(msg, code=3)
 
+    _child_session_check(cfg, getattr(args, "child_session", None),
+                         args.session or caller_session(),
+                         rehearsing=bool(getattr(args, "dry_run", False)))
     _implicit_base_check(cfg, leaf, base_seen,
                          rehearsing=bool(getattr(args, "dry_run", False)))
     _base_dependency_check(leaf, base_seen, getattr(args, "despite_base", None) or [],
@@ -2935,7 +2969,7 @@ def cmd_spawn(args):
     _base_drift_check(leaf, drift, getattr(args, "despite_deleted", None) or [],
                       rehearsing=bool(getattr(args, "dry_run", False)))
     if getattr(args, "dry_run", False):
-        session = args.session or dispatch.new_session_id()
+        session = getattr(args, "child_session", None) or dispatch.new_session_id()
         model = dispatch.resolve_model(cfg, decision)
         cmd = dispatch.build_command(cfg, {"crawler": worktree.crawler_name(leaf["id"], args.actor)},
                                      model, session, "<brief>")
@@ -2976,7 +3010,11 @@ def cmd_spawn(args):
     # session it will be. This used to be generated after the brief was written, which put the
     # one fact the join needs on the wrong side of the join — the reason the asymmetry could
     # not simply have been fixed in place.
-    session = args.session
+    # THE CHILD'S OWN ID, NEVER `--session` (#109). `--session` names the CALLER, for the
+    # may-dispatch check above, and reading it here too launched a Crawler as the orchestrator's
+    # session: it resolved the orchestrator's seat, the write guard refused its edits, and the
+    # claim, campaign record and room membership all named the wrong session.
+    session = getattr(args, "child_session", None)
     if getattr(args, "launch", False) and not session:
         session = dispatch.new_session_id()
 
@@ -4082,7 +4120,10 @@ def build_parser():
                                   "which is refused off the default branch unless named")
     s.add_argument("--branch")
     s.add_argument("--pid", type=int)
-    s.add_argument("--session")
+    s.add_argument("--session", help="the calling session, for the may-dispatch check")
+    s.add_argument("--child-session",
+                   help="pin the Crawler's session id; by default a launch mints a new one. "
+                        "Refused when it is the caller's or a held seat's session")
     s.add_argument("--no-claim", action="store_true")
     s.add_argument("--launch", action="store_true",
                    help="start a REAL Claude Code session in the worktree, with its own hooks")

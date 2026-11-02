@@ -7342,10 +7342,11 @@ def test_hook_registration():
         # effect of shipping the guard.
         "write-guard.sh": "enforcing this checkout's roles on its own development sessions is an "
                           "operator decision about those roles, pending with the operator",
-        # This repo runs its SITE waker, issue-waker.py, which also rings for chat debts;
-        # registering the shipped one beside it would wake the owner session twice per event.
-        "github-waker.sh": "this checkout runs its site waker (issue-waker.py, chat debts "
-                           "included); both registered would wake twice for one event",
+        # SUPERSEDED HERE by the shipped github-waker, which this checkout now runs; llm_chat's
+        # own waker rings for the chat debts this one also covered. Both registered would wake
+        # the owner session twice for one event.
+        "issue-waker.py": "superseded in this checkout by the shipped github-waker; llm_chat's "
+                          "waker rings for chat debts; both registered would wake twice",
     }
     hooks = os.path.join(ROOT, ".showrunner", "hooks")
     settings = [os.path.join(ROOT, ".claude", n)
@@ -15270,6 +15271,69 @@ def test_the_watcher_sees_more_than_new_issues():
        "of my own" in said, said[:400])
 
 
+def test_spawn_session_names_the_caller_not_the_child():
+    group("`spawn --session` names the CALLER; the Crawler gets its own id, and a borrowed one "
+          "is refused (#109)")
+    if not have("git"):
+        skip("the spawn-session group", "git is not installed")
+        return
+    # REPORTED: an orchestrator passed its own id as --session for the may-dispatch check, which
+    # `resume --help` documents, and the Crawler launched as `claude -p --session-id <that id>`.
+    # It resolved the orchestrator's seat and the write guard refused its edits.
+    stub = os.path.join(tmpdir("stub-bin-109"), "fake-claude")
+    with open(stub, "w") as fh:
+        fh.write("#!/bin/sh\nexit 0\n")
+    os.chmod(stub, 0o755)
+    exe = os.path.join(ROOT, "bin", "showrunner")
+    env = dict(os.environ, NO_COLOR="1", SHOWRUNNER_SESSION="orch-109")
+    # ONE REPO PER SPAWN: four leaves in one repo collide on live overlap with each other, and
+    # that refusal is not the one under test.
+    repos = {}
+
+    def repo(leaf):
+        if leaf not in repos:
+            c = make_repo()
+            new_graph(c).add("leaf " + leaf, leaf_id=leaf, paths=["lib/x.py"])
+            data = dict(c.data)
+            data["dispatch"] = dict(data.get("dispatch") or {}, claude_bin=stub)
+            with open(os.path.join(c.root, ".showrunner", "config.json"), "w") as fh:
+                json.dump(data, fh)
+            repos[leaf] = c
+        return repos[leaf]
+
+    def spawn(leaf, *argv):
+        return subprocess.run([sys.executable, exe, "spawn", leaf] + list(argv),
+                              cwd=repo(leaf).root, capture_output=True, text=True, env=env,
+                              stdin=subprocess.DEVNULL)
+
+    def recorded(leaf):
+        es = [c for c in campaign.load(repo(leaf)).get("crawlers", []) if c.get("leaf") == leaf]
+        return es[0].get("session") if es else "<no record>"
+
+    p = spawn("S1", "--actor", "a", "--launch", "--session", "orch-109")
+    ok("a launch given the CALLER's --session still succeeds", p.returncode == 0,
+       (p.stdout + p.stderr)[-400:])
+    ok("...and the Crawler gets a session of its OWN, not the caller's",
+       recorded("S1") not in (None, "", "orch-109", "<no record>"), recorded("S1"))
+
+    p = spawn("S2", "--actor", "b", "--launch", "--child-session", "pinned-child-109")
+    eq("`--child-session` pins the Crawler's id when that is wanted",
+       (p.returncode, recorded("S2")), (0, "pinned-child-109"))
+
+    p = spawn("S3", "--actor", "c", "--launch", "--session", "orch-109",
+              "--child-session", "orch-109")
+    eq("a child id that IS the caller's is refused", p.returncode, 2)
+    ok("...before anything is created", recorded("S3") == "<no record>"
+       and (not os.listdir(repo("S3").worktree_root)
+            if os.path.isdir(repo("S3").worktree_root) else True), recorded("S3"))
+    ok("...and the refusal says whose id it is", "calling session" in p.stderr, p.stderr[-300:])
+
+    roles.claim(repo("S4"), "campaign-lead", "seat-holder-109", pid=os.getpid(), who="lead")
+    p = spawn("S4", "--actor", "d", "--launch", "--child-session", "seat-holder-109")
+    eq("a child id that a HELD SEAT's session owns is refused", p.returncode, 2)
+    ok("...naming the seat", "campaign-lead" in p.stderr, p.stderr[-300:])
+
+
 def test_spawn_binds_the_crawler_to_its_campaign():
     group("A launched Crawler resolves the campaign that placed it, and says which one it "
           "looked in when it does not (#85)")
@@ -17822,7 +17886,7 @@ def test_never_integrated_leaves_do_not_collide():
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

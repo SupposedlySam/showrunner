@@ -102,8 +102,8 @@
         "hooks": [
           {
             "asyncRewake": true,
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.showrunner/hooks/issue-waker.py",
-            "statusMessage": "showrunner: watching for new issues",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.showrunner/hooks/github-waker.sh",
+            "statusMessage": "showrunner: watching GitHub for activity",
             "timeout": 1860,
             "type": "command"
           }

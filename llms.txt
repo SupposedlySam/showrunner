@@ -119,6 +119,10 @@ showrunner spawn <leaf> --launch     # ...and STARTS a real Claude Code session 
                                      # hooks, on the model its lane declares. --dry-run to see the
                                      # command and start nothing. Without --launch, spawn prepares
                                      # and stops, and you start the agent yourself.
+                                     # --session names the CALLER (the may-dispatch check); the
+                                     # Crawler always gets its own new id unless --child-session
+                                     # pins one, which is refused if it is the caller's or a held
+                                     # seat's session.
 showrunner spawn <leaf> --sparse app audio
                                      # a SPARSE tree: only these top-level dirs (plus root files)
                                      # are ever written. Same as sparse_by_label in config, which

@@ -1053,6 +1053,12 @@ TARGETS = [
      "lib/showrunner/locks.py",
      r"(    def stale_held_by\(self, names\):\n)",
      "        return []\n    def _neutered_stale_held_by(self, names):\n"),
+    # Returning at once is "this child id belongs to nobody", which is also what a check that
+    # never looks says — and then a Crawler launches wearing its orchestrator's identity (#109).
+    ("a borrowed Crawler session id", "cli._child_session_check",
+     "lib/showrunner/cli.py",
+     r"(def _child_session_check\(cfg, child, caller, rehearsing=False\):\n)",
+     "    return\ndef _neutered_child_session_check(cfg, child, caller, rehearsing=False):\n"),
     # (False, ...) is "could not post", which is also what a spin-down that never told anyone
     # looks like — and then an orchestrator waits idle for a leaf that already closed.
     ("telling the orchestrator a leaf closed", "dispatch.announce_finished",
