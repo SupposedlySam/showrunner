@@ -896,9 +896,17 @@ swallows the blocked case, because that idiom collapses every non-zero code.
 **Arming that watchdog is a manual step, once per install.** Point it at
 `.showrunner/hooks/waiting-probe.sh`, **not** at `showrunner waiting` directly — the probe maps
 the three codes above onto the two-plus-unknown contract a watchdog expects, so a BLOCKED Crawler
-rings rather than being reported as a broken probe, and it never answers "waiting" from inside a
+reads as "not waiting" rather than as a broken probe, and it never answers "waiting" from inside a
 worktree, where a Crawler would otherwise silence its own watchdog with a sibling's liveness.
 `showrunner doctor` names the file and says whether it is armed.
+
+**Waiting on your own Crawlers: `showrunner waiting --follow`, in the background.** It blocks
+while the answer is "waiting" and exits with the answer a single call gives the moment that
+changes: the Crawler closed or died (1), or it is BLOCKED or STALLED (3); `showrunner waiting --follow --interval 60` sets the seconds
+between looks. Run it with your
+harness's background-command facility and end the turn; its exit wakes the session. That is
+the backstop for a spin-down notice that never lands and for a chat waker that died, because a
+watchdog that checks once per turn-end goes quiet for as long as the answer is "waiting".
 
 It cannot arm it for you: a probe an agent can set is a watchdog an agent can switch off, and one
 that always exits 0 reads as "always waiting". Until it is armed, an orchestrator that has

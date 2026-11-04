@@ -58,9 +58,9 @@ done
 case "$?" in
   0) echo "showrunner: WAITING on live dispatched work"; exit 0 ;;
   1) echo "showrunner: NOT WAITING — nothing outstanding"; exit 1 ;;
-  3) msg="a Crawler is BLOCKED — alive and inert, needs a message not time"
-     # BOTH channels, and neither is redundant: stderr is what makes the RING actionable to the
-     # human it wakes, stdout is what the harness stores so the record says what was found. An
+  3) msg="a Crawler is BLOCKED or STALLED — alive and not working, needs a message not time; showrunner waiting names which"
+     # BOTH channels, and neither is redundant: stderr is the not-waiting reason the watchdog
+     # logs, stdout is what the harness stores so the record says what was found. An
      # earlier version of this change moved the line to stdout and silently took the stderr
      # reason away -- the companion rule, broken on the commit that was enforcing it.
      echo "showrunner: $msg"

@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 from . import (__version__, brief, campaign, collide, config, dispatch, events, gates,
                reach, graph as G, harness, lanes, lease, locks, pin, roles, wake,
@@ -885,9 +886,12 @@ def cmd_doctor(args):
                   "        A human arms this once per install, deliberately: a verb showrunner "
                   "could call would be callable by the sessions being watched, and a probe of "
                   "`true` is the watchdog switched off by the thing it watches.\n"
-                  "        Set %s to:\n            %s waiting"
+                  "        Set %s to:\n            %s\n"
+                  "        The hook, not `showrunner waiting` directly: it maps the verb's exit 3 "
+                  "(BLOCKED or STALLED) to 'not waiting' with the reason on stderr, which the watchdog "
+                  "logs; a bare 3 reads as a probe that could not answer."
                   % (YEL + "warn " + OFF, dirname, detail or "the harness's waiting-probe key",
-                     brief.sr_bin(cfg)))
+                     os.path.join(cfg.root, ".showrunner", "hooks", "waiting-probe.sh")))
 
     # THE BINARY EVERY BRIEF NAMES. A Crawler's proof-of-done, its close, its stop-gate trigger
     # all route through one absolute path, and this repo spent a week naming one that did not
@@ -3630,6 +3634,15 @@ def cmd_watch(args):
 def cmd_waiting(args):
     cfg = _cfg(args)
     is_waiting, detail = campaign.waiting(cfg, _graph(cfg), base=args.base)
+    # --follow BLOCKS WHILE THE ANSWER IS "waiting", then answers exactly as a single call would.
+    # An orchestrator with nothing left but its Crawlers runs it in the background: the harness
+    # re-invokes the session when it exits, whether the Crawler closed, died, or stopped working.
+    # That does not depend on the chat wake landing, nor on a watchdog that checks once per
+    # turn-end and then goes quiet for as long as the answer is "waiting".
+    while (getattr(args, "follow", False) and is_waiting
+           and not (detail.get("blocked_crawlers") or detail.get("stalled_crawlers"))):
+        time.sleep(max(5, args.interval))
+        is_waiting, detail = campaign.waiting(cfg, _graph(cfg), base=args.base)
     if args.porcelain:
         # The porcelain branch returns through the same three-code path below, so a structured
         # consumer and a prose one cannot disagree about the verdict.
@@ -4344,6 +4357,12 @@ def build_parser():
     s.add_argument("--porcelain", action="store_true",
                    help="JSON on stdout — THE CONTRACT. The prose form splits its verdict across "
                         "stdout and its BLOCKED finding across both streams; build on this one")
+    s.add_argument("--follow", action="store_true",
+                   help="block while waiting, then answer as one call would: exits when no "
+                        "dispatched work is live, or a Crawler is BLOCKED or STALLED. Run it in "
+                        "the background, and the harness wakes you when it exits")
+    s.add_argument("--interval", type=int, default=60,
+                   help="with --follow: seconds between looks (minimum 5)")
     s.set_defaults(func=cmd_waiting)
 
     s = sub.add_parser("gc", help="remove worktrees whose branch is merged and whose tree is "

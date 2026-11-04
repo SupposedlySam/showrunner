@@ -67,6 +67,14 @@ watchdog with a sibling's liveness.
 You cannot do this for the operator — a probe an agent can set is a watchdog an agent can switch
 off — so if you are running unattended, say that it is unarmed rather than proceeding quietly.
 
+**Waiting on your own Crawlers: `showrunner waiting --follow`, in the background.** It blocks
+while the answer is "waiting" and exits with the answer a single call gives the moment that
+changes: the Crawler closed or died (1), or it is BLOCKED or STALLED (3); `showrunner waiting --follow --interval 60` sets the seconds
+between looks. Run it with your
+harness's background-command facility and end the turn; its exit wakes the session. That is
+the backstop for a spin-down notice that never lands and for a chat waker that died, because a
+watchdog that checks once per turn-end goes quiet for as long as the answer is "waiting".
+
 **A probe's COST is part of its contract.** game_loop runs `waiting` under a hardcoded 15s
 timeout and reads a timeout as *"the probe did not run at all"* — which it reports as a broken
 watchdog and then **stops scheduling re-checks**. So a slow probe does not degrade the watchdog,

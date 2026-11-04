@@ -3366,6 +3366,42 @@ def test_waiting():
     ok("an explicitly PARKED Crawler does count — parked is accounted-for, not stalled",
        is_waiting is True and detail["parked_crawlers"], detail)
 
+    # --follow BLOCKS WHILE WAITING AND ANSWERS WHEN IT ENDS. The watchdog checks once per
+    # turn-end and goes quiet for as long as the answer is "waiting", so an orchestrator whose
+    # Crawler then finishes, with the chat wake lost, is never rung. A background --follow is
+    # the backstop: it exits when the wait ends, and the harness re-invokes the session.
+    fol = make_repo()
+    gf = new_graph(fol)
+    gf.add("followed", leaf_id="wq3", labels=["backend"])
+    rec_f = worktree.spawn(fol, gf.show("wq3"), actor="brief-life")
+    # A DETACHED GRANDCHILD, as a launched Crawler is: a child of this process would linger as
+    # a zombie after it exits, and a zombie's pid still answers alive.
+    _pid = int(subprocess.run(["sh", "-c", "sleep 6 >/dev/null 2>&1 & echo $!"],
+                              capture_output=True, text=True).stdout.strip())
+    try:
+        campaign.record_spawn(fol, rec_f, pid=_pid)
+        exe = os.path.join(ROOT, "bin", "showrunner")
+        t0 = time.time()
+        p = subprocess.run([sys.executable, exe, "waiting", "--follow", "--interval", "5"],
+                           cwd=fol.root, capture_output=True, text=True, timeout=120,
+                           stdin=subprocess.DEVNULL)
+        took = time.time() - t0
+    finally:
+        try:
+            os.kill(_pid, 9)
+        except OSError:
+            pass
+    ok("`waiting --follow` BLOCKS while the Crawler lives, rather than answering at once",
+       took >= 5, (took, p.stdout[-200:]))
+    eq("...and exits 1, not waiting, once the Crawler is gone — the same answer one call gives",
+       p.returncode, 1)
+    t0 = time.time()
+    p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "waiting",
+                        "--follow", "--interval", "5"], cwd=fol.root,
+                       capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+    ok("...and with nothing to wait on it answers at once instead of sleeping first",
+       p.returncode == 1 and time.time() - t0 < 5, (p.returncode, time.time() - t0))
+
 
 def test_concurrency():
     group("More than one orchestrator may share this state (real races, not theoretical)")
