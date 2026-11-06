@@ -10798,8 +10798,11 @@ def test_publishable():
             with open(_f, errors="ignore") as fh:
                 gl_src += fh.read()
     if gl_src:
+        # Either root: game_loop #193 builds it from RECORD_ROOT, which is the tree's own .game_loop
+        # unless the session's hooks run from the main checkout's, and then it is that one.
         ok("the harness still calls its per-session directory `sessions/` — the segment this "
-           "repo builds its model.json path from", 'os.path.join(ROOT, "sessions")' in gl_src)
+           "repo builds its model.json path from",
+           re.search(r'os\.path\.join\((RECORD_)?ROOT, "sessions"\)', gl_src) is not None)
         ok("...and still names the file model.json, so a rename fails HERE loudly instead of "
            "turning every model verdict into a silent `unknown`",
            'MODEL_F = "model.json"' in gl_src)
@@ -11141,6 +11144,21 @@ def test_dispatch():
     write_model(models=["claude-sonnet-5", "claude-haiku-4-5"], changed=True)
     eq("a model that changed UNDER the run is caught even though it started correct — "
        "--fallback-model degrades mid-run, silently, exactly when every Crawler hits the cap",
+       dispatch.model_finding(cfg, entry)["verdict"], "changed-mid-run")
+    # game_loop #193: a session whose hooks run from the main checkout keeps its record THERE, not
+    # in the worktree it works in. The tree's own record still wins when both exist.
+    main_sess = os.path.join(cfg.root, ".game_loop", "sessions", "s2")
+    os.makedirs(main_sess, exist_ok=True)
+    with open(os.path.join(main_sess, "model.json"), "w") as fh:
+        json.dump({"models": ["claude-sonnet-5"], "changed": False}, fh)
+    eq("a record kept in the MAIN checkout's .game_loop is read, not reported unknown",
+       dispatch.model_finding(cfg, dict(entry, session="s2"))["verdict"], "match")
+    with open(os.path.join(cfg.root, ".game_loop", "sessions", "s2", "model.json"), "w") as fh:
+        json.dump({"models": ["claude-opus-5"], "changed": False}, fh)
+    os.makedirs(os.path.join(cfg.root, ".game_loop", "sessions", "s1"), exist_ok=True)
+    with open(os.path.join(cfg.root, ".game_loop", "sessions", "s1", "model.json"), "w") as fh:
+        json.dump({"models": ["claude-sonnet-5"], "changed": False}, fh)
+    eq("...and the tree's own record wins over the main checkout's when both exist",
        dispatch.model_finding(cfg, entry)["verdict"], "changed-mid-run")
 
     # A LIVE PID IS NOT A WORKING AGENT. Measured: a dispatched Crawler printed "Execution
@@ -17576,6 +17594,54 @@ def test_the_github_waker_rings_and_stays_quiet():
         os.remove(state_file)
     eq("an unreadable look with no state yet, asked once, says it could not look (1)",
        W.run(cfg, once=True, runner=lambda _q: None)[0], 1)
+
+    # SEVERAL WAKERS, ONE RING. REPORTED: one close woke a session twice, from two wakers — each
+    # turn-end starts one, an earlier one keeps running for its budget, and each compared against
+    # the state it loaded at start, so the second never saw the first one's save.
+    def said(n, text):
+        return gql([pr(1)], [pr(5, comments=[c(1, "boss", "old"), c(n, "boss", text)])])
+    W.run(cfg, once=True, runner=lambda _q: answers[0])
+    clock = [1000.0]
+    other = {}
+
+    def other_records_it_first(_sec):
+        other["code"] = W.run(cfg, once=True, runner=lambda _q: said(30, "dup"))[0]
+        clock[0] += 5000
+    code, text = W.run(cfg, sleep=other_records_it_first, now=lambda: clock[0],
+                       runner=lambda _q: said(30, "dup"))
+    ok("another waker that records an event first rings for it...", other.get("code") == 2, other)
+    eq("...and a waker started BEFORE it, holding the old state, stays quiet", (code, text), (0, ""))
+    looked = []
+
+    def a_newer_waker_starts(_sec):
+        W._write_owner(cfg, "a-newer-waker")
+        clock[0] += 5000                        # so a waker that ignores it still ends, and fails
+    code, _ = W.run(cfg, sleep=a_newer_waker_starts, now=lambda: clock[0],
+                    runner=lambda _q: looked.append(1) or said(31, "late"))
+    ok("a waker that a NEWER one replaced exits quietly without looking", code == 0 and not looked,
+       (code, looked))
+    code, text = W.run(cfg, sleep=lambda _sec: clock.__setitem__(0, clock[0] + 5000),
+                       now=lambda: clock[0], runner=lambda _q: said(31, "late"))
+    ok("...while the waker that owns the watch still rings", code == 2 and "late" in text,
+       (code, text))
+    both = gql([pr(1)], [pr(5, comments=[c(1, "boss", "old"), c(40, "boss", "dup2"),
+                                          c(41, "boss", "fresh")])])
+
+    def other_rings_for_the_first(_sec):
+        W.run(cfg, once=True, runner=lambda _q: said(40, "dup2"))
+        clock[0] += 5000
+    code, text = W.run(cfg, sleep=other_rings_for_the_first, now=lambda: clock[0],
+                       runner=lambda _q: both)
+    ok("...and when the stale waker DOES ring, it names only what nobody has rung for yet",
+       code == 2 and "fresh" in text and "dup2" not in text, (code, text))
+    held = {"events": [], "states": {}}
+    on_disk = W.load_state(cfg)
+    ok("each poll compares with the state ON DISK, not the copy a waker loaded at start",
+       on_disk and W._current(cfg, held) == on_disk and W._current(cfg, held) is not held,
+       (on_disk, W._current(cfg, held)))
+    W._write_owner(cfg, "the-owner")
+    eq("the owner a waker records is the one an older waker reads back", W._read_owner(cfg),
+       "the-owner")
     tree = os.path.join(cfg.root, ".worktrees", "waker-probe")
     sh(["git", "worktree", "add", "-q", "-b", "waker-probe", tree], cfg.root)
     from showrunner import config as C

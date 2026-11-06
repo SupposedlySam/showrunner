@@ -19,7 +19,13 @@ Nothing configured means the hook exits at once: it costs nothing until a projec
 
 WHAT RINGS: a new issue or PR; a state change — closed, MERGED, reopened, which arrives as no
 comment at all; a comment; a REVIEW with a body or an approve/request-changes verdict; an INLINE
-review comment. Comments on a closed item count: closed is not finished.
+review comment. Comments on a closed item count: closed is not finished. A close or merge rings
+even when the agent made it: a state change carries no signature to recognise.
+
+ONE RING PER EVENT, however many wakers are running. Each turn-end starts one, so several can be
+alive at once: the newest owns the watch and an older one exits when it sees it was replaced, and
+every poll compares against the state on disk under a lock, so the first to record an event is
+the only one that rings for it.
 
 WHAT DOES NOT, stated so silence is not read as a broken watcher: the agent's own writing (a
 comment or review ending in `signature`, or a PR body ending in Claude Code's attribution line —
@@ -251,6 +257,32 @@ def save_state(cfg, state):
         return False
 
 
+def _current(cfg, held):
+    """The state on disk, which another waker may have advanced; `held` when it cannot be read."""
+    return load_state(cfg) or held
+
+
+def _owner_path(cfg):
+    return os.path.join(cfg.state_dir, "waker-owner")
+
+
+def _write_owner(cfg, token):
+    try:
+        os.makedirs(cfg.state_dir, exist_ok=True)
+        with open(_owner_path(cfg), "w") as fh:
+            fh.write(token)
+    except OSError:
+        pass
+
+
+def _read_owner(cfg):
+    try:
+        with open(_owner_path(cfg)) as fh:
+            return fh.read().strip() or None
+    except OSError:
+        return None
+
+
 def in_linked_worktree(cfg):
     """A Crawler's tree inherits this hook; it must never hold a Crawler at its turn-end."""
     tree = getattr(cfg, "tree", None)
@@ -259,6 +291,7 @@ def in_linked_worktree(cfg):
 
 def run(cfg, once=False, sleep=time.sleep, now=time.time, runner=None):
     """(exit code, text). 2 with a wake; 0 quiet or not configured; 1 `once` that could not look."""
+    from .util import file_lock
     sp = spec(cfg)
     if sp is None:
         return 0, "waker: nothing configured (no `waker.repos` or `waker.upstream`)"
@@ -273,14 +306,28 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, runner=None):
         ids, states = snapshot(items)
         state = {"events": sorted(ids), "states": states}
         save_state(cfg, state)
+    # Every turn-end starts a looping waker, and one that has not fired keeps running for its
+    # budget. The NEWEST one owns the watch (it has the latest deadline, so an older one adds no
+    # cover); an older one that finds itself replaced exits quietly. `once` is a caller's own
+    # poll and never takes the watch from the hook.
+    token = None if once else "%d:%r" % (os.getpid(), now())
+    if token:
+        _write_owner(cfg, token)
     deadline = now() + sp["budget_sec"]
     while True:
         if not once:
             sleep(sp["poll_sec"])
-        wake, new_state = poll(sp, state, look(sp, runner))
-        if new_state is not None:
-            save_state(cfg, new_state)          # advance FIRST: a wake re-sent is noise
-            state = new_state
+            if _read_owner(cfg) not in (None, token):
+                return 0, ""
+        items = look(sp, runner)
+        # Compare against the state ON DISK, under a lock: another waker may have recorded this
+        # same event since we last looked, and the first to record it is the only one to ring.
+        with file_lock(_state_path(cfg)):
+            state = _current(cfg, state)
+            wake, new_state = poll(sp, state, items)
+            if new_state is not None:
+                save_state(cfg, new_state)      # advance FIRST: a wake re-sent is noise
+                state = new_state
         if wake:
             return 2, wake
         if once:

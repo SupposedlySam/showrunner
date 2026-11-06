@@ -504,24 +504,28 @@ def resume(cfg, entry, decision, prompt, dry_run=False):
 
 
 def observed_models(cfg, entry):
-    """What game_loop saw this session actually run on, read from the CRAWLER's checkout.
+    """What game_loop saw this session actually run on, read from the CRAWLER's record.
 
     Returns None when there is nothing to read, and the caller must treat that as UNKNOWN
     rather than as agreement — game_loop warned about exactly this: `changed: false` means the
     model did not move, never that it matched what was asked for, and an absent file means
     nobody looked. An absence here is not evidence of a match.
+
+    The record is the tree's own unless the session's hooks run from the main checkout's
+    .game_loop, and then game_loop keeps it there; a Crawler's session id is its own, so reading
+    the main checkout's copy second cannot pick up the orchestrator's.
     """
     session = entry.get("session")
     if not session:
         return None
-    path = os.path.join(cfg.abspath(entry["worktree"]), ".game_loop", "sessions", session,
-                        "model.json")
-    try:
-        with open(path) as fh:
-            import json
-            return json.load(fh)
-    except (OSError, ValueError):
-        return None
+    import json
+    for home in (cfg.abspath(entry["worktree"]), cfg.root):
+        try:
+            with open(os.path.join(home, ".game_loop", "sessions", session, "model.json")) as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            continue
+    return None
 
 
 def models_agree(declared, observed):

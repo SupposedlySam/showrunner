@@ -817,6 +817,9 @@ showrunner waker                     # Stop, asyncRewake (github-waker.sh): whil
                                      # comment, a REVIEW verdict or inline review comment, and a
                                      # merge/close/reopen. Quiet on its own signed writing; never
                                      # runs in a linked worktree; inert until configured.
+                                     # One ring per event however many turn-ends left a
+                                     # waker running: the newest owns the watch, and each
+                                     # poll compares with the saved state under a lock.
                                      # `showrunner waker --once` looks once;
                                      # `showrunner waker --probe` exits 0 — how the shim tells
                                      # a binary that knows the verb from an older one.

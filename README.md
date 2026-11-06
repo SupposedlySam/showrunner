@@ -504,7 +504,10 @@ verdict or inline review comment, and a merge, close or reopen, which arrive as 
 all. `waker.upstream` watches only the items one author opened on somebody else's repository.
 The agent's own writing, recognised by `waker.signature`, is counted and never reported; anything
 from outside `waker.trusted_logins`/`trusted_names` is marked as a claim to verify. It never runs
-in a Crawler's worktree, and with nothing configured it exits at once.
+in a Crawler's worktree, and with nothing configured it exits at once. Each turn-end starts a
+waker, so several can be alive at once; each event still rings once, because the newest waker owns
+the watch and every poll compares against the saved state under a lock. A close or merge the agent
+made itself still rings: a state change carries no signature.
 `showrunner waker --once` looks once and reports; `SHOWRUNNER_GH` names the `gh` binary when it
 is not on PATH.
 
