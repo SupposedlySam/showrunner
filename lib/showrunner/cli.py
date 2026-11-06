@@ -1507,9 +1507,9 @@ class _LazyVersion(argparse.Action):
 def cmd_self(args):
     """`showrunner self` — pin the tool's own code at a git ref, for a central install.
 
-    NOTHING CONSUMES THIS YET, and that is said plainly rather than left for a reader to infer
-    from the absence of callers: `install.sh --central` and the dispatcher shim are CI-03, and
-    a pin with no consumer is a populated directory, not a working central install.
+    A repo wired with `install.sh --central` runs whatever is pinned at the central path on its
+    next call, so re-pinning that path IS the upgrade. showrunner keeps no list of the repos
+    wired to it; `showrunner --version` inside one says what it runs.
     """
     # NO CONFIG IS LOADED HERE, and its absence is the fix rather than an oversight. Both halves
     # of this verb are about a DIRECTORY and a checkout of showrunner's own code; neither is
@@ -1554,8 +1554,14 @@ def cmd_self(args):
           "standing in" % d["source"])
     print("  stamped %s and %s, so 'what is central running' answers with a commit rather than "
           "with whoever last copied a working tree" % (pin.VERSION_FILE, pin.PINNED_FILE))
-    print("  NOTHING POINTS AT IT YET — wiring consumer repos to a central copy is CI-03 "
-          "(`install.sh --central`). This populated a directory; it did not switch anything over.")
+    if d.get("replaced"):
+        print("  UPDATED IN PLACE from %s — every repo wired to this path with `install.sh "
+              "--central` runs %s on its next call. showrunner keeps no list of those repos; "
+              "`showrunner --version` inside one names the commit it runs."
+              % (d["replaced"][:12], d["sha"][:12]))
+    else:
+        print("  FIRST PIN at this path. A repo already wired to it with `install.sh --central` "
+              "runs this on its next call; to wire one: ./install.sh --central <repo>")
     return 0
 
 

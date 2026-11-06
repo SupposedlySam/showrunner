@@ -1509,6 +1509,8 @@ showrunner self --pin <ref> --dest <path>    # populate central: extract bin/ an
                                              # in the repo the RUNNING CODE lives in, never in the
                                              # project you are standing in. From a consumer repo it
                                              # refuses rather than publishing their HEAD as the tool.
+                                             # Re-pinning the same path IS the upgrade: every repo
+                                             # wired to it runs the new pin on its next call.
 showrunner self --dest <path>                # what is pinned there; exit 2 if it was edited since
 ./install.sh /path/to/project                # revert: restore the local copy, drop the dependency
 ```

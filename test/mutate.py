@@ -1393,7 +1393,9 @@ NOT_SWEPT = {
                               "supply a well-formed payload, so they would not see it.",
     "cli.cmd_self": "CLI wrapper over pin.pin / pin.read_pin, both of which ARE swept. Its own "
                     "decisions are exit codes, and both branches are asserted THROUGH the CLI: "
-                    "0 on a clean pin, 2 on a directory edited since it was pinned. WHAT THAT "
+                    "0 on a clean pin, 2 on a directory edited since it was pinned; and the "
+                    "updated-in-place vs first-pin line, read from pin.pin's `replaced`, is "
+                    "asserted through the CLI both ways. WHAT THAT "
                     "DOES NOT COVER: the two argument refusals (--pin without --dest, --dest "
                     "without either), which are asserted nowhere.",
     "lease._register_locked": "the shared body of register_guard and register_stop_trigger, "

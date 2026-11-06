@@ -10037,6 +10037,7 @@ def test_self_pin():
        "preferring one of the two files", edited and not edited.get("consistent"), edited)
 
     # Re-pinning over our OWN pin is allowed — that is the upgrade path.
+    eq("a first pin replaced nothing, so it reports nothing replaced", d.get("replaced"), None)
     d2 = pin.pin(head, dest)
     eq("re-pinning over an existing pin works, which is the whole upgrade path", d2["sha"], head)
     ok("...and it repaired the edited stamp, so an upgrade is also the remedy for a modified "
@@ -10057,6 +10058,21 @@ def test_self_pin():
     ok("...naming both values, because 'they disagree' without them is a fact the reader "
        "cannot act on", "DISAGREE" in bad.stdout, bad.stdout[-200:])
     pin.pin(head, dest)
+
+    # REPORTED (#110): updating a central copy repos already ran printed "NOTHING POINTS AT IT
+    # YET ... it did not switch anything over", which sent people to re-run the installer.
+    again = subprocess.run([sys.executable, sr, "self", "--pin", "HEAD", "--dest", dest],
+                           capture_output=True, text=True, cwd=ROOT)
+    ok("re-pinning a path that holds a pin says it UPDATED IN PLACE, naming the commit it "
+       "replaced", again.returncode == 0 and "UPDATED IN PLACE from %s" % head[:12] in again.stdout
+       and "NOTHING POINTS" not in again.stdout, again.stdout[-400:])
+    fresh_dest = os.path.join(tmpdir("central-fresh"), "central")
+    first = subprocess.run([sys.executable, sr, "self", "--pin", "HEAD", "--dest", fresh_dest],
+                           capture_output=True, text=True, cwd=ROOT)
+    ok("...while a first pin says it is the first, and how to wire a repo to it",
+       first.returncode == 0 and "FIRST PIN" in first.stdout
+       and "install.sh --central" in first.stdout and "UPDATED IN PLACE" not in first.stdout,
+       first.stdout[-400:])
 
     # THE DELETION SAFETY. `pin` removes its destination wholesale, so the question "is this
     # mine?" is deciding a deletion. A mistyped --dest must not eat a directory.

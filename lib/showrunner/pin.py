@@ -393,6 +393,10 @@ def pin(ref, dest, source=None):
             "A pin overwrites its destination wholesale, so it will only ever overwrite "
             "something it recognises as its own. Move it aside yourself." % dest)
 
+    # WHAT WAS HERE, read before it is replaced: an update to a copy repos already run and a
+    # first populate are different events, and only this side can tell them apart afterwards.
+    replaced = (read_pin(dest) or {}).get("sha") if os.path.exists(dest) else None
+
     staging = "%s.pinning.%d" % (dest, os.getpid())
     shutil.rmtree(staging, ignore_errors=True)
     os.makedirs(staging)
@@ -433,4 +437,4 @@ def pin(ref, dest, source=None):
     os.rename(staging, dest)
 
     return {"ref": ref, "sha": sha, "dest": dest, "at": stamp["at"], "source": source,
-            "binary": os.path.join(dest, "bin", "showrunner")}
+            "binary": os.path.join(dest, "bin", "showrunner"), "replaced": replaced}
