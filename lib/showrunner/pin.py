@@ -106,6 +106,7 @@ def running():
     pinned = read_pin(root)
     if pinned:
         info.update(source="pinned", sha=pinned.get("sha"), ref=pinned.get("ref"),
+                    pin_source=pinned.get("source"), track=pinned.get("track"),
                     unreadable=pinned.get("unreadable"))
         # An edited pin is not the commit it claims, and read_pin already knows. `dirty` is left
         # None when the stamp could not be read: "edited since it was pinned" is a finding, and
@@ -133,6 +134,13 @@ def running():
         rc2, dirty, _ = git(["status", "--porcelain"], cwd=root)
         info["dirty"] = bool((dirty or "").strip()) if rc2 == 0 else None
     return info
+
+
+def _is_bare_sha(ref, sha):
+    """Was the pin named by a commit hash rather than a branch or tag?"""
+    r = (ref or "").lower()
+    return len(r) >= 7 and all(c in "0123456789abcdef" for c in r) and \
+        (sha or "").lower().startswith(r)
 
 
 def staleness(source_repo=None):
@@ -176,15 +184,26 @@ def staleness(source_repo=None):
                         "reaches this copy only when somebody re-vendors it, and nothing here "
                         "will say so. `self --pin <ref>` makes it answerable.")
     ref, sha = d.get("ref"), d.get("sha")
-    repo = source_repo or d.get("root")
+    repo = source_repo or d.get("pin_source") or d.get("root")
     if not ref or not sha or not repo:
         return ("warn", "pinned, but the stamp does not name both a ref and a commit, so "
                         "staleness cannot be computed.")
+    if _is_bare_sha(ref, sha):
+        if not d.get("track"):
+            return ("warn", "pinned to the bare commit %s, which is level with itself by "
+                            "definition — no branch was recorded to compare against, so CANNOT "
+                            "TELL whether it is behind. `self --pin <branch>` makes it "
+                            "answerable." % sha[:12])
+        ref = d["track"]
     rc, out, _ = git(["rev-list", "--count", "%s..%s" % (sha, ref)], cwd=repo)
     if rc != 0 or not (out or "").strip().isdigit():
-        return ("warn", "pinned at %s (%s), and that ref could not be resolved here — CANNOT "
+        why = ("the stamp names no source clone, so git was asked in the pinned copy, which is "
+               "not a repository; re-pin with this version to record one"
+               if not (source_repo or d.get("pin_source")) else
+               "git could not resolve it in %s" % repo)
+        return ("warn", "pinned at %s (%s), and that ref could not be resolved — %s. CANNOT "
                         "TELL whether it is behind, which is different from being current."
-                        % (sha[:12], ref))
+                        % (sha[:12], ref, why))
     behind = int(out.strip())
     if behind == 0:
         return ("ok", "pinned at %s and level with %s — nothing upstream is missing here."
@@ -410,14 +429,25 @@ def pin(ref, dest, source=None):
             if os.path.isfile(path):
                 os.chmod(path, 0o755)
 
-        stamp = {"ref": ref, "sha": sha, "at": now()}
+        # THE CLONE IT WAS CUT FROM, so staleness can ask git there (#112). The pinned copy is
+        # not a repository, so without this every central consumer read CANNOT TELL for a ref
+        # that resolved fine in the clone that made the pin.
+        stamp = {"ref": ref, "sha": sha, "at": now(), "source": os.path.realpath(source)}
+        if _is_bare_sha(ref, sha):
+            # A BARE COMMIT IS LEVEL WITH ITSELF by definition, so "behind" needs a branch to
+            # mean anything: the one checked out in the source, when it contains the commit.
+            rc, br, _ = git(["symbolic-ref", "--quiet", "--short", "HEAD"], cwd=source)
+            br = (br or "").strip()
+            if rc == 0 and br and git(["merge-base", "--is-ancestor", sha, br],
+                                      cwd=source)[0] == 0:
+                stamp["track"] = br
         with open(os.path.join(staging, VERSION_FILE), "w") as fh:
             fh.write(sha + "\n")
         with open(os.path.join(staging, PINNED_FILE), "w") as fh:
-            # NO "home" AND NO SOURCE REPO, following game_loop's reasoning rather than
-            # inventing a second one: a --dest checkout is meant to serve many consumers, so
-            # naming whichever repo happened to run the command is a fact that reads as
-            # ownership and is not one.
+            # NO "home", following game_loop's reasoning rather than inventing a second one: a
+            # --dest checkout is meant to serve many consumers, so naming whichever consumer
+            # happened to run the command is a fact that reads as ownership and is not one.
+            # "source" is different: it is the showrunner clone, the only place git can answer.
             json.dump(stamp, fh, indent=2)
             fh.write("\n")
     except Exception as exc:                        # noqa: BLE001 — see below

@@ -1,17 +1,5 @@
 {
   "hooks": {
-    "PostCompact": [
-      {
-        "hooks": [
-          {
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.showrunner/hooks/whoami.sh",
-            "statusMessage": "showrunner: what is this session?",
-            "timeout": 20,
-            "type": "command"
-          }
-        ]
-      }
-    ],
     "PreToolUse": [
       {
         "hooks": [
@@ -87,9 +75,9 @@
             "type": "command"
           },
           {
-            "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR\"/.showrunner/hooks/unresearched-gate.sh",
-            "statusMessage": "showrunner: does this message admit skipped research?"
+            "statusMessage": "showrunner: does this message admit skipped research?",
+            "type": "command"
           }
         ]
       },

@@ -13,7 +13,7 @@ blocks a legitimate shape trains its own bypass, and the bypass outlives the les
 argument `pipeline-status-gate.sh` makes for noticing rather than denying. So this only ever adds
 `additionalContext` to a call that proceeds.
 
-WHY IT FIRES AT THE MOMENT OF REACH. SessionStart and PostCompact announce the tool; that
+WHY IT FIRES AT THE MOMENT OF REACH. SessionStart announces the tool, compaction included; that
 announcement is read once and competes with everything else in the window. The moment an agent
 types `git worktree add` is the moment it has a specific intent that a specific verb serves, and
 it is the only moment at which naming that verb costs nothing to act on.

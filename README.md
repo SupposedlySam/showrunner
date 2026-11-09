@@ -285,7 +285,7 @@ name, and releases any lock that Crawler held whose holder is proved dead, namin
 
 **What a compacted agent gets back.** An agent several compactions deep can lose which campaign
 it is on and what verbs exist, and stop using the tool at all — doing the work by hand in a repo
-carrying a live campaign. `whoami`, which runs on SessionStart **and PostCompact**, carries the
+carrying a live campaign. `whoami`, which runs on SessionStart — compaction included — carries the
 campaign's *state* rather than the bare fact that one exists: how many leaves, how they split by
 status, and how many are READY right now. It prints every verb, derived from the argparse parser
 rather than a hand-written list that would go stale, because naming only the dispatch verbs
@@ -562,9 +562,9 @@ cannot satisfy "all green", so that version of the gate gets switched off on con
 **showrunner greets its own sessions.** A guard that reads only showrunner's own state sees a
 session that never registered as holding no lease and being no Crawler, and correctly exits 0
 while it works — so a repo can have showrunner installed, wired and carrying a campaign while every
-worker session goes around it. `showrunner whoami` fires on **SessionStart and PostCompact** and announces what this
-session IS. The second seam is the point: a rule that survives only until the next compaction is a
-rule for the first hour.
+worker session goes around it. `showrunner whoami` fires on **SessionStart**, whose `compact` source re-announces it after every
+compaction, and says what this session IS. The compaction is the point: a rule that survives only
+until the next compaction is a rule for the first hour.
 
 The seat is **derived, never declared** — a linked worktree is a CRAWLER, the main checkout of a
 repo carrying a campaign is the ORCHESTRATOR, no campaign is SOLO, and UNKNOWN is a real answer

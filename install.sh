@@ -174,7 +174,7 @@ for hook_name in worktree-guard.sh inert-crawler-gate.sh waiting-probe.sh whoami
                             fi ;;
     inert-crawler-gate.sh)  note="Stop: refuses a turn-end while a Crawler is inert" ;;
     waiting-probe.sh)       note="answers a harness watchdog; NOT wired by this script — arming a wait is a human decision, see the note at the end" ;;
-    whoami.sh)              note="SessionStart + PostCompact: announces the derived seat" ;;
+    whoami.sh)              note="SessionStart (compaction included): announces the derived seat" ;;
     dispatch-guard.sh)      note="PreToolUse on Bash: refuses a raw dispatch from a seat that may not create one" ;;
     pipeline-status-gate.sh) note="PreToolUse on Bash: notices when \$? is about to read a pipe's truncator instead of the command" ;;
     reach-gate.sh)          note="PreToolUse: names the showrunner mechanism for what a call reached for; advice only, never refuses" ;;

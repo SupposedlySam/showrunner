@@ -211,6 +211,25 @@ def installer_provenance(cfg, sp=None):
     if not top:
         return ("ok", "harness installer is outside any git working tree: %s" % path)
 
+    # THE CONSUMER'S OWN SCRIPT IS NOT A HARNESS CLONE (#112). #41 was an installer inside
+    # somebody else's checkout, which every Crawler then took whatever was uncommitted from. A
+    # script in this repo decides what it installs from itself, and the repo's ordinary product
+    # edits say nothing about it — so only the installer's own state is reported.
+    rc, own, _ = run(["git", "-C", cfg.root, "rev-parse", "--show-toplevel"])
+    if rc == 0 and os.path.realpath((own or "").strip()) == os.path.realpath(top):
+        rel_path = os.path.relpath(os.path.realpath(path), os.path.realpath(top))
+        rc, _, _ = run(["git", "-C", top, "ls-files", "--error-unmatch", "--", rel_path])
+        if rc != 0:
+            return ("ok", "harness.installer is this repo's own untracked script (%s): what the "
+                          "party is guarded by is whatever it installs from, which it names "
+                          "itself" % rel_path)
+        rc, dirty, _ = run(["git", "-C", top, "status", "--porcelain", "--", rel_path])
+        if rc == 0 and (dirty or "").strip():
+            return ("warn", "harness.installer (%s) has UNCOMMITTED edits, so every Crawler is "
+                            "provisioned by a version of it no commit names" % rel_path)
+        return ("ok", "harness.installer is this repo's own tracked script (%s), unmodified"
+                      % rel_path)
+
     rc, dirty, _ = run(["git", "-C", top, "status", "--porcelain"])
     unclean = bool((dirty or "").strip()) if rc == 0 else None
     rc, sha, _ = run(["git", "-C", top, "rev-parse", "--short", "HEAD"])

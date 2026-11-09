@@ -342,7 +342,7 @@ showrunner worktree register         # put the hooks it owns in .claude/settings
                                      # the worktree guard, the dispatch guard, the REACH gate and
                                      # the WAKE gate on PreToolUse, the inert-Crawler gate on Stop,
                                      # and the
-                                     # seat announcement on SessionStart AND PostCompact. The
+                                     # seat announcement on SessionStart. The
                                      # list is the claim; a COUNT here rots the day it gains one.
 showrunner whoami                    # what this session IS — a seat DERIVED from where it stands
 showrunner whoami --porcelain        # the SAME resolution as JSON, for a guard to consume
@@ -810,7 +810,7 @@ SessionStart hook cannot block.
 ## The seams showrunner owns: session start and tool use
 
 ```
-showrunner whoami                    # SessionStart AND PostCompact  (whoami.sh)
+showrunner whoami                    # SessionStart incl. compact    (whoami.sh)
 showrunner dispatch guard            # PreToolUse on BASH            (dispatch-guard.sh)
 showrunner reach                     # PreToolUse on Write|Edit|NotebookEdit|Bash|TodoWrite
                                      #                               (reach-gate.sh)
@@ -901,7 +901,7 @@ about whether a goal is bound, and recording that as "fine" is the identity-elem
 **`reach` names the mechanism at the moment of reach.** An agent that cannot remember a tool does
 not stop working — it reaches for what it already knows: `git worktree add`, a private todo list,
 a note in a memory file. Each of those produces a plausible result, which is why nothing ever
-objected. SessionStart and PostCompact announce the tool once into a window that then fills with
+objected. SessionStart announces the tool once into a window that then fills with
 other things; the moment somebody types `git worktree add` is the moment they have a specific
 intent that a specific verb serves.
 
@@ -1602,7 +1602,10 @@ bad pin still reaches every project on the machine at once.
 
 Pinned to a **named ref**, never copied from a working tree, so "what is central running" answers
 with a commit that can be checked out and diffed. `VERSION` holds the resolved SHA and `PINNED`
-holds the ref, SHA and time; if the two ever disagree, something edited the directory after the
+holds the ref, SHA, time and the clone it was cut from — where `doctor` asks git whether the pin
+is behind, since the pinned copy is not a repository. A pin named by a bare SHA also records the
+branch that held it, because a commit is level with itself; with no branch, `doctor` says CANNOT
+TELL. If `VERSION` and `PINNED` ever disagree, something edited the directory after the
 pin and `self --dest` refuses rather than picking one.
 
 It will only ever overwrite a destination it recognises as its own pin — a mistyped `--dest` is

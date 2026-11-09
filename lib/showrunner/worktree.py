@@ -223,7 +223,25 @@ def hook_gaps(cfg, tree):
                     present_dir = sorted(p for p in paths if os.sep in p
                                          and os.path.isdir(os.path.join(tree, os.path.dirname(p))))
                     own = sorted(p for p in paths if p.startswith(".showrunner/hooks/"))
-                    if own:
+                    state = _own_hooks_state(cfg, own[0]) if own else None
+                    if state == "ignored":
+                        # THE REASON MUST BE THE TRUE ONE (#112): the hooks are ignored, so
+                        # spawn copies them in, and "track or ignore" names a fix already made.
+                        out.append(
+                            "showrunner's own guard %s is NOT in this tree, so that gate is "
+                            "silently OFF in it. .showrunner/hooks/ is already ignored, and spawn "
+                            "copies an ignored one into every tree it provisions, so this tree "
+                            "was not made by `showrunner spawn` or its copy did not land. Copy "
+                            ".showrunner/hooks/ in from the main checkout, or retire the tree and "
+                            "dispatch through spawn" % " or ".join(own))
+                    elif state == "tracked":
+                        out.append(
+                            "showrunner's own guard %s is NOT in this tree, so that gate is "
+                            "silently OFF in it. .showrunner/hooks/ is tracked, so the tree's "
+                            "checkout predates the shim or a sparse cone leaves it out. Check out "
+                            "a commit that has it, or put .showrunner in the cone"
+                            % " or ".join(own))
+                    elif own:
                         # showrunner's OWN shim: provisioning copied it and took it back out,
                         # because a shim neither tracked nor ignored is one a Crawler's
                         # `git add -A` commits. The fix is the repo's, and there are two.
@@ -246,6 +264,15 @@ def hook_gaps(cfg, tree):
                                    "them — that gate would be silently OFF"
                                    % (event, name, " or ".join(sorted(paths))))
     return out
+
+
+def _own_hooks_state(cfg, shim):
+    """"tracked", "ignored" or "stageable": how the main checkout holds showrunner's shim."""
+    if git(["ls-files", "--error-unmatch", "--", shim], cwd=cfg.root)[0] == 0:
+        return "tracked"
+    if git(["check-ignore", "-q", "--", shim], cwd=cfg.root)[0] == 0:
+        return "ignored"
+    return "stageable"
 
 
 def cone_gaps(cfg, tree, base="HEAD"):

@@ -1655,7 +1655,7 @@ def _registered_hooks(write_guard=False):
     """
     hooks = [(lease.register_guard, "worktree guard"),
              (lease.register_stop_trigger, "inert-Crawler stop trigger"),
-             (lease.register_whoami, "seat announcement (SessionStart+PostCompact)"),
+             (lease.register_whoami, "seat announcement (SessionStart)"),
              (lease.register_dispatch_guard, "dispatch guard (PreToolUse on Bash)"),
              (lease.register_reach, "reach gate (PreToolUse; advice, never refuses)"),
              (lease.register_wake_gate, "wake gate (PreToolUse on Bash; advice, never refuses)"),
@@ -1831,7 +1831,7 @@ def _fail_open_root():
 
 
 def cmd_whoami(args):
-    """SessionStart / PostCompact: say what this session IS, and what it may not do (#36).
+    """SessionStart (compaction included): say what this session IS, and what it may not do (#36).
 
     THE OUTPUT IS THE ENTIRE MECHANISM. A SessionStart hook cannot block, so there is nothing
     else this can do — which means silence is the one unacceptable outcome. It prints on every
@@ -4285,7 +4285,7 @@ def build_parser():
     s = sub.add_parser("whoami",
                        help="what this session IS — the seat is DERIVED from where it stands, "
                             "never declared, so there is no file a session can write to become "
-                            "something else. Register on SessionStart AND PostCompact")
+                            "something else. Register on SessionStart, which also fires on compaction")
     s.add_argument("--session")
     s.add_argument("--porcelain", action="store_true",
                    help="the SAME resolution as data: seat, role, how, and the writes/"

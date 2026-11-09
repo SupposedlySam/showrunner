@@ -344,6 +344,21 @@ TARGETS = [
     ("is this copy behind its source", "pin.staleness", "lib/showrunner/pin.py",
      r"(def staleness\(source_repo=None\):\n)",
      "    return None\ndef _neutered_staleness(source_repo=None):\n"),
+    # #112. "stageable" everywhere restores the reported defect: a tree spawn did not make is
+    # told to track or ignore hooks the repo already ignores, and the real cause goes unsaid.
+    ("how the main checkout holds showrunner's shim", "worktree._own_hooks_state",
+     "lib/showrunner/worktree.py",
+     r"(def _own_hooks_state\(cfg, shim\):\n)",
+     "    return \"stageable\"\ndef _neutered_own_hooks_state(cfg, shim):\n"),
+    # False everywhere leaves every existing install announcing its seat twice per compaction.
+    ("retiring the PostCompact seat announcement", "lease._retire_postcompact_whoami",
+     "lib/showrunner/lease.py",
+     r"(def _retire_postcompact_whoami\(path, json, atomic_write_json\):\n)",
+     "    return False\ndef _neutered_retire_postcompact_whoami(path, json, atomic_write_json):\n"),
+    # False everywhere compares a bare-sha pin with itself, which always reads "level".
+    ("is the pin a bare commit", "pin._is_bare_sha", "lib/showrunner/pin.py",
+     r"(def _is_bare_sha\(ref, sha\):\n)",
+     "    return False\ndef _neutered_is_bare_sha(ref, sha):\n"),
     # Answering [] everywhere is the SAFE-looking direction — every prose option simply loses its
     # file twin and the CLI still works — which is exactly why it needs a mutant: the failure is
     # that a caller with backticked prose has nowhere safe to put it, and nothing about the run

@@ -862,7 +862,7 @@ def resolution(cfg, session=None):
 def whoami(cfg, session=None):
     """What this session is, what it may do, and what it may not. Returns a list of lines.
 
-    Printed at SessionStart AND PostCompact, because a compaction is where the last one was lost:
+    Printed at SessionStart, whose `compact` source is where the last one was lost:
     every compaction refreshed the harness that owned those seams and eroded the tool that did
     not. A rule that survives only until the next compaction is a rule for the first hour.
     """
@@ -874,9 +874,9 @@ def whoami(cfg, session=None):
     # before the announcement describes it, so the session is not told it is unassigned and then
     # separately told it was re-seated.
     #
-    # THE ANNOUNCEMENT IS THE RIGHT CHANNEL and not a convenience: SessionStart and PostCompact
-    # are the two moments a reloaded session is guaranteed to read, which is the same argument
-    # that put `whoami` on both seams. A re-seat that only `doctor` mentioned would be a notice
+    # THE ANNOUNCEMENT IS THE RIGHT CHANNEL and not a convenience: SessionStart, on startup,
+    # resume and compact alike, is the moment a reloaded session is guaranteed to read, which is
+    # the same argument that put `whoami` there. A re-seat that only `doctor` mentioned would be a notice
     # in a channel nobody reads on the turn it matters — the #71 shape.
     reseat = reseat_after_reload(cfg, session)
     r = resolution(cfg, session)

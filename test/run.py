@@ -2889,6 +2889,45 @@ def test_vendor_staleness():
         ok("...saying CANNOT TELL, which is a different claim from being current — the "
            "distinction the whole issue turns on",
            "CANNOT" in msg3 and "current" in msg3, msg3)
+
+        # THE STAMP NAMES ITS SOURCE CLONE (#112): a central copy is not a repository, so a
+        # ref that resolves in the clone read CANNOT TELL for every consumer on the machine.
+        src = make_repo(files={"README.md": "one\n"})
+        first = sh(["git", "rev-parse", "HEAD"], src.root).stdout.strip()
+        with open(os.path.join(src.root, "README.md"), "a") as fh:
+            fh.write("two\n")
+        sh(["git", "commit", "-qam", "two"], src.root)
+        branch = sh(["git", "symbolic-ref", "--short", "HEAD"], src.root).stdout.strip()
+        P.running = lambda: {"source": "pinned", "root": "/nowhere", "ref": branch,
+                             "sha": first, "pin_source": src.root}
+        lvl4, msg4 = P.staleness() or ("", "")
+        ok("a pin whose stamp names its source clone is answered from that clone, not from "
+           "the pinned copy", lvl4 == "warn" and "BEHIND" in msg4 and "1 commit" in msg4, msg4)
+        P.running = lambda: {"source": "pinned", "root": "/nowhere", "ref": first[:7],
+                             "sha": first, "pin_source": src.root}
+        lvl5, msg5 = P.staleness() or ("", "")
+        ok("...a BARE-SHA pin with no recorded branch says CANNOT TELL rather than 'level' — "
+           "a commit is level with itself by definition", "CANNOT" in msg5 and lvl5 == "warn",
+           msg5)
+        P.running = lambda: {"source": "pinned", "root": "/nowhere", "ref": first[:7],
+                             "sha": first, "pin_source": src.root, "track": branch}
+        lvl6, msg6 = P.staleness() or ("", "")
+        ok("...and one with a recorded branch is compared against it", "BEHIND" in msg6, msg6)
+        # The real checkout, since a synthetic repo carries no payload to extract. Its branch
+        # is whatever is checked out; a detached HEAD records none, and says so above.
+        me = P.source_root()
+        head = sh(["git", "rev-parse", "HEAD"], me).stdout.strip()
+        cur = sh(["git", "symbolic-ref", "--quiet", "--short", "HEAD"], me,
+                 check=False).stdout.strip() or None
+        dest = os.path.join(tmpdir("pin-src"), "copy")
+        try:
+            P.pin(head[:9], dest)
+            stamp = P.read_pin(dest) or {}
+        except Exception as exc:                      # noqa: BLE001 — fail, not crash
+            stamp = {"error": str(exc)}
+        ok("`self --pin` records the source clone and, for a bare sha, the branch holding it",
+           os.path.realpath(stamp.get("source") or "") == os.path.realpath(me)
+           and stamp.get("track") == cur, stamp)
     finally:
         P.running = real_running
 
@@ -5056,6 +5095,24 @@ def test_worktree_lease():
        "TRACK the hooks" in _msg_n and "IGNORE them" in _msg_n, _msg_n[:400])
     ok("...and leaves no tree behind", not os.path.exists(n_path), n_path)
 
+    # A TREE spawn DID NOT MAKE lacks the shim for a different reason, and the message must say
+    # which (#112): "track or ignore" was printed for a repo that already ignores them, naming
+    # a fix already made while the real cause went unsaid.
+    hand = os.path.join(tmpdir("hand-tree"), "t")
+    sh(["git", "worktree", "add", "-q", "--detach", hand], prov.root)
+    _hg = worktree.hook_gaps(prov, hand)
+    _hm = " ".join(_hg)
+    ok("a hand-made tree in a repo that IGNORES the hooks is reported as not made by spawn, "
+       "not as hooks that are neither tracked nor ignored",
+       "not made by `showrunner spawn`" in _hm and "neither tracked" not in _hm, _hm[:300])
+    ok("...and names a remedy that applies there, not the ignore rule that is already in place",
+       "Copy .showrunner/hooks/ in" in _hm and "IGNORE them" not in _hm, _hm[:300])
+    hand_t = os.path.join(tmpdir("hand-tree-t"), "t")
+    sh(["git", "worktree", "add", "-q", "--no-checkout", "--detach", hand_t], tracked.root)
+    _hm = " ".join(worktree.hook_gaps(tracked, hand_t))
+    ok("...and a tree of a repo that TRACKS them is told its checkout lacks the shim",
+       "is tracked" in _hm and "neither tracked" not in _hm, _hm[:300])
+
     # ---- is the guard WIRED? (the check one level out from 'does it work') -----------
     # A guard verb nobody registers has never once run. That was true of `lock guard` for this
     # repo's entire life, and it is the row that shaped this plan.
@@ -5399,6 +5456,34 @@ def test_worktree_guard_from_inside_a_worktree():
 def test_seat_and_whoami():
     group("The session seam: a derived seat, announced where compaction cannot erode it (#36)")
     from showrunner import roles as R
+
+    # ONE SEAM, AND THE OLD SECOND ONE IS TAKEN BACK. SessionStart fires on `compact` too, so a
+    # PostCompact registration printed the announcement twice; an install that has it must lose
+    # ours and keep anyone else's.
+    rw = make_repo()
+    sp = os.path.join(rw.root, ".claude", "settings.json")
+    os.makedirs(os.path.dirname(sp), exist_ok=True)
+    mine = {"type": "command", "command": "\"$CLAUDE_PROJECT_DIR\"/" + lease.WHOAMI_HOOK}
+    theirs = {"type": "command", "command": "echo another-tool"}
+    with open(sp, "w") as fh:
+        json.dump({"hooks": {"PostCompact": [{"hooks": [mine]}, {"hooks": [theirs]},
+                                             {"hooks": [theirs, mine]}]}}, fh)
+    _ch, _note = lease.register_whoami(rw)
+    _after = json.load(open(sp))["hooks"]
+    _pc = [h for e in _after.get("PostCompact", []) for h in e["hooks"]]
+    ok("register_whoami removes OUR PostCompact entry, including from a shared entry, and says so",
+       mine not in _pc and "retired the PostCompact" in _note, (_pc, _note))
+    eq("...and keeps every other tool's PostCompact hook", _pc, [theirs, theirs])
+    ok("...while the announcement stays registered on SessionStart",
+       any(lease.WHOAMI_HOOK in h.get("command", "")
+           for e in _after.get("SessionStart", []) for h in e["hooks"]), _after)
+    eq("a second run changes nothing", lease.register_whoami(rw)[0], False)
+    lp = os.path.join(rw.root, ".claude", "settings.local.json")
+    with open(lp, "w") as fh:
+        json.dump({"hooks": {"PostCompact": [{"hooks": [mine]}]}}, fh)
+    lease.register_whoami(rw)
+    ok("...and the untracked settings.local.json layer, where a --local install put it, loses "
+       "it too", "PostCompact" not in json.load(open(lp)).get("hooks", {}), open(lp).read())
 
     # THE SEAT IS DERIVED, NEVER DECLARED. A consumer's prototype kept it in a one-word file with
     # two PreToolUse guards gated on `^lead`; the file said `worker`, written mid-run, so both
@@ -6271,6 +6356,31 @@ def test_harness_installer_provenance():
     ok("...while NO installer configured reports nothing at all, so this is silent for the "
        "consumers it does not concern",
        harness.installer_provenance(make_repo()) is None)
+
+    # THE CONSUMER'S OWN SCRIPT (#112): an ignored installer in the consumer's repo is not a
+    # harness clone, and the product team's uncommitted work says nothing about it.
+    own = make_repo(files={".gitignore": ".worktrees/\nprovision.sh\n"},
+                    extra_config={"harness": {"provision": "auto",
+                                              "installer": "provision.sh"}})
+    with open(os.path.join(own.root, "provision.sh"), "w") as fh:
+        fh.write("#!/bin/sh\nexit 0\n")
+    with open(os.path.join(own.root, "product-work.txt"), "w") as fh:
+        fh.write("ordinary uncommitted work\n")
+    lvl, msg = harness.installer_provenance(own) or (None, "")
+    ok("an IGNORED installer in the consumer's own repo is ok, however dirty the repo is",
+       lvl == "ok" and "UNCOMMITTED" not in msg, (lvl, msg[:150]))
+    own_t = make_repo(files={"provision.sh": "#!/bin/sh\nexit 0\n"},
+                      extra_config={"harness": {"provision": "auto",
+                                                "installer": "provision.sh"}})
+    with open(os.path.join(own_t.root, "product-work.txt"), "w") as fh:
+        fh.write("ordinary uncommitted work\n")
+    eq("...and so is a TRACKED, unmodified one beside unrelated uncommitted work",
+       (harness.installer_provenance(own_t) or (None,))[0], "ok")
+    with open(os.path.join(own_t.root, "provision.sh"), "a") as fh:
+        fh.write("# edited\n")
+    lvl, msg = harness.installer_provenance(own_t) or (None, "")
+    ok("...while edits to the INSTALLER ITSELF still warn, naming it",
+       lvl == "warn" and "provision.sh" in msg and "UNCOMMITTED" in msg, (lvl, msg[:150]))
 
 
 def test_roles():
@@ -9526,7 +9636,7 @@ def test_hooks_that_must_speak_are_driven_and_not_merely_parsed():
         return subprocess.run(["bash", os.path.join(ROOT, ".showrunner", "hooks", name)],
                               input=payload, capture_output=True, text=True, cwd=ROOT, env=env)
 
-    # whoami announces the seat on SessionStart and PostCompact and has no "nothing to say" case
+    # whoami announces the seat on SessionStart (compaction included) and has no "nothing to say" case
     # by construction — every failure path inside it still prints something.
     p = drive("whoami.sh", "{}")
     ok("whoami.sh produces output for an empty payload — silence is the one outcome it is not "

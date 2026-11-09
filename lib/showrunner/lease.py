@@ -1122,12 +1122,17 @@ def write_guard_enforces(cfg):
 
 
 def register_whoami(cfg, local=False):
-    """Announce the seat on SessionStart AND PostCompact (#36). Returns (changed, message).
+    """Announce the seat at SessionStart (#36). Returns (changed, message).
 
-    BOTH SEAMS, and the second is the whole point. The reported failure had showrunner installed,
-    wired, and carrying a campaign — and every compaction refreshed the harness that owned these
-    events while eroding the tool that owned neither. A rule that survives only until the next
-    compaction is a rule for the first hour.
+    SessionStart fires on every source, `compact` included, so one registration covers the seam
+    that matters. The reported failure had showrunner installed, wired, and carrying a campaign —
+    and every compaction refreshed the harness that owned these events while eroding the tool
+    that owned neither. A rule that survives only until the next compaction is a rule for the
+    first hour.
+
+    THE PostCompact ENTRY IS RETIRED, not left: SessionStart(compact) already delivers the same
+    announcement, so a second registration printed it twice into the window it exists to keep
+    short. An install that still carries ours has it removed; anyone else's is left alone.
     """
     import json
     from .util import atomic_write_json, file_lock
@@ -1138,16 +1143,52 @@ def register_whoami(cfg, local=False):
                         "timeout": 20,
                         "statusMessage": "showrunner: what is this session?"}]}
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    changed_any, notes = False, []
     with file_lock(_register_lock(cfg)):
-        for event in ("SessionStart", "PostCompact"):
-            present = lambda p, e=event: _registration(p, e, "whoami.sh")   # noqa: E731
-            changed, note = _register_locked(cfg, path, entry, json, atomic_write_json,
-                                             event, present, "seat announcement (%s)" % event)
-            changed_any = changed_any or changed
-            if note:
-                notes.append(note)
-    return changed_any, "\n".join(n for n in notes if n)
+        present = lambda p: _registration(p, "SessionStart", "whoami.sh")   # noqa: E731
+        changed, note = _register_locked(cfg, path, entry, json, atomic_write_json,
+                                         "SessionStart", present,
+                                         "seat announcement (SessionStart)")
+        notes = [note] if note else []
+        for candidate in (settings_target(cfg.root, False), settings_target(cfg.root, True)):
+            if _retire_postcompact_whoami(candidate, json, atomic_write_json):
+                changed = True
+                notes.append("retired the PostCompact seat announcement in %s — SessionStart "
+                             "fires on compaction too, so it was arriving twice"
+                             % rel_or(candidate, cfg.root))
+    return changed, "\n".join(notes)
+
+
+def _retire_postcompact_whoami(path, json, atomic_write_json):
+    """Remove OUR whoami hook from PostCompact in `path`. True if the file changed."""
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return False
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    entries = hooks.get("PostCompact") if isinstance(hooks, dict) else None
+    if not isinstance(entries, list):
+        return False
+    ours = lambda h: isinstance(h, dict) and \
+        str(h.get("command", "")).endswith(WHOAMI_HOOK)                  # noqa: E731
+    kept, changed = [], False
+    for e in entries:
+        inner = e.get("hooks") if isinstance(e, dict) else None
+        if not isinstance(inner, list) or not any(ours(h) for h in inner):
+            kept.append(e)
+            continue
+        changed = True
+        rest = [h for h in inner if not ours(h)]
+        if rest:
+            kept.append(dict(e, hooks=rest))
+    if not changed:
+        return False
+    if kept:
+        hooks["PostCompact"] = kept
+    else:
+        del hooks["PostCompact"]
+    atomic_write_json(path, data)
+    return True
 
 
 def register_stop_trigger(cfg, local=False):
