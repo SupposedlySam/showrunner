@@ -682,6 +682,7 @@ def reconcile(cfg, graph, base="HEAD", deep=True):
                      else "dirty" if f["uncommitted"] else "clean")
         if scratch and os.path.isdir(scratch):
             f["scratch_files"] = [x for x in sorted(os.listdir(scratch)) if x != "README.txt"]
+        f["questions"] = recorded_questions(scratch)
 
         if f["worktree_exists"]:
             from . import harness
@@ -853,6 +854,22 @@ def _terminate(pid):
             return True, None
         time.sleep(0.1)
     return not pid_alive(pid), None
+
+
+def recorded_questions(scratch):
+    """The questions a Crawler wrote down because it had no room to ask them. [] when none.
+
+    The brief tells a Crawler with no room to put each question it would have posted in
+    QUESTIONS.md, decide it, and keep working. Without a reader that file is a channel nobody
+    hears, so `reconcile` quotes it.
+    """
+    if not scratch:
+        return []
+    try:
+        with open(os.path.join(scratch, "QUESTIONS.md"), errors="ignore") as fh:
+            return [line.rstrip() for line in fh if line.strip()]
+    except OSError:
+        return []
 
 
 def reap(cfg, graph, base="HEAD", apply=False):

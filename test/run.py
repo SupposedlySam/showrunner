@@ -10384,9 +10384,19 @@ def test_central_install():
     ok("...and it did NOT resolve to the worktree, which is the wrong answer that would look "
        "identical from the main checkout", os.path.realpath(wt) not in res.stdout)
 
+    # ---- A RE-INSTALL KEEPS IT CENTRAL. An upgrade passes no flags. ----
+    kept = subprocess.run([installer, repo], cwd=ROOT, capture_output=True, text=True, env=env)
+    ok("re-installing with NO mode flag keeps a central install central: no local library",
+       not os.path.isdir(os.path.join(repo, ".showrunner", "lib", "showrunner"))
+       and "kept    --central" in kept.stdout, kept.stdout[-300:])
+    both = subprocess.run([installer, "--central", "--copy", repo], cwd=ROOT,
+                          capture_output=True, text=True, env=env)
+    eq("--central with --copy is refused as two opposite modes (64)", both.returncode, 64)
+
     # ---- REVERSIBILITY. A claim, so it gets asserted. -----------------------------
-    out = subprocess.run([installer, repo], cwd=ROOT, capture_output=True, text=True, env=env)
-    ok("re-installing WITHOUT --central restores the local library",
+    out = subprocess.run([installer, "--copy", repo], cwd=ROOT, capture_output=True, text=True,
+                         env=env)
+    ok("re-installing with --copy restores the local library",
        os.path.isdir(os.path.join(repo, ".showrunner", "lib", "showrunner")))
     with open(placed) as fh:
         reverted = fh.read()
@@ -14619,6 +14629,61 @@ def test_install_local_reaches_nobody():
     ok("the installer's summary names EVERY hook it registered (%d)" % len(_whats),
        _whats and not _unnamed, {"unnamed": _unnamed, "said": said[-800:]})
 
+    # A RE-INSTALL KEEPS THE MODE IT FINDS. REPORTED: an upgrade runs the installer with no flags,
+    # and that read as "shared" — every hook landed in the tracked settings file beside the
+    # untracked copies, so the gates fired twice and the next commit carried them to the team.
+    plain = subprocess.run(["bash", inst, "--no-skills", consumer],
+                           capture_output=True, text=True, timeout=300)
+    dirty = subprocess.run(["git", "status", "--porcelain"], cwd=consumer,
+                           capture_output=True, text=True).stdout.strip()
+    ok("a re-install with NO mode flag keeps a --local install local: no tracked diff, no hook "
+       "in the tracked settings", plain.returncode == 0 and dirty == ""
+       and hook_refs("settings.json") == 0, (dirty, hook_refs("settings.json"), plain.stdout[-300:]))
+    ok("...and says which mode it kept and the flag that would change it",
+       "kept    --local" in plain.stdout and "--shared" in plain.stdout, plain.stdout[-400:])
+    both = subprocess.run(["bash", inst, "--local", "--shared", consumer],
+                          capture_output=True, text=True, timeout=60)
+    eq("--local with --shared is refused as two opposite modes (64)", both.returncode, 64)
+    shared = subprocess.run(["bash", inst, "--shared", "--no-skills", consumer],
+                            capture_output=True, text=True, timeout=300)
+    with open(os.path.join(consumer, ".git", "info", "exclude")) as fh:
+        excl = fh.read()
+    ok("...while --shared is the deliberate switch: hooks in the tracked settings, and "
+       ".showrunner/ no longer excluded, so the shared payload can be committed",
+       shared.returncode == 0 and hook_refs("settings.json") > 0
+       and ".showrunner/" not in excl.splitlines(), (hook_refs("settings.json"), excl))
+
+
+def test_reconcile_quotes_the_questions_a_crawler_could_not_ask():
+    group("`reconcile` quotes QUESTIONS.md — the brief sends a Crawler with no room to write its "
+          "questions there, and nothing read them")
+    if not have("git"):
+        skip("the recorded-questions group", "git is not installed")
+        return
+    cfg = make_repo(files={"README.md": "x\n"})
+    g = new_graph(cfg)
+    g.add("decide alone", leaf_id="q1", labels=["backend"])
+    rec = worktree.spawn(cfg, g.show("q1"), actor="q1")
+    campaign.record_spawn(cfg, rec, pid=DeadPid().pid)
+    scratch = cfg.abspath(rec["scratch"])
+    eq("a Crawler that wrote nothing down has no questions on record",
+       next(f for f in campaign.reconcile(cfg, g) if f["crawler"] == rec["crawler"]).get("questions"),
+       [])
+    with open(os.path.join(scratch, "QUESTIONS.md"), "w") as fh:
+        fh.write("- Should the export keep the legacy column? Decided: keep it.\n\n")
+    found = next(f for f in campaign.reconcile(cfg, g) if f["crawler"] == rec["crawler"])
+    eq("...and one that did has each line on its finding",
+       found.get("questions"), ["- Should the export keep the legacy column? Decided: keep it."])
+    out = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "reconcile"],
+                         capture_output=True, text=True, cwd=cfg.root, stdin=subprocess.DEVNULL)
+    eq("recorded_questions reads the file's non-empty lines directly",
+       campaign.recorded_questions(scratch),
+       ["- Should the export keep the legacy column? Decided: keep it."])
+    eq("...and a Crawler with no scratch dir has none", campaign.recorded_questions(None), [])
+    ok("...and `reconcile` prints them, so the orchestrator reads what it was never asked",
+       "QUESTIONS it decided alone" in out.stdout and "legacy column" in out.stdout,
+       out.stdout[-500:])
+
 
 def test_add_and_edit_take_every_path_they_are_given():
     group("`add` and `edit` keep EVERY --path, repeated or comma-separated — `edit` kept only the "
@@ -17621,8 +17686,8 @@ def test_the_github_waker_rings_and_stays_quiet():
     other = {}
 
     def other_records_it_first(_sec):
-        other["code"] = W.run(cfg, once=True, runner=lambda _q: said(30, "dup"))[0]
-        clock[0] += 5000
+        other.setdefault("code", W.run(cfg, once=True, runner=lambda _q: said(30, "dup"))[0])
+        clock[0] += W.BUDGET_SEC + 1            # one poll, then past any budget
     code, text = W.run(cfg, sleep=other_records_it_first, now=lambda: clock[0],
                        runner=lambda _q: said(30, "dup"))
     ok("another waker that records an event first rings for it...", other.get("code") == 2, other)
@@ -17631,12 +17696,12 @@ def test_the_github_waker_rings_and_stays_quiet():
 
     def a_newer_waker_starts(_sec):
         W._write_owner(cfg, "a-newer-waker")
-        clock[0] += 5000                        # so a waker that ignores it still ends, and fails
+        clock[0] += W.BUDGET_SEC + 1            # so a waker that ignores it still ends, and fails
     code, _ = W.run(cfg, sleep=a_newer_waker_starts, now=lambda: clock[0],
                     runner=lambda _q: looked.append(1) or said(31, "late"))
     ok("a waker that a NEWER one replaced exits quietly without looking", code == 0 and not looked,
        (code, looked))
-    code, text = W.run(cfg, sleep=lambda _sec: clock.__setitem__(0, clock[0] + 5000),
+    code, text = W.run(cfg, sleep=lambda _sec: clock.__setitem__(0, clock[0] + W.BUDGET_SEC + 1),
                        now=lambda: clock[0], runner=lambda _q: said(31, "late"))
     ok("...while the waker that owns the watch still rings", code == 2 and "late" in text,
        (code, text))
@@ -17645,7 +17710,7 @@ def test_the_github_waker_rings_and_stays_quiet():
 
     def other_rings_for_the_first(_sec):
         W.run(cfg, once=True, runner=lambda _q: said(40, "dup2"))
-        clock[0] += 5000
+        clock[0] += W.BUDGET_SEC + 1
     code, text = W.run(cfg, sleep=other_rings_for_the_first, now=lambda: clock[0],
                        runner=lambda _q: both)
     ok("...and when the stale waker DOES ring, it names only what nobody has rung for yet",
@@ -17723,6 +17788,62 @@ def test_the_github_waker_rings_and_stays_quiet():
     ok("`worktree register` wires it on Stop with asyncRewake",
        any("github-waker.sh" in h.get("command", "") and h.get("asyncRewake") for h in stops),
        stops)
+    # IDLE PAST HALF AN HOUR IS STILL WATCHED. The budget was 1800 and the hook's timeout 1860, so a
+    # session nobody typed into for 31 minutes heard nothing from GitHub until somebody did.
+    waker_hook = next((h for h in stops if "github-waker.sh" in h.get("command", "")), {})
+    budget = W.BUDGET_SEC
+    ok("the waker's budget covers an idle day, not half an hour", budget >= 86400, budget)
+    eq("...and a configured watch with no budget of its own gets it",
+       (W.spec(make_repo({"waker": {"repos": ["a/b"]}})) or {}).get("budget_sec"), budget)
+    ok("...and its registered timeout outlasts that budget, since the harness ends a hook at its "
+       "timeout", isinstance(waker_hook.get("timeout"), int) and waker_hook["timeout"] > budget,
+       waker_hook)
+    for group_ in reg["hooks"]["Stop"]:
+        for h in group_.get("hooks", []):
+            if "github-waker.sh" in h.get("command", ""):
+                h["timeout"] = 1860
+    with open(os.path.join(fresh.root, ".claude", "settings.json"), "w") as fh:
+        json.dump(reg, fh)
+    again = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "worktree",
+                            "register"], capture_output=True, text=True, cwd=fresh.root,
+                           stdin=subprocess.DEVNULL)
+    with open(os.path.join(fresh.root, ".claude", "settings.json")) as fh:
+        stops2 = [h for e in json.load(fh)["hooks"]["Stop"] for h in e.get("hooks", [])]
+    raised = next((h for h in stops2 if "github-waker.sh" in h.get("command", "")), {})
+    ok("an install registered with the old 1860s timeout is RAISED in place on the next register, "
+       "not skipped as already present", raised.get("timeout", 0) > budget
+       and "raised the GitHub waker's timeout" in again.stdout, (raised, again.stdout[-300:]))
+    eq("...and registered once, not appended a second time",
+       sum("github-waker.sh" in h.get("command", "") for h in stops2), 1)
+    from showrunner import lease as _lease_w
+    from showrunner.util import atomic_write_json as _awj
+    _sp = os.path.join(fresh.root, ".claude", "settings.json")
+    with open(_sp) as fh:
+        _d = json.load(fh)
+    for group_ in _d["hooks"]["Stop"]:
+        for h in group_.get("hooks", []):
+            if "github-waker.sh" in h.get("command", ""):
+                h["timeout"] = 1860
+    with open(_sp, "w") as fh:
+        json.dump(_d, fh)
+    changed_, _msg = _lease_w._raise_waker_timeout(fresh, _sp, 604800, json, _awj)
+    with open(_sp) as fh:
+        _after = [h.get("timeout") for e in json.load(fh)["hooks"]["Stop"] for h in e.get("hooks", [])
+                  if "github-waker.sh" in h.get("command", "")]
+    ok("_raise_waker_timeout raises the stale entry itself and says it did",
+       changed_ is True and _after == [604800], (changed_, _after))
+    eq("...and leaves an entry already at the timeout alone",
+       _lease_w._raise_waker_timeout(fresh, _sp, 604800, json, _awj), (False, ""))
+    with open(_sp) as fh:
+        _d = json.load(fh)
+    for group_ in _d["hooks"]["Stop"]:
+        for h in group_.get("hooks", []):
+            if "github-waker.sh" in h.get("command", ""):
+                h["timeout"] = 1860
+    with open(_sp, "w") as fh:
+        json.dump(_d, fh)
+    ok("...and register_waker, the entry point every install calls, does it too",
+       _lease_w.register_waker(fresh)[0] is True)
     fake = tempfile.mkdtemp(prefix="sr-waker-shim-")
     sh(["git", "init", "-q"], fake)
     os.makedirs(os.path.join(fake, "bin"))
@@ -18004,7 +18125,7 @@ def test_never_integrated_leaves_do_not_collide():
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

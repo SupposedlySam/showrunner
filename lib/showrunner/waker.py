@@ -12,7 +12,7 @@ running in the background after a turn ends and turns an exit 2 with stderr into
       "trusted_logins":  ["login", ...],
       "trusted_names":   ["Display Name", ...],
       "signature":       "— 🤖 <name> owner agent",
-      "poll_sec": 300, "budget_sec": 1800
+      "poll_sec": 300, "budget_sec": 604740
     }
 
 Nothing configured means the hook exits at once: it costs nothing until a project opts in.
@@ -59,6 +59,13 @@ _PR = _THREAD + """
 """ % (LAST, LAST)
 
 
+# A WEEK, a minute under the hook's timeout. This was 1800, so a session idle past half an hour
+# heard nothing until somebody typed; it was bounded because every turn-end left another poller.
+# Now the newest waker owns the watch and an older one exits at its next poll, so a long budget is
+# one poller, and the harness ends it with the session.
+BUDGET_SEC = 604740
+
+
 def spec(cfg):
     """The configured watch, normalised, or None when nothing is configured."""
     w = (cfg.get("waker") if hasattr(cfg, "get") else None) or {}
@@ -75,7 +82,7 @@ def spec(cfg):
         "trusted_names": {str(x).lower() for x in (w.get("trusted_names") or [])},
         "signature": w.get("signature") or "",
         "poll_sec": int(w.get("poll_sec") or 300),
-        "budget_sec": int(w.get("budget_sec") or 1800),
+        "budget_sec": int(w.get("budget_sec") or BUDGET_SEC),
     }
 
 

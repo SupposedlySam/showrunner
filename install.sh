@@ -9,27 +9,36 @@ set -euo pipefail
 SRC="$(cd "$(dirname "$0")" && pwd)"
 CENTRAL=0
 LOCAL=0
+SHARED=0
+COPY=0
 SKILLS=ask
 TARGET="."
 for arg in "$@"; do
   case "$arg" in
     --central) CENTRAL=1 ;;
     --local)   LOCAL=1 ;;
+    --shared)  SHARED=1 ;;
+    --copy)    COPY=1 ;;
     --skills) SKILLS=yes ;;
     --no-skills) SKILLS=no ;;
     -h|--help)
-      echo "usage: ./install.sh [--local] [--central] [--skills|--no-skills] /path/to/your/project"
+      echo "usage: ./install.sh [--local|--shared] [--central|--copy] [--skills|--no-skills] /path/to/your/project"
       echo
+      echo "  With no mode flag, a re-install KEEPS the mode the target already has: a --local"
+      echo "  install stays local and a --central one stays central. A mode changes only when"
+      echo "  you pass the flag for it."
       echo "  --local     install for YOU, not for the team. Hooks go into the untracked"
       echo "              .claude/settings.local.json instead of the source-controlled"
       echo "              .claude/settings.json, and .showrunner/ is excluded LOCALLY."
       echo "              Nothing this installs then reaches anybody who clones the repo."
       echo "              Without it the install is SHARED, which is the default on purpose:"
       echo "              the payload and the gates are committed and everyone gets both."
+      echo "  --shared    the deliberate switch from --local to a SHARED install."
       echo "  --central   do not copy the tool's code into the project at all. Write one tiny"
       echo "              dispatcher shim that execs a shared, machine-wide install instead."
       echo "              Populate that with \`showrunner self --pin <ref> --dest <path>\`."
-      echo "              Opt-in and REVERSIBLE: re-run without --central to restore local copies."
+      echo "              Opt-in and REVERSIBLE: re-run with --copy to restore a local copy."
+      echo "  --copy      the deliberate switch from --central back to a local copy of the code."
       echo "  --skills    also link the Claude Code skills (showrunner, sr-status, sr-doctor,"
       echo "              sr-install) into ~/.claude/skills — the ONLY thing this script writes"
       echo "              outside the target repo. Without a flag it asks, and only on a TTY."
@@ -39,6 +48,15 @@ for arg in "$@"; do
     *)  TARGET="$arg" ;;
   esac
 done
+
+if [ "$LOCAL" = 1 ] && [ "$SHARED" = 1 ]; then
+  echo "install.sh: --local and --shared name opposite modes; pass one." >&2
+  exit 64
+fi
+if [ "$CENTRAL" = 1 ] && [ "$COPY" = 1 ]; then
+  echo "install.sh: --central and --copy name opposite modes; pass one." >&2
+  exit 64
+fi
 
 if [ ! -d "$TARGET" ]; then
   echo "install.sh: no such directory: $TARGET" >&2
@@ -67,6 +85,24 @@ mkdir -p "$TARGET/.showrunner/bin"
 WAS_CENTRAL=0
 if [ -f "$TARGET/.showrunner/bin/showrunner" ] && [ ! -d "$TARGET/.showrunner/lib/showrunner" ]; then
   WAS_CENTRAL=1
+fi
+# AND WAS IT --local? Its hooks are in the untracked settings file and not the tracked one. Both
+# holding them is a shared install with a private copy on top, which stays shared.
+WAS_LOCAL=0
+if grep -q '\.showrunner/' "$TARGET/.claude/settings.local.json" 2>/dev/null && \
+   ! grep -q '\.showrunner/' "$TARGET/.claude/settings.json" 2>/dev/null; then
+  WAS_LOCAL=1
+fi
+# A RE-INSTALL KEEPS THE MODE IT FINDS. An upgrade calls this with no flags, and reading that as
+# "shared, local copy" turned a private install into hooks in the tracked settings and a central
+# one into a vendored copy. Changing a mode takes its flag.
+if [ "$LOCAL" = 0 ] && [ "$SHARED" = 0 ] && [ "$WAS_LOCAL" = 1 ]; then
+  LOCAL=1
+  echo "  kept    --local, which this install already was (pass --shared to change it)"
+fi
+if [ "$CENTRAL" = 0 ] && [ "$COPY" = 0 ] && [ "$WAS_CENTRAL" = 1 ]; then
+  CENTRAL=1
+  echo "  kept    --central, which this install already was (pass --copy to change it)"
 fi
 
 SRC_CENTRAL="${SHOWRUNNER_CENTRAL:-$HOME/.claude/showrunner-central}"
@@ -348,6 +384,19 @@ if [ "$LOCAL" = "1" ]; then
     else
       echo "  ok      .git/info/exclude already excludes what --local writes"
     fi
+  fi
+fi
+
+if [ "$SHARED" = "1" ] && [ "$WAS_LOCAL" = "1" ]; then
+  # THE SWITCH BACK UNDOES ONE LINE OF --local: the exclude that kept .showrunner/ out of git, so
+  # the payload a shared install commits can be committed. settings.local.json stays excluded,
+  # because it is private either way; its old hooks are named by the BOTH-layers warning above.
+  GITDIR="$(git -C "$TARGET" rev-parse --git-common-dir)"
+  case "$GITDIR" in /*) ;; *) GITDIR="$TARGET/$GITDIR" ;; esac
+  EXCLUDE="$GITDIR/info/exclude"
+  if grep -qxF ".showrunner/" "$EXCLUDE" 2>/dev/null; then
+    grep -vxF ".showrunner/" "$EXCLUDE" > "$EXCLUDE.sr-tmp" && mv "$EXCLUDE.sr-tmp" "$EXCLUDE"
+    echo "  shared  removed .showrunner/ from .git/info/exclude, so the payload can be committed"
   fi
 fi
 

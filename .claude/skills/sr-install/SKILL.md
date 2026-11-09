@@ -90,8 +90,9 @@ Precedence, highest first:
 
 1. **What the user just said** in this request ("install it central", "keep it local").
 2. **What the project already is** (§2b) — an upgrade never silently flips a project's mode.
-   Switching is legitimate and reversible, but it is a decision, so name it: re-running
-   `install.sh` *without* `--central` is the deliberate revert from central to a local copy.
+   Switching is legitimate and reversible, but it is a decision, so name it: `install.sh --copy`
+   is the revert from central to a local copy, and `--shared` the switch from `--local` to shared.
+   A re-run with no mode flag keeps the mode the project already has.
 3. **The saved preference** (§2c), when it agrees with reality.
 4. **What the machine has** (§2a): central populated and consistent → central is the sensible
    default. No central → local, and say why rather than offering a mode that would not work.
@@ -147,8 +148,8 @@ Then three options, with **a** stated plainly rather than buried:
 **b. Upgrade the code in place** — `./install.sh <project>` again. Idempotent and non-destructive:
 replaces `bin/` and `lib/`, refreshes the guard shim, appends missing ignore rules, registers the
 guard if it never was, and **keeps `config.json`**. Graph, campaign record and baseline all survive.
-Under central, the upgrade for *every* project at once is one `self --pin` — **not** a loop over
-`install.sh`, which without `--central` is the revert.
+A re-run keeps the project's mode, local or central. Under central, the upgrade for *every*
+project at once is one `self --pin`, since the code lives at the pinned path, not in the project.
 
 **c. Wipe and reinstall fresh** — §6, only when asked for by name.
 

@@ -1473,7 +1473,12 @@ committed, and everyone who clones gets both. `--local` is the other arrangement
 ./install.sh --local /path/to/project        # hooks to .claude/settings.local.json (untracked),
                                              # payload excluded in .git/info/exclude
 ./install.sh /path/to/project                # the shared default: hooks in .claude/settings.json
+./install.sh --shared /path/to/project       # switch a --local install to shared
 ```
+
+With no mode flag, a re-install keeps the mode the target already has, so an upgrade never moves
+a private install's hooks into the tracked settings or a central install back to a copy. A mode
+changes only with its flag. Opposite flags together (`--local --shared`, `--central --copy`) exit 64.
 
 A `--local` install leaves `git status` **clean**. That is the whole promise, and it is why the
 exclusion goes in `.git/info/exclude` rather than the repo's `.gitignore`: `.gitignore` is
@@ -1512,7 +1517,7 @@ showrunner self --pin <ref> --dest <path>    # populate central: extract bin/ an
                                              # Re-pinning the same path IS the upgrade: every repo
                                              # wired to it runs the new pin on its next call.
 showrunner self --dest <path>                # what is pinned there; exit 2 if it was edited since
-./install.sh /path/to/project                # revert: restore the local copy, drop the dependency
+./install.sh --copy /path/to/project         # revert: restore the local copy, drop the dependency
 ```
 
 Under `--central`, `.showrunner/bin/showrunner` stops being the tool and becomes a small

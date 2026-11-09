@@ -69,6 +69,10 @@ Two things worth knowing before you use it:
   cannot see the other one, so a shared install followed by a local one leaves every guard firing
   twice. `showrunner doctor` names any hook registered in both; which copy to remove depends on
   whose file it is, so the tool reports it and does not choose.
+- **A re-install keeps the mode it finds.** `./install.sh /path` on a `--local` install stays
+  local, and on a `--central` one stays central, which is what an upgrade needs. A mode changes
+  only with its flag: `--shared` moves a local install's hooks to `.claude/settings.json` and
+  stops excluding `.showrunner/`, and `--copy` turns a central install back into a local copy.
 
 ## The cast
 

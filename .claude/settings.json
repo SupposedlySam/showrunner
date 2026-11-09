@@ -104,7 +104,7 @@
             "asyncRewake": true,
             "command": "\"$CLAUDE_PROJECT_DIR\"/.showrunner/hooks/github-waker.sh",
             "statusMessage": "showrunner: watching GitHub for activity",
-            "timeout": 1860,
+            "timeout": 604800,
             "type": "command"
           }
         ]

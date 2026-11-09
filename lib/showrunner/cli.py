@@ -3395,6 +3395,14 @@ def cmd_reconcile(args):
         if f["scratch_files"]:
             print("    scratch holds %d file(s): %s" % (len(f["scratch_files"]),
                                                         ", ".join(f["scratch_files"][:5])))
+        if f.get("questions"):
+            # Written because it had no room to ask, so this is the only place they surface.
+            print("    %sQUESTIONS it decided alone%s (no room to ask) — %s/QUESTIONS.md:"
+                  % (YEL, OFF, f.get("scratch")))
+            for _q in f["questions"][:8]:
+                print("      %s" % _q[:160])
+            if len(f["questions"]) > 8:
+                print("      … %d more line(s) in the file" % (len(f["questions"]) - 8))
         # THE SECOND FACT, BESIDE LIVENESS — and until now nothing printed it. `reconcile` has
         # computed `session_health` since #69 and NO caller read it: not this printer, not
         # `waiting`, not `status`. A detector built because "a live PID is not a working agent"

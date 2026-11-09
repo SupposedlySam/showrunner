@@ -1045,13 +1045,43 @@ def register_waker(cfg, local=False):
     entry = {"hooks": [{"type": "command",
                         "command": "\"$CLAUDE_PROJECT_DIR\"/" + WAKER_SHIM,
                         "asyncRewake": True,
-                        "timeout": 1860,
+                        "timeout": 604800,
                         "statusMessage": "showrunner: watching GitHub for activity"}]}
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with file_lock(_register_lock(cfg)):
-        return _register_locked(
+        changed, msg = _register_locked(
             cfg, path, entry, json, atomic_write_json, "Stop",
             lambda p: _registration(p, "Stop", "github-waker"), "GitHub waker")
+        if changed or msg:
+            return changed, msg
+        return _raise_waker_timeout(cfg, path, entry["hooks"][0]["timeout"], json,
+                                    atomic_write_json)
+
+
+def _raise_waker_timeout(cfg, path, want, json, atomic_write_json):
+    """An entry registered with a shorter timeout is raised in place. Returns (changed, message).
+
+    The harness kills an async hook at its timeout, so an entry left at the old 1860 would stop a
+    week-long waker after half an hour, which is the deafness the longer budget exists to end.
+    Only the waker's own entry is touched, and only upward.
+    """
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return False, ""
+    raised = False
+    for group in (data.get("hooks") or {}).get("Stop") or []:
+        for hook in (group.get("hooks") or []) if isinstance(group, dict) else []:
+            if (isinstance(hook, dict) and WAKER_SHIM in str(hook.get("command", ""))
+                    and isinstance(hook.get("timeout"), (int, float)) and hook["timeout"] < want):
+                hook["timeout"] = want
+                raised = True
+    if not raised:
+        return False, ""
+    atomic_write_json(path, data)
+    return True, ("raised the GitHub waker's timeout to %ds in %s, so the harness does not end "
+                  "it before its budget" % (want, rel_or(path, cfg.root)))
 
 
 WRITE_SHIM = os.path.join(".showrunner", "hooks", "write-guard.sh")
