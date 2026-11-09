@@ -334,8 +334,8 @@ TARGETS = [
      r"(def _fail_open_root\(\):\n)",
      "    return None\ndef _neutered_fail_open_root():\n"),
     ("the fail-open ledger", "cli._record_fail_open", "lib/showrunner/cli.py",
-     r"(def _record_fail_open\(notice\):\n)",
-     "    return\ndef _neutered_record_fail_open(notice):\n"),
+     r"(def _record_fail_open\(notice, guard=None, cause=None, detail=None\):\n)",
+     "    return\ndef _neutered_record_fail_open(notice, guard=None, cause=None, detail=None):\n"),
     # Answering None everywhere restores the exact defect: doctor goes back to reporting only
     # PROVENANCE, which fires identically whether a copy is current or twenty commits behind. A
     # producer whose death returns the tool to its previous, working-looking state dies
@@ -768,6 +768,12 @@ TARGETS = [
     ("never in a Crawler's tree", "waker.in_linked_worktree", "lib/showrunner/waker.py",
      r"(def in_linked_worktree\(cfg\):\n)",
      "    return False\ndef _neutered_linked(cfg):\n"),
+    ("doctor's fail-opens by cause", "cli._fail_open_groups", "lib/showrunner/cli.py",
+     r"(def _fail_open_groups\(rows, at\):\n)",
+     "    return []\ndef _neutered_fail_open_groups(rows, at):\n"),
+    ("why a guard raised", "cli._fail_open_cause", "lib/showrunner/cli.py",
+     r"(def _fail_open_cause\(exc\):\n)",
+     "    return \"unknown\", \"\"\ndef _neutered_fail_open_cause(exc):\n"),
     ("another tool's own reach rules", "reach.foreign_rules", "lib/showrunner/reach.py",
      r"(def foreign_rules\(root\):\n)",
      "    return []\ndef _neutered_foreign_rules(root):\n"),

@@ -714,6 +714,8 @@ def cmd_doctor(args):
               "Each printed a notice beside a successful result, which is the channel an agent "
               "mid-task skims. Read them: %s — then fix what degraded and delete the file."
               % (YEL + "warn " + OFF, len(_rows), _ago, rel(_fo, cfg.root)))
+        for _line in _fail_open_groups(_rows, int(now())):
+            print("        " + _line)
     else:
         print("  %s no guard has failed open here — the ledger is empty, which is a different "
               "answer from it being unreadable" % (GRN + "ok   " + OFF))
@@ -1585,6 +1587,48 @@ NO_REPO_FAIL_OPEN = ("neither the working directory nor CLAUDE_PROJECT_DIR resol
                      "repository, so this call was ALLOWED WITHOUT BEING CHECKED")
 
 
+def _fail_open_groups(rows, at):
+    """doctor's fail-open lines BY CAUSE (#111): one per (guard, cause), most frequent first, each
+    with its count, when it last happened, and that row's evidence.
+
+    Rows from before causes were recorded say only which guard failed; they are grouped as
+    "cause not recorded" rather than guessed at, since the shim had three causes it did not
+    distinguish.
+    """
+    groups = {}
+    for r in rows:
+        guard = r.get("guard") or (str(r.get("notice") or "").split(" guard failed open")[0]
+                                   if " guard failed open" in str(r.get("notice") or "")
+                                   else "unknown")
+        cause = r.get("cause") or "cause not recorded"
+        groups.setdefault((guard.lower(), cause), []).append(r)
+    out = []
+    for (guard, cause), rs in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+        last = max(rs, key=lambda r: int(r.get("ts") or 0))
+        age = at - int(last.get("ts") or 0)
+        ago = ("%dm" % (age // 60)) if age < 7200 else ("%dh" % (age // 3600))
+        evidence = []
+        if last.get("candidate"):
+            evidence.append("%s exited %s" % (last["candidate"], last.get("rc") or "?"))
+        for key in ("stderr", "detail"):
+            if last.get(key):
+                evidence.append(repr(str(last[key])[:120]))
+        if last.get("cwd") or last.get("project_dir"):
+            evidence.append("cwd %s, CLAUDE_PROJECT_DIR %s" % (last.get("cwd") or "?",
+                                                               last.get("project_dir") or "unset"))
+        out.append("%-9s %-20s %5d, last %s ago%s" % (guard, cause, len(rs), ago,
+                                                     (": " + "; ".join(evidence)) if evidence
+                                                     else ""))
+    return out
+
+
+def _fail_open_cause(exc):
+    """(cause, detail) for a guard that raised: the no-repo case, or the exception itself."""
+    if "not inside a git repository" in str(exc):
+        return "no-repo", ""
+    return "raised", "%s: %s" % (type(exc).__name__, exc)
+
+
 def _fail_open_text(which, exc, consequence):
     """One fail-open sentence for both CLI guards, matching the shims for the case that happens.
 
@@ -1708,7 +1752,7 @@ def _hook_payload():
     return (payload, None) if isinstance(payload, dict) else ({}, "stdin JSON was not an object")
 
 
-def _allow_loudly(notice):
+def _allow_loudly(notice, guard=None, cause=None, detail=None):
     """Exit 0, and SAY the guard did not run — the posture, and never the silent half of it.
 
     Allowing without a word is indistinguishable from a guard that ran and was content, which
@@ -1717,13 +1761,13 @@ def _allow_loudly(notice):
     this is the shape `.game_loop/bin/guard-writes.sh` uses for the same purpose, in this repo,
     on every tool call, which makes it the mechanism with observed evidence behind it.
     """
-    _record_fail_open(notice)
+    _record_fail_open(notice, guard=guard, cause=cause, detail=detail)
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
                                              "additionalContext": notice}}))
     return 0
 
 
-def _record_fail_open(notice):
+def _record_fail_open(notice, guard=None, cause=None, detail=None):
     """Append the fail-open to a durable ledger, so something downstream can ASK.
 
     THE NOTICE IS TECHNICALLY EMITTED AND RELIABLY UNREAD. It arrives as hook output beside a
@@ -1744,8 +1788,13 @@ def _record_fail_open(notice):
         root = _fail_open_root()
         if not root:
             return
+        # WHY, NOT ONLY WHICH (#111): the cause and its detail are what make doctor's "fix what
+        # degraded" actionable after the fact, alongside where the call came from.
+        row = {"ts": now(), "notice": notice[:300], "guard": guard or "unknown",
+               "cause": cause or "unknown", "detail": (detail or "")[:200],
+               "cwd": os.getcwd(), "project_dir": os.environ.get("CLAUDE_PROJECT_DIR", "")}
         with open(os.path.join(root, ".showrunner", "fail-open.jsonl"), "a") as fh:
-            fh.write(json.dumps({"ts": now(), "notice": notice[:300]}) + "\n")
+            fh.write(json.dumps(row) + "\n")
     except Exception:                                            # noqa: BLE001
         pass
 
@@ -1950,7 +1999,8 @@ def cmd_write_guard(args):
     if problem and not (args.command or args.path):
         return _allow_loudly(
             "⚠ THE WRITE GUARD DID NOT RUN — it could not read its PreToolUse payload (%s), so "
-            "this call was ALLOWED WITHOUT BEING CHECKED against this session's role." % problem)
+            "this call was ALLOWED WITHOUT BEING CHECKED against this session's role." % problem,
+            guard="write", cause="bad-payload", detail=problem)
     try:
         # FROM THE SESSION'S OWN DIRECTORY (#104). The shim `cd`s to the repo root before calling
         # this, so config loaded from the process directory made every session the main
@@ -1970,9 +2020,10 @@ def cmd_write_guard(args):
                                               cwd=payload.get("cwd") or os.getcwd())
     except Exception as exc:                                    # noqa: BLE001 — see docstring
         return _allow_loudly(_fail_open_text(
-            "WRITE", exc, "This session's role is NOT being enforced on writes right now."))
+            "WRITE", exc, "This session's role is NOT being enforced on writes right now."),
+            "write", *_fail_open_cause(exc))
     if allowed:
-        return _allow_loudly(message) if message else 0
+        return _allow_loudly(message, guard="write", cause="degraded") if message else 0
     try:
         events.emit(cfg, "write.denied", {"session": session, "tool": tool})
     except Exception:                                           # noqa: BLE001
@@ -2060,7 +2111,8 @@ def cmd_dispatch_guard(args):
         return _allow_loudly(
             "⚠ THE DISPATCH GUARD DID NOT RUN — it could not read its PreToolUse payload (%s), "
             "so this tool call was ALLOWED WITHOUT BEING CHECKED. A raw `claude -p` would skip "
-            "the worktree, the lease, the claim and the room." % problem)
+            "the worktree, the lease, the claim and the room." % problem,
+            guard="dispatch", cause="bad-payload", detail=problem)
     try:
         cfg = _cfg(args, guard=True)
         session = (args.session or payload.get("session_id")
@@ -2074,11 +2126,13 @@ def cmd_dispatch_guard(args):
     except Exception as exc:                                    # noqa: BLE001 — see docstring
         return _allow_loudly(_fail_open_text(
             "DISPATCH", exc,
-            "A raw `claude -p` would skip the worktree, the lease, the claim and the room."))
+            "A raw `claude -p` would skip the worktree, the lease, the claim and the room."),
+            "dispatch", *_fail_open_cause(exc))
 
     if allow:
         if message:
-            return _allow_loudly(message)
+            return _allow_loudly(message, guard="dispatch", cause="degraded",
+                                 detail=detail.get("why"))
         print(message or "allow: %s" % (detail.get("why") or "not a dispatch"))
         return 0
     eprint(message)
@@ -2241,7 +2295,8 @@ def cmd_worktree_guard(args):
         return _allow_loudly(
             "⚠ THE WORKTREE GUARD DID NOT RUN — it could not read its PreToolUse payload (%s), "
             "so this tool call was ALLOWED WITHOUT BEING CHECKED. A worktree held by another "
-            "live session is NOT protected right now. Check `showrunner doctor`." % problem)
+            "live session is NOT protected right now. Check `showrunner doctor`." % problem,
+            guard="worktree", cause="bad-payload", detail=problem)
 
     try:
         cfg = _cfg(args, guard=True)
@@ -2259,11 +2314,13 @@ def cmd_worktree_guard(args):
     except Exception as exc:                                    # noqa: BLE001 — see docstring
         return _allow_loudly(_fail_open_text(
             "WORKTREE", exc,
-            "A worktree held by another live session is NOT protected right now."))
+            "A worktree held by another live session is NOT protected right now."),
+            "worktree", *_fail_open_cause(exc))
 
     if allow:
         if detail.get("degraded"):
-            return _allow_loudly(message)
+            return _allow_loudly(message, guard="worktree", cause="degraded",
+                                 detail=str(detail.get("degraded")))
         print(message)
         return 0
 

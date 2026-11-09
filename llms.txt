@@ -33,7 +33,11 @@ saying so — and that notice arrives as hook output beside a SUCCESSFUL tool re
 channel an agent concentrating on something else skims. Writing the notice in capitals does not
 fix that; it treats a delivery problem as a copywriting problem.
 
-So every fail-open also appends to `.showrunner/fail-open.jsonl`, and `doctor` reports the COUNT.
+So every fail-open also appends to `.showrunner/fail-open.jsonl`, and `doctor` reports the COUNT,
+grouped by guard and cause (`binary-failed`, `no-repo`, `no-binary`, `bad-payload`, `raised`,
+`degraded`), with each group's latest evidence: the binary and its exit code, the first stderr
+line or the exception, and the cwd and `CLAUDE_PROJECT_DIR`. Rows from before causes were recorded
+are grouped as "cause not recorded".
 That is the part a notice cannot carry: one unchecked call and twenty are different facts about a
 session, and each individual notice looks exactly like the last. `doctor` is read by somebody who
 has stopped to look. The ledger distinguishes three answers that otherwise collapse into silence —

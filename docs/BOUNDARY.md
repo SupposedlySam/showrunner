@@ -301,7 +301,7 @@ re-reading everything: the assumptions above cite `guard-writes-impl.sh`, `verif
 cannot have moved. That is the difference between a check being satisfied and a check being
 skipped, and it is worth writing down because the skip is the tempting one.
 
-<!-- game_loop-verified: 3315ac3e — payload digest. THIS is the gated value, and it moves only
+<!-- game_loop-verified: c119c17c — payload digest. THIS is the gated value, and it moves only
      when the claims below have been re-read against that payload. It is not a claim about what
      is installed now; `.game_loop/VERSION` answers that and is not prose. -->
 

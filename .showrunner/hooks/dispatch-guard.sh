@@ -22,12 +22,21 @@ _record_fail_open() {
   _r="${CLAUDE_PROJECT_DIR:-}"
   [ -n "$_r" ] || _r="$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)" || return 0
   [ -d "$_r/.showrunner" ] || return 0
-  printf '{"ts":%s,"notice":"%s guard failed open"}\n' "$(date +%s)" "dispatch" \
+  # WHY, NOT ONLY WHICH (#111). A count tells the operator to fix something; the cause, the
+  # candidate, its exit code and its first stderr line are what make that fixable after the fact.
+  # Each field is JSON-escaped here, so a quote in stderr cannot corrupt the ledger.
+  printf '{"ts":%s,"notice":"%s guard failed open","guard":"%s","cause":"%s","candidate":"%s","rc":"%s","stderr":"%s","cwd":"%s","project_dir":"%s"}\n' \
+    "$(date +%s)" "dispatch" "dispatch" "$(_json_str "${1:-unknown}")" "$(_json_str "${2:-}")" \
+    "$(_json_str "${3:-}")" "$(_json_str "$(printf '%s' "${4:-}" | head -1 | cut -c1-200)")" \
+    "$(_json_str "$PWD")" "$(_json_str "${CLAUDE_PROJECT_DIR:-}")" \
     >> "$_r/.showrunner/fail-open.jsonl" 2>/dev/null || true
 }
 
+# A value made safe inside a JSON string: control characters dropped, backslash and quote escaped.
+_json_str() { printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
 notice() {
-  _record_fail_open
+  _record_fail_open "${2:-}" "${3:-}" "${4:-}" "${5:-}"
   printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"%s"}}\n' "$1"
   exit 0
 }
@@ -72,12 +81,12 @@ for candidate in "$root/.showrunner_self/bin/showrunner" \
       printf '%s\n' "$err" >&2
       exit 2
     fi
-    notice "⚠ THE DISPATCH GUARD DID NOT RUN — $candidate exited $rc instead of answering, so this call was ALLOWED WITHOUT BEING CHECKED. If that names an unknown verb, the binary is a PINNED copy older than it. First line: $(printf '%s' "$err" | head -1)"
+    notice "⚠ THE DISPATCH GUARD DID NOT RUN — $candidate exited $rc instead of answering, so this call was ALLOWED WITHOUT BEING CHECKED. If that names an unknown verb, the binary is a PINNED copy older than it. First line: $(printf '%s' "$err" | head -1)" binary-failed "$candidate" "$rc" "$err"
   fi
 done
 
 
 if [ "$near" = 1 ]; then
-  notice "⚠ THE DISPATCH GUARD DID NOT RUN — neither the working directory nor CLAUDE_PROJECT_DIR resolves to a git repository, so this call was ALLOWED WITHOUT BEING CHECKED. A raw \`claude -p\` would skip the worktree, the lease, the claim and the room. Check: showrunner doctor"
+  notice "⚠ THE DISPATCH GUARD DID NOT RUN — neither the working directory nor CLAUDE_PROJECT_DIR resolves to a git repository, so this call was ALLOWED WITHOUT BEING CHECKED. A raw \`claude -p\` would skip the worktree, the lease, the claim and the room. Check: showrunner doctor" no-repo
 fi
-notice "⚠ THE DISPATCH GUARD DID NOT RUN — no showrunner binary was found under the main checkout, so this call was ALLOWED WITHOUT BEING CHECKED. Check: showrunner doctor"
+notice "⚠ THE DISPATCH GUARD DID NOT RUN — no showrunner binary was found under the main checkout, so this call was ALLOWED WITHOUT BEING CHECKED. Check: showrunner doctor" no-binary

@@ -39,12 +39,21 @@ _record_fail_open() {
   _r="${CLAUDE_PROJECT_DIR:-}"
   [ -n "$_r" ] || _r="$(cd "$(dirname "$0")/../.." 2>/dev/null && pwd)" || return 0
   [ -d "$_r/.showrunner" ] || return 0
-  printf '{"ts":%s,"notice":"%s guard failed open"}\n' "$(date +%s)" "worktree" \
+  # WHY, NOT ONLY WHICH (#111). A count tells the operator to fix something; the cause, the
+  # candidate, its exit code and its first stderr line are what make that fixable after the fact.
+  # Each field is JSON-escaped here, so a quote in stderr cannot corrupt the ledger.
+  printf '{"ts":%s,"notice":"%s guard failed open","guard":"%s","cause":"%s","candidate":"%s","rc":"%s","stderr":"%s","cwd":"%s","project_dir":"%s"}\n' \
+    "$(date +%s)" "worktree" "worktree" "$(_json_str "${1:-unknown}")" "$(_json_str "${2:-}")" \
+    "$(_json_str "${3:-}")" "$(_json_str "$(printf '%s' "${4:-}" | head -1 | cut -c1-200)")" \
+    "$(_json_str "$PWD")" "$(_json_str "${CLAUDE_PROJECT_DIR:-}")" \
     >> "$_r/.showrunner/fail-open.jsonl" 2>/dev/null || true
 }
 
+# A value made safe inside a JSON string: control characters dropped, backslash and quote escaped.
+_json_str() { printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
 notice() {
-  _record_fail_open
+  _record_fail_open "${2:-}" "${3:-}" "${4:-}" "${5:-}"
   # additionalContext is what actually reaches the agent on an allow. Fixed strings only —
   # this is the piece that must never itself be the thing that breaks.
   printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"%s"}}\n' "$1"
@@ -115,12 +124,12 @@ for candidate in "$root/.showrunner_self/bin/showrunner" \
       printf '%s\n' "$err" >&2          # the refusal's reason, on the channel a denial uses
       exit 2
     fi
-    notice "⚠ THE WORKTREE GUARD DID NOT RUN — $candidate exited $rc instead of answering, so this tool call was ALLOWED WITHOUT BEING CHECKED. That is what a half-edited showrunner looks like from here: one syntax error under lib/showrunner/ kills every verb at import. A worktree held by another live session is NOT protected right now. First line: $(printf '%s' "$err" | head -1)"
+    notice "⚠ THE WORKTREE GUARD DID NOT RUN — $candidate exited $rc instead of answering, so this tool call was ALLOWED WITHOUT BEING CHECKED. That is what a half-edited showrunner looks like from here: one syntax error under lib/showrunner/ kills every verb at import. A worktree held by another live session is NOT protected right now. First line: $(printf '%s' "$err" | head -1)" binary-failed "$candidate" "$rc" "$err"
   fi
 done
 
 
 if [ "$near" = 1 ]; then
-  notice "⚠ THE WORKTREE GUARD DID NOT RUN — neither the working directory nor CLAUDE_PROJECT_DIR resolves to a git repository, so this tool call was ALLOWED WITHOUT BEING CHECKED. A worktree held by another live session is NOT protected. Check: showrunner doctor"
+  notice "⚠ THE WORKTREE GUARD DID NOT RUN — neither the working directory nor CLAUDE_PROJECT_DIR resolves to a git repository, so this tool call was ALLOWED WITHOUT BEING CHECKED. A worktree held by another live session is NOT protected. Check: showrunner doctor" no-repo
 fi
-notice "⚠ THE WORKTREE GUARD DID NOT RUN — no showrunner binary was found (looked for .showrunner/bin/showrunner and bin/showrunner under the main checkout), so this tool call was ALLOWED WITHOUT BEING CHECKED. A worktree held by another live session is NOT protected. Check: showrunner doctor"
+notice "⚠ THE WORKTREE GUARD DID NOT RUN — no showrunner binary was found (looked for .showrunner/bin/showrunner and bin/showrunner under the main checkout), so this tool call was ALLOWED WITHOUT BEING CHECKED. A worktree held by another live session is NOT protected. Check: showrunner doctor" no-binary

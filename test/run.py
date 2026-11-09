@@ -9238,6 +9238,83 @@ def test_fail_open_is_counted_not_just_announced():
     ok("...and it lands in the SAME ledger, so the count spans both guards",
        "2 tool call(s) were ALLOWED" in doctor())
 
+    # WHY, NOT ONLY WHICH (#111). A consumer's ledger held 727 rows reading only "worktree guard
+    # failed open", in bursts nobody could explain afterwards, while the shim knew which of three
+    # causes it was in. Each row now carries the cause and its evidence, and doctor groups by it.
+    def rows():
+        # [] when the ledger is absent, so a recorder that wrote nothing FAILS the
+        # assertions below rather than crashing the group.
+        if not os.path.exists(ledger):
+            return []
+        with open(ledger) as fh:
+            return [json.loads(l) for l in fh if l.strip()]
+    rows_cli = rows()
+    ok("the CLI records the cause of each fail-open: a raised exception, and a bad payload",
+       {(r.get("guard"), r.get("cause")) for r in rows_cli}
+       >= {("dispatch", "raised"), ("worktree", "bad-payload")}, rows_cli)
+    ok("...with the exception's type in the detail, which is what says what broke",
+       any(r.get("cause") == "raised" and "Refused:" in (r.get("detail") or "")
+           and "not valid JSON" in (r.get("detail") or "") for r in rows_cli),
+       rows_cli)
+
+    wt = os.path.join(cfg.root, ".showrunner", "hooks", "worktree-guard.sh")
+    shutil.copy(os.path.join(ROOT, ".showrunner", "hooks", "worktree-guard.sh"), wt)
+    os.chmod(wt, 0o755)
+    broken = os.path.join(cfg.root, ".showrunner", "bin", "showrunner")
+    os.makedirs(os.path.dirname(broken), exist_ok=True)
+    real_bin = open(broken).read() if os.path.exists(broken) else None
+    with open(broken, "w") as fh:
+        fh.write('#!/bin/sh\necho \'Traceback: SyntaxError: a "quoted" \\\\ token\' >&2\nexit 1\n')
+    os.chmod(broken, 0o755)
+    if os.path.exists(ledger):
+        os.remove(ledger)
+    try:
+        subprocess.run(["bash", wt], input='{"tool_name":"Bash","tool_input":{"command":"ls"}}',
+                       capture_output=True, text=True, cwd=cfg.root,
+                       env=dict(os.environ, CLAUDE_PROJECT_DIR=cfg.root))
+        got = rows()
+    except ValueError as exc:
+        got = [{"unparseable": str(exc)}]
+    finally:
+        if real_bin is None:
+            os.remove(broken)
+        else:
+            with open(broken, "w") as fh:
+                fh.write(real_bin)
+    row = got[-1] if got else {}
+    ok("the shim's row stays valid JSON when stderr carries quotes and backslashes",
+       "unparseable" not in row and bool(row), got)
+    ok("...and names the cause, the binary, its exit code and its first stderr line",
+       row.get("cause") == "binary-failed" and row.get("candidate", "").endswith(
+           os.path.join(".showrunner", "bin", "showrunner")) and row.get("rc") == "1"
+       and 'a "quoted"' in (row.get("stderr") or ""), row)
+    ok("...and the cwd and CLAUDE_PROJECT_DIR it ran under", row.get("project_dir") == cfg.root
+       and bool(row.get("cwd")), row)
+
+    with open(ledger, "a") as fh:
+        fh.write(json.dumps({"ts": int(time.time()) - 3600, "notice": "dispatch guard failed open"})
+                 + "\n")
+    out = doctor()
+    ok("doctor groups the fail-opens by guard and cause, with the latest one's evidence",
+       "binary-failed" in out and "exited 1" in out and "SyntaxError" in out, out[-800:])
+    ok("...and a row from before causes were recorded is grouped as such, not guessed at",
+       "cause not recorded" in out, out[-800:])
+    from showrunner import cli as _cli_fo
+    eq("_fail_open_cause: a missing repository is no-repo, with nothing more to say",
+       _cli_fo._fail_open_cause(RuntimeError("not inside a git repository")), ("no-repo", ""))
+    eq("...and anything else is raised, keeping its type and message",
+       _cli_fo._fail_open_cause(ValueError("bad thing")), ("raised", "ValueError: bad thing"))
+    _groups = _cli_fo._fail_open_groups(
+        [{"ts": 100, "guard": "worktree", "cause": "no-repo"},
+         {"ts": 200, "guard": "worktree", "cause": "no-repo"},
+         {"ts": 150, "guard": "dispatch", "cause": "raised", "detail": "KeyError: x"},
+         {"ts": 50, "notice": "dispatch guard failed open"}], 300)
+    ok("_fail_open_groups: one line per guard and cause, the most frequent first",
+       len(_groups) == 3 and _groups[0].startswith("worktree") and " 2," in _groups[0], _groups)
+    ok("...each with its latest evidence, and an old row grouped as cause not recorded",
+       any("KeyError: x" in g for g in _groups)
+       and any("dispatch" in g and "cause not recorded" in g for g in _groups), _groups)
+
 def test_stop_hook_heartbeat():
     group("Did the Stop hook RUN — the one question registration, parsing and 'has fired' "
           "cannot answer")

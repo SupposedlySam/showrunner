@@ -354,7 +354,11 @@ mid-task skims. Rewording it louder would treat a delivery problem as a copywrit
 fail-open appends to `.showrunner/fail-open.jsonl`, and
 `doctor` reports how many calls went unchecked — a count is the fact a per-call banner cannot
 carry, and `doctor` is read by somebody who has stopped to look. Both entrypoints record through
-the same funnel, and an unparseable ledger reports UNKNOWN rather than none.
+the same funnel, and an unparseable ledger reports UNKNOWN rather than none. Each row records WHY:
+the guard, a cause (`binary-failed`, `no-repo`, `no-binary`, `bad-payload`, `raised`,
+`degraded`), its evidence (the binary and its exit code, the first stderr line, or the
+exception), and the cwd and `CLAUDE_PROJECT_DIR` it ran under. `doctor` groups the count by guard
+and cause and shows each group's latest evidence, so "fix what degraded" has something to act on.
 
 **The launch binary is configurable, and `doctor` resolves it.** `dispatch.claude_bin` defaults
 to `claude` on PATH. On a machine whose only `claude` is bundled inside an editor extension —
