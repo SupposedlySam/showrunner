@@ -9370,7 +9370,9 @@ def test_a_message_that_admits_skipped_research_is_refused():
                                           "live sessions."),
             ("an italic hypothetical", "It reads as *I didn't look where you put it*."),
             ("a quoted line", "> I haven't checked that\n\nThey said that; I checked it: it holds."),
-            ("finished work", "Verified against the source: the engine uses no dart:io.")):
+            ("finished work", "Verified against the source: the engine uses no dart:io."),
+            ("reported speech, the gate's own first false block",
+             "It stops a turn on a message that says I didn't check something.")):
         eq("allowed: %s" % label, verdict(text)[0], 0)
     eq("no transcript allows, and says so", verdict.__code__ and subprocess.run(
         ["bash", gate], input=json.dumps({"transcript_path": "/nonexistent"}),

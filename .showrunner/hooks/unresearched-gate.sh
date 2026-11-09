@@ -95,9 +95,14 @@ EXEMPT = re.compile(
     r"|decision\s+that['’]s\s+yours|needs\s+your|deliberately|on\s+purpose"
     r"|it\s+would\s+(?:swap|overwrite|break|destroy|wipe|delete|clobber)", re.I)
 
+# REPORTED SPEECH IS A MENTION. "a message that says I didn't check something" describes an
+# admission; it is not one. Found on the gate's first live turn, refusing its own summary.
+REPORTED = re.compile(r"\b(?:says?|saying|said|admits?|admitting|reads?\s+as|claims?)\s+"
+                      r"(?:that\s+)?i\b", re.I)
+
 for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
     m = ADMIT.search(sentence)
-    if m and not EXEMPT.search(sentence):
+    if m and not EXEMPT.search(sentence) and not REPORTED.search(sentence[:m.start() + 2]):
         print(
             "STOP REFUSED — this message admits something was not researched:\n"
             "\n"
