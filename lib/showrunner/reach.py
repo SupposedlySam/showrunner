@@ -37,7 +37,19 @@ import re
 #   tools   — tool names this can fire on; empty means any.
 #   pattern — matched against the payload's searchable text, case-insensitively.
 #   verb    — the showrunner verb the message names, or "" when it names none. CHECKED.
-#   requires— path that must exist under the repo root for the rule to speak, or "".
+#   requires— path that must exist under the repo root for the rule to speak, a predicate
+#             `f(root) -> bool` asked only once the pattern matched, or "".
+
+
+def _no_waker_configured(root):
+    """True when this repo has no `waker` watch, so a hand check of GitHub has a product."""
+    try:
+        from . import config, waker
+        return waker.spec(config.load(start=root)) is None
+    except Exception:                                           # noqa: BLE001
+        return False
+
+
 RULES = [
     # THE ONE THE REPORT ASKED FOR. A lesson written into a memory file is remembered; a lesson
     # written into an artifact is enforced. This repo's whole posture is that instructions do not
@@ -93,7 +105,76 @@ RULES = [
      "If this branch is for a parallel Crawler, `showrunner spawn` makes the branch inside its "
      "own worktree with a lease and a claim, so two sessions cannot land on it at once. If it "
      "is just a branch for your own work, carry on — this is a notice, not a refusal."),
+
+    # MERGING A CRAWLER'S BRANCH BY HAND, measured across this machine's transcripts: 227 calls in
+    # 7 repos, mostly `git merge --no-ff showrunner/<leaf>` into a campaign branch, one by one.
+    ("merge-a-crawler-branch",
+     ("Bash",),
+     r"git\s+(-C\s+\S+\s+)?merge\s+[^;&|\n]*\bshowrunner/\S",
+     "integrate",
+     "",
+     "You are merging a Crawler's branch by hand. `showrunner integrate` merges closed leaves "
+     "one at a time and re-runs the checks on each MERGED result, so two branches that each "
+     "pass alone cannot land as a trunk that fails. `--base <branch>` targets a campaign "
+     "branch, `--only <leaf>` takes one leaf, and `--dry-run` shows the order first."),
+
+    # A SLEEP LOOP AROUND A SHOWRUNNER VERB, waiting for a leaf to close: 25 calls in 2 repos.
+    ("poll-loop-on-a-campaign",
+     ("Bash",),
+     r"(until|while)\s+(!\s*)?\S*showrunner\s+(list|show|status|reconcile|ready|waiting)\b",
+     "waiting",
+     "",
+     "You are polling showrunner in a loop. `showrunner waiting --follow` is that loop: it "
+     "blocks while Crawlers are working and exits the moment that changes (1 when no dispatched "
+     "work is live, 3 when one is BLOCKED or STALLED). Run it as a background task and its exit "
+     "wakes you, with no sleep interval to guess."),
+
+    # CHECKING GITHUB BY HAND for new issues and PRs: 1,568 calls in 11 repos, mostly owner
+    # agents asking "anything new?" on every turn. Silent where the waker is already configured.
+    ("watching-github-by-hand",
+     ("Bash",),
+     r"gh\s+(-R\s+\S+\s+)?(issue|pr)\s+(-R\s+\S+\s+)?list\b",
+     "waker",
+     _no_waker_configured,
+     "You are checking GitHub by hand for new issues or PRs. `showrunner waker` does it for "
+     "you: add a `waker` section to .showrunner/config.local.json naming the repos and who to "
+     "trust, and the registered Stop hook wakes this session on a new issue, PR, comment, "
+     "review or merge. `showrunner waker --once` looks once and reports."),
 ]
+
+
+# OTHER TOOLS' RULES, read from the file each ships. game_loop's advice is game_loop's to word:
+# a rule about its gates written here would be a second statement of its behaviour, free to
+# disagree with the first. So a repo carrying `.game_loop/reach.json` gets those rules too:
+#   {"rules": [{"name": "...", "tools": ["Bash"], "pattern": "...", "message": "..."}]}
+# An entry that does not parse, or whose pattern does not compile, is skipped: advice that
+# cannot be read costs advice and nothing else.
+FOREIGN_RULE_FILES = ((os.path.join(".game_loop", "reach.json"), "game_loop"),)
+
+
+def foreign_rules(root):
+    """(name, tools, pattern, verb, requires, message) for every readable foreign rule."""
+    out = []
+    for rel, owner in FOREIGN_RULE_FILES:
+        try:
+            with open(os.path.join(root, rel)) as fh:
+                data = json.load(fh)
+        except (OSError, ValueError, TypeError):
+            continue
+        for r in (data.get("rules") if isinstance(data, dict) else None) or []:
+            if not isinstance(r, dict):
+                continue
+            name, pattern, message = r.get("name"), r.get("pattern"), r.get("message")
+            tools = r.get("tools") or ()
+            if not (isinstance(name, str) and isinstance(pattern, str)
+                    and isinstance(message, str) and isinstance(tools, (list, tuple))):
+                continue
+            try:
+                re.compile(pattern)
+            except re.error:
+                continue
+            out.append(("%s:%s" % (owner, name), tuple(tools), pattern, "", "", message))
+    return out
 
 
 _HEREDOC = re.compile(r"<<-?\s*['\"]?(\w+)['\"]?\n.*?^\1$", re.S | re.M)
@@ -180,10 +261,16 @@ def advise(tool, tool_input, root=None):
     segments = _command_segments((tool_input or {}).get("command")
                                  if isinstance(tool_input, dict) else "")
     out = []
-    for name, tools, pattern, _verb, requires, message in RULES:
+    for name, tools, pattern, _verb, requires, message in RULES + (foreign_rules(root)
+                                                                    if root else []):
         if tools and tool not in tools:
             continue
-        if requires and not (root and os.path.exists(os.path.join(root, requires))):
+        if isinstance(requires, str) and requires and not (
+                root and os.path.exists(os.path.join(root, requires))):
+            continue
+        if callable(requires) and not re.search(pattern, text, re.I | re.M):
+            continue
+        if callable(requires) and not (root and requires(root)):
             continue
         # A COMMAND RULE MUST MATCH AT A COMMAND BOUNDARY; a path rule matches its field
         # anywhere, because a path is not a sequence of commands and has no boundaries to

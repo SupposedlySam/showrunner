@@ -8991,6 +8991,54 @@ def test_reaching_for_the_wrong_thing_names_the_right_one():
         fh.write("#!/bin/sh\n")
     ok("...and speaks once it IS present", "memory-write-could-be-hardened" in fires("Write", mem))
 
+    # THE REACHES MEASURED ACROSS THIS MACHINE'S TRANSCRIPTS, each with its quiet twin.
+    ok("merging a Crawler's branch by hand names integrate",
+       "merge-a-crawler-branch" in fires("Bash", {"command":
+                                                   "cd x && git merge --no-ff showrunner/w2 -m m"}))
+    eq("...while merging main, or asking for a merge-base, says nothing",
+       [fires("Bash", {"command": c}) for c in ("git merge main",
+                                                 "git merge-base main showrunner/w2")], [[], []])
+    ok("a sleep loop around a showrunner verb names waiting --follow",
+       "poll-loop-on-a-campaign" in fires("Bash", {"command":
+           "until ./.showrunner/bin/showrunner list | grep -q closed; do sleep 60; done"}))
+    eq("...while one call of the same verb says nothing",
+       fires("Bash", {"command": "./.showrunner/bin/showrunner list"}), [])
+    ok("checking GitHub by hand names the waker where none is configured",
+       "watching-github-by-hand" in fires("Bash", {"command": "gh pr list --state open"}))
+    waked = make_repo({"waker": {"repos": ["a/b"]}})
+    eq("...and says nothing where the waker is already watching",
+       fires("Bash", {"command": "gh pr list --state open"}, at=waked.root), [])
+
+    # OTHER TOOLS WORD THEIR OWN ADVICE. game_loop ships .game_loop/reach.json; an entry that
+    # cannot be read is skipped rather than breaking the rest.
+    with open(os.path.join(root, ".game_loop", "reach.json"), "w") as fh:
+        json.dump({"rules": [
+            {"name": "skipped-gate", "tools": ["Bash"], "pattern": r"git\s+commit\b.*--no-verify",
+             "message": "game_loop: authorize the bypass instead."},
+            {"name": "bad-regex", "tools": ["Bash"], "pattern": "(", "message": "x"},
+            {"name": "no-message", "pattern": "ls"}]}, fh)
+    hit = fires("Bash", {"command": "git commit --no-verify -m x"})
+    ok("a rule game_loop ships fires under its own name", "game_loop:skipped-gate" in hit, hit)
+    eq("...while its unreadable entries are skipped, not fatal",
+       fires("Bash", {"command": "ls"}), [])
+    eq("...and a repo without the file gets none of them",
+       [r for r in reach.foreign_rules(waked.root)], [])
+    eq("foreign_rules returns exactly the readable rule, named for its owner",
+       [r[0] for r in reach.foreign_rules(root)], ["game_loop:skipped-gate"])
+    eq("_no_waker_configured: true with no watch, false with one",
+       (reach._no_waker_configured(root), reach._no_waker_configured(waked.root)), (True, False))
+
+    def reach_says(command, at):
+        return subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "reach"],
+                              input=json.dumps({"tool_name": "Bash",
+                                                "tool_input": {"command": command}}),
+                              capture_output=True, text=True, cwd=at).stdout
+    ok("...and through the verb, a foreign rule's own words reach the agent",
+       "authorize the bypass" in reach_says("git commit --no-verify -m x", root))
+    ok("...as does the waker advice in a repo with no watch",
+       "showrunner waker" in reach_says("gh issue list", root)
+       or "waker" in reach_says("gh issue list", root))
+
     # THE RULES NAME VERBS, AND A NAMED VERB MUST EXIST. A table pointing at a renamed verb is
     # worse than no table: it teaches that the tool cannot do the thing.
     verbs = set(roles.verb_inventory())
@@ -9276,6 +9324,57 @@ def test_stop_hook_heartbeat():
            "recorded the invocation rather than simply skipping it",
            os.path.exists(redirected) and os.path.getsize(redirected) > 0)
 
+
+
+def test_a_message_that_admits_skipped_research_is_refused():
+    group("A turn-end whose message admits something was not researched is refused — Jonah, "
+          "2026-11-09: he never wants to read one")
+    gate = os.path.join(ROOT, ".showrunner", "hooks", "unresearched-gate.sh")
+    ok("the gate ships and is executable", os.path.isfile(gate) and os.access(gate, os.X_OK))
+    with open(os.path.join(ROOT, ".claude", "settings.json")) as fh:
+        stops = [h.get("command", "") for g in json.load(fh)["hooks"].get("Stop", [])
+                 for h in g.get("hooks", [])]
+    ok("...and is registered on Stop in this checkout, so it runs at every turn-end",
+       any("unresearched-gate.sh" in c for c in stops), stops)
+
+    def verdict(text):
+        d = tmpdir("ur-gate")
+        tp = os.path.join(d, "t.jsonl")
+        with open(tp, "w") as fh:
+            fh.write(json.dumps({"type": "assistant",
+                                 "message": {"content": [{"type": "text", "text": text}]}}) + "\n")
+        p = subprocess.run(["bash", gate], input=json.dumps({"transcript_path": tp}),
+                           capture_output=True, text=True)
+        return p.returncode, (p.stdout + p.stderr)
+
+    # THE REPORTED MESSAGE, and the real admissions measured in this repo's transcript.
+    rc, said = verdict("Use OpenAPI.\n\nOne thing to check: I haven't seen a real /swagger.json.")
+    eq("the reported admission, mid-message, REFUSES the turn-end (exit 2)", rc, 2)
+    ok("...and quotes the sentence it caught", "haven't seen" in said, said[:200])
+    for label, text in (
+            ("never read", "I rebased and ran the suite — but I never actually read the code."),
+            ("not measured", "- **Speed:** I haven't measured it, so I didn't guess."),
+            ("not sure whether", "I'm not sure whether the stream routes are in the spec."),
+            ("don't know whether", "I don't know whether those four leaves carried edges."),
+            ("needs checking", "The OpenAPI route still needs to be verified."),
+            ("bold retro", "**I never tested it.** It was the newest behaviour.")):
+        eq("refused: %s" % label, verdict(text)[0], 2)
+
+    # THE QUIET TWINS: describing code, someone else's audit, a decision handed back, a refusal
+    # with its hazard, a quoted or italic phrase, and plain finished work.
+    for label, text in (
+            ("code that goes unchecked", "A raw dispatch from a non-repo cwd goes unchecked."),
+            ("someone else's audit", "Their audit found 44 of 54 claims unverified."),
+            ("a decision handed back", "The decision that's yours: I did not run the upgrade."),
+            ("a refusal with its hazard", "I haven't run it: it would swap the harness under "
+                                          "live sessions."),
+            ("an italic hypothetical", "It reads as *I didn't look where you put it*."),
+            ("a quoted line", "> I haven't checked that\n\nThey said that; I checked it: it holds."),
+            ("finished work", "Verified against the source: the engine uses no dart:io.")):
+        eq("allowed: %s" % label, verdict(text)[0], 0)
+    eq("no transcript allows, and says so", verdict.__code__ and subprocess.run(
+        ["bash", gate], input=json.dumps({"transcript_path": "/nonexistent"}),
+        capture_output=True, text=True).returncode, 0)
 
 
 def test_embedded_code_inside_hooks_is_checked_too():
@@ -18125,7 +18224,7 @@ def test_never_integrated_leaves_do_not_collide():
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

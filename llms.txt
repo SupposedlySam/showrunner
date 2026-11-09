@@ -810,6 +810,14 @@ showrunner whoami                    # SessionStart AND PostCompact  (whoami.sh)
 showrunner dispatch guard            # PreToolUse on BASH            (dispatch-guard.sh)
 showrunner reach                     # PreToolUse on Write|Edit|NotebookEdit|Bash|TodoWrite
                                      #                               (reach-gate.sh)
+                                     # ADVICE ONLY: names the mechanism for a hand-rolled
+                                     # version of it: a worktree or branch for parallel work,
+                                     # a merge of a showrunner/ branch (integrate), a sleep loop
+                                     # around a showrunner verb (waiting --follow), a hand check
+                                     # of GitHub with no waker configured (waker), a todo list
+                                     # beside the graph, a memory write. Rules another tool
+                                     # ships in .game_loop/reach.json speak in its own words:
+                                     # {"rules":[{"name","tools","pattern","message"}]}
 showrunner wake-gate                 # PreToolUse on BASH            (wake-gate.sh)
 showrunner waker                     # Stop, asyncRewake (github-waker.sh): while the session is
                                      # idle, ONE GraphQL query every poll_sec over the repos the
@@ -1082,7 +1090,20 @@ allowed — that is present tense, and an agent that swallows "this is blocked o
 authorisation" to satisfy a word-ban has traded a visible stall for an invisible one. No
 transcript means ALLOWED WITHOUT BEING CHECKED, like every other guard here.
 
-Both run from tracked shims under `.showrunner/hooks/`, beside `worktree-guard.sh`,
+### A turn whose message admits skipped research is refused
+
+`.showrunner/hooks/unresearched-gate.sh` runs on **Stop** and reads the turn's whole final message,
+sentence by sentence. A first-person admission that something was not researched ("I haven't
+checked", "I never read the code", "I'm not sure whether", "still needs to be verified") refuses
+the turn-end with exit 2 and quotes the sentence. If the agent can name what it didn't check, it
+can check it, and the message is rewritten on what it found.
+
+Allowed: a description of code ("goes unchecked"), someone else's words (quoted lines, quoted or
+italic spans), a decision handed to the human ("your call", "needs your go-ahead"), and a refusal
+with its hazard stated ("it would overwrite …"). A real blocker is said once, as a present-tense
+ask. No transcript means ALLOWED WITHOUT BEING CHECKED.
+
+All three run from tracked shims under `.showrunner/hooks/`, beside `worktree-guard.sh`,
 `inert-crawler-gate.sh`, `reach-gate.sh`, `wake-gate.sh`, `write-guard.sh` and `waiting-probe.sh`.
 
 **`worktree register` does NOT wire all of them.** It writes the worktree guard, the
@@ -1094,6 +1115,7 @@ verb gaining one, and the table below is the thing that has to stay right. It do
 |---|---|---|
 | `future-tense-gate.sh` | by hand | outside the verb's set; registering it is a one-line settings edit |
 | `pipeline-status-gate.sh` | by hand | same |
+| `unresearched-gate.sh` | by hand | same |
 | `write-guard.sh` | `showrunner worktree register --write-guard` | OPT-IN: it REFUSES writes, and on a seat no role maps the fallback may write nothing — wired by default, an upgrade alone would make a repo read-only |
 | `github-waker.sh` | `worktree register` (inert until `waker` is configured) | — it IS registered; listed so its config is findable: `waker.repos`, `waker.upstream` ({repo, author}), `waker.trusted_logins`, `waker.trusted_names`, `waker.signature`, `waker.poll_sec` |
 | `waiting-probe.sh` | **NOBODY — deliberately** | arming an idle watchdog is a human decision, stated under "First thing, every session": *a probe an agent can set is a watchdog an agent can switch off* |
