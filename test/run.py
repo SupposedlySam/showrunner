@@ -9014,11 +9014,15 @@ def test_reaching_for_the_wrong_thing_names_the_right_one():
     with open(os.path.join(root, ".game_loop", "reach.json"), "w") as fh:
         json.dump({"rules": [
             {"name": "skipped-gate", "tools": ["Bash"], "pattern": r"git\s+commit\b.*--no-verify",
-             "message": "game_loop: authorize the bypass instead."},
+             "message": "game_loop: authorize the bypass instead.",
+             # UNKNOWN KEYS ARE IGNORED, as a contract: game_loop ships each rule with its own
+             # examples beside it, and a loader that refused extra keys would drop the rule.
+             "fires_on": ["git commit --no-verify -m x"], "silent_on": ["git commit -m x"]},
             {"name": "bad-regex", "tools": ["Bash"], "pattern": "(", "message": "x"},
             {"name": "no-message", "pattern": "ls"}]}, fh)
     hit = fires("Bash", {"command": "git commit --no-verify -m x"})
-    ok("a rule game_loop ships fires under its own name", "game_loop:skipped-gate" in hit, hit)
+    ok("a rule game_loop ships fires under its own name, its extra keys (fires_on, silent_on) "
+       "ignored rather than rejected", "game_loop:skipped-gate" in hit, hit)
     eq("...while its unreadable entries are skipped, not fatal",
        fires("Bash", {"command": "ls"}), [])
     eq("...and a repo without the file gets none of them",
