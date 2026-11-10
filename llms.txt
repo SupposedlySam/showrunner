@@ -238,6 +238,14 @@ showrunner gc                        # remove worktrees whose branch is MERGED a
                                      # it is fingerprinted at spawn and at launch, and counts
                                      # again the moment the Crawler edits it. `status` says when
                                      # worktrees pile past `gc_nudge_at` (default 10)
+                                     # REMOVAL RE-READS STATUS first, with the same provisioning
+                                     # split: work that appeared since it was classified holds the
+                                     # tree. It FORCES only when what remains is spawn's
+                                     # provisioning (git's own check refuses those), and then looks
+                                     # at the directory: a refusal, or a tree git reported removed
+                                     # that is still on disk, prints FAILED with the reason, is
+                                     # left out of the total, and `gc --apply` exits 1. `integrate`
+                                     # removes the same way and prints the same FAILED line
 showrunner gc --idle 24h             # EVERY registered worktree unused that long — campaign or not,
                                      # merged or not, dirty or not. KEPT, with the reason: locked,
                                      # `--keep <tree>`, a live Crawler, an in-progress claim, a held

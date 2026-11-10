@@ -254,6 +254,46 @@ TARGETS = [
     ("worktrees whose work has landed", "campaign.reclaimable", "lib/showrunner/campaign.py",
      r"(def reclaimable\([^)]*\):\n)",
      "    return [], []\ndef _neutered_reclaimable(cfg, graph, base='HEAD'):\n"),
+    # Answering (True, "") always restores the reported state exactly: every tree `reclaimable`
+    # chose is reported removed, the byte total is printed, `gc --apply` exits 0, and every one
+    # of them is still on disk. The report is the only thing anybody reads, so nothing errors.
+    ("removing a reclaimed tree", "campaign.remove_reclaimed", "lib/showrunner/campaign.py",
+     r"(def remove_reclaimed\(cfg, row\):\n)",
+     "    return True, \"\"\ndef _neutered_remove_reclaimed(cfg, row):\n"),
+    # NOT STUBS — each of these drops ONE decision inside the removal and leaves the rest. A
+    # stub of the whole function is killed by any assertion that the tree went; these are killed
+    # only by an assertion about the decision itself, which is the coverage being asked about.
+    #
+    # The re-read ignored: classification is trusted, so a file written after `gc` looked is
+    # deleted with the tree — forced, because the provisioning beside it licenses the force.
+    ("reclaim trusting a stale classification", "campaign.remove_reclaimed",
+     "lib/showrunner/campaign.py",
+     r"(    work, prov = worktree\.split_provisioning\(cfg, path, lines, "
+     r"entry\.get\(\"provisioned_files\"\)\)\n)",
+     "    work = []\n"),
+    # Never forced: git's own cleanliness check, which knows nothing about provisioning, refuses
+    # every tree whose only change is spawn's — the trees reclaim exists to remove.
+    ("reclaim never forcing provisioning", "campaign.remove_reclaimed",
+     "lib/showrunner/campaign.py",
+     r"(    work, prov = worktree\.split_provisioning\(cfg, path, lines, "
+     r"entry\.get\(\"provisioned_files\"\)\)\n)",
+     "    prov = []\n"),
+    # The directory not looked at: git's exit code is believed, and a tree it reported removed
+    # while leaving on disk is counted in the total.
+    #
+    # ACCEPTED AS THIN, declared rather than inflated. A real git does not exit 0 and leave the
+    # tree, so the only way to reach this is to stub `worktree.remove` in-process — once at the
+    # helper and once through the verbs' loop. A third through the CLI would need git faked
+    # inside a subprocess, which tests the fake.
+    ("reclaim believing git's exit code", "campaign.remove_reclaimed",
+     "lib/showrunner/campaign.py",
+     r"(    if os\.path\.lexists\(path\):\n)",
+     "        return True, \"\"\n"),
+    # A refusal counted as removed, one layer up: the FAILED line is never printed, the tree is
+    # in the total, and `gc --apply` exits 0 over trees that are still there.
+    ("the reclaim loop counting a refusal", "cli._remove_reclaimed", "lib/showrunner/cli.py",
+     r"(            gone, why = campaign\.remove_reclaimed\(cfg, r\)\n)",
+     "            gone = True\n"),
     # Answering None means "could not measure", which the reporter must print as `?` and never
     # as 0. A size that silently reads zero makes a reclaim look free and a backlog look absent.
     ("how big a tree actually is", "campaign.tree_bytes", "lib/showrunner/campaign.py",
