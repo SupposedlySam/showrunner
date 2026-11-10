@@ -520,6 +520,42 @@ def reclaimable(cfg, graph, base="HEAD"):
     return take, held
 
 
+def remove_reclaimed(cfg, row):
+    """Remove one tree `reclaimable` chose. Returns (removed, why_not).
+
+    CLASSIFICATION AND REMOVAL HAVE TO MEAN THE SAME "CLEAN" (#113). `reclaimable` discounts
+    spawn's own writes, so a tree whose only change is the provisioned hook registration is
+    reclaimable — and git, asked to remove it without force, sees a modified file and refuses.
+    Every tree #99 made reclaimable was one git would not remove, and the caller reported all of
+    them as removed.
+
+    So the status is read AGAIN here, immediately before the removal, with the same split: any
+    line that is somebody's work holds the tree, however it was classified a moment ago. Only
+    then is it forced, and only when what remains is provisioning — a tree git already calls
+    clean is removed without force, so git's own check stays in play wherever it agrees.
+
+    AND THE DIRECTORY IS LOOKED AT AFTERWARDS. "git exited 0" is a report; the tree being gone
+    is the fact, and the byte total printed to the operator is a claim about the fact.
+    """
+    path = cfg.abspath(row.get("worktree"))
+    entry = next((e for e in load(cfg).get("crawlers") or []
+                  if e.get("crawler") == row.get("crawler")), {})
+    lines = worktree.dirty(path)
+    if lines is None:
+        return False, ("its status could not be re-read just before removing it, and an "
+                       "unreadable answer must not license a delete")
+    work, prov = worktree.split_provisioning(cfg, path, lines, entry.get("provisioned_files"))
+    if work:
+        return False, ("%d change(s) appeared after it was classified (%s) — kept"
+                       % (len(work), ", ".join(worktree.status_path(l) for l in work[:3])))
+    ok, err = worktree.remove(cfg, row["crawler"], force=bool(prov))
+    if not ok:
+        return False, "git refused to remove it: %s" % (err or "no reason given")
+    if os.path.lexists(path):
+        return False, "git reported the tree removed and %s is still on disk" % path
+    return True, ""
+
+
 def _shallow_tail(cfg, graph, entry, f, wt):
     """Leaf status, parked and blocked — the fields BOTH modes need (#76).
 

@@ -2150,7 +2150,7 @@ def _human(n):
     return "%.0fG" % n
 
 
-def _report_reclaim(take, held, applied):
+def _report_reclaim(take, held, applied, failed=()):
     """What was (or would be) reclaimed, and everything held back WITH ITS REASON."""
     total = sum(r["bytes"] or 0 for r in take)
     unknown_size = any(r["bytes"] is None for r in take)
@@ -2164,8 +2164,30 @@ def _report_reclaim(take, held, applied):
                                          len(take), _human(total),
                                          " (at least — one tree could not be measured)"
                                          if unknown_size else ""))
+    elif failed:
+        print("  reclaimed nothing: %d tree(s) could not be removed and are still on disk"
+              % len(failed))
     elif not held:
         print("  no worktrees to reclaim, and none held back — nothing was found to look at")
+
+
+def _remove_reclaimed(cfg, take):
+    """Remove each tree in `take`; returns (removed, failed). Only what is GONE is removed (#113)."""
+    removed, failed = [], []
+    for r in take:
+        try:
+            gone, why = campaign.remove_reclaimed(cfg, r)
+        except SystemExit:
+            raise
+        except Exception as exc:                                # noqa: BLE001
+            gone, why = False, "%s: %s" % (type(exc).__name__, exc)
+        if gone:
+            removed.append(r)
+        else:
+            failed.append(r)
+            eprint("  %sFAILED%s %-22s %s — the tree is still at %s"
+                   % (RED, OFF, r["crawler"] or "?", why, r["worktree"]))
+    return removed, failed
 
 
 def cmd_gc(args):
@@ -2183,19 +2205,13 @@ def cmd_gc(args):
         return _gc_idle(cfg, args)
     take, held = campaign.reclaimable(cfg, _graph(cfg), base=args.base)
     print("%sWorktree reclaim%s%s" % (BOLD, OFF, "" if args.apply else " (dry run — use --apply)"))
-    removed = []
     if args.apply:
-        for r in take:
-            try:
-                worktree.remove(cfg, r["crawler"])
-                removed.append(r)
-            except SystemExit:
-                raise
-            except Exception as exc:                            # noqa: BLE001
-                eprint("  %sFAILED%s %s: %s" % (RED, OFF, r["crawler"], exc))
-        _report_reclaim(removed, held, True)
-    else:
-        _report_reclaim(take, held, False)
+        removed, failed = _remove_reclaimed(cfg, take)
+        _report_reclaim(removed, held, True, failed)
+        # NON-ZERO, because a script that reclaims disk and reads the exit code would otherwise
+        # be told the space is free.
+        return 1 if failed else 0
+    _report_reclaim(take, held, False)
     return 0
 
 
@@ -3848,16 +3864,8 @@ def cmd_integrate(args):
         take, held = campaign.reclaimable(cfg, _graph(cfg), base=args.base)
         if take or held:
             print("\n%sWorktrees%s" % (BOLD, OFF))
-            removed = []
-            for r in take:
-                try:
-                    worktree.remove(cfg, r["crawler"])
-                    removed.append(r)
-                except SystemExit:
-                    raise
-                except Exception as exc:                        # noqa: BLE001
-                    eprint("  %sFAILED%s %s: %s" % (RED, OFF, r["crawler"], exc))
-            _report_reclaim(removed, held, True)
+            removed, failed = _remove_reclaimed(cfg, take)
+            _report_reclaim(removed, held, True, failed)
 
     if integrated:
         print("%sThese merges auto-committed, so no provenance declaration was needed: the "

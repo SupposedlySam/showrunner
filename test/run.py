@@ -17093,6 +17093,56 @@ def test_gc_does_not_count_spawns_own_provisioning_as_work():
        names["P4"]["crawler"] in {h["crawler"] for h in held2},
        sorted(t["crawler"] for t in take2))
 
+    # THE TREE HAS TO ACTUALLY GO (#113). Classification discounted spawn's writes and removal
+    # did not: git saw a modified file, refused, and `gc --apply` printed "removed" and a byte
+    # total for nine trees that were all still on disk. So these look at the FILESYSTEM and at
+    # git's own list, never at the report.
+    for leaf_id in ("P1", "P2", "P3"):
+        sh(["git", "merge", "--no-ff", "-q", "-m", "merge", names[leaf_id]["branch"]], cfg.root)
+    sr = os.path.join(ROOT, "bin", "showrunner")
+    p1, p3 = names["P1"], names["P3"]
+
+    # A change that lands AFTER classification still holds the tree: asked directly, with a row
+    # classified while the tree held only provisioning.
+    row = next(t for t in campaign.reclaimable(cfg, g)[0] if t["crawler"] == p1["crawler"])
+    late = os.path.join(p1["worktree"], "late.txt")
+    with open(late, "w") as fh:
+        fh.write("written after gc looked\n")
+    gone, why = campaign.remove_reclaimed(cfg, row)
+    ok("a change made AFTER classification holds the tree at removal time, and says what changed",
+       gone is False and "late.txt" in why and os.path.isfile(late), (gone, why))
+    os.remove(late)
+
+    # A REFUSAL IS REPORTED AS ONE. git is made to refuse by locking the tree, which `--force`
+    # alone does not override.
+    sh(["git", "worktree", "lock", p1["worktree"]], cfg.root)
+    p = subprocess.run([sys.executable, sr, "gc", "--apply"], capture_output=True, text=True,
+                       cwd=cfg.root)
+    both = p.stdout + p.stderr
+    ok("a tree git REFUSES to remove is reported FAILED with git's reason, not as removed",
+       "FAILED" in both and p1["crawler"] in both
+       and not re.search(r"removed\s+%s" % re.escape(p1["crawler"]), p.stdout), both[-600:])
+    ok("...and it is not counted in the reclaimed total", "reclaimed nothing" in p.stdout
+       or not re.search(r"reclaimed \d+ tree", p.stdout), p.stdout[-300:])
+    eq("...and gc exits non-zero, so a script reading the code is not told the space is free",
+       p.returncode, 1)
+    ok("...and the tree really is still there", os.path.isdir(p1["worktree"]))
+    sh(["git", "worktree", "unlock", p1["worktree"]], cfg.root)
+
+    p = subprocess.run([sys.executable, sr, "gc", "--apply"], capture_output=True, text=True,
+                       cwd=cfg.root)
+    listed = sh(["git", "worktree", "list", "--porcelain"], cfg.root).stdout
+    ok("`gc --apply` REMOVES a merged tree whose only change is spawn's provisioning: the "
+       "directory is gone", not os.path.exists(p1["worktree"]), p.stdout + p.stderr)
+    ok("...and git no longer lists it", os.path.realpath(p1["worktree"]) not in listed
+       and p1["worktree"] not in listed, listed)
+    ok("...and it is reported removed, with a non-zero size", re.search(
+        r"removed\s+%s" % re.escape(p1["crawler"]), p.stdout) is not None
+        and not re.search(r"reclaimed \d+ tree\(s\), 0B", p.stdout), p.stdout[-400:])
+    ok("...while the tree holding a real untracked file survives it, file intact",
+       os.path.isfile(os.path.join(p3["worktree"], "notes.txt")))
+    eq("...and that run exits 0", p.returncode, 0)
+
     # THE NUDGE: a count, so `status` stays cheap; `gc` says which.
     import io
     from contextlib import redirect_stdout
