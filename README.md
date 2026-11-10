@@ -264,6 +264,14 @@ into a tree — its hook registrations above all — is fingerprinted when it wr
 counted as uncommitted work, until the Crawler edits it. `status` names `gc` once the worktree
 count passes `gc_nudge_at`.
 
+Removal re-reads each tree's status immediately before deleting it, with the same provisioning
+split classification uses, so work that appeared after `gc` looked still holds the tree. It forces
+the removal only when what remains is spawn's provisioning — git's own cleanliness check knows
+nothing about provisioning and refuses every such tree — and removes a tree git already calls
+clean without force. Then it looks at the directory: a tree git refused, or reported removed and
+left on disk, is printed FAILED with the reason, stays out of the reclaimed total, and makes
+`gc --apply` exit 1. `integrate` removes through the same step and reports a refusal the same way.
+
 **Every idle worktree, not only the campaign's.** A busy checkout accumulates trees made by other
 tooling, trees dirty only with harness output and refuted work kept on purpose, none of which plain
 `gc` touches. `showrunner gc --idle 24h` covers every worktree git has registered, keeps any tree

@@ -10106,6 +10106,8 @@ def test_issue_waker():
     # long. Asserted on ELAPSED TIME against a deliberately long budget, because that is the
     # actual claim: "it rang early" and "it rang at the end" are the same return value.
     w.POLL_SEC, w.DEBT_EVERY, w.BUDGET_SEC = 0, 1, 60
+    # Held to the main checkout: from a Crawler's tree `main()` returns before the loop runs.
+    w.in_linked_worktree = lambda _root: False
     w.look = lambda: {1: {}, 2: {}}                      # nothing fresh; issues are quiet
     w.chat_debts = lambda: ["#game_loop_owner: owner asked at seq 193"]
     started = time.time()
@@ -15512,6 +15514,10 @@ def test_the_watcher_sees_more_than_new_issues():
     w.POLL_SEC = 0
     w.BUDGET_SEC = 1
     w.chat_debts = lambda: []
+    # The hook resolves its repo from its own file, so from a Crawler's tree it is IN a linked
+    # worktree and `main()` returns before polling — every ring below would read as silence.
+    # Where the hook stands is asserted on its own elsewhere; here it is held to the main checkout.
+    w.in_linked_worktree = lambda _root: False
 
     def drive(items, comments, state):
         """Run one poll against a fixed world. Returns (rc, what it wrote to stderr)."""
@@ -17105,17 +17111,55 @@ def test_gc_does_not_count_spawns_own_provisioning_as_work():
     # A change that lands AFTER classification still holds the tree: asked directly, with a row
     # classified while the tree held only provisioning.
     row = next(t for t in campaign.reclaimable(cfg, g)[0] if t["crawler"] == p1["crawler"])
-    late = os.path.join(p1["worktree"], "late.txt")
-    with open(late, "w") as fh:
-        fh.write("written after gc looked\n")
-    gone, why = campaign.remove_reclaimed(cfg, row)
+
+    def late_change(rel, mode):
+        """(gone, why, still_there) for a write made after classification. FAILS rather than
+        raises when the tree is already gone, so a mutant that deleted it earlier takes these
+        assertions down one at a time instead of crashing the group."""
+        target = os.path.join(p1["worktree"], rel)
+        if not os.path.isdir(p1["worktree"]):
+            return None, "the tree was already gone", False
+        with open(target, mode) as fh:
+            fh.write("written after gc looked\n")
+        gone_, why_ = campaign.remove_reclaimed(cfg, row)
+        return gone_, why_, os.path.isfile(target)
+
+    gone, why, kept = late_change("late.txt", "w")
     ok("a change made AFTER classification holds the tree at removal time, and says what changed",
-       gone is False and "late.txt" in why and os.path.isfile(late), (gone, why))
-    os.remove(late)
+       gone is False and "late.txt" in why and kept, (gone, why))
+    if os.path.exists(os.path.join(p1["worktree"], "late.txt")):
+        os.remove(os.path.join(p1["worktree"], "late.txt"))
+    # A TRACKED file is the other kind of late work: it reaches the re-read through a different
+    # status line than an untracked one, and it is just as much somebody's only copy.
+    gone, why, kept = late_change("README.md", "a")
+    ok("...and so does an edit to a TRACKED file made after classification",
+       gone is False and "README.md" in why and kept, (gone, why))
+    if os.path.isdir(p1["worktree"]):
+        sh(["git", "checkout", "--", "README.md"], p1["worktree"], check=False)
+
+    # "git exited 0" IS A REPORT, NOT THE FACT. git is made to claim success and remove nothing,
+    # so only the look at the directory can tell the two apart.
+    real_remove = worktree.remove
+    worktree.remove = lambda _cfg, _name, force=False: (True, "")
+    import io as _io_rr
+    from contextlib import redirect_stderr as _rr_err
+    from showrunner import cli as _cli_rr
+    err_rr = _io_rr.StringIO()
+    try:
+        gone, why = campaign.remove_reclaimed(cfg, row)
+        with _rr_err(err_rr):
+            removed_rr, failed_rr = _cli_rr._remove_reclaimed(cfg, [row])
+    finally:
+        worktree.remove = real_remove
+    ok("a tree git REPORTS removed while it is still on disk is not counted removed, and says so",
+       gone is False and "still on disk" in why and os.path.isdir(p1["worktree"]), (gone, why))
+    ok("...and the verbs' removal loop files it under FAILED, printing that it is still on disk",
+       not removed_rr and failed_rr == [row] and "FAILED" in err_rr.getvalue()
+       and "still on disk" in err_rr.getvalue(), (removed_rr, err_rr.getvalue()))
 
     # A REFUSAL IS REPORTED AS ONE. git is made to refuse by locking the tree, which `--force`
     # alone does not override.
-    sh(["git", "worktree", "lock", p1["worktree"]], cfg.root)
+    sh(["git", "worktree", "lock", p1["worktree"]], cfg.root, check=False)
     p = subprocess.run([sys.executable, sr, "gc", "--apply"], capture_output=True, text=True,
                        cwd=cfg.root)
     both = p.stdout + p.stderr
@@ -17127,7 +17171,7 @@ def test_gc_does_not_count_spawns_own_provisioning_as_work():
     eq("...and gc exits non-zero, so a script reading the code is not told the space is free",
        p.returncode, 1)
     ok("...and the tree really is still there", os.path.isdir(p1["worktree"]))
-    sh(["git", "worktree", "unlock", p1["worktree"]], cfg.root)
+    sh(["git", "worktree", "unlock", p1["worktree"]], cfg.root, check=False)
 
     p = subprocess.run([sys.executable, sr, "gc", "--apply"], capture_output=True, text=True,
                        cwd=cfg.root)
@@ -17158,6 +17202,63 @@ def test_gc_does_not_count_spawns_own_provisioning_as_work():
     with redirect_stdout(quiet):
         cli._gc_nudge(cfg)
     eq("...and says nothing below the threshold", quiet.getvalue(), "")
+
+
+def test_integrate_removes_a_provisioned_tree_and_reports_a_refusal():
+    group("`integrate` reclaims through the same removal as `gc`: a tree holding only spawn's "
+          "provisioning goes, and a refusal is FAILED with the tree still on disk")
+    if not have("git"):
+        skip("the integrate-reclaim group", "git is not installed")
+        return
+    cfg = make_repo(files={"README.md": "x\n",
+                           ".claude/settings.json": json.dumps({"hooks": {}}) + "\n"})
+    lease.register_guard(cfg, local=True)
+    # Integration refuses a checkout with uncommitted tracked changes, and registering touched
+    # the tracked settings — so commit it, as a consumer's checkout would have.
+    sh(["git", "commit", "-q", "-am", "register"], cfg.root)
+    g = new_graph(cfg)
+    recs = {}
+    for leaf_id in ("I1", "I2"):
+        g.add("leaf %s" % leaf_id, leaf_id=leaf_id, labels=["backend"])
+        rec = worktree.spawn(cfg, g.show(leaf_id), actor="crawler-%s" % leaf_id.lower())
+        campaign.record_spawn(cfg, rec)
+        landed = os.path.join(rec["worktree"], "%s.txt" % leaf_id)
+        with open(landed, "w") as fh:
+            fh.write("work\n")
+        sh(["git", "add", "%s.txt" % leaf_id], rec["worktree"])
+        sh(["git", "commit", "-q", "-m", "the work"], rec["worktree"])
+        g.claim(leaf_id, rec["crawler"], tree=rec["worktree"])
+        g.close(leaf_id, G.CLOSED, landed, "done")
+        recs[leaf_id] = rec
+    i1, i2 = recs["I1"], recs["I2"]
+    # THE CONTROL: without it, a tree that was simply clean would pass every assertion below
+    # and say nothing about provisioning.
+    ok("each tree's only uncommitted change is spawn's provisioning, so git alone would refuse it",
+       (worktree.dirty(i2["worktree"]) or []) != []
+       and all("settings" in l for l in worktree.dirty(i2["worktree"]) or []),
+       worktree.dirty(i2["worktree"]))
+
+    # git is made to refuse I1 by locking it, which `--force` alone does not override.
+    sh(["git", "worktree", "lock", i1["worktree"]], cfg.root)
+    sr = os.path.join(ROOT, "bin", "showrunner")
+    p = subprocess.run([sys.executable, sr, "integrate"], capture_output=True, text=True,
+                       cwd=cfg.root)
+    both = p.stdout + p.stderr
+    ok("both branches integrate, so both trees are reclaim candidates",
+       both.count("integrated") >= 2, both[-800:])
+    ok("`integrate` REMOVES the tree whose only change is provisioning: the directory is gone",
+       not os.path.exists(i2["worktree"]), both[-800:])
+    ok("...and git no longer lists it", i2["worktree"] not in sh(
+        ["git", "worktree", "list", "--porcelain"], cfg.root).stdout)
+    ok("...and it is reported removed", re.search(r"removed\s+%s" % re.escape(i2["crawler"]),
+                                                   p.stdout) is not None, p.stdout[-600:])
+    ok("a tree git REFUSES is reported FAILED by `integrate` too, with git's reason",
+       re.search(r"FAILED\s+%s\s+git refused" % re.escape(i1["crawler"]), p.stderr) is not None,
+       p.stderr[-600:])
+    ok("...and not as removed", not re.search(r"removed\s+%s" % re.escape(i1["crawler"]),
+                                              p.stdout), p.stdout[-600:])
+    ok("...and the refused tree really is still there", os.path.isdir(i1["worktree"]))
+    sh(["git", "worktree", "unlock", i1["worktree"]], cfg.root)
 
 
 def test_a_crawler_running_tests_is_not_inert():
@@ -18467,7 +18568,7 @@ def test_never_integrated_leaves_do_not_collide():
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,
