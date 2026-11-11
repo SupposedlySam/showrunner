@@ -7171,7 +7171,7 @@ def test_mutation_anchor_refusal():
     # question — an anchor can go stale between now and any future edit, and the accounting
     # already reports `0 stale`, but nothing here re-derives it from the source files.
     missing = []
-    for name, _key, relpath, pattern, stub in _m.TARGETS:
+    for name, _key, relpath, pattern, stub in _m.TARGETS + _m.PAYLOAD_TARGETS:
         full = os.path.join(ROOT, relpath)
         try:
             with open(full) as fh:
@@ -12312,6 +12312,50 @@ def test_filed_issues_15_to_21():
        [t["name"] for t in again["stop"]].count("showrunner-stop-gate") == 1, again)
 
 
+
+# The payload is named by DIRECTORY, never by file. This check used to read the `game_loop` entry
+# point, and kept skipping after the implementation moved to `_gl_impl.py` behind a stub. So every
+# file in bin/ is read, and the next refactor that moves the map moves nothing here.
+_EXIT_MAP_DECL = re.compile(r"^WORKTREE_EXIT\s*=\s*(\{.*?\})", re.S | re.M)
+
+
+def installed_exit_map(root):
+    """(map, declaring file, files searched, that file's text, why not) for the installed harness.
+
+    `searched` is None only when there is no `.game_loop/` at all, which is the one state that
+    may skip. A payload whose bin/ is missing or declares no readable map returns map None with
+    the list of what was read, so the caller can fail naming it.
+    """
+    if not os.path.isdir(os.path.join(root, ".game_loop")):
+        return None, None, None, "", "no .game_loop/ payload is installed here"
+    bindir = os.path.join(root, ".game_loop", "bin")
+    searched, found = [], []
+    names = sorted(os.listdir(bindir)) if os.path.isdir(bindir) else []
+    for name in names:
+        full = os.path.join(bindir, name)
+        if not os.path.isfile(full):
+            continue
+        searched.append(os.path.relpath(full, root))
+        try:
+            with open(full, errors="ignore") as fh:
+                text = fh.read()
+        except OSError:
+            continue
+        for m in _EXIT_MAP_DECL.finditer(text):
+            try:
+                found.append((ast.literal_eval(m.group(1)), full, text))
+            except (ValueError, SyntaxError):
+                pass
+    maps = [f for f in found if isinstance(f[0], dict) and f[0]]
+    if not maps:
+        return None, None, searched, "", "no file declares a readable WORKTREE_EXIT literal"
+    if any(f[0] != maps[0][0] for f in maps):
+        # Two files declaring DIFFERENT maps is no answer either: which one runs is a fact
+        # about import order, and guessing it is how this check came to read the wrong file.
+        return None, None, searched, "", "the payload declares different maps in %s" % sorted(
+            {os.path.relpath(f[1], root) for f in maps})
+    return maps[0][0], os.path.relpath(maps[0][1], root), searched, maps[0][2], ""
+
 def test_claims_about_the_layer_below():
     group("Claims about game_loop, and whether they still describe what is installed")
     if not have("git"):
@@ -12551,22 +12595,41 @@ def test_claims_about_the_layer_below():
     # reporting that the harness could not tell, about a comparison the harness had made and
     # won. A wrong reason is what somebody reads when deciding whether to override.
     from showrunner import harness as H
-    binp = os.path.join(ROOT, ".game_loop", "bin", "game_loop")
-    payload_text = ""
-    exit_map = None
-    if os.path.exists(binp):
-        with open(binp, errors="ignore") as fh:
-            payload_text = fh.read()
-        m = re.search(r"WORKTREE_EXIT\s*=\s*(\{.*?\})", payload_text, re.S)
-        if m:
-            try:
-                exit_map = ast.literal_eval(m.group(1))
-            except (ValueError, SyntaxError):
-                exit_map = None
-    if not isinstance(exit_map, dict) or not exit_map:
-        skip("the exit-map agreement check",
-             "the installed harness declares no readable WORKTREE_EXIT")
-    else:
+    # THE FINDER'S FOUR STATES, on fixtures, because the installed payload only ever shows one.
+    with tempfile.TemporaryDirectory() as fx:
+        gone = installed_exit_map(fx)
+        bindir = os.path.join(fx, ".game_loop", "bin")
+        os.makedirs(bindir)
+        with open(os.path.join(bindir, "game_loop"), "w") as fh:
+            fh.write("import _impl\n")
+        with open(os.path.join(bindir, "_impl.py"), "w") as fh:
+            fh.write('X = 1\nWORKTREE_EXIT = {"clean": 0,\n    "drifted": 1}\n')
+        moved = installed_exit_map(fx)
+        with open(os.path.join(bindir, "_impl.py"), "w") as fh:
+            fh.write("X = 1\n")
+        absent = installed_exit_map(fx)
+        with open(os.path.join(bindir, "_impl.py"), "w") as fh:
+            fh.write('WORKTREE_EXIT = {"clean": 0}\n')
+        with open(os.path.join(bindir, "_other.py"), "w") as fh:
+            fh.write('WORKTREE_EXIT = {"clean": 1}\n')
+        split = installed_exit_map(fx)
+    ok("only a tree with no .game_loop/ at all may skip the exit-map check", gone[2] is None,
+       gone)
+    ok("...a map declared outside the entry point is found, in the file that declares it",
+       moved[0] == {"clean": 0, "drifted": 1} and moved[1].endswith("_impl.py"), moved[:3])
+    ok("...a payload with no map returns no map AND the files it read, so the failure can "
+       "name them", absent[0] is None and len(absent[2]) == 2, absent[:3])
+    ok("...and two files declaring different maps is no answer, not whichever was read first",
+       split[0] is None and "different maps" in split[4], split[4])
+    exit_map, decl_path, searched, payload_text, why = installed_exit_map(ROOT)
+    if searched is None:
+        skip("the exit-map agreement check", why)
+    # A PAYLOAD WITH NO MAP IS A FAILURE, NOT A SKIP. This check read one named file, the map
+    # moved to another in a refactor, and it skipped for as long as nobody read the skip list:
+    # a comparison that had stopped comparing, reporting nothing wrong.
+    elif ok("the installed harness declares a readable WORKTREE_EXIT somewhere in its payload "
+            "— a map nobody can find is a comparison that has silently stopped comparing",
+            exit_map, "%s; searched %d file(s): %s" % (why, len(searched), searched)):
         ok("every code the installed harness can exit with is one showrunner has a meaning "
            "for — an unmapped code reads as 'could not tell', which blocks, and says nothing",
            set(exit_map.values()) <= set(H.CONTRACT_CODES), exit_map)
@@ -12585,7 +12648,7 @@ def test_claims_about_the_layer_below():
         # that stopped firing reads exactly like a tree that was never mis-certified.
         ok("the retrospective flag showrunner surfaces is one the installed harness still "
            "emits — this is the only thing standing between that warning and going quiet",
-           "false_clean_before_fix" in payload_text, binp)
+           "false_clean_before_fix" in payload_text, decl_path)
 
     # THE LINE NUMBERS, which the stamp above does not check. It fires when the payload moves
     # and says so — it never says WHICH citation is now wrong, and the answer has twice been
