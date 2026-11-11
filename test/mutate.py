@@ -1518,6 +1518,23 @@ NOT_SWEPT = {
 }
 
 
+# MUTANTS OF THE VENDORED PAYLOAD, which is not product and so has no function key for the
+# accounting to hold: kept apart from TARGETS for that reason alone, and swept by the same loop.
+# Each one manufactures a payload shape a cross-layer check in run.py must FAIL on, because the
+# alternative it replaced was a skip — and a skip is what a check that has stopped looking
+# prints. Only the temporary copy is mutated; .game_loop/ itself is never written.
+PAYLOAD_TARGETS = [
+    # The exit map stops being a literal anyone can read, while game_loop keeps a working one:
+    # `_UNDECLARED = WORKTREE_EXIT = {...}` still runs, so the only assertion that can flip is
+    # the one asking whether showrunner found the map. That check once named a single file and
+    # skipped, unnoticed, after the map moved out of it.
+    ("the exit map the payload declares", "payload.WORKTREE_EXIT",
+     ".game_loop/bin/_gl_impl.py",
+     r"(\n)(?=WORKTREE_EXIT = \{)",
+     "_UNDECLARED = "),
+]
+
+
 # DERIVED from TARGETS, never mirrored. A hand-kept parallel set drifts in the silent
 # direction: delete a target, leave its key, and a candidate reads as covered while nothing
 # sweeps it.
@@ -1782,14 +1799,14 @@ def main():
     # is an error rather than a quiet success — the whole point of this tool is that a check
     # which cannot fail is worse than no check.
     if only:
-        matched = [t for t in TARGETS
+        matched = [t for t in TARGETS + PAYLOAD_TARGETS
                    if only.lower() in t[0].lower() or only.lower() in t[1].lower()]
         if not matched:
             print("--target %r matched no producer. Names and keys available:" % only)
-            for name, key, _r, _p, _s in TARGETS:
+            for name, key, _r, _p, _s in TARGETS + PAYLOAD_TARGETS:
                 print("  %-34s %s" % (name, key))
             return 1
-    for name, _key, relpath, pattern, stub in TARGETS:
+    for name, _key, relpath, pattern, stub in TARGETS + PAYLOAD_TARGETS:
         if only and not (only.lower() in name.lower() or only.lower() in _key.lower()):
             continue
         work = tempfile.mkdtemp(prefix="mutate-")
