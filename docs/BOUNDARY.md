@@ -18,7 +18,7 @@ Dependency arrow points one way: **showrunner → game_loop.** game_loop never l
 | Whether a **turn** may end | game_loop | Its Stop gate. showrunner supplies the graph the gate reads. |
 | Whether a **leaf** may close | showrunner | Proof-of-done and the premise verdict. |
 | A commit's **provenance** under fan-out | game_loop | `attribute --merge <ref>`, recomputed from the ref. |
-| Whether an orchestrator is **waiting on dispatched work** | showrunner | `showrunner waiting` — a live PID or an explicit park; game_loop's watchdog cannot see a subagent. |
+| Whether an orchestrator is **waiting on dispatched work** | showrunner | `showrunner waiting` — a live PID or an explicit park; game_loop's watchdog holds only for this session's own in-flight subagents and workflows; a Crawler is another session, which it cannot see. |
 | What a change **owes**, and whether evidence postdates it | game_loop | A fact about a tree. |
 | **Merge order and timing** | showrunner | Which branch lands when, and whether to stop. |
 | Proving a **fix** on the merged trunk | showrunner | `fix --prove` is scoped to the session that proved it — deliberately, so a Crawler's branch-local proof can never satisfy the integrator's handback. Branch-green is not trunk-green, so the integrating session must exercise the fix's own consumer against the merge. `integrate` writes the merged-result checks out as a citable artifact. |
@@ -301,26 +301,28 @@ re-reading everything: the assumptions above cite `guard-writes-impl.sh`, `verif
 cannot have moved. That is the difference between a check being satisfied and a check being
 skipped, and it is worth writing down because the skip is the tempting one.
 
-<!-- game_loop-verified: c119c17c — payload digest. THIS is the gated value, and it moves only
+<!-- game_loop-verified: 54d822d1 — payload digest. THIS is the gated value, and it moves only
      when the claims below have been re-read against that payload. It is not a claim about what
      is installed now; `.game_loop/VERSION` answers that and is not prose. -->
 
 
 - The commit gate resolves **per target tree** — the resolution lands in `commit_root`, and the
   no-harness branch then carries it in `_gl_unharnessed` — and denies in two cases: when that
-  tree carries no harness (`guard-writes-impl.sh:1659`, where the `undetermined:` resolution
+  tree carries no harness (`guard-writes-impl.sh:1752`, where the `undetermined:` resolution
   becomes `_gl_unharnessed`), and
   when the target is built from a **shell variable** so the gate cannot resolve it without
-  executing it (line 1640). The second is newer than the first — it used to pass silently,
+  executing it (line 1733). The second is newer than the first — it used to pass silently,
   which is the default shape under fan-out.
 - A **FOURTH** denial, newest of all and the only one keyed on a *mandate* rather than on a
-  path: a Bash `rm` carrying BOTH recursive and force, while an unparked mandate is live
-  (`guard-writes-impl.sh:1066`). The reasoning is not about the delete — it is that an
+  path: a Bash `rm` carrying BOTH recursive and force, while a mandate is active and not parked
+  (`guard-writes-impl.sh:1164`); a cleared mandate does not count. The reasoning is not about the delete — it is that an
   interactive approval is the one hazard in an unattended run that fails SILENT: no timeout, no
   log line, and the watchdog cannot answer it because a run blocked on a prompt is not idle.
   Both flags are required, in any spelling (`-rf`, `-r -f`, `--recursive --force`), and the
   argv is lexed rather than pattern-matched — unbalanced quotes make it say nothing rather than
-  guess at a command.
+  guess at a command. `game_loop authorize --path rm-rf` with the human's words buys exactly one
+  such delete, logged with the command, and it must be its own call: the gate fires before any
+  part of a command runs, so authorize-then-rm in one line is refused whole.
 
   **This bullet exists because the enumeration above was wrong the moment the harness moved.**
   It read "denies in two cases" plus "a third" against a payload that had grown a fourth, and
@@ -328,12 +330,12 @@ skipped, and it is worth writing down because the skip is the tempting one.
   day it is written.
 
 - A **third** denial, newer than both and not on the commit path at all: a Write or Edit to
-  `config.json`, `INVARIANTS.md` or `verify.yaml` **when the file already exists** (line 619).
+  `config.json`, `INVARIANTS.md` or `verify.yaml` **when the file already exists** (line 697).
   The discriminator is existence, so seeding an absent one is provisioning and passes —
   verified here in a real tree by moving the file aside and re-running the same payload, since
   an orchestrator that provisions worktrees is the party that breaks if that arm is wrong.
   It **now also covers `config.local.json`, and that one is denied whether or not it exists**
-  (line 625) —
+  (line 703) —
   nothing seeds it, so creating one is the same act as editing one. Written down because the
   sentence here said the opposite for exactly one commit: showrunner found that file merged
   into the same policy with UNION semantics on the trust lists, reported it upstream rather
@@ -344,7 +346,7 @@ skipped, and it is worth writing down because the skip is the tempting one.
   calls, so showrunner writing that file into a worktree from its own process is unaffected.
   Verified here, same path both ways — the orchestrator's write lands, the session's is denied.
 - A **fifth** denial, and the one that reaches into showrunner's own tree: a Write, Edit or shell
-  write to the script `watchdog.waiting_probe` names (`guard-writes-impl.sh:724`, and line 2754
+  write to the script `watchdog.waiting_probe` names (`guard-writes-impl.sh:802`, and line 2819
   for the shell path). Here that is `.showrunner/hooks/waiting-probe.sh`. The guard resolves the
   script from the config value rather than by name, and refuses it because a probe that exits 0
   tells the watchdog the run is waiting, so a session that edits it decides when its own idle
@@ -356,12 +358,19 @@ skipped, and it is worth writing down because the skip is the tempting one.
   showrunner's product code, which its owner session edits as ordinary work, so the file guard
   cannot reach them without blocking that work. The answer `waiting` gives is pinned by the
   suite's `waiting` group instead.
+- A **sixth** denial, and the only one a project has to switch on: a write matching a
+  `require_read` rule's globs, when the file that rule names has not been read since the
+  human's last message. It sits on both paths — Write/Edit (`guard-writes-impl.sh:890`) and
+  shell writes (line 2806), both calling `require_read_gate` — and hands the targets the guard
+  already resolved to `game_loop readcheck`, so there is one parser of where a command writes.
+  It costs nothing unconfigured and fails open on any error. This repo configures no
+  `require_read` rule, so nothing here is refused by it.
 - The edited-file set is scoped to the **session**, not the tree — one session is one session
   however many trees it touches. (`EDITED_F` at line 353.)
 - The blast-radius check is a **warning, never a denial** — `blast_note` reaches `commit_note`
-  and nothing else (`blast_note` assigned at 1787, consumed at 3192) — and is silent when the
-  session's `edited` set is empty, which is no evidence rather than a clean bill (line 1804,
-  with the set's design stated at 445).
+  and nothing else (`blast_note` assigned at 1880, consumed at 3257) — and is silent when the
+  session's `edited` set is empty, which is no evidence rather than a clean bill (line 1897,
+  with the set's design stated at 463).
 **The two below cite `install.sh` by ANCHOR, not by line, and that is a correction.** It is
 the one file here that is not vendored — it lives in game_loop's own checkout — so the payload
 digest does not move when it changes and the cited-line check cannot read it. They carried line
