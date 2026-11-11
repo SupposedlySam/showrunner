@@ -697,6 +697,24 @@ TARGETS = [
      r"(def dispatch_guard\(cfg, session=None, tool=None, tool_input=None\):\n)",
      "    return True, '', {}\n"
      "def _neutered_dispatch_guard(cfg, session=None, tool=None, tool_input=None):\n"),
+    # A MENTION IS NOT A DISPATCH. Always-True is the reported defect — unittest's `-p` beside a
+    # heredoc that says "claude" refused as a raw dispatch; always-False is the silent half, every
+    # real `claude -p` allowed with the guard still registered.
+    ("claude as the command word, not a mention", "dispatch._is_headless_claude",
+     "lib/showrunner/dispatch.py",
+     r"(def _is_headless_claude\(command, depth=0\):\n)",
+     "    return True\ndef _neutered_is_headless_claude(command, depth=0):\n"),
+    ("claude as the command word, not a mention (silent half)", "dispatch._is_headless_claude",
+     "lib/showrunner/dispatch.py",
+     r"(def _is_headless_claude\(command, depth=0\):\n)",
+     "    return False\ndef _neutered_is_headless_claude(command, depth=0):\n"),
+    ("wrappers stripped to the real command word", "dispatch._command_word",
+     "lib/showrunner/dispatch.py",
+     r"(def _command_word\(argv\):\n)",
+     "    return list(argv)\ndef _neutered_command_word(argv):\n"),
+    ("substitutions a shell executes", "dispatch._substitutions", "lib/showrunner/dispatch.py",
+     r"(def _substitutions\(text\):\n)",
+     "    return []\ndef _neutered_substitutions(text):\n"),
     # THE VALIDITY PRECONDITION (#41). An always-empty answer is the exact silence it exists to
     # break: a run that could not reach the world reports its failure count as though the count
     # meant something, and a confident verdict lands about code that was never exercised.

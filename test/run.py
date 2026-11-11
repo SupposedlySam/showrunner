@@ -6207,6 +6207,36 @@ def test_dispatch_guard():
         ok("...and `claude` WITHOUT -p passes: this is not a ban on the binary, it is a check "
            "that a session may dispatch at all", allow3)
 
+        # A MENTION IS NOT A DISPATCH. The reported command: unittest's `-p` plus a commit whose
+        # heredoc said "the claude session" was refused, because the two words were searched for
+        # independently anywhere in the text. Each of these names claude and carries a -p.
+        mentions = [
+            'python3 -m unittest discover -s test -p "test_docs*.py" && git commit -m "$(cat '
+            "<<'EOF'\nfix: docs\n\nRestart the claude session to pick it up.\nEOF\n)\"",
+            'mkdir -p x && echo "start claude later"',
+            "git log -p --grep 'claude code' | grep claude",
+            "echo 'claude -p'",
+            'git commit -m "note: a raw claude -p is refused"',
+            "cat > notes.md <<EOF\nrun claude -p x by hand\nEOF",
+            "bash -c 'echo claude -p'",
+        ]
+        wrong = [c for c in mentions if not dispatch.dispatch_guard(
+            cfg, "s", tool="Bash", tool_input={"command": c})[0]]
+        ok("a command that only MENTIONS claude -p — in a heredoc, a quoted argument, a grep "
+           "pattern, or beside somebody else's -p — is ALLOWED", not wrong, wrong)
+
+        # ...and every shape a shell would really run it in is still refused, including the ones
+        # where the command word sits inside quotes a shell executes.
+        runs = ["bash -c 'claude -p x'", "cd x && claude -p y",
+                "FOO=1 /usr/local/bin/claude --print y", "$(claude -p y)", "nohup claude -p y &",
+                'git commit -m "$(claude -p y)"', "`claude -p y`", "{ claude -p y; }",
+                "sudo -u bob env -u X claude -p y", 'zsh -lc "cd x && claude -p y"',
+                "timeout 60 claude -p y", "</dev/null claude --print=json y"]
+        missed = [c for c in runs if dispatch.dispatch_guard(
+            cfg, "s", tool="Bash", tool_input={"command": c})[0]]
+        ok("...while claude as the COMMAND WORD with -p is DENIED behind a separator, an env "
+           "assignment, a wrapper, a group, `$(…)`, backticks or `sh -c`", not missed, missed)
+
         # THE PROTOTYPE'S BLIND SPOT, asserted as a stated LIMIT rather than left to be found.
         # A consumer's version matched PreToolUse on `Agent` and guarded the in-process subagent
         # tool while every real dispatch went out through Bash — 42 times, reporting nothing.

@@ -582,7 +582,11 @@ announced as one. A seat kept in a one-word file is a claim that goes stale: a f
 **The cheap dispatch path has a gate on it.** `spawn --launch` is the correct way to start a
 Crawler; the competing path is one Bash line — a raw headless `claude` — which gets no worktree,
 no lease, no claim a reaper can reclaim, no leaf-scoped stop gate and no room. `dispatch guard`
-refuses it from a session whose role may not create one. Registered on **Bash**, which is the
+refuses it from a session whose role may not create one. It matches a dispatch, not a mention:
+`claude` has to be the command word of a simple command (after a separator, an env assignment, a
+wrapper like `nohup` or `env`, a group, `$(…)`, or inside `bash -c`) with `-p`/`--print` among
+that command's own arguments. The word in a heredoc, a commit message or a grep pattern, next to
+some other command's `-p`, is allowed. Registered on **Bash**, which is the
 mechanism actually used: a matcher on `Agent` guards only the in-process subagent tool and sees
 none of the real dispatches.
 

@@ -1148,8 +1148,14 @@ one place and enforcement in another is two statements of one policy, free to di
 
 `dispatch guard` refuses a raw headless `claude` dispatch from a session whose role may not create
 one. On BASH, which is the mechanism actually used: matching on `Agent` would guard the
-in-process subagent tool while real dispatches go out through Bash, reporting nothing. It cannot see a command built from a shell variable, a wrapper script, or any non-Bash
-tool — the LEASE is what protects a tree from whatever gets in anyway.
+in-process subagent tool while real dispatches go out through Bash, reporting nothing. It matches
+use, not mention: `claude` must be the command word of a simple command — after a separator, env
+assignments, a wrapper such as `nohup`/`env`/`sudo`/`xargs`, a `(`/`{` group, inside `$(…)` or
+backticks (even within double quotes), or inside `bash -c`/`eval` — with `-p`/`--print` among
+that same command's arguments. The word in a heredoc body or a quoted argument, beside another
+command's `-p`, is allowed. It cannot see a command built from a shell variable, a wrapper script,
+a launcher word it does not know, or any non-Bash tool — the LEASE is what protects a tree from
+whatever gets in anyway.
 
 ## When a run could not measure anything
 
