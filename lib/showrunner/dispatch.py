@@ -816,8 +816,124 @@ def model_finding(cfg, entry):
 # `Bash`. The guard built specifically to stop flat dispatch was blind to the mechanism actually
 # used, 42 times, and reported nothing. A guard matched on the wrong tool is indistinguishable
 # from a world with nothing to guard.
+#
+# A MENTION IS NOT A DISPATCH. This used to search for `claude ` and for ` -p` independently,
+# anywhere in the text, so `python3 -m unittest -p "test_*.py"` followed by a commit whose heredoc
+# said "restart the claude session" was refused as a raw dispatch (llm_chat's owner, 2026-11-10).
+# Now `claude` has to be the COMMAND WORD of a simple command and `-p`/`--print` an argument of
+# that same command. Heredoc bodies and quoted arguments are data handed to another program; the
+# one place quoted text IS a command — `bash -c "…"`, `eval "…"`, `$(…)` and backticks, which a
+# shell runs even inside double quotes — is read as one.
 _CLAUDE_CALL = re.compile(r"(?:^|[;&|]|\s)(?:[^\s;|&]*/)?claude\s", re.I)
 _PRINT_FLAG = re.compile(r"(?:^|\s)(?:-p|--print)(?:\s|=|$)")
+# Words that run the NEXT word as the command, and the options of theirs that take a value.
+_RUNS_NEXT = {"env": {"-u", "--unset", "-C", "--chdir", "-S", "--split-string"},
+              "sudo": {"-u", "-g", "-C", "-D", "-h", "-p", "-U", "-r", "-t"},
+              "xargs": {"-n", "-I", "-i", "-L", "-l", "-P", "-d", "-E", "-e", "-s", "-a"},
+              "nice": {"-n"}, "stdbuf": {"-i", "-o", "-e"},
+              "exec": {"-a"}, "nohup": set(), "command": set(), "builtin": set(),
+              "time": set(), "caffeinate": set(), "timeout": {"-s", "--signal", "-k"},
+              "{": set(), "!": set(), "then": set(), "do": set(), "else": set()}
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _substitutions(text):
+    """The bodies of every `$(…)` and backtick span a shell would EXECUTE — including inside
+    double quotes, where `git commit -m "$(claude -p x)"` still runs claude. Single-quoted text
+    is skipped because nothing in it runs."""
+    out, i, n = [], 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "'":
+            j = text.find("'", i + 1)
+            i = n if j < 0 else j + 1
+            continue
+        if c == "`":
+            j = text.find("`", i + 1)
+            if j < 0:
+                break
+            out.append(text[i + 1:j])
+            i = j + 1
+            continue
+        if text.startswith("$(", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                depth += {"(": 1, ")": -1}.get(text[j], 0)
+                j += 1
+            out.append(text[i + 2:j - 1] if depth == 0 else text[i + 2:])
+            i = j
+            continue
+        i += 1
+    return out
+
+
+def _command_word(argv):
+    """The argv with every env assignment, wrapper and redirection in front of the real command
+    word stripped off: `FOO=1 nohup </dev/null claude -p` → `claude -p`."""
+    from .writeguard import _is_redirect
+    argv = list(argv)
+    while argv:
+        head = argv[0]
+        if _ASSIGNMENT.match(head):
+            argv = argv[1:]
+        elif _is_redirect(head) or (head and set(head) <= set("<&") and "<" in head):
+            argv = argv[2:]
+        elif head.isdigit() and len(argv) > 1 and _is_redirect(argv[1]):
+            argv = argv[3:]
+        elif head in _RUNS_NEXT:
+            takes, argv = _RUNS_NEXT[head], argv[1:]
+            while argv and argv[0].startswith("-") and argv[0] != "-":
+                argv = argv[2:] if argv[0] in takes else argv[1:]
+            if head == "timeout" and argv:
+                argv = argv[1:]             # the duration
+        else:
+            break
+    return argv
+
+
+def _is_headless_claude(command, depth=0):
+    """Does this shell text run `claude` with `-p`/`--print`, as a command rather than a mention?
+
+    Tokenized with the write guard's shell-word tokenizer, so the two guards agree about what a
+    word is. Text that does not tokenize (an unbalanced quote) falls back to the old textual
+    match: a shell would not run it either, and refusing what was refused before is the side to
+    err on.
+    """
+    from .writeguard import _HEREDOC, _OPERATORS, _SHELLS, _tokens
+    text = _HEREDOC.sub(lambda m: m.group(0).split("\n", 1)[0] + "\n", command or "")
+    if depth < 3 and any(_is_headless_claude(s, depth + 1) for s in _substitutions(text)):
+        return True
+    toks = _tokens(text.replace("\n", " ; "))
+    if toks is None:
+        return bool(_CLAUDE_CALL.search(command) and _PRINT_FLAG.search(command))
+    argvs, cur = [], []
+    for tok in toks + [";"]:
+        if tok in _OPERATORS or tok in ("$", "}"):
+            if cur:
+                argvs.append(cur)
+            cur = []
+        else:
+            cur.append(tok.strip("`"))
+    for argv in argvs:
+        argv = _command_word(argv)
+        if not argv:
+            continue
+        verb = os.path.basename(argv[0]).lower()
+        if verb == "claude" and any(a in ("-p", "--print") or a.startswith(("-p=", "--print="))
+                                    for a in argv[1:]):
+            return True
+        if depth < 3 and verb in _SHELLS:
+            flag = next((i for i, a in enumerate(argv[1:], 1)
+                         if re.match(r"^-[A-Za-z]*c[A-Za-z]*$", a)), None)
+            if flag is not None and flag + 1 < len(argv) \
+                    and _is_headless_claude(argv[flag + 1], depth + 1):
+                return True
+        if depth < 3 and verb == "eval" and _is_headless_claude(" ".join(argv[1:]), depth + 1):
+            return True
+    return False
 
 
 def dispatch_guard(cfg, session=None, tool=None, tool_input=None):
@@ -841,8 +957,8 @@ def dispatch_guard(cfg, session=None, tool=None, tool_input=None):
                             would repair it, so it allows AND SAYS the call went unchecked.
 
     WHAT IT CANNOT SEE, stated rather than implied: a command built from a shell variable, a
-    wrapper script that calls `claude` internally, or a dispatch through any tool that is not
-    Bash. It catches the honest one-liner — which is the one that was used 42 times — and the
+    wrapper script that calls `claude` internally, a launcher word not in `_RUNS_NEXT`
+    (`caffeinate` is, `script` is not), or a dispatch through any tool that is not Bash. It catches the honest one-liner — which is the one that was used 42 times — and the
     LEASE is what protects a tree from whatever gets in anyway.
     """
     tool_input = tool_input or {}
@@ -852,7 +968,7 @@ def dispatch_guard(cfg, session=None, tool=None, tool_input=None):
     if not command:
         return True, "", {"checked": False, "why": "no command"}
 
-    if not (_CLAUDE_CALL.search(command) and _PRINT_FLAG.search(command)):
+    if not _is_headless_claude(command):
         return True, "", {"checked": True, "why": "not a headless claude dispatch"}
     if "showrunner" in command:
         return True, "", {"checked": True, "why": "routed through showrunner"}
