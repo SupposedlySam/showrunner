@@ -6224,6 +6224,17 @@ def test_dispatch_guard():
             cfg, "s", tool="Bash", tool_input={"command": c})[0]]
         ok("a command that only MENTIONS claude -p — in a heredoc, a quoted argument, a grep "
            "pattern, or beside somebody else's -p — is ALLOWED", not wrong, wrong)
+        # ...and allowed for the RIGHT reason: a role that may create would also allow these, so
+        # the verdict has to say it looked and found no dispatch, not that the policy permitted one.
+        _, _, det_m = dispatch.dispatch_guard(cfg, "s", tool="Bash",
+                                              tool_input={"command": mentions[0]})
+        ok("...the reported command is allowed BECAUSE it is not a dispatch — checked, and named "
+           "as no headless claude — rather than waved through by the policy",
+           det_m.get("checked") and det_m.get("why") == "not a headless claude dispatch", det_m)
+        _, _, det_v = dispatch.dispatch_guard(cfg, "s", tool="Bash",
+                                              tool_input={"command": "claude --version"})
+        ok("...and so is `claude` with no -p, for the same named reason",
+           det_v.get("why") == "not a headless claude dispatch", det_v)
 
         # ...and every shape a shell would really run it in is still refused, including the ones
         # where the command word sits inside quotes a shell executes.
@@ -6236,6 +6247,17 @@ def test_dispatch_guard():
             cfg, "s", tool="Bash", tool_input={"command": c})[0]]
         ok("...while claude as the COMMAND WORD with -p is DENIED behind a separator, an env "
            "assignment, a wrapper, a group, `$(…)`, backticks or `sh -c`", not missed, missed)
+
+        # DOUBLE QUOTES DO NOT STOP A SUBSTITUTION. The tokenizer hands `"$(claude -p y)"` back as
+        # one quoted word, which is exactly where a mention lives, so only reading what a shell
+        # executes inside it tells the two apart; single quotes really do stop it.
+        allow_q, _, _ = dispatch.dispatch_guard(
+            cfg, "s", tool="Bash", tool_input={"command": 'echo "result: `claude -p y`"'})
+        ok("a backtick dispatch inside a double-quoted argument is DENIED — the shell runs it",
+           not allow_q)
+        subs = dispatch._substitutions('git commit -m "$(claude -p y)" && echo \'$(no) `no`\'')
+        ok("...and the substitutions read are the ones a shell executes: inside double quotes "
+           "yes, inside single quotes no", subs == ["claude -p y"], subs)
 
         # THE PROTOTYPE'S BLIND SPOT, asserted as a stated LIMIT rather than left to be found.
         # A consumer's version matched PreToolUse on `Agent` and guarded the in-process subagent
