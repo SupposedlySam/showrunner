@@ -10246,6 +10246,21 @@ def test_install_provenance():
 
     stamp_path = lambda t: os.path.join(t, ".showrunner", pin.INSTALL_STAMP_FILE)  # noqa: E731
 
+    def stamp_text(t):
+        # FAILS RATHER THAN RAISES: a missing stamp is what a broken writer produces, and it
+        # must reach the assertions below instead of crashing the group out from under them.
+        try:
+            with open(stamp_path(t)) as fh:
+                return fh.read()
+        except OSError:
+            return ""
+
+    def stamp_doc(t):
+        try:
+            return json.loads(stamp_text(t))
+        except ValueError:
+            return {}
+
     # ---- a CLEAN clone records its sha, its refs and a credential-free remote ----
     src = git_source()
     sha = sh(["git", "rev-parse", "HEAD"], src).stdout.strip()
@@ -10269,9 +10284,8 @@ def test_install_provenance():
     eq("...and the branch it was on", (doc.get("refs") or {}).get("branch"), "main")
     eq("...and the remote, with the credential stripped",
        doc.get("source"), "https://example.invalid/sr.git")
-    with open(stamp_path(target)) as fh:
-        raw = fh.read()
-    ok("the stamp file itself never carries the token", "s3cret" not in raw, raw[:200])
+    raw = stamp_text(target)
+    ok("the stamp file itself never carries the token", raw and "s3cret" not in raw, raw[:200])
     line = version(target).stdout
     ok("--version says 'copied from <sha12> (clean) · <source>'",
        "copied from %s (clean) · https://example.invalid/sr.git" % sha[:12] in line, line)
@@ -10294,6 +10308,13 @@ def test_install_provenance():
        doc.get("dirty"), True)
     ok("...and the one line says DIRTY", "dirty" in version(target).stdout.lower(),
        version(target).stdout)
+    # COMPANIONS at the other two layers that carry the flag: the file SRCode may read
+    # directly, and the installer's own report, which is what a human sees at install time.
+    eq("...the stamp FILE records dirty: true", stamp_doc(target).get("dirty"), True)
+    ok("...and install.sh's report says DIRTY at the moment it stamps",
+       "DIRTY" in p.stdout, p.stdout[:400])
+    eq("...and asked directly, the source's copied paths ARE dirty",
+       pin._payload_dirty(src), True)
     # A DIRTY FILE THE COPY DOES NOT CARRY does not make the copy dirty — that would be the
     # flag saying "not that commit" about code that is exactly that commit.
     sh(["git", "checkout", "--", "lib"], src)
@@ -10326,6 +10347,14 @@ def test_install_provenance():
     eq("...with dirty unknown, because nothing looked", doc.get("dirty"), None)
     ok("...and the one line says declared, not copied",
        "declared %s" % claimed[:12] in version(target).stdout, version(target).stdout)
+    # COMPANIONS: a declared sha promoted to 'copy' is the expensive direction, so it is
+    # asserted where each reader stands — the file, the installer's report, and the producer.
+    eq("...the stamp FILE says kind 'declared'", stamp_doc(target).get("kind"), "declared")
+    ok("...install.sh's report says NOT verified, not 'copied from'",
+       "NOT verified" in p.stdout and "copied from" not in p.stdout.split("stamped", 1)[-1][:80],
+       p.stdout[:400])
+    eq("...and the producer, asked about a tree with no .git, answers 'declared'",
+       (pin.install_stamp(loose, claimed) or {}).get("kind"), "declared")
     install(loose, target, env={"SHOWRUNNER_SOURCE_COMMIT": "1234567"})
     eq("SHOWRUNNER_SOURCE_COMMIT is the env equivalent", as_json(target)[1].get("sha"),
        "1234567")
@@ -10345,7 +10374,7 @@ def test_install_provenance():
 
     # ---- an unreadable stamp is said as unreadable ----
     install(src, target, "--copy")
-    with open(stamp_path(target), "w") as fh:
+    with open(stamp_path(target), "w") as fh:   # writes, so it cannot fail on absence
         fh.write("{torn")
     rc, doc = as_json(target)
     eq("a torn stamp still answers, exit 0", rc, 0)
