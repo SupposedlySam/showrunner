@@ -38,6 +38,67 @@ $EDITOR .showrunner/config.json      # resources, lanes, inject, checks
 
 `showrunner` is the project-local binary `./.showrunner/bin/showrunner` — not a global command.
 
+### Getting started (for an agent)
+
+Follow this verbatim. For the interactive path, which asks only what it cannot detect, use the
+`sr-install` skill instead.
+
+```bash
+git clone --branch stable https://github.com/SupposedlySam/showrunner.git <clone>
+<clone>/install.sh <repo>              # SHARED: payload and gates committed for the team
+#   <clone>/install.sh --local <repo>  # or: for you only, nothing reaches git
+#   <clone>/install.sh --central <repo> && <clone>/bin/showrunner self --pin stable \
+#       --dest ~/.claude/showrunner-central      # or: one machine-wide copy of the code
+cd <repo>
+./.showrunner/bin/showrunner --version
+./.showrunner/bin/showrunner doctor
+./.showrunner/bin/showrunner baseline
+```
+
+What each must say:
+
+- **`--version`** names a commit: `copied from <sha12> (clean) · https://github.com/SupposedlySam/showrunner.git`
+  for a copy, `pinned <sha12> (stable)` for central. `dirty` means the copied code is not that
+  commit. `no commit names this code` means the install recorded nothing (see
+  [Which code am I running?](llms.txt)); re-install from the clone.
+- **`doctor`** exits 0 with no `ERROR` line. Each `ERROR` names its fix. A copy warns that whether
+  it is *behind* cannot be told locally; that is expected, and the upgrade check below answers it.
+- **`baseline`** refuses (exit 2) until `checks` in `.showrunner/config.json` names the project's
+  real test command, because a placeholder check measures nothing. Set it, then run `baseline` on a
+  known-good tree.
+
+**The release ref.** The tag `stable` on the public repo marks the newest release and moves with
+each one; `stable-<sha8>` marks each release immutably. No account is needed to ask for it:
+
+```bash
+git ls-remote --tags https://github.com/SupposedlySam/showrunner refs/tags/stable
+```
+
+`./.showrunner/bin/showrunner --version --json` prints one object that a program can compare
+against that sha:
+
+```json
+{"dirty": false, "provenance": "copy", "refs": {"branch": null, "tags": ["stable", "stable-0123abcd"]},
+ "sha": "<40-hex>", "source": "https://github.com/SupposedlySam/showrunner.git", "version": "0.1.0"}
+```
+
+`provenance` is `pinned`, `checkout`, `copy`, `declared` or `unknown`; `sha` is null only for
+`unknown`; `dirty` is null when nothing looked; `refs` is null when nothing recorded them. It exits
+0 whenever it can answer, `unknown` included.
+
+### Upgrading
+
+```bash
+# a clone-based install (shared, --local): the mode is kept, no flag needed
+git -C <clone> fetch --tags --force && git -C <clone> checkout stable && <clone>/install.sh <repo>
+# central: re-pin the shared copy from the clone; every repo wired to it moves at once
+git -C <clone> fetch --tags --force && <clone>/bin/showrunner self --pin stable --dest ~/.claude/showrunner-central
+```
+
+`--force` is needed because `stable` moves, and git does not overwrite an existing tag without it.
+Then check that `./.showrunner/bin/showrunner --version --json` reports the `sha` that
+`git ls-remote` gives for `stable`, and that `doctor` shows no `ERROR`.
+
 The installer touches **only the target repo**, with one exception it asks about: `--skills` links
 the Claude Code skills (`showrunner`, `sr-status`, `sr-doctor`, `sr-install`) into
 `~/.claude/skills`, which is the one thing written outside your project. Given neither flag it

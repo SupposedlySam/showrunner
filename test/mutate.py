@@ -1040,6 +1040,27 @@ TARGETS = [
     # been bumped. That answered every "which build is this?" with the same six characters, and
     # proving seven consumers were stale took a file-by-file diff because of it. A regression
     # here would be invisible — the output still looks like a version string.
+    # THE DIRTY FLAG on a copy's stamp. Always-False is the reassuring direction: a copy cut
+    # from a working tree with uncommitted edits is presented as exactly that commit, and SRCode
+    # compares it against the release and says "current" about code that is not.
+    ("is the copied code its commit", "pin._payload_dirty", "lib/showrunner/pin.py",
+     r"(def _payload_dirty\(source\):\n)",
+     "    return False\ndef _neutered_payload_dirty(source):\n"),
+    # THE PROVENANCE KIND. Always 'copy' promotes a commit somebody TYPED into one git
+    # verified, and the declared/verified distinction is the whole value of the stamp.
+    ("verified or declared", "pin._stamp_kind", "lib/showrunner/pin.py",
+     r"(def _stamp_kind\(verified\):\n)",
+     "    return 'copy'\ndef _neutered_stamp_kind(verified):\n"),
+    # The READ side of the copy's stamp. Always-None is every stamped copy reporting "no commit
+    # names this code" — the honest-sounding absence, about code a stamp does name.
+    ("the copy's stamp, read back", "pin.read_install_stamp", "lib/showrunner/pin.py",
+     r"(def read_install_stamp\(root\):\n)",
+     "    return None\ndef _neutered_read_install_stamp(root):\n"),
+    # The WRITE side. A no-op leaves whatever stamp an EARLIER install wrote, so a re-install
+    # from a different tree goes on naming code that is no longer there.
+    ("the copy's stamp, written", "pin.write_install_stamp", "lib/showrunner/pin.py",
+     r"(def write_install_stamp\(dest, stamp\):\n)",
+     "    return None\ndef _neutered_write_install_stamp(dest, stamp):\n"),
     ("what code is running", "pin.describe", "lib/showrunner/pin.py",
      r"(def describe\(\):\n)",
      "    return 'showrunner 0.1.0'\ndef _neutered_describe():\n"),

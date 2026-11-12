@@ -48,6 +48,49 @@ reader render identically, which is this repo's most-repeated defect.
 `./.showrunner/bin/showrunner`. Call it by that path. Python 3 standard library only; nothing to
 install.
 
+## Getting started (for an agent)
+
+No `.showrunner/` in the repo yet? Follow this verbatim. The `sr-install` skill is the interactive
+path, and it asks only what it cannot detect.
+
+```
+git clone --branch stable https://github.com/SupposedlySam/showrunner.git <clone>
+<clone>/install.sh <repo>                 # SHARED (default): payload and gates committed
+<clone>/install.sh --local <repo>         # or: for you only; hooks untracked, payload excluded
+<clone>/install.sh --central <repo>       # or: one machine-wide copy of the code, then
+<clone>/bin/showrunner self --pin stable --dest ~/.claude/showrunner-central
+cd <repo>
+./.showrunner/bin/showrunner --version    # MUST name a commit: "copied from <sha12> (clean) · <remote>"
+                                          # (central: "pinned <sha12> (stable)"). "dirty" = the copy
+                                          # is NOT that commit. "no commit names this code" = nothing
+                                          # was recorded; re-install from the clone.
+./.showrunner/bin/showrunner doctor       # MUST exit 0 with no ERROR line; each ERROR names its fix.
+                                          # A copy warns that "behind" cannot be told locally: expected.
+./.showrunner/bin/showrunner baseline     # REFUSES (exit 2) until `checks` in .showrunner/config.json
+                                          # names the real test command. Set it; run on a green tree.
+```
+
+**The release ref is a contract.** The moving tag `stable` on the public repo marks the newest
+release; `stable-<sha8>` marks each one immutably. The latest release, with no account:
+
+```
+git ls-remote --tags https://github.com/SupposedlySam/showrunner refs/tags/stable
+```
+
+## Upgrading
+
+```
+# clone-based (shared or --local): a re-install keeps the mode, so pass no mode flag
+git -C <clone> fetch --tags --force && git -C <clone> checkout stable && <clone>/install.sh <repo>
+# central: re-pin from the clone; every repo wired to that path runs it on its next call
+git -C <clone> fetch --tags --force && <clone>/bin/showrunner self --pin stable --dest <central path>
+```
+
+`--force` because `stable` MOVES: without it git refuses to update a tag it already has ("would
+clobber existing tag", exit 1), and the clone stays on the old release. Done means
+`./.showrunner/bin/showrunner --version --json` reports the `sha` that `ls-remote` gives for
+`stable`, and `doctor` shows no ERROR.
+
 ## First thing, every session
 
 ```
@@ -1442,19 +1485,34 @@ records no liveness on a claim, so `reap` cannot work against it and says so rat
 ## Which code am I running?
 
 ```
-showrunner --version
+showrunner --version          # one line
+showrunner --version --json   # one object: version, sha, provenance, dirty, source, refs
 ```
 
 Answers with a **commit**, not just `0.1.0` — and resolves it from where the CODE lives, never
 from the cwd. Under a central install the cwd is some consumer project, so answering from it
-would report that project's HEAD as showrunner's version. Three provenances, and only two of
-them can name a commit:
+would report that project's HEAD as showrunner's version. Five provenances, and four of them
+name a commit:
 
-| | what names it |
+| `provenance` | what names it |
 |---|---|
 | **pinned** | `self --pin` extracted it from a git ref; `VERSION`/`PINNED` sit beside the code. The strongest answer, and why central mode can say what every project on the machine runs. |
 | **checkout** | the code lives in a showrunner git repo — its root IS the repo root. Reports HEAD, and whether the tree is dirty, because uncommitted edits make that sha an overstatement. |
-| **copy** | `install.sh` without `--central` copies from a working tree. **No commit names this code**, and none is invented — that absence is the argument for pinning. |
+| **copy** | `install.sh` copied it from a git clone and stamped `.showrunner/INSTALLED`: the commit git resolved there, whether the copied paths (`bin/showrunner`, `lib/showrunner`, `.showrunner/hooks`) were dirty, the tags and branch at that commit, and `origin` with any credential stripped. Line: `copied from <sha12> (clean\|dirty) · <source>`. A **dirty** copy names its BASE commit and is never that commit. |
+| **declared** | the source had no `.git` (a packager copied the tree) and the installer was given `--source-commit <sha>` or `SHOWRUNNER_SOURCE_COMMIT`. Recorded as a claim nobody verified: `declared <sha12>`, `dirty` null. From a git clone, git's answer wins over the flag. |
+| **unknown** | a copy with no stamp: no `.git` and no declaration. **No commit names this code**, and none is invented. `sha` is null. |
+
+`INSTALLED` is a sibling of `PINNED`, not a `PINNED`: `self --pin` deletes a directory it
+recognises as a pin, and a copy install's `.showrunner/` holds the project's config and state.
+Every install replaces the stamp, and removes it when nothing names the source, so it never
+outlives the code it describes. `--central` removes it with the copy. It is gitignored like the
+copy.
+
+`--version --json` keys are fixed and pinned by a test, because programs parse them: `sha` is null
+only for `unknown`, `dirty` is null when nothing looked, `source` is the remote URL or else the path
+the code was cut from or lives at, and `refs` is `{"tags": [...], "branch": ...}` or null when
+nothing recorded them. It exits 0 whenever it can answer, `unknown` included. Compare `sha` against
+`git ls-remote --tags <remote> refs/tags/stable` to tell whether an install is current.
 
 `__version__` alone is not bumped per change, so it cannot distinguish a checkout from this
 morning from an install weeks stale.
@@ -1470,7 +1528,8 @@ So the answer is a command that does not require the stale thing to be running. 
 recorded commit off the copy and compare it yourself:**
 
 ```bash
-cd <copy> && cat PINNED                  # the commit that copy was cut from
+cd <copy> && cat PINNED                  # a pin: the commit it was cut from
+cat <repo>/.showrunner/INSTALLED         # a copy: the same, written by install.sh
 cd <showrunner-checkout>
 git log --oneline <that-sha>..HEAD | wc -l    # how far behind it is
 ```

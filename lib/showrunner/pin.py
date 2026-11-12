@@ -25,6 +25,18 @@ from .util import Refused, git, now
 
 VERSION_FILE = "VERSION"
 PINNED_FILE = "PINNED"
+# WHAT `install.sh` RECORDS ABOUT A COPY, beside the copy. A sibling of PINNED and deliberately
+# not PINNED itself: `looks_pinned` reads PINNED + lib/showrunner as "a pin this verb may delete
+# wholesale", and a copy install has lib/showrunner — so stamping PINNED into a consumer's
+# `.showrunner/` would hand `self --pin --dest` permission to rm -rf their config and campaigns.
+INSTALL_STAMP_FILE = "INSTALLED"
+# What install.sh copies out of the source tree. A dirty README does not change the code a copy
+# carries, so dirtiness is asked of these paths only — "dirty" means the copied code is not the
+# commit it names, which is the one thing the flag exists to say.
+COPIED_PATHS = ("bin/showrunner", "lib/showrunner", ".showrunner/hooks")
+# The moving tag that marks the newest release on the public repo. Moved by the maintainer at
+# each release; `stable-<sha8>` marks each one immutably. Nothing here creates or moves either.
+RELEASE_TAG = "stable"
 # The two directories that ARE the tool. `.showrunner/` is the consumer's state and config and
 # is emphatically not extracted — a central copy carrying one project's config is the misread
 # that makes a shared install report on the wrong repo.
@@ -84,7 +96,7 @@ def running():
     were out of date needed a file-by-file diff, because the one field whose job is to answer
     that question could not.
 
-    Three provenances, and only two of them can name a commit:
+    Five provenances, and only four of them can name a commit:
 
       pinned    extracted by `self --pin` from a git ref. VERSION/PINNED sit beside the code
                 and name the exact commit. The strongest answer, and the reason central mode
@@ -92,13 +104,17 @@ def running():
       checkout  the code lives in a git repo — a clone, or this repo working on itself. HEAD
                 names it, and `dirty` says whether HEAD still describes what is actually here,
                 because uncommitted edits make the SHA an overstatement.
-      copy      `install.sh` without --central copies from a working tree. There is NO commit
-                that names this code and none can be invented — that is precisely the argument
-                for pinning, and it is reported as the absence it is rather than filled in
-                with the version literal and left to look like an answer.
+      copy      `install.sh` copied it from a git checkout and stamped INSTALLED with the
+                commit git resolved there, and whether the copied paths were dirty. A dirty
+                copy names its BASE commit and says dirty; it is never that commit.
+      declared  `install.sh` copied it from a tree with no `.git`, and whoever ran it passed
+                `--source-commit`. Recorded and reported as a claim nobody verified.
+      unknown   a copy with no stamp: no commit names this code and none can be invented. It
+                is reported as the absence it is rather than filled in with the version
+                literal and left to look like an answer.
     """
     root = code_root()
-    info = {"version": None, "source": "copy", "sha": None, "ref": None, "dirty": None,
+    info = {"version": None, "source": "unknown", "sha": None, "ref": None, "dirty": None,
             "root": root}
     from . import __version__
     info["version"] = __version__
@@ -122,9 +138,18 @@ def running():
     # Caught by running it: a fresh copy reported `checkout 943e2449`, which was the throwaway
     # test project's own seed commit. The guard is exact rather than heuristic — a real
     # checkout's root IS the toplevel; every installed layout is a subdirectory of one.
-    rc, top, _ = git(["rev-parse", "--show-toplevel"], cwd=root)
-    toplevel = (top or "").strip()
-    if rc != 0 or not toplevel or os.path.realpath(toplevel) != os.path.realpath(root):
+    if not _is_toplevel(root):
+        stamp = read_install_stamp(root)
+        if stamp and stamp.get("unreadable"):
+            # Still unknown — but said as "the stamp is there and cannot be read", which sends
+            # a reader to the file rather than to a re-install they may not need.
+            info["unreadable"] = stamp["unreadable"]
+        elif stamp:
+            info.update(source=stamp["kind"], sha=stamp["sha"], dirty=stamp.get("dirty"),
+                        refs={"tags": list(stamp.get("tags") or []),
+                              "branch": stamp.get("branch")},
+                        origin=stamp.get("origin"), cut_from=stamp.get("path"),
+                        at=stamp.get("at"))
         return info
 
     rc, out, _ = git(["rev-parse", "HEAD"], cwd=root)
@@ -133,7 +158,171 @@ def running():
         info.update(source="checkout", sha=sha)
         rc2, dirty, _ = git(["status", "--porcelain"], cwd=root)
         info["dirty"] = bool((dirty or "").strip()) if rc2 == 0 else None
+        info["refs"] = _refs_at(root, sha)
+        info["origin"] = _origin(root)
     return info
+
+
+def _is_toplevel(root):
+    """Is `root` itself a git checkout's top level — not merely somewhere inside one?
+
+    An installed copy sits INSIDE the consumer's repo, and a packager's extracted tree can sit
+    inside the packager's. Asking git there answers about the wrong repository, so only the
+    exact toplevel counts.
+    """
+    rc, top, _ = git(["rev-parse", "--show-toplevel"], cwd=root)
+    toplevel = (top or "").strip()
+    return rc == 0 and bool(toplevel) and os.path.realpath(toplevel) == os.path.realpath(root)
+
+
+def _strip_credentials(url):
+    """A remote URL with any user:token removed. The stamp is a file people paste.
+
+    Only URL-shaped remotes carry credentials in the authority (`https://u:tok@host/x`); an
+    scp-style `git@host:x` names a login, not a secret, and is kept as written.
+    """
+    url = (url or "").strip()
+    if "://" not in url:
+        return url or None
+    scheme, rest = url.split("://", 1)
+    authority, sep, path = rest.partition("/")
+    if "@" in authority:
+        authority = authority.rsplit("@", 1)[1]
+    return "%s://%s%s%s" % (scheme, authority, sep, path)
+
+
+def _origin(repo):
+    rc, out, _ = git(["remote", "get-url", "origin"], cwd=repo)
+    return _strip_credentials(out) if rc == 0 else None
+
+
+def _refs_at(repo, sha):
+    """The tags pointing at `sha`, and the branch checked out when it is that commit."""
+    rc, out, _ = git(["tag", "--points-at", sha], cwd=repo)
+    tags = sorted(t for t in (out or "").split() if t) if rc == 0 else []
+    branch = None
+    rc, br, _ = git(["symbolic-ref", "--quiet", "--short", "HEAD"], cwd=repo)
+    if rc == 0 and (br or "").strip():
+        rc2, head, _ = git(["rev-parse", "HEAD"], cwd=repo)
+        if rc2 == 0 and (head or "").strip() == sha:
+            branch = br.strip()
+    return {"tags": tags, "branch": branch}
+
+
+def _payload_dirty(source):
+    """Does the source differ from HEAD in what install.sh copies? None when git cannot say.
+
+    Untracked files count: `cp -R lib/showrunner` copies them too, so a new module nobody
+    committed is in the copy and not in the commit. Bytecode does not: running the source
+    binary (which install.sh does just before this) writes `__pycache__` into a tree that may
+    not ignore it, and a cache is not a change to the code.
+    """
+    rc, out, _ = git(["status", "--porcelain", "--"] + list(COPIED_PATHS) +
+                     [":(exclude,glob)**/__pycache__/**"], cwd=source)
+    return bool((out or "").strip()) if rc == 0 else None
+
+
+def _stamp_kind(verified):
+    """'copy' when git resolved the commit in the source, 'declared' when a person named it.
+
+    The distinction is the whole value of the stamp: SRCode will compare this sha against the
+    release, and an unverified claim reported as verified is a confident wrong answer.
+    """
+    return "copy" if verified else "declared"
+
+
+def _looks_like_sha(value):
+    v = (value or "").strip().lower()
+    return 7 <= len(v) <= 64 and all(c in "0123456789abcdef" for c in v)
+
+
+def install_stamp(source, declared=None):
+    """What `install.sh` should record about a copy cut from `source`. Never raises.
+
+    Returns the stamp dict, or None when nothing names the code — no checkout at `source` and
+    no declared commit — so the install stays honestly "unknown" instead of guessing.
+    A checkout WINS over a declaration: git's answer is a fact, the flag is a claim, and when
+    they disagree the stamp carries both so the disagreement is visible rather than resolved.
+    """
+    source = os.path.realpath(source)
+    declared = (declared or "").strip().lower() or None
+    stamp = None
+    if _is_toplevel(source):
+        rc, out, _ = git(["rev-parse", "HEAD"], cwd=source)
+        sha = (out or "").strip()
+        if rc == 0 and sha:
+            refs = _refs_at(source, sha)
+            stamp = {"kind": _stamp_kind(True), "sha": sha, "dirty": _payload_dirty(source),
+                     "tags": refs["tags"], "branch": refs["branch"],
+                     "origin": _origin(source), "path": source}
+            if declared and not sha.startswith(declared):
+                stamp["declared_mismatch"] = declared
+    if stamp is None and declared:
+        stamp = {"kind": _stamp_kind(False), "sha": declared, "dirty": None, "tags": [],
+                 "branch": None, "origin": None, "path": source}
+    if stamp is not None:
+        stamp["at"] = now()
+    return stamp
+
+
+def write_install_stamp(dest, stamp):
+    """Replace the stamp at `dest` — or remove it when `stamp` is None. Re-installs replace."""
+    path = os.path.join(dest, INSTALL_STAMP_FILE)
+    if stamp is None:
+        if os.path.exists(path):
+            os.remove(path)
+        return None
+    tmp = path + ".tmp.%d" % os.getpid()
+    with open(tmp, "w") as fh:
+        json.dump(stamp, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+    os.replace(tmp, path)
+    return path
+
+
+def read_install_stamp(root):
+    """The INSTALLED stamp at `root`, None when absent, {"unreadable": ...} when broken.
+
+    Missing and unreadable are different answers, for the reason `read_pin` gives.
+    """
+    path = os.path.join(root, INSTALL_STAMP_FILE)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return {"unreadable": str(exc)}
+    if not isinstance(data, dict) or data.get("kind") not in ("copy", "declared") or \
+            not _looks_like_sha(data.get("sha")):
+        return {"unreadable": "%s names no kind and sha" % INSTALL_STAMP_FILE}
+    return data
+
+
+def as_json(info=None):
+    """The `--version --json` object. ONE SCHEMA, pinned by a test, because SRCode parses it.
+
+    Keys, always all six: version, sha (null when unknown), provenance (pinned | checkout |
+    copy | declared | unknown), dirty (true/false, null when not known), source (the remote
+    URL, else the path the code was cut from or lives at), refs ({"tags": [...], "branch":
+    str|null}, or null when nothing recorded them).
+    """
+    d = info or running()
+    kind = d.get("source")
+    if kind == "pinned" and d.get("unreadable"):
+        kind = "unknown"
+    source = d.get("origin") or d.get("cut_from") or d.get("pin_source") or d.get("root")
+    refs = d.get("refs")
+    if kind == "pinned" and refs is None and d.get("sha") and d.get("pin_source") and \
+            os.path.isdir(d["pin_source"]):
+        # A pin records the ref it was ASKED for, which may be a tag or a branch — guessing
+        # which would be inventing a ref. The clone it was cut from can say which tags point
+        # at the sha; with no clone to ask, refs stays null ("not recorded"), never [].
+        rc, out, _ = git(["tag", "--points-at", d["sha"]], cwd=d["pin_source"])
+        if rc == 0:
+            refs = {"tags": sorted(t for t in out.split() if t), "branch": d.get("track")}
+    return {"version": d.get("version"), "sha": d.get("sha") if kind != "unknown" else None,
+            "provenance": kind, "dirty": d.get("dirty"), "source": source, "refs": refs}
 
 
 def _is_bare_sha(ref, sha):
@@ -178,6 +367,15 @@ def staleness(source_repo=None):
             return ("warn", "this checkout is %d commit(s) behind its upstream branch — a fix "
                             "you are about to write may already be there." % behind)
         return ("ok", "this IS a showrunner checkout and it is level with its upstream branch.")
+    if d["source"] in ("copy", "declared") and d.get("sha"):
+        # THE STAMP NAMES A COMMIT, so "nothing records what it came from" would be false. What
+        # it does not record is a ref to compare against without the network, so say that, and
+        # name the one-line check that answers it.
+        return ("warn", "this copy names %s%s, but whether it is BEHIND cannot be told here: "
+                        "nothing local records the latest release. `git ls-remote --tags "
+                        "<showrunner remote> refs/tags/%s` names it; if that sha differs, "
+                        "upgrade." % (d["sha"][:12], " (declared, unverified)"
+                                      if d["source"] == "declared" else "", RELEASE_TAG))
     if d["source"] != "pinned" or d.get("unreadable"):
         return ("warn", "whether this copy is BEHIND cannot be told: no readable pin records "
                         "what it came from, so nothing can be compared. A fix landing upstream "
@@ -272,7 +470,7 @@ def self_pin_state(cfg, sr):
 
 
 def describe():
-    """One line for `--version`. Says which of the three it is, and never invents a commit."""
+    """One line for `--version`. Says which provenance it is, and never invents a commit."""
     d = running()
     base = "showrunner %s" % d["version"]
     if d["source"] == "pinned":
@@ -291,8 +489,23 @@ def describe():
             base, (d["sha"] or "?")[:12],
             "dirty — uncommitted changes, so this sha overstates what is here"
             if d["dirty"] else "clean", d["root"])
-    return ("%s · copied from a working tree, so NO commit names this code. `self --pin` is "
-            "what makes this answerable. · %s" % (base, d["root"]))
+    if d["source"] == "copy":
+        return "%s · copied from %s (%s) · %s" % (
+            base, (d["sha"] or "?")[:12],
+            "dirty — the copied code had uncommitted changes, so it is NOT that commit; that "
+            "is its base" if d["dirty"] else
+            "clean" if d["dirty"] is False else "dirtiness unknown",
+            d.get("origin") or d.get("cut_from") or d["root"])
+    if d["source"] == "declared":
+        return ("%s · declared %s — named with --source-commit by whoever installed it, from a "
+                "tree with no .git, so nothing verified it · %s"
+                % (base, (d["sha"] or "?")[:12], d["root"]))
+    if d.get("unreadable"):
+        return ("%s · copied, and its %s stamp CANNOT BE READ (%s), so which commit is unknown "
+                "rather than absent. Re-run install.sh. · %s"
+                % (base, INSTALL_STAMP_FILE, d["unreadable"], d["root"]))
+    return ("%s · copied from a working tree, so NO commit names this code. Re-install from a "
+            "git clone, or `self --pin`, to make this answerable. · %s" % (base, d["root"]))
 
 
 def read_pin(dest):

@@ -10190,6 +10190,187 @@ def test_issue_waker():
        w.main(), 0)
 
 
+def test_install_provenance():
+    """A copy install can say which commit it is, in words and in JSON SRCode parses."""
+    group("install.sh stamps which commit a COPY is, and --version --json says it")
+    if not have("git"):
+        skip("install provenance", "git is not installed")
+        return
+    from showrunner import pin
+
+    def payload(dest):
+        # THE WORKING TREE'S payload, not ROOT's HEAD: cloning ROOT would test the code as last
+        # committed, which is never the code under test while it is being written.
+        os.makedirs(dest)
+        for rel_path in ("bin", "lib", "templates", os.path.join(".showrunner", "hooks")):
+            shutil.copytree(os.path.join(ROOT, rel_path), os.path.join(dest, rel_path),
+                            ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copy2(os.path.join(ROOT, "install.sh"), os.path.join(dest, "install.sh"))
+        return dest
+
+    def git_source():
+        d = payload(os.path.join(tmpdir("prov-src"), "showrunner"))
+        sh(["git", "init", "-q", "-b", "main"], d)
+        sh(["git", "config", "user.email", "t@t"], d)
+        sh(["git", "config", "user.name", "t"], d)
+        sh(["git", "add", "-A"], d)
+        sh(["git", "commit", "-q", "-m", "release"], d)
+        # A token in the remote, because a stamp is a file people paste into issues.
+        sh(["git", "remote", "add", "origin", "https://someone:s3cret@example.invalid/sr.git"], d)
+        return d
+
+    def consumer():
+        d = tmpdir("prov-consumer")
+        sh(["git", "init", "-q", "-b", "main"], d)
+        sh(["git", "config", "user.email", "t@t"], d)
+        sh(["git", "config", "user.name", "t"], d)
+        sh(["git", "commit", "-q", "--allow-empty", "-m", "seed"], d)
+        return d
+
+    def install(src, target, *flags, env=None):
+        return subprocess.run([os.path.join(src, "install.sh"), "--no-skills", *flags, target],
+                              cwd=src, capture_output=True, text=True, timeout=120,
+                              env=dict(os.environ, **(env or {})))
+
+    def version(target, *flags):
+        p = subprocess.run([os.path.join(target, ".showrunner", "bin", "showrunner"),
+                            "--version", *flags], cwd=target, capture_output=True, text=True)
+        return p
+
+    def as_json(target):
+        p = version(target, "--json")
+        try:
+            return p.returncode, json.loads(p.stdout)
+        except ValueError:
+            return p.returncode, {"unparsed": p.stdout + p.stderr}
+
+    stamp_path = lambda t: os.path.join(t, ".showrunner", pin.INSTALL_STAMP_FILE)  # noqa: E731
+
+    # ---- a CLEAN clone records its sha, its refs and a credential-free remote ----
+    src = git_source()
+    sha = sh(["git", "rev-parse", "HEAD"], src).stdout.strip()
+    sh(["git", "tag", pin.RELEASE_TAG], src)
+    sh(["git", "tag", "%s-%s" % (pin.RELEASE_TAG, sha[:8])], src)
+    target = consumer()
+    p = install(src, target)
+    eq("an install from a clean git clone succeeds", p.returncode, 0)
+    rc, doc = as_json(target)
+    eq("--version --json exits 0 when it can answer", rc, 0)
+    # THE SCHEMA, pinned exactly: SRCode parses this, so a key added, dropped or renamed is a
+    # breaking change and must fail here rather than in somebody else's app.
+    eq("--version --json carries exactly the six documented keys",
+       sorted(doc), ["dirty", "provenance", "refs", "sha", "source", "version"])
+    eq("...a copy from a clean clone is provenance 'copy'", doc.get("provenance"), "copy")
+    eq("...naming the commit git resolved in the source", doc.get("sha"), sha)
+    eq("...and saying it was clean", doc.get("dirty"), False)
+    eq("...with the tags that point at that commit, the release tag among them",
+       (doc.get("refs") or {}).get("tags"),
+       sorted([pin.RELEASE_TAG, "%s-%s" % (pin.RELEASE_TAG, sha[:8])]))
+    eq("...and the branch it was on", (doc.get("refs") or {}).get("branch"), "main")
+    eq("...and the remote, with the credential stripped",
+       doc.get("source"), "https://example.invalid/sr.git")
+    with open(stamp_path(target)) as fh:
+        raw = fh.read()
+    ok("the stamp file itself never carries the token", "s3cret" not in raw, raw[:200])
+    line = version(target).stdout
+    ok("--version says 'copied from <sha12> (clean) · <source>'",
+       "copied from %s (clean) · https://example.invalid/sr.git" % sha[:12] in line, line)
+    ok("the stamp is ignored like the copy it describes, so nobody commits a stale one",
+       sh(["git", "check-ignore", "-q", stamp_path(target)], target, check=False).returncode == 0)
+
+    # THE PUBLIC RELEASE CONTRACT, against a local fixture: `ls-remote` on the release tag names
+    # the commit, and that is the sha `--version --json` must report after an upgrade.
+    ls = sh(["git", "ls-remote", "--tags", src, "refs/tags/%s" % pin.RELEASE_TAG], src).stdout
+    eq("`git ls-remote --tags <repo> refs/tags/%s` names the sha --version --json reports"
+       % pin.RELEASE_TAG, (ls.split() or [""])[0], doc.get("sha"))
+
+    # ---- a DIRTY clone names its base AND says dirty ----
+    with open(os.path.join(src, "lib", "showrunner", "__init__.py"), "a") as fh:
+        fh.write("# an uncommitted edit\n")
+    p = install(src, target)
+    rc, doc = as_json(target)
+    eq("a dirty clone records its BASE commit", doc.get("sha"), sha)
+    eq("...with dirty: true, so that commit is never presented as this code",
+       doc.get("dirty"), True)
+    ok("...and the one line says DIRTY", "dirty" in version(target).stdout.lower(),
+       version(target).stdout)
+    # A DIRTY FILE THE COPY DOES NOT CARRY does not make the copy dirty — that would be the
+    # flag saying "not that commit" about code that is exactly that commit.
+    sh(["git", "checkout", "--", "lib"], src)
+    with open(os.path.join(src, "README.md"), "w") as fh:
+        fh.write("untracked, and not part of what install.sh copies\n")
+    install(src, target)
+    eq("a dirty file OUTSIDE the copied paths leaves the copy clean",
+       as_json(target)[1].get("dirty"), False)
+
+    # ---- a tree with NO .git and no flag stays honestly unknown ----
+    loose = payload(os.path.join(tmpdir("prov-loose"), "showrunner"))
+    p = install(loose, target)
+    eq("an install from a tree with no .git succeeds", p.returncode, 0)
+    rc, doc = as_json(target)
+    eq("...and --version --json still exits 0 — 'unknown' is an answer", rc, 0)
+    eq("...provenance 'unknown'", doc.get("provenance"), "unknown")
+    eq("...with sha null rather than a guess", doc.get("sha"), None)
+    ok("RE-INSTALL REPLACES THE STAMP: the clone's stamp is gone, not left naming code that is "
+       "no longer here", not os.path.exists(stamp_path(target)))
+    ok("...and --version says no commit names it",
+       "no commit names this code" in version(target).stdout.lower(), version(target).stdout)
+
+    # ---- --source-commit, and its env twin, record DECLARED ----
+    claimed = "abcdef1234567890"
+    p = install(loose, target, "--source-commit", claimed)
+    rc, doc = as_json(target)
+    eq("--source-commit on a tree with no .git gives provenance 'declared'",
+       doc.get("provenance"), "declared")
+    eq("...recording the named sha", doc.get("sha"), claimed)
+    eq("...with dirty unknown, because nothing looked", doc.get("dirty"), None)
+    ok("...and the one line says declared, not copied",
+       "declared %s" % claimed[:12] in version(target).stdout, version(target).stdout)
+    install(loose, target, env={"SHOWRUNNER_SOURCE_COMMIT": "1234567"})
+    eq("SHOWRUNNER_SOURCE_COMMIT is the env equivalent", as_json(target)[1].get("sha"),
+       "1234567")
+    p = install(loose, consumer(), "--source-commit", "main")
+    ok("a ref NAME is refused as --source-commit, before anything is copied",
+       p.returncode == 64 and "not a commit hash" in p.stderr, p.stderr[-300:])
+    # GIT WINS over a declaration: a checkout is a fact, the flag a claim.
+    install(src, target, "--source-commit", "0" * 12)
+    rc, doc = as_json(target)
+    eq("from a git clone, git's answer wins over --source-commit", doc.get("provenance"), "copy")
+    eq("...and names the real commit", doc.get("sha"), sha)
+
+    # ---- --central drops the copy's stamp along with the copy ----
+    install(src, target, "--central", env={"SHOWRUNNER_CENTRAL": tmpdir("prov-central")})
+    ok("a switch to --central removes the copy's stamp with the copy",
+       not os.path.exists(stamp_path(target)))
+
+    # ---- an unreadable stamp is said as unreadable ----
+    install(src, target, "--copy")
+    with open(stamp_path(target), "w") as fh:
+        fh.write("{torn")
+    rc, doc = as_json(target)
+    eq("a torn stamp still answers, exit 0", rc, 0)
+    eq("...as unknown, never as the commit it can no longer read", doc.get("provenance"),
+       "unknown")
+    ok("...and the one line says the stamp CANNOT BE READ",
+       "CANNOT BE READ" in version(target).stdout, version(target).stdout)
+
+    # ---- the schema, for every provenance, from the producer itself ----
+    for info, kind in (({"source": "checkout", "sha": sha, "dirty": False, "root": ROOT,
+                         "version": "0"}, "checkout"),
+                       ({"source": "pinned", "sha": sha, "ref": "stable", "dirty": False,
+                         "root": "/x", "version": "0"}, "pinned"),
+                       ({"source": "pinned", "unreadable": "torn", "sha": None, "root": "/x",
+                         "version": "0"}, "unknown")):
+        got = pin.as_json(info)
+        eq("as_json(%s) carries the same six keys" % kind, sorted(got),
+           ["dirty", "provenance", "refs", "sha", "source", "version"])
+        eq("...and provenance %r" % kind, got["provenance"], kind)
+    eq("credentials are stripped from an https remote",
+       pin._strip_credentials("https://u:tok@github.com/a/b.git"), "https://github.com/a/b.git")
+    eq("...and an scp-style remote is left as written",
+       pin._strip_credentials("git@github.com:a/b.git"), "git@github.com:a/b.git")
+
+
 def test_self_vendored_pin():
     group("Self-vendoring: editing the tool must not disarm the tool (game_loop's .game_loop_self)")
     if not have("git"):
@@ -10472,10 +10653,16 @@ def test_self_pin():
     ok("a plain copied install does NOT claim the consumer's commit as its own version — the "
        "code root must BE the repo, not merely sit inside one",
        consumer_head[:12] not in said, said.strip()[:160])
-    ok("...it reports the absence instead, because a working-tree copy genuinely has no commit "
-       "that names it — which is the entire argument for pinning",
-       "no commit names this code" in said.lower() or "copied from a working tree" in said,
-       said.strip()[:160])
+    # WHAT IT SAYS INSTEAD depends on whether ROOT is a checkout: install.sh stamps the commit
+    # git resolves in the SOURCE, and a mutation sweep runs this suite on a copy with no .git.
+    # Either way the answer is about showrunner's tree, never the consumer's.
+    if pin._is_toplevel(ROOT):
+        ok("...it names the commit of the tree it was COPIED FROM, which install.sh stamped",
+           "copied from %s" % head[:12] in said, said.strip()[:160])
+    else:
+        ok("...it reports the absence instead, because a copy from a tree with no .git "
+           "genuinely has no commit that names it",
+           "no commit names this code" in said.lower(), said.strip()[:160])
 
     # THE PINNED BRANCH, against a REAL pin directory. Only `code_root` is redirected — the
     # stamp, its reader and the consistency check are all the real ones. Redirecting where the
@@ -18696,7 +18883,7 @@ def main():
                test_unconfigured_checks,
                test_concurrency,
                test_integration, test_worktree_lease, test_worktree_guard_from_inside_a_worktree,
-               test_self_pin, test_self_vendored_pin, test_roles,
+               test_self_pin, test_install_provenance, test_self_vendored_pin, test_roles,
                test_harness_installer_provenance, test_void_run, test_dispatch_guard,
                test_seat_and_whoami, test_crawler_seat_resolves_to_a_role,
                test_role_seat_verbs,
