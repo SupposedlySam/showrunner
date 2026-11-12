@@ -17440,6 +17440,92 @@ def test_a_crawler_running_tests_is_not_inert():
        got is False and why == "", (got, why))
 
 
+def test_a_pre_block_job_writing_scratch_does_not_release_a_block():
+    group("a scratch write releases a block only when the session's transcript cannot say who "
+          "wrote it: a job started before the refusal keeps the Crawler BLOCKED")
+    if not have("git"):
+        skip("the pre-block scratch writer group", "git is not installed")
+        return
+    # THE SHAPE, from a consumer's journal: the session sent an e2e run to the background twelve
+    # seconds before its turn-end was refused, and the run went on appending its log under the
+    # Crawler's scratch dir for minutes. A log written by an already-running job is not the
+    # session working, and `_children_since` already refuses to count that job as a process.
+    cfg = make_repo()
+    from showrunner import events as EV
+    from showrunner.util import transcript_path
+    wt = os.path.join(cfg.worktree_root, "c-e2e")
+    sh(["git", "worktree", "add", "-q", wt, "-b", "showrunner/c-e2e"], cfg.root)
+    for name in os.listdir(wt):
+        p_ = os.path.join(wt, name)
+        if name != ".git" and os.path.isfile(p_):
+            os.utime(p_, (1, 1))                        # THE TREE IS QUIET, so it cannot answer
+    scratch = os.path.join(cfg.root, ".showrunner", "scratch", "c-e2e")
+    os.makedirs(scratch, exist_ok=True)
+    log = os.path.join(scratch, "e2e-run.log")
+    tp = transcript_path(wt, "S-E2E")
+    os.makedirs(os.path.dirname(tp), exist_ok=True)
+    with open(tp, "w") as fh:
+        fh.write("{}\n")
+    # A REAL JOB, started BEFORE the block, whose write lands in a later second than the block.
+    job = subprocess.Popen(["sh", "-c", "sleep 2.2; echo 'e2e: replay 1 passed' >> '%s'" % log])
+    time.sleep(0.2)
+    EV.emit(cfg, "crawler.blocked", {"crawler": "c-e2e", "leaf": "E1", "why": "refused"})
+    since = EV.latest(cfg, ("crawler.blocked",), "crawler", "c-e2e")["ts"]
+    os.utime(tp, (since - 12, since - 12))              # the session's last write: before it
+    job.wait()
+    me = os.getpid()
+    ok("the fixture holds: the job's write to scratch landed AFTER the block",
+       os.path.isfile(log) and int(os.path.getmtime(log)) > since,
+       (os.path.getmtime(log) if os.path.isfile(log) else None, since))
+
+    got, why = campaign.work_since_block(cfg, "c-e2e", None, wt, scratch, session="S-E2E",
+                                         pid=me)
+    ok("a scratch log appended by a job started BEFORE the block, with the session's transcript "
+       "quiet since, does NOT release the block", got is False, (got, why))
+    ok("...and the reason names the writer as a pre-refusal job, so the operator is not left "
+       "with a bare refusal over a dir that visibly changed", "BEFORE the refusal" in why, why)
+
+    # THE PAIR, through the consumer: `waiting` lists this shape as blocked.
+    g_w = new_graph(cfg)
+    g_w.add("the e2e leaf", leaf_id="E1")
+    finding = [{"crawler": "c-e2e", "leaf": "E1", "branch": None, "worktree": wt,
+                "scratch": scratch, "session": "S-E2E", "pid": None,
+                "blocked": True, "blocked_detail": "refused at turn-end", "alive": True,
+                "parked": False, "uncommitted": []}]
+    real_reconcile = campaign.reconcile
+
+    def blocked_names():
+        campaign.reconcile = lambda *a, **k: finding
+        try:
+            _w, d = campaign.waiting(cfg, g_w)
+        finally:
+            campaign.reconcile = real_reconcile
+        return [c["crawler"] for c in d["blocked_crawlers"]]
+
+    names = blocked_names()
+    ok("`waiting` reports that Crawler under blocked_crawlers", "c-e2e" in names, names)
+
+    # THE REPORT-WRITING CRAWLER, which the scratch rule was added for: the session writes its
+    # report, and every tool call that does so writes its transcript too.
+    os.utime(tp, (since + 30, since + 30))
+    got, why = campaign.work_since_block(cfg, "c-e2e", None, wt, scratch, session="S-E2E",
+                                         pid=me)
+    ok("a session that writes scratch after the block, with its transcript moving, IS released",
+       got is True and "transcript" in why, (got, why))
+    names = blocked_names()
+    ok("...and `waiting` stops listing it as blocked", "c-e2e" not in names, names)
+
+    # AN UNREADABLE TRANSCRIPT CANNOT ATTRIBUTE, so the scratch rule stands on its own there:
+    # a session recorded whose file is not where the derivation looks (a host layout this does
+    # not match, or the second before claude creates it).
+    os.unlink(tp)
+    got, why = campaign.work_since_block(cfg, "c-e2e", None, wt, scratch, session="S-E2E",
+                                         pid=me)
+    ok("with the transcript UNREADABLE, a scratch write after the block still releases — a "
+       "failed read must never make this gate stricter", got is True and "scratch" in why,
+       (got, why))
+
+
 def test_resume_restarts_a_crawler_in_its_own_tree():
     group("`resume` restarts a stopped Crawler's recorded session in its EXISTING worktree, and "
           "`waiting` sees it (#97)")
@@ -18683,7 +18769,7 @@ def test_never_integrated_leaves_do_not_collide():
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

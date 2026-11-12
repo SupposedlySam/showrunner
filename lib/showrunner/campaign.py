@@ -1262,11 +1262,13 @@ def work_since_block(cfg, crawler, branch, worktree, scratch=None, session=None,
     # analysis changes no tracked file for many minutes, and the tree-based evidence below read
     # that as inert — pointing the lead at a reap that would have discarded an hour of work. A
     # transcript written after the block means the session did not stop.
+    transcript_quiet = False
     if session and os.path.isdir(tree):
         from .util import transcript_activity
         act = transcript_activity(tree, session)
         if act.get("mtime") is not None:
             readable.append("transcript")
+            transcript_quiet = act["mtime"] <= since
             if act["mtime"] > since:
                 return True, ("its session transcript was written after the block was recorded "
                               "— it kept working past the refused turn-end")
@@ -1312,6 +1314,15 @@ def work_since_block(cfg, crawler, branch, worktree, scratch=None, session=None,
     # rather than asking git — the opposite of the tree check above, and for the opposite reason:
     # there, an untracked file is harness noise that must not release a gate; here, untracked
     # files are the deliverable.
+    #
+    # A SCRATCH WRITE IS NOT ATTRIBUTED TO ITS WRITER, so it is only evidence when the session's
+    # own transcript cannot be read. A session that writes a report writes its transcript with
+    # every tool call, so a report-writing Crawler is already released above. A readable
+    # transcript that has NOT moved since the block therefore means the scratch writes came from
+    # something else, and the only candidate left is a job started before the refusal (an e2e
+    # run sent to the background seconds before the turn ended, appending its log for minutes).
+    # Children started after the block were already counted above. What this gives up: where the
+    # transcript cannot be read, a pre-block job writing scratch still releases, as before.
     scratch_dir = scratch if os.path.isabs(scratch or "") else (
         os.path.join(cfg.root, scratch) if scratch else "")
     if scratch_dir and os.path.isdir(scratch_dir):
@@ -1319,6 +1330,11 @@ def work_since_block(cfg, crawler, branch, worktree, scratch=None, session=None,
             for name in files:
                 try:
                     if int(os.path.getmtime(os.path.join(dirpath, name))) > since:
+                        if transcript_quiet:
+                            return False, ("its scratch dir was written after the block, but "
+                                           "its session transcript has not moved since, so the "
+                                           "writer is a job it started BEFORE the refusal — "
+                                           "not the session working")
                         return True, ("wrote to its scratch dir after the block was recorded — "
                                       "for a leaf whose deliverable is a report rather than "
                                       "code, that is where the work is")

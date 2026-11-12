@@ -1329,10 +1329,14 @@ inert-Crawler gate either — but it is still reported, and the report says when
 is ALSO inert so its owner learns the run is stalled.
 
 **What counts as working since a block**, before the gate calls a Crawler inert: a commit on its
-branch, a tracked-file change in its tree, a write to its scratch dir, its session transcript
-written after the block, or a process it STARTED after the block — a test run or a build changes
-no tracked file while it runs. Children that predate the block (MCP servers, a language server)
-do not count, or every Crawler would look busy forever. "After the block" means after the
+branch, a tracked-file change in its tree, its session transcript written after the block, or a
+process it STARTED after the block — a test run or a build changes no tracked file while it runs.
+Children that predate the block (MCP servers, a language server) do not count, or every Crawler
+would look busy forever. A write to its scratch dir counts only when the session's transcript
+cannot be read: a session that writes a report writes its transcript too, so a transcript that is
+readable and quiet since the block means the scratch writer was a job started BEFORE the refusal
+(an e2e run sent to the background, appending its log), and the Crawler stays blocked. Where the
+transcript cannot be read, a pre-block job writing scratch still releases the block. "After the block" means after the
 harness REFUSED the turn-end — the time game_loop records on the blocking attachment — not after
 showrunner first noticed it, which can be minutes later. When none of that could be read, the
 report says COULD NOT DETERMINE rather than "doing nothing" — do not reap on unreadable.

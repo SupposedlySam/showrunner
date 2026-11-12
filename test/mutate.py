@@ -481,6 +481,20 @@ TARGETS = [
     ("work-since-block evidence", "campaign.work_since_block", "lib/showrunner/campaign.py",
      r"(def work_since_block\(cfg, crawler, branch, worktree, scratch=None, session=None, pid=None\):\n)",
      "    return False, \"\"\ndef _neutered_work_since_block(cfg, crawler, branch, worktree):\n"),
+    # NOT STUBS — the scratch rule's attribution guard, each direction once. Never quiet: a
+    # scratch log appended by a job started before the refusal releases the block again while
+    # the session's own transcript sits still, which is the false release the guard exists for.
+    ("work-since-block crediting a pre-block job's scratch writes", "campaign.work_since_block",
+     "lib/showrunner/campaign.py",
+     r"(            transcript_quiet = act\[\"mtime\"\] <= since\n)",
+     "            transcript_quiet = False\n"),
+    # Always quiet: an UNREADABLE transcript is treated as a quiet one, so a failed read makes
+    # the gate stricter, and the report-writing Crawler on a host whose transcripts this cannot
+    # find is reported inert mid-report.
+    ("work-since-block reading an unreadable transcript as quiet", "campaign.work_since_block",
+     "lib/showrunner/campaign.py",
+     r"(    transcript_quiet = False\n)",
+     "    transcript_quiet = True\n"),
     # Added when the release gate's accounting refused: five producers arrived from another
     # session unswept. These two are registered rather than excused, because both are POLICY.
     #
