@@ -1502,7 +1502,12 @@ class _LazyVersion(argparse.Action):
     """
 
     def __call__(self, parser, namespace, values, option_string=None):
-        print(pin.describe())
+        # `--json` may come AFTER `--version` on the line, and this action fires the moment
+        # argparse reaches `--version` — so the flag is read from the argv being parsed.
+        if "--json" in getattr(parser, "_sr_argv", ()):
+            print(json.dumps(pin.as_json(), sort_keys=True))
+        else:
+            print(pin.describe())
         parser.exit()
 
 
@@ -1517,6 +1522,8 @@ def cmd_self(args):
     # of this verb are about a DIRECTORY and a checkout of showrunner's own code; neither is
     # about the consumer project you happen to be standing in. Passing that project's config to
     # `pin` is what made `self --pin` archive from the wrong repository.
+    if args.stamp_install:
+        return _stamp_install(args)
     if not args.pin:
         # THE READ SIDE, reachable on its own. A stamp that can only be written by the command
         # that writes it is one nobody checks between upgrades.
@@ -1564,6 +1571,39 @@ def cmd_self(args):
     else:
         print("  FIRST PIN at this path. A repo already wired to it with `install.sh --central` "
               "runs this on its next call; to wire one: ./install.sh --central <repo>")
+    return 0
+
+
+def _stamp_install(args):
+    """`self --stamp-install DIR`: what install.sh runs after copying this code into DIR.
+
+    The SOURCE is where this code lives (`pin.code_root`), never the cwd — install.sh runs it
+    as `$SRC/bin/showrunner`, so that is the tree that was copied.
+    """
+    declared = args.source_commit or os.environ.get("SHOWRUNNER_SOURCE_COMMIT") or None
+    if declared and not pin._looks_like_sha(declared):
+        die("self --stamp-install: --source-commit %r is not a commit hash (7-64 hex "
+            "characters). A ref name would be recorded as if it were a commit." % declared,
+            code=64)
+    dest = os.path.abspath(os.path.expanduser(args.stamp_install))
+    if not os.path.isdir(dest):
+        die("self --stamp-install: %s is not a directory" % dest, code=64)
+    stamp = pin.install_stamp(pin.code_root(), declared)
+    pin.write_install_stamp(dest, stamp)
+    if stamp is None:
+        print("unknown — %s has no .git and no --source-commit was given, so NO commit names "
+              "this copy (stamp removed)" % pin.code_root())
+    elif stamp["kind"] == "declared":
+        print("declared %s — recorded as named, NOT verified (no .git in %s)"
+              % (stamp["sha"][:12], stamp["path"]))
+    else:
+        print("copied from %s (%s) · %s" % (stamp["sha"][:12],
+              "DIRTY — the copy is not that commit, it is based on it" if stamp["dirty"]
+              else "clean" if stamp["dirty"] is False else "dirtiness unknown",
+              stamp.get("origin") or stamp["path"]))
+        if stamp.get("declared_mismatch"):
+            print("  %s--source-commit %s DISAGREES with the checkout's HEAD; git's answer is "
+                  "the one recorded.%s" % (YEL, stamp["declared_mismatch"], OFF))
     return 0
 
 
@@ -3940,7 +3980,8 @@ def cmd_integration_commit(args):
 def build_parser():
     p = argparse.ArgumentParser(prog="showrunner", description=__doc__)
     p.add_argument("--version", action=_LazyVersion, nargs=0,
-                   help="show the version AND what commit names this code")
+                   help="show the version AND what commit names this code; add --json for "
+                        "one machine-readable object")
     sub = p.add_subparsers(dest="cmd")
 
     s = sub.add_parser("init", help="write .showrunner/config.json and the worktree root")
@@ -4127,6 +4168,12 @@ def build_parser():
                        formatter_class=argparse.RawDescriptionHelpFormatter)
     s.add_argument("--pin", help="the git ref to extract: a commit, tag or branch")
     s.add_argument("--dest", help="where the pinned checkout lands, or which one to report on")
+    s.add_argument("--stamp-install", metavar="DIR",
+                   help="record which commit THIS code is in DIR/%s — what install.sh runs "
+                        "after a copy. Git resolves it when this code is a checkout" % pin.INSTALL_STAMP_FILE)
+    s.add_argument("--source-commit", metavar="SHA",
+                   help="with --stamp-install, for a tree with no .git: the commit it was cut "
+                        "from, recorded as DECLARED, not verified (env: SHOWRUNNER_SOURCE_COMMIT)")
     s.set_defaults(func=cmd_self)
 
     s = sub.add_parser("lock", help="single-consumer resource locks")
@@ -4753,6 +4800,8 @@ def main(argv=None):
     _add_prose_twins(parser)
     argv = list(sys.argv[1:] if argv is None else argv)
     argv, trailing = _split_trailing_command(parser, argv)
+    # `--version` is top-level only, so a line carrying it is a version query in either order.
+    parser._sr_argv = argv if "--version" in argv else ()
     args = parser.parse_args(argv)
     if trailing is not None:
         args.command = list(getattr(args, "command", None) or []) + trailing

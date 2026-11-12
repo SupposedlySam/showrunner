@@ -13,8 +13,16 @@ SHARED=0
 COPY=0
 SKILLS=ask
 TARGET="."
-for arg in "$@"; do
+SOURCE_COMMIT="${SHOWRUNNER_SOURCE_COMMIT:-}"
+# A WHILE LOOP, not `for arg`, because --source-commit takes a value.
+while [ "$#" -gt 0 ]; do
+  arg="$1"
+  shift
   case "$arg" in
+    --source-commit=*) SOURCE_COMMIT="${arg#*=}" ;;
+    --source-commit)
+      if [ "$#" = 0 ]; then echo "install.sh: --source-commit needs a commit hash" >&2; exit 64; fi
+      SOURCE_COMMIT="$1"; shift ;;
     --central) CENTRAL=1 ;;
     --local)   LOCAL=1 ;;
     --shared)  SHARED=1 ;;
@@ -43,6 +51,10 @@ for arg in "$@"; do
       echo "              sr-install) into ~/.claude/skills — the ONLY thing this script writes"
       echo "              outside the target repo. Without a flag it asks, and only on a TTY."
       echo "  --no-skills never touch ~/.claude, and do not ask."
+      echo "  --source-commit <sha>"
+      echo "              for a source tree with NO .git (a packager copied it): the commit it"
+      echo "              was cut from, recorded in .showrunner/INSTALLED as DECLARED, not verified."
+      echo "              Env: SHOWRUNNER_SOURCE_COMMIT. From a git clone, git answers instead."
       exit 0 ;;
     -*) echo "install.sh: unknown option $arg" >&2; exit 64 ;;
     *)  TARGET="$arg" ;;
@@ -55,6 +67,13 @@ if [ "$LOCAL" = 1 ] && [ "$SHARED" = 1 ]; then
 fi
 if [ "$CENTRAL" = 1 ] && [ "$COPY" = 1 ]; then
   echo "install.sh: --central and --copy name opposite modes; pass one." >&2
+  exit 64
+fi
+
+# Checked BEFORE anything is copied: refusing after the copy leaves a half-installed target.
+if [ -n "$SOURCE_COMMIT" ] && ! printf '%s' "$SOURCE_COMMIT" | grep -Eq '^[0-9a-fA-F]{7,64}$'; then
+  echo "install.sh: --source-commit '$SOURCE_COMMIT' is not a commit hash (7-64 hex characters)." >&2
+  echo "  A ref name would be recorded as if it were a commit; resolve it first." >&2
   exit 64
 fi
 
@@ -115,6 +134,8 @@ if [ "$CENTRAL" = 1 ]; then
   # library sitting beside a shim that ignores it: two copies of the code where one is
   # unreferenced is exactly the drift this mode exists to end, arriving inside the fix.
   rm -rf "$TARGET/.showrunner/lib"
+  # The copy's provenance stamp goes with the copy: central's answer comes from the pin.
+  rm -f "$TARGET/.showrunner/INSTALLED"
   echo "  wrote   .showrunner/bin/showrunner — ONE dispatcher shim, no local copy of the tool"
   if [ -x "$SRC_CENTRAL/bin/showrunner" ]; then
     echo "  central install found at $SRC_CENTRAL — reachable right now"
@@ -140,6 +161,18 @@ else
   cp "$SRC/bin/showrunner" "$TARGET/.showrunner/bin/showrunner"
   chmod +x "$TARGET/.showrunner/bin/showrunner"
   echo "  copied  .showrunner/bin/showrunner + .showrunner/lib/showrunner/"
+  # WHICH COMMIT THIS COPY IS, recorded beside it so `--version` can answer. Every install
+  # REPLACES the stamp, and removes it when nothing names the source — a stale stamp from an
+  # earlier install would name code that is no longer here. Run from the SOURCE binary: the
+  # source tree is the one that was copied, and git is asked there.
+  if [ -n "$SOURCE_COMMIT" ]; then
+    STAMP_OUT=$("$SRC/bin/showrunner" self --stamp-install "$TARGET/.showrunner" \
+                --source-commit "$SOURCE_COMMIT" 2>&1) || { echo "install.sh: $STAMP_OUT" >&2; exit 64; }
+  else
+    STAMP_OUT=$("$SRC/bin/showrunner" self --stamp-install "$TARGET/.showrunner" 2>&1) || {
+      echo "install.sh: could not record provenance: $STAMP_OUT" >&2; exit 70; }
+  fi
+  printf '%s\n' "$STAMP_OUT" | sed '1s/^/  stamped /; 2,$s/^/          /'
   if [ "$WAS_CENTRAL" = 1 ]; then
     echo "  reverted from central dispatch to a local copy — this repo no longer depends on"
     echo "  a central install. Reversibility is the whole reason --central is safe to try."
@@ -208,6 +241,7 @@ integration-commit.json
 # Reported by a consumer who had to use .git/info/exclude instead, and who was right that an
 # exclusion living outside the payload vanishes on the next upgrade.
 config.local.json
+INSTALLED
 seen-issues.json
 wake-gate-seen.json
 waker-state.json
@@ -246,7 +280,7 @@ sr_added=0
 for entry in "bin/" "lib/" "graph.db" "graph.db-*" "locks/" "scratch/" "campaigns/" \
              "sessions.json" "campaign.json" \
              "routing.jsonl" "waiting.jsonl" "events.jsonl" "*.lock" "baseline.json" \
-             "integration-commit.json" "archive/" "config.local.json" "seen-issues.json" \
+             "integration-commit.json" "archive/" "config.local.json" "INSTALLED" "seen-issues.json" \
              "wake-gate-seen.json" "waker-state.json" \
              "hook-heartbeat.jsonl" "fail-open.jsonl"; do
   if ! grep -qxF "$entry" "$sr_ignore" 2>/dev/null; then
