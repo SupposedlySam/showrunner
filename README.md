@@ -992,6 +992,20 @@ harness's background-command facility and end the turn; its exit wakes the sessi
 the backstop for a spin-down notice that never lands and for a chat waker that died, because a
 watchdog that checks once per turn-end goes quiet for as long as the answer is "waiting".
 
+**An idle orchestrator is woken when a Crawler needs it, with nothing polling.** The Crawler
+waker (`.showrunner/hooks/crawler-waker.sh`) is a Stop hook with `asyncRewake`, registered by
+`init` and `worktree register`. The harness starts it after each of your turns, so a session
+restart cannot kill it the way it kills a background poll, and it needs no mandate. Using
+`waiting`'s own classification, it wakes you when a Crawler stays BLOCKED past the quiet window
+(`crawler_waker.quiet_sec`, default 180 s), when game_loop stands down after repeated refusals
+with the leaf still open, or when a Crawler STALLS. It does not wake on the refusal itself, which
+is the gate working: a refused Crawler usually acts again within a second and closes its leaf by
+itself. The wake names the Crawler, its leaf, why, and the commands to look:
+`showrunner status`, `showrunner show <leaf>`. A block already outstanding when your turn ended
+does not wake you, and a Crawler released and refused again does. It is silent in a Crawler's
+worktree, costs a stat per Crawler per poll while idle, and `doctor` says whether it is
+registered and when it last rang.
+
 It cannot arm it for you: a probe an agent can set is a watchdog an agent can switch off, and one
 that always exits 0 reads as "always waiting". Until it is armed, an orchestrator that has
 correctly dispatched a full wave looks exactly like one that fell asleep, gets rung, and

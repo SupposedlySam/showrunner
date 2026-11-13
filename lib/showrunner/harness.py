@@ -573,9 +573,25 @@ def stop_gate(cfg, worktree_path, session, seen=None):
             continue
         if not isinstance(seam, dict) or "blocked" not in seam:
             continue
-        if not seam.get("blocked"):
-            return False, ""
         att = seam.get("attachments") or {}
+        if seen is not None:
+            seen["blocks_total"] = seam.get("blocks_total")
+        if not seam.get("blocked"):
+            # STOOD DOWN IS NOT RELEASED. Past its limit of consecutive refusals the harness stops
+            # honouring an attachment and LETS THE SESSION STOP, still saying no, and reports
+            # `blocked: false`. Read as unblocked, the Crawler that gave up with its leaf open was
+            # the one shape nothing reported. The caller decides what an open leaf makes of it.
+            down = {n: r for n, r in att.items()
+                    if isinstance(r, dict) and r.get("verdict") == "stood_down"}
+            if not down:
+                return False, ""
+            n = max(int(r.get("consecutive") or 0) for r in down.values())
+            if seen is not None:
+                seen["stood_down"] = n
+                seen["since"] = _latest_at(down)
+            return True, ("stood down after %d refusals by %s — the harness stopped honouring "
+                          "it and let the session stop, still saying no"
+                          % (n, ", ".join(sorted(down))))
         who = ", ".join(sorted(att)) or "an unnamed attachment"
         if seen is not None:
             seen["since"] = _earliest_block(att)
@@ -590,21 +606,33 @@ def stop_gate(cfg, worktree_path, session, seen=None):
     return None, ""
 
 
-def _earliest_block(attachments):
-    """Epoch of the earliest `at` among blocking attachments, or None when none can be read.
-
-    The harness writes `at` as a naive local ISO time, which `fromisoformat` reads as local too.
-    """
+def _ats(attachments, verdicts):
     import datetime
     found = []
     for rec in attachments.values():
-        if not isinstance(rec, dict) or rec.get("verdict") not in (None, "blocked"):
+        if not isinstance(rec, dict) or rec.get("verdict") not in verdicts:
             continue
         try:
             found.append(int(datetime.datetime.fromisoformat(str(rec.get("at"))).timestamp()))
         except (TypeError, ValueError):
             continue
+    return found
+
+
+def _earliest_block(attachments):
+    """Epoch of the earliest `at` among blocking attachments, or None when none can be read.
+
+    The harness writes `at` as a naive local ISO time, which `fromisoformat` reads as local too.
+    It rewrites `at` on every refusal, so this is the most recent refusal of each attachment.
+    """
+    found = _ats(attachments, (None, "blocked"))
     return min(found) if found else None
+
+
+def _latest_at(attachments):
+    """Epoch of the newest `at` among stood-down attachments: when the session was let stop."""
+    found = _ats(attachments, ("stood_down",))
+    return max(found) if found else None
 
 
 def owns_path(cfg, path):

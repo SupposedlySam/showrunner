@@ -444,6 +444,103 @@ def transcript_last_action(path):
     return None
 
 
+STOP_FEEDBACK = "Stop hook feedback"
+TRANSCRIPT_TAIL = 1 << 20
+
+
+def _entry_epoch(rec):
+    """A transcript entry's own `timestamp` as epoch seconds, or None."""
+    import datetime
+    raw = rec.get("timestamp")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return datetime.datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _is_stop_feedback(rec):
+    msg = rec.get("message") if isinstance(rec.get("message"), dict) else {}
+    content = msg.get("content")
+    return (rec.get("type") == "user" and isinstance(content, str)
+            and content.startswith(STOP_FEEDBACK))
+
+
+def session_acted(rec):
+    """Is this transcript entry the SESSION acting, rather than the host writing on its own?
+
+    The session acts when the model replies or calls a tool (an assistant entry carrying `text` or
+    `tool_use`), or when a tool it called returns (a user entry carrying `tool_result`). Everything
+    else is bookkeeping the host writes whether or not anybody is working, measured on a real
+    refusal: the `isMeta` user frame carrying "Stop hook feedback", `system` entries
+    (`stop_hook_summary`, `api_error`), `api-request`, `api-request-blob`, `api-request-shape`,
+    `queue-operation`, `attachment`, `custom-title`, `agent-name`, `atis-latch`, `last-prompt`,
+    `mode`, `cost-state` and `file-history-*`. A thinking-only assistant entry is not counted,
+    and neither is an error the host writes in the assistant's name (`isApiErrorMessage`, or the
+    `<synthetic>` model).
+    """
+    if not isinstance(rec, dict) or rec.get("isMeta") or rec.get("isApiErrorMessage"):
+        return False
+    msg = rec.get("message") if isinstance(rec.get("message"), dict) else {}
+    content = msg.get("content")
+    parts = [p for p in content if isinstance(p, dict)] if isinstance(content, list) else []
+    if rec.get("type") == "assistant":
+        if msg.get("model") == "<synthetic>":
+            return False
+        return any(p.get("type") == "tool_use" or
+                   (p.get("type") == "text" and str(p.get("text") or "").strip())
+                   for p in parts)
+    if rec.get("type") == "user":
+        return any(p.get("type") == "tool_result" for p in parts)
+    return False
+
+
+def acted_after_refusal(path, refused):
+    """Did the session act AFTER a refusal recorded at `refused` (epoch seconds)? True/False/None.
+
+    None means the transcript could not be read, which is not an answer.
+
+    WHY NOT THE FILE'S MTIME. The host writes into the transcript on its own the moment a turn-end
+    is refused: the "Stop hook feedback" frame, a `stop_hook_summary`, an `api-request`, all
+    within about a second. An mtime test reads that echo as the session working, so a Crawler
+    that stopped at a refusal was released as busy, and `waiting` almost never reported one
+    blocked.
+
+    WHY NOT THE ENTRY'S DATE ALONE. The harness writes the refusal at SECOND resolution, and the
+    session's own closing sentence, the thing that was refused, routinely lands inside that same
+    second. So the anchor is ORDER: an acting entry after the newest feedback frame dated at or
+    after the refusal. Where that frame is not in the tail read, an acting entry dated a full
+    second after the refusal is evidence, because the refused turn ended before then.
+    """
+    import json as _json
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - TRANSCRIPT_TAIL))
+            tail = fh.read().decode("utf-8", "replace")
+    except (OSError, TypeError):
+        return None
+    recs = []
+    for line in tail.splitlines():
+        try:
+            rec = _json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict):
+            recs.append(rec)
+    anchor = None
+    for i in range(len(recs) - 1, -1, -1):
+        t = _entry_epoch(recs[i])
+        if _is_stop_feedback(recs[i]) and t is not None and t >= refused:
+            anchor = i
+            break
+    if anchor is not None:
+        return any(session_acted(r) for r in recs[anchor + 1:])
+    return any(session_acted(r) and (_entry_epoch(r) or 0) >= refused + 1 for r in recs)
+
+
 def transcript_activity(tree, session):
     """When this session last wrote anything: {"path", "idle", "mtime", "why"}.
 

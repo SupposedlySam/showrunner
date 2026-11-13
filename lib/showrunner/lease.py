@@ -1084,6 +1084,32 @@ def _raise_waker_timeout(cfg, path, want, json, atomic_write_json):
                   "it before its budget" % (want, rel_or(path, cfg.root)))
 
 
+CRAWLER_WAKER_SHIM = os.path.join(".showrunner", "hooks", "crawler-waker.sh")
+
+
+def register_crawler_waker(cfg, local=False):
+    """Register the Crawler waker on Stop with asyncRewake. Returns (changed, message).
+
+    Registered for every checkout, and silent in a linked worktree, so the Crawlers that inherit
+    the registration are never held at their turn-end by it. The week-long timeout matches the
+    GitHub waker's: the harness kills an async hook at its timeout.
+    """
+    import json
+    from .util import atomic_write_json, file_lock
+
+    path = settings_target(cfg.root, local)
+    entry = {"hooks": [{"type": "command",
+                        "command": "\"$CLAUDE_PROJECT_DIR\"/" + CRAWLER_WAKER_SHIM,
+                        "asyncRewake": True,
+                        "timeout": 604800,
+                        "statusMessage": "showrunner: watching for a Crawler that needs you"}]}
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with file_lock(_register_lock(cfg)):
+        return _register_locked(
+            cfg, path, entry, json, atomic_write_json, "Stop",
+            lambda p: _registration(p, "Stop", "crawler-waker"), "Crawler waker")
+
+
 WRITE_SHIM = os.path.join(".showrunner", "hooks", "write-guard.sh")
 
 
