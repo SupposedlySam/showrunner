@@ -18593,6 +18593,68 @@ def test_the_github_waker_rings_and_stays_quiet():
     W._write_owner(cfg, "the-owner")
     eq("the owner a waker records is the one an older waker reads back", W._read_owner(cfg),
        "the-owner")
+
+    # A WAKER STARTED AT A TURN END LOOKS BEFORE IT SLEEPS. MEASURED on a consumer: a PR opened
+    # during a long turn, whose waker the host had ended, rang a full poll_sec after the turn,
+    # because the next waker slept before its first look.
+    poll = W.spec(cfg)["poll_sec"]
+
+    def started_with(looked_at, answer, sleeps, looks, before=None):
+        st = W.load_state(cfg)
+        st["looked_at"] = looked_at
+        W.save_state(cfg, st)
+
+        def runner(_q):
+            looks.append(len(sleeps))
+            if before:
+                before()
+            return answer
+
+        def nap(sec):
+            sleeps.append(sec)
+            clock[0] += W.BUDGET_SEC + 1
+        return W.run(cfg, sleep=nap, now=lambda: clock[0], runner=runner)
+    sleeps, looks = [], []
+    code, text = started_with(clock[0] - 10 * poll, said(50, "during the turn"), sleeps, looks)
+    ok("an event recorded while no waker ran is rung by the next waker's FIRST look...",
+       code == 2 and "during the turn" in text, (code, text))
+    eq("...which it took before sleeping at all", (looks, sleeps), ([0], []))
+    sleeps, looks, second = [], [], {}
+
+    def a_second_waker_starts_too():
+        # Once only: both share this pid and this clock, so their owner tokens are equal and the
+        # first does not see itself replaced; it looks again after its nap.
+        if "run" in second:
+            return
+
+        def nap(_s):
+            second["slept"] = 1
+            clock[0] += W.BUDGET_SEC + 1
+        second["run"] = W.run(cfg, sleep=nap, now=lambda: clock[0],
+                              runner=lambda _q: said(51, "once"))
+    code, text = started_with(clock[0] - 10 * poll, said(51, "once"), sleeps, looks,
+                              before=a_second_waker_starts_too)
+    ok("two wakers starting together both look at once, and ONE rings...",
+       second.get("run", (0,))[0] == 2 and "once" in second["run"][1]
+       and "slept" not in second and looks[:1] == [0], (second, looks))
+    eq("...while the other compares with what it recorded and stays quiet", (code, text), (0, ""))
+    sleeps, looks = [], []
+    code, _ = started_with(clock[0] - 100, said(52, "soon"), sleeps, looks)
+    ok("a waker started soon after a look sleeps only what is left of poll_sec, then looks",
+       sleeps[:1] == [poll - 100] and looks == [1] and code == 2, (sleeps, looks, code))
+    sleeps, looks = [], []
+    started_with(clock[0] + 50, said(53, "skew"), sleeps, looks)
+    eq("...and a stamp from the future is never read as overdue: the whole interval",
+       sleeps[:1], [poll])
+    eq("first_wait: a state with no stamp (written before it existed) looks at once",
+       W.first_wait({"poll_sec": poll}, {"events": [], "states": {}}, clock[0]), 0)
+    os.remove(state_file)
+    sleeps, looks = [], []
+    code, text = W.run(cfg, sleep=lambda s: sleeps.append(s) or clock.__setitem__(
+        0, clock[0] + W.BUDGET_SEC + 1), now=lambda: clock[0],
+        runner=lambda _q: looks.append(len(sleeps)) or said(54, "backlog"))
+    ok("a FIRST-EVER waker still snapshots silently, then sleeps the whole poll_sec",
+       (code, text) == (0, "") and sleeps == [poll] and looks == [0, 1], (code, sleeps, looks))
     tree = os.path.join(cfg.root, ".worktrees", "waker-probe")
     sh(["git", "worktree", "add", "-q", "-b", "waker-probe", tree], cfg.root)
     from showrunner import config as C

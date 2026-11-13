@@ -25,7 +25,8 @@ even when the agent made it: a state change carries no signature to recognise.
 ONE RING PER EVENT, however many wakers are running. Each turn-end starts one, so several can be
 alive at once: the newest owns the watch and an older one exits when it sees it was replaced, and
 every poll compares against the state on disk under a lock, so the first to record an event is
-the only one that rings for it.
+the only one that rings for it. A starting waker sleeps only what is left of `poll_sec` since the
+last look on record, so an event that arrived during a long turn rings at that turn's end.
 
 WHAT DOES NOT, stated so silence is not read as a broken watcher: the agent's own writing (a
 comment or review ending in `signature`, or a PR body ending in Claude Code's attribution line —
@@ -296,6 +297,24 @@ def in_linked_worktree(cfg):
     return bool(tree) and os.path.realpath(tree) != os.path.realpath(cfg.root)
 
 
+def first_wait(sp, state, now_ts):
+    """Seconds a starting waker sleeps before its first look: what is left of `poll_sec` since
+    the last look on record, so a waker started after a long turn looks AT ONCE.
+
+    The host ends a pending waker when a turn starts, so every event that arrived during a turn
+    waited a full `poll_sec` after it, measured at 180 s on a consumer. Looking whenever a waker
+    starts would cost a query per turn-end instead: a one-repo, one-upstream watch costs 14
+    GraphQL points, so an hour of 30-second turns would spend a third of the 5,000 the machine
+    shares, against 168 at one look per 300 s. Counting from the last look keeps it at one per
+    `poll_sec`, however often turns end. A state with no stamp, or one from the future, is never
+    read as recent: the first waits nothing, the second the whole interval."""
+    try:
+        age = now_ts - float(state.get("looked_at"))
+    except (TypeError, ValueError):
+        return 0
+    return sp["poll_sec"] if age < 0 else max(0, sp["poll_sec"] - age)
+
+
 def run(cfg, once=False, sleep=time.sleep, now=time.time, runner=None):
     """(exit code, text). 2 with a wake; 0 quiet or not configured; 1 `once` that could not look."""
     from .util import file_lock
@@ -311,7 +330,7 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, runner=None):
             return (1, "could not look at GitHub (not the same as nothing new)") if once else \
                 (0, "")
         ids, states = snapshot(items)
-        state = {"events": sorted(ids), "states": states}
+        state = {"events": sorted(ids), "states": states, "looked_at": now()}
         save_state(cfg, state)
     # Every turn-end starts a looping waker, and one that has not fired keeps running for its
     # budget. The NEWEST one owns the watch (it has the latest deadline, so an older one adds no
@@ -321,9 +340,12 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, runner=None):
     if token:
         _write_owner(cfg, token)
     deadline = now() + sp["budget_sec"]
+    wait = first_wait(sp, state, now())
     while True:
         if not once:
-            sleep(sp["poll_sec"])
+            if wait:
+                sleep(wait)
+            wait = sp["poll_sec"]
             if _read_owner(cfg) not in (None, token):
                 return 0, ""
         items = look(sp, runner)
@@ -333,6 +355,7 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, runner=None):
             state = _current(cfg, state)
             wake, new_state = poll(sp, state, items)
             if new_state is not None:
+                new_state["looked_at"] = now()
                 save_state(cfg, new_state)      # advance FIRST: a wake re-sent is noise
                 state = new_state
         if wake:
