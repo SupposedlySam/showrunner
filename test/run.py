@@ -18526,6 +18526,8 @@ def test_the_github_waker_rings_and_stays_quiet():
              False),
             ("the signature quoted mid-text, not at the end",
              "— 🤖 x owner agent said so, but I disagree", False),
+            ("its signature, then the attribution with CRLF line endings",
+             "body\r\n\r\n— 🤖 x owner agent\r\n\r\n🤖 " + W.PR_ATTRIBUTION + "\r\n", True),
             ("plain text", "please fix", False)):
         eq("mine(): %s" % label, W.mine(sp, text), want)
     eq("mine(): with no signature configured, nothing is mine — not even the attribution line",
@@ -18584,23 +18586,35 @@ def test_the_github_waker_rings_and_stays_quiet():
     saved = W.load_state(cfg)
     ok("the state is SAVED and read back: it holds the events it has seen",
        saved and "c2" in saved["events"], saved)
-    with open(W.decisions_path(cfg)) as fh:
-        logged = [json.loads(l) for l in fh.read().splitlines()]
+    def decisions():
+        try:
+            with open(W.decisions_path(cfg)) as fh:
+                return [json.loads(l) for l in fh.read().splitlines()]
+        except OSError:
+            return []
+    logged = decisions()
     eq("the decision log: the seed's event is seen, the next look's comment rang, one line each",
        [(d["item"], d["event"], d["verdict"]) for d in logged],
        [("them/up#5", "c1", "seen"), ("them/up#5", "c2", "rang")])
     ok("...each line carries the author, the reason and a timestamp",
-       all(d.get("author") == "boss" and d.get("reason") and isinstance(d.get("ts"), int)
-           for d in logged), logged)
+       logged and all(d.get("author") == "boss" and d.get("reason")
+                      and isinstance(d.get("ts"), int) for d in logged), logged)
+    seed = W.seeded({"them/up#5": dict(pr(5, comments=[c(1, "boss", "a"), c(2, "rando", "b")]),
+                                       repo="them/up", is_pr=True)})
+    eq("a silent seed records every event it saw as seen, never as rang",
+       [(d["event"], d["author"], d["verdict"]) for d in seed],
+       [("c1", "boss", "seen"), ("c2", "rando", "seen")])
+    ok("...and says why it did not ring", seed and all("without ringing" in d["reason"]
+                                                         for d in seed), seed)
     keep = W.DECISIONS_KEEP
     W.log_decisions(cfg, [{"item": "x", "event": "e%d" % i, "author": "a", "verdict": "rang",
                            "reason": "r"} for i in range(keep + 5)], 1)
-    with open(W.decisions_path(cfg)) as fh:
-        tail = fh.read().splitlines()
+    tail = [json.dumps(d) for d in decisions()]
     ok("the log is a BOUNDED tail: the newest %d lines, the oldest dropped" % keep,
        len(tail) == keep and json.loads(tail[-1])["event"] == "e%d" % (keep + 4)
        and json.loads(tail[0])["event"] == "e5", (len(tail), tail[:1], tail[-1:]))
-    os.remove(W.decisions_path(cfg))
+    if os.path.exists(W.decisions_path(cfg)):
+        os.remove(W.decisions_path(cfg))
     state_file = os.path.join(cfg.state_dir, "waker-state.json")
     with open(state_file, "w") as fh:
         fh.write("not json")
