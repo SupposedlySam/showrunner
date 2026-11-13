@@ -583,8 +583,11 @@ The agent's own writing, recognised by `waker.signature`, is counted and never r
 from outside `waker.trusted_logins`/`trusted_names` is marked as a claim to verify. It never runs
 in a Crawler's worktree, and with nothing configured it exits at once. Each turn-end starts a
 waker, so several can be alive at once; each event still rings once, because the newest waker owns
-the watch and every poll compares against the saved state under a lock. A close or merge the agent
-made itself still rings: a state change carries no signature.
+the watch and every poll compares against the saved state under a lock. A new waker sleeps only
+what is left of `waker.poll_sec` since the last look, so an event that arrived during a long turn
+rings when that turn ends, and turn-ends however frequent never look more than once per
+`poll_sec`. A close or merge the agent made itself still rings: a state change carries no
+signature.
 `showrunner waker --once` looks once and reports; `SHOWRUNNER_GH` names the `gh` binary when it
 is not on PATH.
 
