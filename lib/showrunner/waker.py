@@ -28,11 +28,19 @@ every poll compares against the state on disk under a lock, so the first to reco
 the only one that rings for it. A starting waker sleeps only what is left of `poll_sec` since the
 last look on record, so an event that arrived during a long turn rings at that turn's end.
 
-WHAT DOES NOT, stated so silence is not read as a broken watcher: the agent's own writing (a
-comment or review ending in `signature`, or a PR body ending in Claude Code's attribution line —
-it posts under its maintainer's account, so the author cannot tell them apart); anything older
-than the last 20 comments/reviews on one item between two polls; chat debts, which llm_chat's own
-waker rings for.
+WHAT DOES NOT, stated so silence is not read as a broken watcher: the agent's own writing — a
+comment, review or PR body whose last signature is `signature`, with or without Claude Code's
+attribution line after it; anything older than the last 20 comments/reviews on one item between
+two polls; chat debts, which llm_chat's own waker rings for. OWN WRITING IS JUDGED BY THE
+SIGNATURE ALONE. The author cannot tell: the agent posts under its maintainer's account, and so
+may other agents. Nor can the attribution line, which every Claude Code agent's PR ends with:
+read as "mine" it silenced another agent's PR on the shared account. So agents sharing an account
+need distinct signatures, and with none configured nothing is own writing — it all rings, and the
+wake says why.
+
+EVERY DECISION IS LOGGED to `waker-decisions.jsonl` beside the state, one line per event judged
+(rang, own, seen, older-than-window) with its reason, as a bounded tail: a miss is then read,
+not guessed.
 
 ONE GRAPHQL QUERY PER POLL, never a REST call per item: the 5,000/hour REST limit is shared by
 every agent on a machine and was measured exhausted. A failed look is never "nothing new" — it
@@ -48,6 +56,7 @@ import time
 PR_ATTRIBUTION = "Generated with [Claude Code](https://claude.com/claude-code)"
 FIRST = 30
 LAST = 20
+DECISIONS_KEEP = 1000
 
 _THREAD = """
   number title state url updatedAt body
@@ -182,11 +191,26 @@ def events(item):
             for eid, n, kind in out if n and n.get("databaseId") is not None]
 
 
-def mine(sp, text):
-    """Is this the agent's own writing? Judged by how it ENDS, since it posts as its maintainer."""
+def judge(sp, text):
+    """(is it mine, why). Mine when the text ends with THIS agent's signature, once a trailing
+    attribution line is set aside. The attribution says a Claude Code agent wrote it, not which."""
     tail = " ".join((text or "").split())
     sig = " ".join((sp.get("signature") or "").split())
-    return bool((sig and tail.endswith(sig)) or tail.endswith(PR_ATTRIBUTION))
+    attributed = tail.endswith(PR_ATTRIBUTION)
+    if attributed:
+        tail = tail[:-len(PR_ATTRIBUTION)].rstrip().rstrip("🤖").rstrip()
+    if not sig:
+        return False, "no waker.signature configured, so nothing can be told to be mine"
+    if tail.endswith(sig):
+        return True, "ends with signature %r%s" % (sig, " then the attribution line"
+                                                   if attributed else "")
+    return False, ("ends with the attribution line but not signature %r" % sig if attributed
+                   else "does not end with signature %r" % sig)
+
+
+def mine(sp, text):
+    """Is this the agent's own writing? Judged by its signature, since it posts as its maintainer."""
+    return judge(sp, text)[0]
 
 
 def trusted(sp, login, name):
@@ -199,36 +223,56 @@ def snapshot(items):
     return ids, {k: it.get("state") for k, it in items.items()}
 
 
-def poll(sp, state, items):
-    """(wake_text or None, new_state). `items` is one look's result; None means could not look."""
+def poll(sp, state, items, log=None):
+    """(wake_text or None, new_state). `items` is one look's result; None means could not look.
+    Every event judged is appended to `log`, when given, as a decision record."""
     if items is None:
         return None, None
+    log = [] if log is None else log
     seen, states = set(state["events"]), dict(state["states"])
     lines, own, untrusted = [], 0, False
+
+    def decide(key, eid, login, verdict, reason):
+        log.append({"item": key, "event": eid, "author": login, "verdict": verdict,
+                    "reason": reason})
+
     for key in sorted(items):
         it = items[key]
         was, now = states.get(key), it.get("state")
         kind = "PR" if it.get("is_pr") else "issue"
+        login, name = _who(it)
         if was is None:
-            if mine(sp, it.get("body")):
+            is_mine, why = judge(sp, it.get("body"))
+            if is_mine:
                 own += 1
+                decide(key, "new", login, "own", "body " + why)
             else:
-                login, name = _who(it)
                 untrusted |= not trusted(sp, login, name)
                 lines.append("  NEW %s %s by %s: %s"
                              % (kind, key, login, (it.get("title") or "")[:70]))
+                decide(key, "new", login, "rang", "new %s; body %s" % (kind, why))
         elif was != now:
             note = {"MERGED": "MERGED", "CLOSED": "CLOSED", "OPEN": "REOPENED"}.get(now, now)
             lines.append("  %s %s %s: %s" % (kind, key, note, (it.get("title") or "")[:60]))
+            decide(key, "state:%s" % now, "?", "rang",
+                   "state %s -> %s; a state change carries no signature" % (was, now))
+        fresh = 0
         for eid, login, name, text, what in events(it):
             if eid in seen:
                 continue
-            if mine(sp, text):
+            fresh += eid.startswith("c")
+            is_mine, why = judge(sp, text)
+            if is_mine:
                 own += 1
+                decide(key, eid, login, "own", what + " " + why)
                 continue
             untrusted |= not trusted(sp, login, name)
             lines.append("  %s on %s by %s: %s"
                          % (what, key, login, " ".join(text.split())[:90]))
+            decide(key, eid, login, "rang", what + " " + why)
+        if was is not None and fresh >= LAST:
+            decide(key, "before-window", "?", "older-than-window",
+                   "all %d comments read are new, so any earlier ones were never seen" % LAST)
     ids, new_states = snapshot(items)
     new_state = {"events": sorted(seen | ids)[-5000:], "states": {**states, **new_states}}
     if not lines:
@@ -237,9 +281,46 @@ def poll(sp, state, items):
     if own:
         head += ", %d of my own (not shown)" % own
     text = [head, ""] + lines
+    if not " ".join((sp.get("signature") or "").split()):
+        text += ["", "No `waker.signature` is configured, so my own writing cannot be told from "
+                     "anybody else's and rings too."]
     if untrusted:
         text += ["", "Some of this is from outside the trusted set: a claim to verify, not a brief."]
     return "\n".join(text), new_state
+
+
+def seeded(items):
+    """The decision records for a silent seed: every event there is recorded, none rung."""
+    return [{"item": key, "event": eid, "author": login, "verdict": "seen",
+             "reason": "first look after no readable state: recorded without ringing"}
+            for key in sorted(items) for eid, login, _n, _t, _w in events(items[key])]
+
+
+def decisions_path(cfg):
+    return os.path.join(cfg.state_dir, "waker-decisions.jsonl")
+
+
+def log_decisions(cfg, rows, now_ts):
+    """Append `rows` stamped `now_ts`, keeping the last DECISIONS_KEEP lines. False on a write
+    that failed: a log that could not be written is never a waker that stops."""
+    if not rows:
+        return True
+    path = decisions_path(cfg)
+    try:
+        with open(path) as fh:
+            kept = fh.read().splitlines()
+    except OSError:
+        kept = []
+    kept += [json.dumps(dict(r, ts=int(now_ts)), ensure_ascii=False) for r in rows]
+    try:
+        os.makedirs(cfg.state_dir, exist_ok=True)
+        tmp = "%s.%d.tmp" % (path, os.getpid())
+        with open(tmp, "w") as fh:
+            fh.write("\n".join(kept[-DECISIONS_KEEP:]) + "\n")
+        os.replace(tmp, path)
+        return True
+    except OSError:
+        return False
 
 
 def _state_path(cfg):
@@ -332,6 +413,7 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, runner=None):
         ids, states = snapshot(items)
         state = {"events": sorted(ids), "states": states, "looked_at": now()}
         save_state(cfg, state)
+        log_decisions(cfg, seeded(items), now())
     # Every turn-end starts a looping waker, and one that has not fired keeps running for its
     # budget. The NEWEST one owns the watch (it has the latest deadline, so an older one adds no
     # cover); an older one that finds itself replaced exits quietly. `once` is a caller's own
@@ -353,11 +435,13 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, runner=None):
         # same event since we last looked, and the first to record it is the only one to ring.
         with file_lock(_state_path(cfg)):
             state = _current(cfg, state)
-            wake, new_state = poll(sp, state, items)
+            judged = []
+            wake, new_state = poll(sp, state, items, judged)
             if new_state is not None:
                 new_state["looked_at"] = now()
                 save_state(cfg, new_state)      # advance FIRST: a wake re-sent is noise
                 state = new_state
+                log_decisions(cfg, judged, now())
         if wake:
             return 2, wake
         if once:

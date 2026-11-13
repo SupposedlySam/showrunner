@@ -87,7 +87,7 @@ STATE_IGNORE_SECTIONS = [
      "# the exact state doctor flags elsewhere, and the state that reopens the leak\n"
      "# config.local.json exists to prevent.",
      [CONFIG_LOCAL_NAME, "seen-issues.json", "wake-gate-seen.json", "waker-state.json",
-      "crawler-waker-state.json", "crawler-waker-owner"]),
+      "waker-owner", "waker-decisions.jsonl", "crawler-waker-state.json", "crawler-waker-owner"]),
     ("# The TOOL, not this project — replaced wholesale on upgrade. INSTALLED records which\n"
      "# commit that copy is, so it goes with the copy (pin.INSTALL_STAMP_FILE).",
      ["bin/", "lib/", "INSTALLED"]),

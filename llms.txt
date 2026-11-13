@@ -923,6 +923,14 @@ showrunner waker                     # Stop, asyncRewake (github-waker.sh): whil
                                      # A new waker waits only what is left of poll_sec
                                      # since the last look, so an event that arrived
                                      # mid-turn rings at the turn's end.
+                                     # Own writing is judged by waker.signature
+                                     # alone, never by the account or Claude
+                                     # Code's attribution line: agents sharing
+                                     # an account need distinct signatures, and
+                                     # with none set everything rings, saying so.
+                                     # Every decision, with its reason, goes to
+                                     # waker-decisions.jsonl beside its state
+                                     # (a bounded tail; doctor prints the path).
                                      # `showrunner waker --once` looks once;
                                      # `showrunner waker --probe` exits 0 — how the shim tells
                                      # a binary that knows the verb from an older one.

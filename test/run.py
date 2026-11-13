@@ -18498,7 +18498,8 @@ def test_the_github_waker_rings_and_stays_quiet():
        "review changes_requested" in wake, wake)
     ok("...and so does its INLINE comment", wake and "threshold too low" in wake, wake)
     w6 = {"them/up#5": dict(seen_world["them/up#5"], state="MERGED"),
-          "me/fork#7": dict(pr(7, body="x\n\n🤖 " + W.PR_ATTRIBUTION), repo="me/fork", is_pr=True)}
+          "me/fork#7": dict(pr(7, body="x\n\n— 🤖 x owner agent\n\n🤖 " + W.PR_ATTRIBUTION),
+                            repo="me/fork", is_pr=True)}
     wake, _ = W.poll(sp, st, w6)
     ok("a MERGE with no comment at all rings", wake and "MERGED" in wake, wake)
     ok("...and the agent's own new PR is counted, not shown",
@@ -18516,13 +18517,63 @@ def test_the_github_waker_rings_and_stays_quiet():
        (None, None))
     for label, text, want in (
             ("its signature, with trailing whitespace", "done\n\n— 🤖 x owner agent  \n", True),
-            ("Claude Code's PR attribution line", "body\n🤖 " + W.PR_ATTRIBUTION, True),
+            ("its signature, then Claude Code's attribution line",
+             "body\n\n— 🤖 x owner agent\n\n🤖 " + W.PR_ATTRIBUTION, True),
+            ("Claude Code's attribution line ALONE: some Claude Code agent, not this one",
+             "body\n🤖 " + W.PR_ATTRIBUTION, False),
+            ("ANOTHER agent's signature, then the attribution line",
+             "body\n\n— 🤖 x owner agent\n\n— 🤖 another agent\n\n🤖 " + W.PR_ATTRIBUTION,
+             False),
             ("the signature quoted mid-text, not at the end",
              "— 🤖 x owner agent said so, but I disagree", False),
+            ("its signature, then the attribution with CRLF line endings",
+             "body\r\n\r\n— 🤖 x owner agent\r\n\r\n🤖 " + W.PR_ATTRIBUTION + "\r\n", True),
             ("plain text", "please fix", False)):
         eq("mine(): %s" % label, W.mine(sp, text), want)
-    eq("mine(): with no signature configured, only the attribution line is recognised",
-       W.mine(dict(sp, signature=""), "done — 🤖 x owner agent"), False)
+    eq("mine(): with no signature configured, nothing is mine — not even the attribution line",
+       [W.mine(dict(sp, signature=""), t) for t in ("done — 🤖 x owner agent",
+                                                   "b\n\n🤖 " + W.PR_ATTRIBUTION)],
+       [False, False])
+
+    # ANOTHER AGENT'S PR ON THE SHARED ACCOUNT IS NOT MY OWN WRITING. MEASURED on a consumer:
+    # PR #7 was opened by a different agent under the one maintainer account; its body ended
+    # with the attribution line every Claude Code PR carries, and the waker silenced it as mine.
+    seven = ("Adds the thing.\n\n— 🤖 SRCode agent on the work machine (showrunner-code-owner)"
+             "\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)")
+    pr7 = {"me/fork#7": dict(pr(7, body=seven, who="me"), repo="me/fork", is_pr=True)}
+    judged = []
+    wake, _ = W.poll(sp, st, {**seen_world, **pr7}, judged)
+    ok("PR #7's exact body — another agent's signature, then the attribution — RINGS",
+       wake and "NEW PR me/fork#7" in wake and "of my own" not in wake, wake)
+    eq("...and its decision is logged as rang, with the reason",
+       [(d["item"], d["event"], d["author"], d["verdict"]) for d in judged],
+       [("me/fork#7", "new", "me", "rang")])
+    ok("...the reason names the attribution line without my signature",
+       judged and "attribution line but not signature" in judged[0]["reason"], judged)
+    wake, _ = W.poll(dict(sp, signature=""), st, w3)
+    ok("with no signature configured, my signed comment RINGS and the wake says why",
+       wake and "done." in wake and "No `waker.signature` is configured" in wake, wake)
+    wake, _ = W.poll(sp, st, w2)
+    ok("...a note a configured signature never prints", wake and "waker.signature" not in wake,
+       wake)
+    judged = []
+    W.poll(sp, st, {"them/up#5": dict(seen_world["them/up#5"], state="CLOSED",
+                                      comments={"nodes": [c(1, "boss", "old"), c(2, "boss", "hi"),
+                                                          c(3, "me", "ok\n\n— 🤖 x owner agent")]})},
+           judged)
+    eq("ONE decision per event judged: the state change rang, the new comment rang, mine is "
+       "own, and the comment already seen is not re-judged",
+       [(d["event"], d["verdict"]) for d in judged],
+       [("state:CLOSED", "rang"), ("c2", "rang"), ("c3", "own")])
+    full = {"them/up#5": dict(seen_world["them/up#5"], comments={"nodes": [
+        c(100 + i, "boss", "n%d" % i) for i in range(W.LAST)]})}
+    judged = []
+    W.poll(sp, st, full, judged)
+    eq("a window FULL of new comments logs that earlier ones were never read",
+       [d["verdict"] for d in judged if d["verdict"] != "rang"], ["older-than-window"])
+    judged = []
+    W.poll(sp, st, w2, judged)
+    eq("...and one with room to spare does not", [d["verdict"] for d in judged], ["rang"])
 
     # THE LOOP: seeds silently, then wakes; and never runs in a Crawler's tree.
     answers = [gql([pr(1)], [pr(5, comments=[c(1, "boss", "old")])]),
@@ -18535,6 +18586,35 @@ def test_the_github_waker_rings_and_stays_quiet():
     saved = W.load_state(cfg)
     ok("the state is SAVED and read back: it holds the events it has seen",
        saved and "c2" in saved["events"], saved)
+    def decisions():
+        try:
+            with open(W.decisions_path(cfg)) as fh:
+                return [json.loads(l) for l in fh.read().splitlines()]
+        except OSError:
+            return []
+    logged = decisions()
+    eq("the decision log: the seed's event is seen, the next look's comment rang, one line each",
+       [(d["item"], d["event"], d["verdict"]) for d in logged],
+       [("them/up#5", "c1", "seen"), ("them/up#5", "c2", "rang")])
+    ok("...each line carries the author, the reason and a timestamp",
+       logged and all(d.get("author") == "boss" and d.get("reason")
+                      and isinstance(d.get("ts"), int) for d in logged), logged)
+    seed = W.seeded({"them/up#5": dict(pr(5, comments=[c(1, "boss", "a"), c(2, "rando", "b")]),
+                                       repo="them/up", is_pr=True)})
+    eq("a silent seed records every event it saw as seen, never as rang",
+       [(d["event"], d["author"], d["verdict"]) for d in seed],
+       [("c1", "boss", "seen"), ("c2", "rando", "seen")])
+    ok("...and says why it did not ring", seed and all("without ringing" in d["reason"]
+                                                         for d in seed), seed)
+    keep = W.DECISIONS_KEEP
+    W.log_decisions(cfg, [{"item": "x", "event": "e%d" % i, "author": "a", "verdict": "rang",
+                           "reason": "r"} for i in range(keep + 5)], 1)
+    tail = [json.dumps(d) for d in decisions()]
+    ok("the log is a BOUNDED tail: the newest %d lines, the oldest dropped" % keep,
+       len(tail) == keep and json.loads(tail[-1])["event"] == "e%d" % (keep + 4)
+       and json.loads(tail[0])["event"] == "e5", (len(tail), tail[:1], tail[-1:]))
+    if os.path.exists(W.decisions_path(cfg)):
+        os.remove(W.decisions_path(cfg))
     state_file = os.path.join(cfg.state_dir, "waker-state.json")
     with open(state_file, "w") as fh:
         fh.write("not json")

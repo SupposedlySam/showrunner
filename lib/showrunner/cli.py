@@ -827,6 +827,27 @@ def cmd_doctor(args):
               "is stuck only while something polls for it (it %s). Wire it: `showrunner worktree "
               "register`" % (YEL + "warn " + OFF, _cw_when))
 
+    # THE GITHUB WAKER'S DECISIONS: where a miss is read instead of guessed, and the one config
+    # gap that makes every own-writing verdict impossible.
+    from . import waker as _gw
+    _gw_sp = _gw.spec(cfg)
+    if _gw_sp is not None:
+        _gw_path = _gw.decisions_path(cfg)
+        try:
+            with open(_gw_path) as _fh:
+                _gw_rows = _fh.read().splitlines()
+        except OSError:
+            _gw_rows = None
+        print("  %s the GitHub waker logs every decision (rang/own/seen/older-than-window, with "
+              "the reason) to %s — %s" % (
+                  GRN + "ok   " + OFF, os.path.relpath(_gw_path, cfg.root),
+                  "%d line(s), the last %d kept" % (len(_gw_rows), _gw.DECISIONS_KEEP)
+                  if _gw_rows is not None else "not written yet: no look has been recorded"))
+        if not " ".join((_gw_sp.get("signature") or "").split()):
+            print("  %s `waker.signature` is not set, so the waker cannot tell this agent's own "
+                  "writing from anybody else's and rings for all of it. Set a signature no "
+                  "other agent on the account uses." % (YEL + "warn " + OFF))
+
     # THE RECIPROCAL HALF: showrunner's config names paths into a NEIGHBOUR's tree, and only
     # this repo can see whether they still resolve. A neighbour who moves or uninstalls their
     # tool cannot fail our suite — they do not know we point at them — so the failure would
