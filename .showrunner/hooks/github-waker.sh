@@ -9,6 +9,15 @@
 # So each candidate is asked `waker --probe`, and only one that answers 0 is handed the job.
 # Unconfigured, in a linked worktree, or with no binary that answers, this exits 0, silently.
 set -u
+# HEARTBEAT FIRST, as the other Stop hooks stamp, so `doctor` can tell a hook reached from one
+# not. Before the first `exit`, so the probe-failed, unconfigured and linked-worktree paths
+# leave the same evidence as the one that waits.
+_hb="${SHOWRUNNER_HEARTBEAT:-}"
+if [ -z "$_hb" ]; then
+  _hb_root="${CLAUDE_PROJECT_DIR:-}"
+  [ -n "$_hb_root" ] && [ -d "$_hb_root/.showrunner" ] && _hb="$_hb_root/.showrunner/hook-heartbeat.jsonl"
+fi
+[ -n "$_hb" ] && { printf '{"hook":"github-waker","ts":%s}\n' "$(date +%s)" >> "$_hb" 2>/dev/null || true; }
 anchor="${CLAUDE_PROJECT_DIR:-$PWD}"
 common="$(git -C "$anchor" rev-parse --git-common-dir 2>/dev/null)" || exit 0
 case "$common" in /*) ;; *) common="$anchor/$common" ;; esac

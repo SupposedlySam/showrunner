@@ -18729,6 +18729,114 @@ def test_the_github_waker_rings_and_stays_quiet():
        q.returncode == 0 and "usage" not in q.stderr, (q.returncode, q.stderr))
 
 
+def test_the_github_waker_stamps_every_invocation():
+    group("The GitHub waker stamps the heartbeat on every exit path, so doctor's NEVER line about "
+          "it is true when it appears")
+    if not have("git"):
+        skip("the github-waker heartbeat group", "git is not installed")
+        return
+    # REPORTED: doctor here warned the waker had NEVER stamped while its `showrunner waker` process
+    # was running under the orchestrator. The shim wrote no stamp, so a warn line that is always
+    # on for a healthy hook was teaching the reader to skip warn lines.
+    real = os.path.join(ROOT, ".showrunner", "hooks", "github-waker.sh")
+    with open(real) as fh:
+        source = fh.read()
+    # THE MUTANT. mutate.py reads no shell, so the stamp's death is manufactured here: the same
+    # shim with its stamp line removed, run through the same paths, must fail the same counts.
+    dropped = "".join(l for l in source.splitlines(True) if "printf" not in l)
+    ok("the mutant really differs from the shim (the stamp is one printf line)",
+       dropped != source and source.count("printf") == 1)
+
+    def paths(text):
+        """Stamps written per exit path, keyed by path, for one copy of the shim."""
+        repo = make_repo()
+        bindir = os.path.join(repo.root, "bin")
+        os.makedirs(bindir)
+        shim = os.path.join(tmpdir("ghw-shim"), "github-waker.sh")
+        with open(shim, "w") as fh:
+            fh.write(text)
+        hb = os.path.join(tmpdir("ghw-hb"), "hb.jsonl")
+        tree = os.path.join(repo.root, ".worktrees", "linked")
+        sh(["git", "worktree", "add", "-q", "-b", "linked", tree], repo.root)
+        out = {}
+
+        def run(name, cwd, binary=None):
+            exe = os.path.join(bindir, "showrunner")
+            if os.path.lexists(exe):
+                os.remove(exe)
+            if binary == "real":
+                # The real verb, made to SAY which branch it took: in hook mode it exits 0
+                # silently on both, and so would a probe that failed. `--once` returns before any
+                # look on these two branches, so nothing reaches GitHub.
+                sr = os.path.join(ROOT, "bin", "showrunner")
+                binary = ("#!/bin/sh\n[ \"$2\" = --probe ] && exec '%s' \"$@\"\n"
+                          "exec '%s' \"$@\" --once\n" % (sr, sr))
+            if binary:
+                with open(exe, "w") as fh:
+                    fh.write(binary)
+                os.chmod(exe, 0o755)
+            before = open(hb).read().count('"github-waker"') if os.path.exists(hb) else 0
+            q = subprocess.run(["bash", shim], capture_output=True, text=True, cwd=cwd,
+                               env=dict(os.environ, CLAUDE_PROJECT_DIR=cwd,
+                                        SHOWRUNNER_HEARTBEAT=hb), stdin=subprocess.DEVNULL)
+            after = open(hb).read().count('"github-waker"') if os.path.exists(hb) else 0
+            out[name] = (after - before, q.returncode, (q.stdout + q.stderr)[-200:])
+
+        run("not a repo", tmpdir("ghw-norepo"))
+        run("no binary", repo.root)
+        run("probe failed", repo.root, "#!/bin/sh\necho 'usage: unknown verb' >&2\nexit 2\n")
+        run("unconfigured", repo.root, "real")
+        with open(os.path.join(repo.root, ".showrunner", "config.local.json"), "w") as fh:
+            json.dump({"waker": {"repos": ["acme/widgets"]}}, fh)
+        run("linked worktree", tree, "real")
+        run("ran", repo.root, "#!/bin/sh\n[ \"$2\" = --probe ] && exit 0\necho RANG >&2\nexit 2\n")
+        return out
+
+    got = paths(source)
+    eq("every exit path the shim has writes exactly ONE stamp — not a repo, no binary, probe "
+       "failed, unconfigured, linked worktree, and handed the job",
+       {k: v[0] for k, v in got.items()}, {k: 1 for k in got})
+    ok("...and the paths are the ones claimed: the unconfigured and linked-worktree runs reached "
+       "the real `waker` and exited 0, the run that was handed the job rang",
+       got["unconfigured"][1] == 0 and "nothing configured" in got["unconfigured"][2]
+       and got["linked worktree"][1] == 0 and "linked worktree" in got["linked worktree"][2]
+       and got["ran"][1] == 2 and "RANG" in got["ran"][2], got)
+    gone = paths(dropped)
+    eq("THE MUTANT: the shim without its stamp line fails every one of those counts, so the "
+       "assertion above is load-bearing rather than satisfied by some other writer",
+       {k: v[0] for k, v in gone.items()}, {k: 0 for k in gone})
+
+    # DOCTOR, end to end. A registered shim that stamped is reported with WHEN; one that has not
+    # keeps today's NEVER wording, which this must not have softened.
+    fresh = make_repo()
+    exe = os.path.join(ROOT, "bin", "showrunner")
+    subprocess.run([sys.executable, exe, "worktree", "register"], capture_output=True, text=True,
+                   cwd=fresh.root, stdin=subprocess.DEVNULL)
+    hooks = os.path.join(fresh.root, ".showrunner", "hooks")
+    os.makedirs(hooks, exist_ok=True)
+    shutil.copy(real, os.path.join(hooks, "github-waker.sh"))
+    env = {k: v for k, v in os.environ.items() if k != "SHOWRUNNER_HEARTBEAT"}
+
+    def doctor():
+        return subprocess.run([sys.executable, exe, "doctor"], capture_output=True, text=True,
+                              cwd=fresh.root, env=env, stdin=subprocess.DEVNULL).stdout
+    out = doctor()
+    ok("before any invocation, doctor keeps the NEVER wording for the github-waker",
+       "Stop hook `github-waker` has NEVER stamped an invocation" in out
+       and "cannot tell which" in out, out[-1500:])
+    subprocess.run(["bash", os.path.join(hooks, "github-waker.sh")], capture_output=True,
+                   text=True, cwd=fresh.root, env=dict(env, CLAUDE_PROJECT_DIR=fresh.root),
+                   stdin=subprocess.DEVNULL)
+    ledger = os.path.join(fresh.root, ".showrunner", "hook-heartbeat.jsonl")
+    ok("...the shim, run with only CLAUDE_PROJECT_DIR as the harness gives it, stamps the "
+       "project's own heartbeat",
+       os.path.exists(ledger) and '"github-waker"' in open(ledger).read())
+    out = doctor()
+    ok("...and doctor then names WHEN it ran instead of warning it never did",
+       "Stop hook `github-waker` stamped an invocation 0m ago" in out
+       and "`github-waker` has NEVER" not in out, out[-1500:])
+
+
 def _iso(epoch):
     import datetime as _dt
     return _dt.datetime.fromtimestamp(epoch, _dt.timezone.utc).isoformat().replace("+00:00", "Z")
@@ -19435,7 +19543,7 @@ def test_never_integrated_leaves_do_not_collide():
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_the_github_waker_stamps_every_invocation, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,
