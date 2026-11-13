@@ -101,6 +101,17 @@
             "type": "command"
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "asyncRewake": true,
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.showrunner/hooks/crawler-waker.sh",
+            "statusMessage": "showrunner: watching for a Crawler that needs you",
+            "timeout": 604800,
+            "type": "command"
+          }
+        ]
       }
     ]
   },

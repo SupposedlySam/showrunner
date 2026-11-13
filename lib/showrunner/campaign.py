@@ -564,9 +564,9 @@ def _shallow_tail(cfg, graph, entry, f, wt):
     watchdog rings — the failure would be a `waiting` that says one thing and a `reconcile`
     that says another about the same live session.
 
-    The blocked question costs a `stop_gate` call, but only for a Crawler that is ALIVE, so it
-    is bounded by how many are running rather than by how many the campaign ever had. That is
-    the distinction that makes the shallow mode worth having.
+    The blocked question costs a `stop_gate` call, but only for a Crawler that is ALIVE or whose
+    leaf is still open, so it is bounded by the live work rather than by how many Crawlers the
+    campaign ever had. That is the distinction that makes the shallow mode worth having.
     """
     leaf = None
     try:
@@ -576,32 +576,85 @@ def _shallow_tail(cfg, graph, entry, f, wt):
     f["leaf_status"] = leaf.get("status") if leaf else "unknown"
     f["parked"] = bool(leaf.get("parked")) if leaf else False
 
-    # BLOCKED IS NOT WORKING (issue #24). Asked only of a tree that is still alive, because
-    # a refused turn-end matters exactly while the process is up: that is the state where
-    # every other signal here reads healthy and the Crawler is doing nothing.
+    # BLOCKED IS NOT WORKING (issue #24). Asked of a tree that is still alive, because a refused
+    # turn-end matters exactly while the process is up: that is the state where every other
+    # signal here reads healthy and the Crawler is doing nothing. And of a DEAD one whose leaf is
+    # still open, for one answer only: a harness that stood down and let it stop.
     f["blocked"], f["blocked_detail"] = (None, "")
-    if f["alive"] and f["worktree_exists"]:
+    f["stood_down"], f["released"] = (None, None)
+    open_leaf = f["leaf_status"] == "in_progress"
+    if f["worktree_exists"] and (f["alive"] or open_leaf):
         from . import harness as _h
         seen = {}
-        f["blocked"], f["blocked_detail"] = _h.stop_gate(cfg, wt, entry.get("session"), seen)
-        # JOURNALLED AS A TRANSITION, not as a state. reconcile computes `blocked` fresh on
-        # every call and a watchdog may call it every few seconds, so emitting the state
-        # would give a viewer one identical line per poll — the signal drowning in its own
-        # repetition. Only a CHANGE is an event.
-        #
-        # This makes a read verb write, which is worth naming: reconcile documents itself as
-        # reporting rather than acting, and that still holds — an observation of a campaign
-        # is not a mutation of it, and `waiting` already appends its own verdict log for the
-        # same reason. What reconcile still never does is change a claim, a branch or a tree.
+        blocked, detail = _h.stop_gate(cfg, wt, entry.get("session"), seen)
+        if seen.get("stood_down"):
+            # A STAND-DOWN ON A CLOSED LEAF IS A FINISHED CRAWLER, not one that gave up.
+            if not open_leaf:
+                blocked, detail = False, ""
+            else:
+                f["stood_down"] = seen["stood_down"]
+                detail = ("stood down after %d refusals, leaf still open%s — %s"
+                          % (seen["stood_down"], "" if f["alive"] else
+                             ", and its process has exited", detail))
+        elif not f["alive"]:
+            blocked, detail = None, ""          # dead and not stood down: not this question
+        f["blocked"], f["blocked_detail"] = blocked, detail
         if f["blocked"] is not None:
-            kind = "crawler.blocked" if f["blocked"] else "crawler.unblocked"
-            prev = events.latest(cfg, ("crawler.blocked", "crawler.unblocked"),
-                                 "crawler", f["crawler"])
-            if (prev or {}).get("kind") != kind:
-                events.emit(cfg, kind, {"crawler": f["crawler"], "leaf": f["leaf"],
-                                        "why": f["blocked_detail"] or None,
-                                        "since": seen.get("since") if f["blocked"] else None})
+            _journal_block(cfg, f, entry, wt, seen)
     return f
+
+
+def _refusal(seen):
+    """What identifies ONE refusal: the harness rewrites `at` and counts every block."""
+    return {"since": seen.get("since"), "blocks_total": seen.get("blocks_total"),
+            "stood_down": seen.get("stood_down")}
+
+
+def _journal_block(cfg, f, entry, wt, seen):
+    """Journal the block, and the verdict on it, as TRANSITIONS — once each, by whoever sees it.
+
+    reconcile computes `blocked` fresh on every call and a watchdog may call it every few seconds,
+    so emitting the state would give a viewer one identical line per poll. Only a CHANGE is an
+    event. This makes a read verb write, which is worth naming: an observation of a campaign is
+    not a mutation of it, and what reconcile still never does is change a claim, a branch or a
+    tree.
+
+    THE JOURNAL SAYS WHAT `waiting` CONCLUDED, not only what the harness did. The harness's
+    `blocked` stays true while a refused Crawler carries on working, so a journal that recorded
+    only the harness said "blocked" for ten minutes over a session that was visibly busy, and
+    anything reading the journal (a UI, the waker) showed it stuck. So the work-since-block
+    verdict is decided HERE, in the one pass every verb shares, and a release is appended as
+    `crawler.unblocked` with the evidence in `why` and `released_by: "evidence"`. It names the
+    refusal it released, so the next poll, which still sees the harness say blocked, knows this
+    refusal is answered and does not re-announce it. A NEW refusal (the harness rewrites `at` and
+    counts it) is a new `crawler.blocked`, whatever came before.
+    """
+    ident = _refusal(seen)
+    f["refusal"] = ident
+    prev = events.latest(cfg, ("crawler.blocked", "crawler.unblocked"), "crawler", f["crawler"])
+    prev = prev or {}
+    if not f["blocked"]:
+        if prev.get("kind") == "crawler.blocked":
+            events.emit(cfg, "crawler.unblocked", {"crawler": f["crawler"], "leaf": f["leaf"],
+                                                   "why": None, "since": None})
+        return
+    same = (prev.get("refusal") or {k: prev.get(k) for k in ident}) == ident
+    if prev.get("kind") == "crawler.unblocked" and prev.get("released_by") == "evidence" and same:
+        f["released"] = prev.get("why") or "released by evidence"
+        return
+    if prev.get("kind") != "crawler.blocked" or not same:
+        events.emit(cfg, "crawler.blocked", dict(
+            {"crawler": f["crawler"], "leaf": f["leaf"], "why": f["blocked_detail"] or None},
+            **ident))
+    worked, why = work_since_block(cfg, f["crawler"], f.get("branch"), f.get("worktree") or "",
+                                   f.get("scratch"), session=entry.get("session"),
+                                   pid=entry.get("pid"))
+    f["work_why"] = why
+    if worked:
+        f["released"] = why
+        events.emit(cfg, "crawler.unblocked", {"crawler": f["crawler"], "leaf": f["leaf"],
+                                               "why": why, "released_by": "evidence",
+                                               "refusal": ident, "since": None})
 
 
 def _is_tracked(cfg, path):
@@ -1262,16 +1315,24 @@ def work_since_block(cfg, crawler, branch, worktree, scratch=None, session=None,
     # analysis changes no tracked file for many minutes, and the tree-based evidence below read
     # that as inert — pointing the lead at a reap that would have discarded an hour of work. A
     # transcript written after the block means the session did not stop.
+    #
+    # THE SESSION'S OWN ENTRIES, NOT THE FILE'S MTIME. The host writes the refusal's own feedback
+    # into the transcript within a second of it, so "the file moved" released every refused
+    # Crawler, the inert ones included. `acted_after_refusal` counts only a reply, a tool call or
+    # a tool result after the refusal's feedback frame, and names what it excludes.
     transcript_quiet = False
     if session and os.path.isdir(tree):
-        from .util import transcript_activity
+        from .util import acted_after_refusal, transcript_activity
         act = transcript_activity(tree, session)
         if act.get("mtime") is not None:
-            readable.append("transcript")
-            transcript_quiet = act["mtime"] <= since
-            if act["mtime"] > since:
-                return True, ("its session transcript was written after the block was recorded "
-                              "— it kept working past the refused turn-end")
+            acted = False if act["mtime"] <= since else acted_after_refusal(act["path"], since)
+            if acted is not None:
+                readable.append("transcript")
+                transcript_quiet = not acted
+            if acted:
+                return True, ("its session transcript shows it acting (a reply, a tool call or a "
+                              "tool result) after the refusal — it kept working past the refused "
+                              "turn-end")
     kids, kids_readable = _children_since(pid, since)
     if kids_readable:
         readable.append("processes")
@@ -1385,7 +1446,12 @@ def waiting(cfg, graph, base="HEAD"):
     # run at all", which stops the watchdog scheduling any further re-check.
     for f in reconcile(cfg, graph, base, deep=False):
         worked, why_worked = (False, "")
-        if f["blocked"]:
+        if f["blocked"] and "released" in f:
+            # DECIDED ONCE, IN RECONCILE, which journalled it: the journal and this verdict are
+            # the same computation, so a reader of either cannot see the other disagree.
+            worked = bool(f["released"])
+            why_worked = f["released"] or f.get("work_why") or ""
+        elif f["blocked"]:
             worked, why_worked = work_since_block(cfg, f["crawler"], f.get("branch"),
                                                   f.get("worktree") or "", f.get("scratch"),
                                                   session=f.get("session"), pid=f.get("pid"))
@@ -1428,10 +1494,16 @@ def waiting(cfg, graph, base="HEAD"):
                             "claim_session": short_session(_leaf.get("claim_session"))}
             except Exception:                                   # noqa: BLE001
                 _who = {}
+            # THE REFUSAL'S IDENTITY AND THE STAND-DOWN ride along, so a consumer that has to
+            # tell "a block I already saw" from "a new one" (the crawler waker) reads it here
+            # rather than re-deriving it from a second source.
             blocked.append(dict({"crawler": f["crawler"], "leaf": f["leaf"],
                                  "why": f["blocked_detail"] + (
-                                     " — " + why_worked if why_worked else "")}, **_who))
-        elif f["blocked"] and worked:
+                                     " — " + why_worked if why_worked else ""),
+                                 "alive": f.get("alive"),
+                                 "stood_down": f.get("stood_down"),
+                                 "refused_at": (f.get("refusal") or {}).get("since")}, **_who))
+        elif f["blocked"] and worked and f["alive"]:
             # Blocked report, and the TREE disagrees. It is working without a phone line --
             # which is legitimate waiting, and the case that produced this issue.
             live.append({"crawler": f["crawler"], "leaf": f["leaf"], "branch": f["branch"],

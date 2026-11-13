@@ -805,6 +805,28 @@ def cmd_doctor(args):
         print("  %s %s" % (mark, msg))
         bad += level == "error"
 
+    # THE CRAWLER WAKER: registered, and when it last rang. Without it an idle orchestrator hears
+    # about a stuck Crawler only while something polls, and a background poll dies with every
+    # session restart.
+    from . import crawlerwaker as _cw
+    _cw_reg, _ = lease._registration(
+        [os.path.join(cfg.root, ".claude", n) for n in ("settings.json", "settings.local.json")],
+        "Stop", "crawler-waker")
+    _cw_last = _cw.load_state(cfg).get("last_fired")
+    _cw_when = ("last rang %s ago, for %s" % (
+        ("%dm" % ((int(now()) - _cw_last) // 60)) if int(now()) - _cw_last < 7200 else
+        ("%dh" % ((int(now()) - _cw_last) // 3600)),
+        ", ".join(_cw.load_state(cfg).get("last_crawlers") or []) or "?")
+        if isinstance(_cw_last, int) else "has never rung here")
+    if _cw_reg:
+        print("  %s the Crawler waker is registered (Stop, asyncRewake) and %s; it rings once a "
+              "blocked Crawler has stayed blocked for %ds (`crawler_waker.quiet_sec`)"
+              % (GRN + "ok   " + OFF, _cw_when, _cw.spec(cfg)["quiet_sec"]))
+    else:
+        print("  %s the Crawler waker is NOT registered, so an idle orchestrator learns a Crawler "
+              "is stuck only while something polls for it (it %s). Wire it: `showrunner worktree "
+              "register`" % (YEL + "warn " + OFF, _cw_when))
+
     # THE RECIPROCAL HALF: showrunner's config names paths into a NEIGHBOUR's tree, and only
     # this repo can see whether they still resolve. A neighbour who moves or uninstalls their
     # tool cannot fail our suite — they do not know we point at them — so the failure would
@@ -1660,7 +1682,9 @@ def _registered_hooks(write_guard=False):
              (lease.register_reach, "reach gate (PreToolUse; advice, never refuses)"),
              (lease.register_wake_gate, "wake gate (PreToolUse on Bash; advice, never refuses)"),
              (lease.register_waker, "GitHub waker (Stop, asyncRewake; inert until `waker` is "
-                                    "configured)")]
+                                    "configured)"),
+             (lease.register_crawler_waker, "Crawler waker (Stop, asyncRewake; wakes the idle "
+                                            "orchestrator when a Crawler needs it)")]
     if write_guard:
         hooks.append((lease.register_write_guard,
                       "write guard (PreToolUse on the edit tools and Bash; refuses writes the "
@@ -1980,6 +2004,32 @@ def cmd_waker(args):
         return 2
     if text and (args.once or code == 1):
         (eprint if code else print)(text)
+    return code
+
+
+def cmd_crawler_waker(args):
+    """Stop hook (asyncRewake): wake the idle orchestrator when one of its Crawlers needs it.
+
+    `--probe` answers 0 and does nothing, for the same reason `waker --probe` does: a pinned copy
+    older than this verb exits 2 on it, and 2 from an asyncRewake hook IS a wake carrying usage
+    text. Every failure inside the loop is quiet (exit 0): a waker must never break a turn.
+    """
+    if args.probe:
+        return 0
+    from . import crawlerwaker
+    try:
+        cfg = _cfg(args, required=False)
+        code, text = crawlerwaker.run(cfg, once=args.once)
+    except Exception as exc:                                    # noqa: BLE001
+        if args.once:
+            eprint("crawler-waker: %s" % exc)
+            return 1
+        return 0
+    if code == 2:
+        eprint(text)
+        return 2
+    if text and args.once:
+        print(text)
     return code
 
 
@@ -4385,6 +4435,20 @@ def build_parser():
     s.add_argument("--once", action="store_true", help="look once and report, instead of waiting")
     s.add_argument("--probe", action="store_true", help="exit 0: this binary knows the verb")
     s.set_defaults(func=cmd_waker)
+
+    s = sub.add_parser("crawler-waker",
+                       help="Stop hook (asyncRewake): WAKE the idle orchestrator when one of its "
+                            "Crawlers stays blocked past the quiet window, stands down with its "
+                            "leaf open, or stalls. Silent in a linked worktree")
+    s.description = ("exit codes:\n"
+                     "  0  nothing to ring, a linked worktree, or --once (which prints what it "
+                     "would ring)\n"
+                     "  1  --once could not answer\n"
+                     "  2  WAKE: a Crawler needs the orchestrator; the text on stderr says which")
+    s.formatter_class = argparse.RawDescriptionHelpFormatter
+    s.add_argument("--once", action="store_true", help="judge once and report, instead of waiting")
+    s.add_argument("--probe", action="store_true", help="exit 0: this binary knows the verb")
+    s.set_defaults(func=cmd_crawler_waker)
 
     s = sub.add_parser("write-guard",
                        help="PreToolUse (Write|Edit|MultiEdit|NotebookEdit|Bash): refuse a write "

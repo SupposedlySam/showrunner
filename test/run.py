@@ -17425,7 +17425,11 @@ def test_a_crawler_running_tests_is_not_inert():
         ok("a transcript last written BEFORE the block is not evidence", got is False, (got, why))
         os.utime(tp, (since + 30, since + 30))
         got, why = campaign.work_since_block(cfg, "c-tests", None, wt, session="S-T98", pid=None)
-        ok("a transcript written AFTER the block is — the session did not stop",
+        ok("a transcript whose FILE moved after the block, with no entry of the session acting, "
+           "is not — the harness writes its own echo of every refusal", got is False, (got, why))
+        _append_tx(tp, [_tx("tool_use", since + 30)])
+        got, why = campaign.work_since_block(cfg, "c-tests", None, wt, session="S-T98", pid=None)
+        ok("a transcript with the session ACTING after the block is — the session did not stop",
            got is True and "transcript" in why, (got, why))
     finally:
         old_child.kill()
@@ -17507,7 +17511,7 @@ def test_a_pre_block_job_writing_scratch_does_not_release_a_block():
 
     # THE REPORT-WRITING CRAWLER, which the scratch rule was added for: the session writes its
     # report, and every tool call that does so writes its transcript too.
-    os.utime(tp, (since + 30, since + 30))
+    _append_tx(tp, [_tx("tool_use", since + 30)])
     got, why = campaign.work_since_block(cfg, "c-e2e", None, wt, scratch, session="S-E2E",
                                          pid=me)
     ok("a session that writes scratch after the block, with its transcript moving, IS released",
@@ -18503,6 +18507,446 @@ def test_the_github_waker_rings_and_stays_quiet():
        q.returncode == 0 and "usage" not in q.stderr, (q.returncode, q.stderr))
 
 
+def _iso(epoch):
+    import datetime as _dt
+    return _dt.datetime.fromtimestamp(epoch, _dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _tx(kind, at, **extra):
+    """One transcript entry of a shape measured in a real Claude Code transcript."""
+    if kind == "text":
+        rec = {"type": "assistant", "message": {"role": "assistant", "model": "claude-x",
+                                                "content": [{"type": "text", "text": extra.get(
+                                                    "text", "The e2e is still running.")}]}}
+    elif kind == "tool_use":
+        rec = {"type": "assistant", "message": {"role": "assistant", "model": "claude-x",
+                                                "content": [{"type": "tool_use", "id": "t1",
+                                                             "name": "Bash",
+                                                             "input": {"command": "tail log"}}]}}
+    elif kind == "thinking":
+        rec = {"type": "assistant", "message": {"role": "assistant", "model": "claude-x",
+                                                "content": [{"type": "thinking", "thinking": ""}]}}
+    elif kind == "tool_result":
+        rec = {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}}
+    elif kind == "feedback":
+        rec = {"type": "user", "isMeta": True, "message": {"role": "user", "content": (
+            "Stop hook feedback:\n[game_loop stopgate]: STOP GATE CLOSED")}}
+    elif kind == "summary":
+        rec = {"type": "system", "subtype": "stop_hook_summary"}
+    elif kind == "api_error":
+        rec = {"type": "assistant", "isApiErrorMessage": True,
+               "message": {"role": "assistant", "model": "<synthetic>",
+                           "content": [{"type": "text", "text": "API Error: overloaded"}]}}
+    else:
+        rec = {"type": kind}
+    rec["timestamp"] = _iso(at)
+    return rec
+
+
+def _append_tx(path, recs):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a") as fh:
+        for r in recs:
+            fh.write(json.dumps(r) + "\n")
+    newest = max(int(r_t) for r_t in [_epoch_of(r) for r in recs]) if recs else None
+    if newest:
+        os.utime(path, (newest + 1, newest + 1))
+
+
+def _epoch_of(rec):
+    import datetime as _dt
+    return _dt.datetime.fromisoformat(rec["timestamp"].replace("Z", "+00:00")).timestamp()
+
+
+def _echo(r):
+    """The harness's own echo of ONE refusal at `r`, as measured on 19 real refusals: the session's
+    closing sentence inside the refusal's second, then the feedback frame, the summary and the
+    api-request, all within 1.2 s."""
+    return [_tx("text", r + 0.5, text="I'll pick up its result when it finishes."),
+            _tx("feedback", r + 0.9), _tx("summary", r + 1.1), _tx("api-request", r + 1.2)]
+
+
+def test_the_harness_echo_is_not_work():
+    group("transcript evidence counts the SESSION acting after a refusal, never the harness's own "
+          "echo of it")
+    from showrunner import util as U
+    d = tmpdir("sr-echo")
+    r = int(time.time()) + 1000
+    p = os.path.join(d, "a.jsonl")
+    _append_tx(p, [_tx("tool_use", r - 20), _tx("tool_result", r - 19)] + _echo(r))
+    eq("the recorded shape — refusal, echo within 1.2 s, nothing else — is NOT acting",
+       U.acted_after_refusal(p, r), False)
+    _append_tx(p, [_tx("thinking", r + 3.3), _tx("queue-operation", r + 4),
+                   _tx("attachment", r + 4), _tx("api_error", r + 5)])
+    eq("...nor are thinking alone, bookkeeping, attachments or an API error written in the "
+       "assistant's name", U.acted_after_refusal(p, r), False)
+    _append_tx(p, [_tx("tool_use", r + 5.2)])
+    eq("a tool call after the feedback frame IS acting", U.acted_after_refusal(p, r), True)
+
+    p2 = os.path.join(d, "b.jsonl")
+    _append_tx(p2, _echo(r) + [_tx("text", r + 4, text="Done for now.")] + _echo(r + 6))
+    eq("a closing sentence and a SECOND refusal: the newest feedback frame anchors, and nothing "
+       "acted after it", U.acted_after_refusal(p2, r + 6), False)
+    _append_tx(p2, [_tx("tool_result", r + 9)])
+    eq("...and a tool result after it does", U.acted_after_refusal(p2, r + 6), True)
+
+    p3 = os.path.join(d, "c.jsonl")
+    _append_tx(p3, [_tx("text", r + 0.4)])
+    eq("with no feedback frame, an entry in the refusal's own second is the refused turn, not "
+       "work", U.acted_after_refusal(p3, r), False)
+    _append_tx(p3, [_tx("text", r + 2)])
+    eq("...and one a full second later is", U.acted_after_refusal(p3, r), True)
+    eq("an unreadable transcript is None, not False", U.acted_after_refusal(
+        os.path.join(d, "missing.jsonl"), r), None)
+
+
+def _crawler_fixture(name, pid=None, session="sess-w"):
+    """A repo, a claimed leaf and a spawned Crawler record, with its tree quiet since the epoch."""
+    cfg = make_repo()
+    g = new_graph(cfg)
+    g.add("waker work", leaf_id=name, labels=["backend"])
+    rec = worktree.spawn(cfg, g.show(name), actor="w")
+    campaign.record_spawn(cfg, rec, pid=pid or os.getpid(), session=session)
+    g.claim(name, "w", pid=pid or os.getpid(), tree=cfg.root)
+    wt = rec["worktree"] if os.path.isabs(rec["worktree"]) else os.path.join(cfg.root,
+                                                                             rec["worktree"])
+    for dirpath, _d, files in os.walk(wt):
+        if ".git" in dirpath.split(os.sep):
+            continue
+        for f_ in files:
+            try:
+                os.utime(os.path.join(dirpath, f_), (1, 1))
+            except OSError:
+                pass
+    from showrunner.util import transcript_path
+    return cfg, g, rec, transcript_path(wt, session)
+
+
+def test_the_journal_says_what_waiting_concluded():
+    group("the journal records `waiting`'s verdict on a block, once per transition, and agrees "
+          "with `waiting --porcelain` at every step of the mock-recorder shape")
+    if not have("git"):
+        skip("the journal-verdict group", "git is not installed")
+        return
+    from showrunner import events as EV
+    import showrunner.harness as _HB
+    cfg, g, rec, tp = _crawler_fixture("M1")
+    c = rec["crawler"]
+    r = int(time.time()) + 1000                 # the future, so nothing in the fixture is after it
+    harness = {"blocked": True, "since": r, "blocks_total": 1}
+
+    def fake_sg(_c, _w, _s, seen=None):
+        if seen is not None:
+            seen.update({"since": harness["since"], "blocks_total": harness["blocks_total"]})
+        return (True, "refused at turn-end") if harness["blocked"] else (False, "")
+    exe = os.path.join(ROOT, "bin", "showrunner")
+
+    def step():
+        orig = _HB.stop_gate
+        _HB.stop_gate = fake_sg
+        try:
+            _w, d = campaign.waiting(cfg, g)
+        finally:
+            _HB.stop_gate = orig
+        last = EV.latest(cfg, ("crawler.blocked", "crawler.unblocked"), "crawler", c) or {}
+        listed = c in [b["crawler"] for b in d["blocked_crawlers"]]
+        n = len([e for e in EV.read(cfg)[0] if e.get("crawler") == c
+                 and e["kind"] in ("crawler.blocked", "crawler.unblocked")])
+        return listed, last, n, d
+
+    _append_tx(tp, [_tx("tool_use", r - 20)] + _echo(r))
+    listed, last, n1, d = step()
+    ok("1. refused, then only the harness's echo: `waiting` lists it BLOCKED", listed, d)
+    eq("...and the journal's latest transition says blocked", last.get("kind"), "crawler.blocked")
+    eq("...naming the refusal it is about", (last.get("since"), last.get("blocks_total")),
+       (r, 1))
+
+    _append_tx(tp, [_tx("thinking", r + 3), _tx("tool_use", r + 5)])
+    listed, last, n2, d = step()
+    ok("2. it acts after the refusal: `waiting` releases it", not listed and any(
+        x["crawler"] == c and x.get("was_blocked") for x in d["live_crawlers"]), d)
+    ok("...and the journal says UNBLOCKED, with the evidence as `why`",
+       last.get("kind") == "crawler.unblocked" and last.get("released_by") == "evidence"
+       and "transcript" in (last.get("why") or ""), last)
+    eq("...appended once", n2, n1 + 1)
+    listed, last, n3, d = step()
+    eq("3. polled again with the harness still saying blocked: nothing new is appended — the "
+       "release names the refusal it answered", (listed, last.get("kind"), n3),
+       (False, "crawler.unblocked", n2))
+
+    harness.update({"since": r + 60, "blocks_total": 2})
+    _append_tx(tp, _echo(r + 60))
+    listed, last, n4, d = step()
+    ok("4. refused AGAIN (the harness rewrote `at`): blocked again, in both", listed
+       and last.get("kind") == "crawler.blocked" and last.get("since") == r + 60, (listed, last))
+    eq("...one new event", n4, n3 + 1)
+
+    harness["blocked"] = False
+    listed, last, n5, d = step()
+    ok("5. its next turn-end passed: unblocked in both, by the harness this time",
+       not listed and last.get("kind") == "crawler.unblocked"
+       and last.get("released_by") is None, (listed, last))
+
+    # THE VERB, not just the function: `waiting --porcelain` reads the same journal.
+    harness.update({"blocked": True, "since": r + 120, "blocks_total": 3})
+    _append_tx(tp, _echo(r + 120))
+    step()
+    pr = subprocess.run([sys.executable, exe, "waiting", "--porcelain"], capture_output=True,
+                        text=True, cwd=cfg.root, stdin=subprocess.DEVNULL)
+    ok("`waiting --porcelain` from a separate process parses", pr.stdout.strip().startswith("{"),
+       pr.stdout[-200:])
+
+
+def test_a_stand_down_on_an_open_leaf_needs_the_lead():
+    group("game_loop standing down after repeated refusals lets the Crawler stop with its leaf "
+          "open — that is reported as needing the lead, not as unblocked")
+    if not have("git"):
+        skip("the stand-down group", "git is not installed")
+        return
+    import showrunner.harness as H
+    import datetime as _dt
+    cfg, g, rec, tp = _crawler_fixture("M2")
+    time.sleep(1.1)
+    at = int(time.time())                   # after the fixture's commits, as a real stand-down is
+    seam = {"stop_gate": {
+        "blocked": False, "blocks_total": 4, "limit": 3, "stood_down": ["showrunner-stop-gate"],
+        "attachments": {"showrunner-stop-gate": {
+            "verdict": "stood_down", "consecutive": 4,
+            "at": _dt.datetime.fromtimestamp(at).isoformat(timespec="seconds"),
+            "stood_down": True, "detail": "leaf M2 is still open"}}}}
+    orig_run = H.run
+    H.run = lambda cmd, cwd=None, check=False, timeout=None, env=None: (0, json.dumps(seam), "")
+    wt = rec["worktree"] if os.path.isabs(rec["worktree"]) else os.path.join(cfg.root,
+                                                                             rec["worktree"])
+    os.makedirs(os.path.join(cfg.root, ".game_loop"), exist_ok=True)   # a harness is installed
+    os.makedirs(os.path.join(wt, ".game_loop", "bin"), exist_ok=True)
+    gl = os.path.join(wt, ".game_loop", "bin", "game_loop")
+    with open(gl, "w") as fh:
+        fh.write("#!/bin/sh\nexit 0\n")
+    os.chmod(gl, 0o755)
+    try:
+        seen = {}
+        blocked, why = H.stop_gate(cfg, wt, "sess-w", seen)
+        ok("the recorded stand-down shape reads as blocked, not as released", blocked is True,
+           (blocked, why))
+        eq("...with the count and the moment it was let stop", (seen.get("stood_down"),
+                                                                seen.get("since")), (4, at))
+        seam["stop_gate"]["attachments"]["showrunner-stop-gate"]["verdict"] = "passed"
+        eq("a PASSED attachment with the same streak flag is not a stand-down",
+           H.stop_gate(cfg, wt, "sess-w", {})[0], False)
+        seam["stop_gate"]["attachments"]["showrunner-stop-gate"]["verdict"] = "stood_down"
+
+        _append_tx(tp, [_tx("text", at - 1)])
+        _w, d = campaign.waiting(cfg, g)
+        b = next((x for x in d["blocked_crawlers"] if x["crawler"] == rec["crawler"]), None)
+        ok("`waiting` lists it as needing the lead, saying 'stood down after 4 refusals, leaf "
+           "still open'", b and b.get("stood_down") == 4
+           and "stood down after 4 refusals, leaf still open" in b["why"], d["blocked_crawlers"])
+        from showrunner import events as EV
+        last = EV.latest(cfg, ("crawler.blocked", "crawler.unblocked"), "crawler",
+                         rec["crawler"]) or {}
+        ok("...and the journal records it as a block with the stand-down count",
+           last.get("kind") == "crawler.blocked" and last.get("stood_down") == 4, last)
+        from showrunner import crawlerwaker as CW
+        eq("the wake text names the stand-down", "stood down after 4 refusals, leaf still open"
+           in CW.wake_text(dict(b, kind="blocked"), 180), True)
+
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        data = campaign.load(cfg)
+        for e in data["crawlers"]:
+            if e["crawler"] == rec["crawler"]:
+                e["pid"] = dead.pid
+        campaign.save(cfg, data)
+        _w, d = campaign.waiting(cfg, g)
+        b = next((x for x in d["blocked_crawlers"] if x["crawler"] == rec["crawler"]), None)
+        ok("a stand-down whose process has EXITED is still reported, saying so — a dead Crawler "
+           "is otherwise not asked about at all", b and b.get("alive") is False
+           and "process has exited" in b["why"], d["blocked_crawlers"])
+
+        g.close("M2", "closed", None, "finished")
+        _w, d = campaign.waiting(cfg, g)
+        eq("a stand-down on a CLOSED leaf is a finished Crawler, not one that needs the lead",
+           [x["crawler"] for x in d["blocked_crawlers"]], [])
+    finally:
+        H.run = orig_run
+
+
+def test_the_crawler_waker():
+    group("the Crawler waker: an idle orchestrator is woken when a Crawler STAYS blocked, once per "
+          "block, and never from a Crawler's tree")
+    if not have("git"):
+        skip("the crawler-waker group", "git is not installed")
+        return
+    from showrunner import crawlerwaker as CW
+    from showrunner import events as EV
+    cfg, g, rec, tp = _crawler_fixture("W1")
+    c = rec["crawler"]
+    t0 = int(time.time())
+    _append_tx(tp, [_tx("tool_use", t0 - 1000)])        # quiet for a long while
+    clock = [float(t0)]
+
+    def drive(answer, budget=120):
+        cfg.data["crawler_waker"] = {"quiet_sec": 180, "poll_sec": 20, "budget_sec": budget}
+        calls = []
+
+        def ask(_cfg):
+            calls.append(1)
+            return answer() if callable(answer) else answer
+        code, text = CW.run(cfg, sleep=lambda s: clock.__setitem__(0, clock[0] + s),
+                            now=lambda: clock[0], ask=ask)
+        return code, text, len(calls)
+
+    def blocked(refused, **kw):
+        return {"blocked_crawlers": [dict({"crawler": c, "leaf": "W1", "alive": True,
+                                           "stood_down": None, "refused_at": refused,
+                                           "why": "refused at turn-end by showrunner-stop-gate"},
+                                          **kw)], "stalled_crawlers": []}
+
+    code, text, _n = drive(blocked(t0 - 600))
+    ok("a block that arrives while the lead is idle, and stays past the window, WAKES (exit 2)",
+       code == 2, (code, text))
+    ok("...naming the Crawler, the leaf, why, the window and the command to look",
+       c in text and "W1" in text and "refused at turn-end" in text and "180s quiet window"
+       in text and "showrunner show W1" in text and "showrunner status" in text, text)
+    st = CW.load_state(cfg)
+    ok("...and records when it fired, for `doctor`", isinstance(st.get("last_fired"), int)
+       and st.get("last_crawlers") == [c], st)
+    code, _t, _n = drive(blocked(t0 - 600))
+    eq("the same block does not ring a second waker", code, 0)
+
+    EV.emit(cfg, "crawler.blocked", {"crawler": c, "leaf": "W1", "since": t0 - 300,
+                                     "blocks_total": 2})
+    code, _t, _n = drive(blocked(t0 - 300))
+    eq("a block ALREADY OUTSTANDING in the journal when the turn ended does not wake", code, 0)
+    _seen_key = CW.block_key(c, t0 - 300, None)
+    ok("...because `judge` holds a seen block back, and the same block unseen rings",
+       CW.judge(cfg, CW.spec(cfg), blocked(t0 - 300), {_seen_key}, set(), t0, {})[0] == []
+       and len(CW.judge(cfg, CW.spec(cfg), blocked(t0 - 300), set(), set(), t0, {})[0]) == 1)
+    EV.emit(cfg, "crawler.blocked", {"crawler": c, "leaf": "W1", "since": t0 - 250,
+                                     "blocks_total": 3})
+    _code, _txt = CW.run(cfg, once=True, ask=lambda _c: blocked(t0 - 250))
+    ok("...and `--once` over that seen block says there is nothing to ring, rather than what it "
+       "would ring", _txt.startswith("nothing to ring"), _txt)
+
+    code, text, _n = drive(blocked(t0 - 200))
+    ok("a Crawler released and refused AGAIN is a new block, and wakes", code == 2, (code, text))
+
+    clock[0] = float(int(time.time()))
+    fresh = int(clock[0]) - 30
+    code, text, n = drive(blocked(fresh), budget=600)
+    ok("inside the quiet window it waits, then rings once the window has passed",
+       code == 2 and clock[0] >= fresh + 180, (code, clock[0] - fresh))
+
+    clock[0] = float(int(time.time()))
+    code, text, n = drive(blocked(int(clock[0]) - 5, stood_down=4, alive=False))
+    ok("a stand-down whose process has exited rings AT ONCE, inside the window",
+       code == 2 and "process has exited" in text, (code, text))
+
+    clock[0] = float(int(time.time()))
+    _append_tx(tp, [_tx("tool_use", clock[0])])
+    code, _t, n = drive(blocked(int(clock[0]) - 600))
+    eq("a Crawler whose transcript is moving is never even judged — one stat per poll", n, 0)
+
+    sleeps = []
+
+    def replaced(s):
+        sleeps.append(s)
+        clock[0] += s
+        with open(os.path.join(cfg.state_dir, CW.OWNER), "w") as fh:
+            fh.write("a-newer-waker")
+    cfg.data["crawler_waker"] = {"quiet_sec": 180, "poll_sec": 20, "budget_sec": 600}
+    code, _t = CW.run(cfg, sleep=replaced, now=lambda: clock[0], ask=lambda _c: blocked(0))
+    eq("an older waker exits at its next poll once a newer one owns the watch", (code, len(sleeps)),
+       (0, 1))
+    drive(blocked(t0 - 600), budget=40)
+    ok("the newest waker to start holds the watch", (CW._owner(cfg) or "").startswith(
+        "%d:" % os.getpid()), CW._owner(cfg))
+    eq("the owner a waker records is the one an older waker reads back",
+       (CW._owner(cfg, "tok-1"), CW._owner(cfg)), ("tok-1", "tok-1"))
+    ok("`doctor` names the last ring and whom it was for", "last rang" in subprocess.run(
+        [sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"], capture_output=True,
+        text=True, cwd=cfg.root, stdin=subprocess.DEVNULL).stdout)
+
+    tree = os.path.join(cfg.root, ".worktrees", "cw-probe")
+    sh(["git", "worktree", "add", "-q", "-b", "cw-probe", tree], cfg.root)
+    from showrunner import config as C
+    code, text = CW.run(C.load(start=tree), once=True, ask=lambda _c: blocked(t0 - 9999))
+    ok("in a LINKED worktree it exits 0 at once — a Crawler is never held by it",
+       code == 0 and "linked worktree" in text, (code, text))
+
+    exe = os.path.join(ROOT, "bin", "showrunner")
+    lw = subprocess.run([sys.executable, exe, "crawler-waker", "--once"], capture_output=True,
+                        text=True, cwd=tree, stdin=subprocess.DEVNULL)
+    ok("...and the verb says so from inside one", lw.returncode == 0
+       and "linked worktree" in lw.stdout, (lw.returncode, lw.stdout))
+    mc = subprocess.run([sys.executable, exe, "crawler-waker", "--once"], capture_output=True,
+                        text=True, cwd=cfg.root, stdin=subprocess.DEVNULL)
+    ok("`crawler-waker --once` in the main checkout judges and says what it found",
+       mc.returncode == 0 and (mc.stdout.startswith("nothing to ring")
+                               or mc.stdout.startswith("would ring")), (mc.returncode, mc.stdout))
+    eq("`crawler-waker --probe` answers 0 — what the shim asks first", subprocess.run(
+        [sys.executable, exe, "crawler-waker", "--probe"], capture_output=True, text=True,
+        cwd=cfg.root, stdin=subprocess.DEVNULL).returncode, 0)
+
+    fresh_repo = make_repo()
+    once = subprocess.run([sys.executable, exe, "crawler-waker", "--once"], capture_output=True,
+                          text=True, cwd=fresh_repo.root, stdin=subprocess.DEVNULL)
+    ok("`crawler-waker --once` with nothing dispatched says so, out loud, and exits 0",
+       once.returncode == 0 and "nothing to ring" in once.stdout, (once.returncode, once.stdout))
+    subprocess.run([sys.executable, exe, "worktree", "register"], capture_output=True, text=True,
+                   cwd=fresh_repo.root, stdin=subprocess.DEVNULL)
+    with open(os.path.join(fresh_repo.root, ".claude", "settings.json")) as fh:
+        stops = [h for e in json.load(fh).get("hooks", {}).get("Stop", [])
+                 for h in e.get("hooks", [])]
+    hook = next((h for h in stops if "crawler-waker.sh" in h.get("command", "")), {})
+    ok("`worktree register` wires it on Stop with asyncRewake", hook.get("asyncRewake") is True,
+       stops)
+    ok("...with a timeout that outlasts its budget, since the harness ends a hook at its timeout",
+       isinstance(hook.get("timeout"), int) and hook["timeout"] > CW.BUDGET_SEC, hook)
+    doc = subprocess.run([sys.executable, exe, "doctor"], capture_output=True, text=True,
+                         cwd=fresh_repo.root, stdin=subprocess.DEVNULL)
+    ok("`doctor` reports it registered and that it has never rung",
+       "Crawler waker is registered" in doc.stdout and "never rung" in doc.stdout,
+       doc.stdout[-1500:])
+    ok("the installer copies the shim", "crawler-waker.sh" in open(
+        os.path.join(ROOT, "install.sh")).read())
+
+    fake = tempfile.mkdtemp(prefix="sr-cwaker-shim-")
+    sh(["git", "init", "-q"], fake)
+    os.makedirs(os.path.join(fake, "bin"))
+    os.makedirs(os.path.join(fake, ".showrunner", "hooks"))
+    shim = os.path.join(fake, ".showrunner", "hooks", "crawler-waker.sh")
+    shutil.copy(os.path.join(ROOT, ".showrunner", "hooks", "crawler-waker.sh"), shim)
+    with open(os.path.join(fake, "bin", "showrunner"), "w") as fh:
+        fh.write("#!/bin/sh\necho 'usage: unknown verb' >&2\nexit 2\n")
+    os.chmod(os.path.join(fake, "bin", "showrunner"), 0o755)
+    hb = os.path.join(fake, "hb.jsonl")
+    q = subprocess.run(["bash", shim], capture_output=True, text=True, cwd=fake,
+                       env=dict(os.environ, CLAUDE_PROJECT_DIR=fake, SHOWRUNNER_HEARTBEAT=hb),
+                       stdin=subprocess.DEVNULL)
+    ok("a binary that does not know `crawler-waker` is NOT a wake — the shim exits 0, silently",
+       q.returncode == 0 and "usage" not in q.stderr, (q.returncode, q.stderr))
+    tree2 = os.path.join(fake, "linked")
+    sh(["git", "commit", "-q", "--allow-empty", "-m", "x"], fake)
+    sh(["git", "worktree", "add", "-q", "-b", "linked", tree2], fake)
+    with open(os.path.join(fake, "bin", "showrunner"), "w") as fh:
+        fh.write("#!/bin/sh\n[ \"$2\" = --probe ] && exit 0\necho RANG >&2\nexit 2\n")
+    q = subprocess.run(["bash", shim], capture_output=True, text=True, cwd=tree2,
+                       env=dict(os.environ, CLAUDE_PROJECT_DIR=tree2, SHOWRUNNER_HEARTBEAT=hb),
+                       stdin=subprocess.DEVNULL)
+    ok("the shim run from a LINKED worktree exits 0 without asking the binary",
+       q.returncode == 0 and "RANG" not in q.stderr, (q.returncode, q.stderr))
+    q = subprocess.run(["bash", shim], capture_output=True, text=True, cwd=fake,
+                       env=dict(os.environ, CLAUDE_PROJECT_DIR=fake, SHOWRUNNER_HEARTBEAT=hb),
+                       stdin=subprocess.DEVNULL)
+    ok("...while in the main checkout a binary that knows the verb is handed the job",
+       q.returncode == 2 and "RANG" in q.stderr, (q.returncode, q.stderr))
+    ok("...and every invocation stamped the heartbeat `doctor` reads",
+       os.path.isfile(hb) and open(hb).read().count("crawler-waker") == 3)
+
+
 def test_gc_idle_reclaims_any_idle_tree_and_archives_first():
     group("`gc --idle` covers EVERY registered worktree, keeps any in use, and archives before it "
           "removes — so idle can be aggressive and still lossless (#105)")
@@ -18769,7 +19213,7 @@ def test_never_integrated_leaves_do_not_collide():
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

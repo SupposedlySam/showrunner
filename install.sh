@@ -161,7 +161,7 @@ mkdir -p "$TARGET/.showrunner/hooks"
 # what the registration actually names.
 for hook_name in worktree-guard.sh inert-crawler-gate.sh waiting-probe.sh whoami.sh \
                  dispatch-guard.sh pipeline-status-gate.sh reach-gate.sh wake-gate.sh \
-                 write-guard.sh github-waker.sh; do
+                 write-guard.sh github-waker.sh crawler-waker.sh; do
   cp "$SRC/.showrunner/hooks/$hook_name" "$TARGET/.showrunner/hooks/$hook_name"
   chmod +x "$TARGET/.showrunner/hooks/$hook_name"
   case "$hook_name" in
@@ -180,6 +180,7 @@ for hook_name in worktree-guard.sh inert-crawler-gate.sh waiting-probe.sh whoami
     reach-gate.sh)          note="PreToolUse: names the showrunner mechanism for what a call reached for; advice only, never refuses" ;;
     wake-gate.sh)           note="PreToolUse on Bash: says ONCE when long work starts with no mandate bound, so a wake has a goal to return to; advice only" ;;
     github-waker.sh)        note="Stop (asyncRewake): wakes an idle session on GitHub activity in the repos \`waker\` config names; inert until configured" ;;
+    crawler-waker.sh)       note="Stop (asyncRewake): wakes the idle orchestrator when a Crawler stays blocked, stands down or stalls; silent in a Crawler's worktree" ;;
     write-guard.sh)         note="PreToolUse on the edit tools AND Bash: refuses a write the session's role may not make, heredocs and redirections included" ;;
   esac
   echo "  copied  .showrunner/hooks/$hook_name ($note)"
@@ -211,6 +212,8 @@ config.local.json
 seen-issues.json
 wake-gate-seen.json
 waker-state.json
+crawler-waker-state.json
+crawler-waker-owner
 EOF
   echo "  wrote   .showrunner/.gitignore (runtime state ignored; config.json is source)"
 fi
@@ -248,6 +251,7 @@ for entry in "bin/" "lib/" "graph.db" "graph.db-*" "locks/" "scratch/" "campaign
              "routing.jsonl" "waiting.jsonl" "events.jsonl" "*.lock" "baseline.json" \
              "integration-commit.json" "archive/" "config.local.json" "seen-issues.json" \
              "wake-gate-seen.json" "waker-state.json" \
+             "crawler-waker-state.json" "crawler-waker-owner" \
              "hook-heartbeat.jsonl" "fail-open.jsonl"; do
   if ! grep -qxF "$entry" "$sr_ignore" 2>/dev/null; then
     if [ "$sr_added" = 0 ]; then

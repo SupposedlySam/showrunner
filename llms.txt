@@ -79,6 +79,30 @@ harness's background-command facility and end the turn; its exit wakes the sessi
 the backstop for a spin-down notice that never lands and for a chat waker that died, because a
 watchdog that checks once per turn-end goes quiet for as long as the answer is "waiting".
 
+**How an idle orchestrator learns a Crawler needs it: the Crawler waker.** `crawler-waker.sh` is
+a Stop hook with `asyncRewake`, registered by `init` and `worktree register`, which the harness
+starts after every turn of yours. It needs no mandate, is independent of game_loop's waiting
+probe, and outlives nothing: it is restarted at every turn-end, so a session restart cannot
+silence it the way it kills a background `waiting --follow`. It wakes the idle session when a
+Crawler, by `waiting`'s own classification:
+
+* stays BLOCKED (refused at its turn-end, no work since) past the quiet window,
+  `crawler_waker.quiet_sec`, default **180 s**. A refusal alone is the gate working: a refused
+  Crawler usually acts again within a second and closes its leaf by itself;
+* was STOOD DOWN by game_loop after repeated refusals and let stop with its leaf open (after the
+  window, or at once if its process has exited);
+* is STALLED.
+
+The wake names the Crawler, the leaf, why, the window, and `showrunner status` / `showrunner
+show <leaf>`. A block already outstanding when your turn ended does not wake you (your own
+turn-end ran the inert-Crawler gate over it); a Crawler released and refused again does. It
+exits 0 at once in a Crawler's worktree, and asks `crawler-waker --probe` first, so an older
+pinned binary never wakes you with usage text. While idle it costs a stat per Crawler per poll
+(`crawler_waker.poll_sec`, default 20); `waiting` runs only when a transcript has gone quiet for
+the window, a Crawler's process ends, or the journal records a new block. Set
+`crawler_waker.enabled: false` to turn it off. `doctor` says whether it is registered and when
+it last rang.
+
 **A probe's COST is part of its contract.** game_loop runs `waiting` under a hardcoded 15s
 timeout and reads a timeout as *"the probe did not run at all"* — which it reports as a broken
 watchdog and then **stops scheduling re-checks**. So a slow probe does not degrade the watchdog,
@@ -320,7 +344,13 @@ The event kinds, and what each is for:
 | `integrate.*` | the riskiest verb, one kind per outcome: integrated, conflict, would-merge, checks-failed-on-merged-result, harness-drifted |
 
 `crawler.blocked` is journalled on the **transition**, not on the state — `reconcile` recomputes
-it every call, so a poller would otherwise get one identical line per poll.
+it every call, so a poller would otherwise get one identical line per poll. Each one names the
+refusal (`since`, `blocks_total`, and `stood_down` when the harness stood down). The journal says
+what `waiting` concluded, not only what the harness did: when the work-since-block evidence
+releases a Crawler that the harness still reports blocked, `crawler.unblocked` is appended once,
+with `why` set to the evidence and `released_by: "evidence"`, by whichever verb notices first. A
+new refusal is a new `crawler.blocked`. So a reader of the journal and `waiting --porcelain`
+agree about who is blocked.
 
 Frames carry their own type. `ready` marks the end of the replay, so attaching to a running
 campaign is never a blank screen. `heartbeat` proves the stream is alive — the journal is sparse
@@ -831,6 +861,13 @@ showrunner reach                     # PreToolUse on Write|Edit|NotebookEdit|Bas
                                      # ships in .game_loop/reach.json speak in its own words:
                                      # {"rules":[{"name","tools","pattern","message"}]}
 showrunner wake-gate                 # PreToolUse on BASH            (wake-gate.sh)
+showrunner crawler-waker             # Stop, asyncRewake (crawler-waker.sh): WAKES the idle
+                                     # orchestrator when a Crawler stays BLOCKED past
+                                     # crawler_waker.quiet_sec (180), stands down with its leaf
+                                     # open, or stalls.
+                                     # `showrunner crawler-waker --once` judges now and says
+                                     # what it would ring; `showrunner crawler-waker --probe`
+                                     # exits 0 — how the shim tells a binary that knows the verb
 showrunner waker                     # Stop, asyncRewake (github-waker.sh): while the session is
                                      # idle, ONE GraphQL query every poll_sec over the repos the
                                      # `waker` config names; WAKES it on a new issue or PR, a
@@ -1130,6 +1167,7 @@ verb gaining one, and the table below is the thing that has to stay right. It do
 | `unresearched-gate.sh` | by hand | same |
 | `write-guard.sh` | `showrunner worktree register --write-guard` | OPT-IN: it REFUSES writes, and on a seat no role maps the fallback may write nothing — wired by default, an upgrade alone would make a repo read-only |
 | `github-waker.sh` | `worktree register` (inert until `waker` is configured) | — it IS registered; listed so its config is findable: `waker.repos`, `waker.upstream` ({repo, author}), `waker.trusted_logins`, `waker.trusted_names`, `waker.signature`, `waker.poll_sec` |
+| `crawler-waker.sh` | `worktree register` | — it IS registered; listed so its config is findable: `crawler_waker.quiet_sec` (180), `crawler_waker.poll_sec` (20), `crawler_waker.budget_sec`, `crawler_waker.enabled` |
 | `waiting-probe.sh` | **NOBODY — deliberately** | arming an idle watchdog is a human decision, stated under "First thing, every session": *a probe an agent can set is a watchdog an agent can switch off* |
 
 Enforced by a default-deny check: every hook file present is registered in a settings file or
@@ -1329,8 +1367,8 @@ inert-Crawler gate either — but it is still reported, and the report says when
 is ALSO inert so its owner learns the run is stalled.
 
 **What counts as working since a block**, before the gate calls a Crawler inert: a commit on its
-branch, a tracked-file change in its tree, its session transcript written after the block, or a
-process it STARTED after the block — a test run or a build changes no tracked file while it runs.
+branch, a tracked-file change in its tree, its session ACTING in its transcript after the block,
+or a process it STARTED after the block — a test run or a build changes no tracked file while it runs.
 Children that predate the block (MCP servers, a language server) do not count, or every Crawler
 would look busy forever. A write to its scratch dir counts only when the session's transcript
 cannot be read: a session that writes a report writes its transcript too, so a transcript that is
@@ -1338,7 +1376,17 @@ readable and quiet since the block means the scratch writer was a job started BE
 (an e2e run sent to the background, appending its log), and the Crawler stays blocked. Where the
 transcript cannot be read, a pre-block job writing scratch still releases the block. "After the block" means after the
 harness REFUSED the turn-end — the time game_loop records on the blocking attachment — not after
-showrunner first noticed it, which can be minutes later. When none of that could be read, the
+showrunner first noticed it, which can be minutes later.
+
+"Acting" in the transcript means a reply or a tool call from the model, or a tool's result,
+after the refusal's own "Stop hook feedback" frame. The host writes that frame, a
+`stop_hook_summary` and an `api-request` within about a second of every refusal whether or not
+anybody carries on, so the file moving is not evidence; nor are thinking alone, attachments,
+queue operations or an API error written in the assistant's name. A model that answers the
+refusal with a closing sentence and stops again is refused again, and the newer feedback frame
+is the anchor. A Crawler whose harness STOOD DOWN after repeated refusals, letting it stop with
+its leaf open, is reported blocked ("stood down after N refusals, leaf still open"), even when
+its process has exited; on a closed leaf it is a finished Crawler. When none of that could be read, the
 report says COULD NOT DETERMINE rather than "doing nothing" — do not reap on unreadable.
 
 The inert-Crawler gate is a different gate from `stop-gate`, and it consults the parked flag
