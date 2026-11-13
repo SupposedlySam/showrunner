@@ -579,7 +579,14 @@ section of config names — one GraphQL query per poll, because the REST budget 
 agent on the machine — and wakes the session on a new issue or pull request, a comment, a review
 verdict or inline review comment, and a merge, close or reopen, which arrive as no comment at
 all. `waker.upstream` watches only the items one author opened on somebody else's repository.
-The agent's own writing, recognised by `waker.signature`, is counted and never reported; anything
+The agent's own writing is counted and never reported, and it is judged by `waker.signature` alone:
+a comment, review or PR body whose last signature is that one, with or without Claude Code's
+attribution line after it. Not by the account, which the agent shares with its maintainer and
+perhaps with other agents, and not by the attribution line, which every Claude Code agent's PR
+carries — so agents posting under one account must each configure a distinct signature, and with
+none configured nothing counts as own writing and everything rings, saying why. Every decision
+(rang, own, seen, older-than-window) is logged with its reason to
+`waker-decisions.jsonl` beside the waker's state, a bounded tail whose path `doctor` prints. Anything
 from outside `waker.trusted_logins`/`trusted_names` is marked as a claim to verify. It never runs
 in a Crawler's worktree, and with nothing configured it exits at once. Each turn-end starts a
 waker, so several can be alive at once; each event still rings once, because the newest waker owns

@@ -246,6 +246,8 @@ INSTALLED
 seen-issues.json
 wake-gate-seen.json
 waker-state.json
+waker-owner
+waker-decisions.jsonl
 crawler-waker-state.json
 crawler-waker-owner
 EOF
@@ -284,7 +286,7 @@ for entry in "bin/" "lib/" "graph.db" "graph.db-*" "locks/" "scratch/" "campaign
              "sessions.json" "campaign.json" \
              "routing.jsonl" "waiting.jsonl" "events.jsonl" "*.lock" "baseline.json" \
              "integration-commit.json" "archive/" "config.local.json" "INSTALLED" "seen-issues.json" \
-             "wake-gate-seen.json" "waker-state.json" \
+             "wake-gate-seen.json" "waker-state.json" "waker-owner" "waker-decisions.jsonl" \
              "crawler-waker-state.json" "crawler-waker-owner" \
              "hook-heartbeat.jsonl" "fail-open.jsonl"; do
   if ! grep -qxF "$entry" "$sr_ignore" 2>/dev/null; then
