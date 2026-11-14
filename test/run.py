@@ -9510,7 +9510,11 @@ def test_stop_hook_heartbeat():
 
     def doctor():
         p = subprocess.run([sys.executable, os.path.join(ROOT, "bin", "showrunner"), "doctor"],
-                           cwd=cfg.root, capture_output=True, text=True)
+                           cwd=cfg.root, capture_output=True, text=True,
+                           # doctor reads what SHOWRUNNER_HEARTBEAT names, as the shims write
+                           # it; this fixture's file is the default one, so drop the redirect.
+                           env={k: v for k, v in os.environ.items()
+                                if k != "SHOWRUNNER_HEARTBEAT"})
         return p.stdout
 
     out = doctor()
@@ -18983,6 +18987,194 @@ def test_the_github_waker_stamps_every_invocation():
        and "`github-waker` has NEVER" not in out, out[-1500:])
 
 
+def test_doctor_and_waker_show_state_the_effective_watch():
+    group("doctor and `waker --show --json` state what the GitHub waker EFFECTIVELY watches, with "
+          "the layer each value came from, and read the same paths the waker and its shim write")
+    if not have("git"):
+        skip("the waker-watch group", "git is not installed")
+        return
+    from showrunner import waker as W
+    # REQUESTED by SRCode's owner: SRCode re-read showrunner's config layers to show each repo's
+    # watch, a second statement of the merge that is free to drift. These are the reading it can
+    # parse instead, so the schema is pinned key by key.
+    exe = os.path.join(ROOT, "bin", "showrunner")
+    env = {k: v for k, v in os.environ.items() if k != "SHOWRUNNER_HEARTBEAT"}
+    home = tmpdir("watch-xdg")
+    os.makedirs(os.path.join(home, "showrunner"))
+    env["XDG_CONFIG_HOME"] = home
+    gh_mark = os.path.join(tmpdir("watch-gh"), "called")
+    gh = os.path.join(os.path.dirname(gh_mark), "gh")
+    with open(gh, "w") as fh:
+        fh.write("#!/bin/sh\ntouch '%s'\nexit 1\n" % gh_mark)
+    os.chmod(gh, 0o755)
+    env["SHOWRUNNER_GH"] = gh
+
+    def cli(repo, *argv):
+        p = subprocess.run([sys.executable, exe] + list(argv), capture_output=True, text=True,
+                           cwd=repo.root, env=env, stdin=subprocess.DEVNULL)
+        return p.returncode, p.stdout, p.stderr
+
+    def show(repo):
+        rc, out, err = cli(repo, "waker", "--show", "--json")
+        try:
+            return rc, json.loads(out)
+        except ValueError:
+            return rc, {"_unparsed": out + err}
+
+    # INERT: nothing in any layer.
+    plain = make_repo()
+    rc, wt = show(plain)
+    eq("`waker --show --json` exits 0 and prints JSON", (rc, "_unparsed" in wt), (0, False))
+    eq("THE SCHEMA, pinned: these keys and no others, so a host parsing it breaks loudly here "
+       "rather than quietly in SRCode",
+       sorted(wt), sorted(["schema", "state", "inert_reason", "repos", "upstream", "signature",
+                           "signature_note", "trusted_logins", "trusted_names", "poll_sec",
+                           "budget_sec", "ignored", "source", "state_dir", "decisions_log"]))
+    eq("...with a versioned schema name", wt.get("schema"), "showrunner.waker-watch/1")
+    eq("...and `source` names every watch key", sorted(wt.get("source") or {}),
+       sorted(["repos", "upstream", "signature", "trusted_logins", "trusted_names", "poll_sec",
+               "budget_sec"]))
+    eq("unconfigured, the waker is INERT and says why",
+       (wt.get("state"), wt.get("inert_reason"), wt.get("repos"), wt.get("poll_sec")),
+       ("inert", "no waker config", [], None))
+    out = cli(plain, "doctor")[1]
+    ok("...and doctor says the same in words", "the GitHub waker is inert: no waker config" in out,
+       out[-2000:])
+
+    # FOUR LAYERS. The user sets budget and upstream, the project sets repos, signature and a
+    # zero poll_sec, the local overlay replaces repos (with one malformed entry) and selects a
+    # campaign. Each value must name the layer that WON.
+    repo = make_repo({"waker": {"repos": ["proj/only"], "signature": "  — 🤖 me  ",
+                                "trusted_logins": ["Boss"], "poll_sec": 0}})
+    user = os.path.join(home, "showrunner", "config.json")
+    with open(user, "w") as fh:
+        json.dump({"waker": {"budget_sec": 999, "upstream": [{"repo": "them/up", "author": "me"}],
+                             "trusted_names": ["The Boss"]}}, fh)
+    local = os.path.join(repo.root, ".showrunner", "config.local.json")
+    with open(local, "w") as fh:
+        json.dump({"campaign": "c1", "waker": {"repos": ["acme/widgets", "not-a-repo"]}}, fh)
+    rc, wt = show(repo)
+    src = {k: (v or {}).get("layer") for k, v in (wt.get("source") or {}).items()}
+    eq("every value names the layer that won the merge — local over project, user beneath both, "
+       "built-in where nothing set it",
+       src, {"repos": "local", "upstream": "user", "signature": "project",
+             "trusted_logins": "project", "trusted_names": "user", "poll_sec": "default",
+             "budget_sec": "user"})
+    eq("...and the file it came from, absolutely",
+       os.path.realpath(((wt.get("source") or {}).get("repos") or {}).get("path") or "-"),
+       os.path.realpath(local))
+    eq("the values are the ones the waker RUNS with: the local repos (minus the malformed one), "
+       "the user's upstream and budget, a zero poll_sec replaced by the built-in 300",
+       (wt.get("state"), wt.get("repos"), wt.get("upstream"), wt.get("poll_sec"),
+        wt.get("budget_sec")),
+       ("watching", ["acme/widgets"], [{"repo": "them/up", "author": "me"}], 300, 999))
+    eq("the signature is shown as the waker compares it, whitespace collapsed",
+       (wt.get("signature"), wt.get("signature_note")), ("— 🤖 me", None))
+    eq("trust sets as the waker matches them, lowercased",
+       (wt.get("trusted_logins"), wt.get("trusted_names")), (["boss"], ["the boss"]))
+    eq("an entry the waker drops is listed as IGNORED, not shown as watched",
+       [(i.get("key"), i.get("value")) for i in wt.get("ignored") or []],
+       [("waker.repos", "not-a-repo")])
+    ok("the decision log is named under the CAMPAIGN's state dir, which is where the waker "
+       "writes it",
+       (wt.get("decisions_log") or "").endswith(
+           os.path.join(".showrunner", "campaigns", "c1", "waker-decisions.jsonl")), wt)
+    rc, out, _ = cli(repo, "waker", "--show")
+    ok("`waker --show` without --json prints one line per value, each with its layer",
+       rc == 0 and "repos       acme/widgets  [local .showrunner/config.local.json]" in out
+       and "budget_sec  999  [user %s]" % user in out and "poll_sec    300  [default]" in out,
+       out)
+    ok("...and NEVER looks at GitHub: the gh stub was not called", not os.path.exists(gh_mark))
+    out = cli(repo, "doctor")[1]
+    ok("doctor prints the same effective watch, layer by layer",
+       "the GitHub waker's effective watch" in out
+       and "upstream    them/up by me  [user %s]" % user in out
+       and "signature   \"— 🤖 me\"  [project .showrunner/config.json]" in out, out[-3000:])
+    ok("...and warns about the ignored entry", "waker.repos has an entry the waker IGNORES" in out,
+       out[-3000:])
+
+    # NO SIGNATURE.
+    nosig = make_repo({"waker": {"repos": ["a/b"]}})
+    rc, wt = show(nosig)
+    eq("with no signature the watch says everything rings, and that the wake text says so",
+       (wt.get("signature"), wt.get("signature_note")),
+       (None, "none: everything rings, and the wake text says so"))
+
+    # THE DECISION LOG, WRITER AND READER, under a campaign. The waker is run in-process with
+    # a fake GitHub; doctor, as a separate process, must find what it wrote.
+    out = cli(repo, "doctor")[1]
+    ok("before any look, doctor says no look has been recorded",
+       "not written yet: no look has been recorded" in out, out[-3000:])
+    loaded = config.load(start=repo.root)
+    eq("(the fixture really selects the campaign)", loaded.campaign, "c1")
+    world = json.dumps({"data": {
+        "r0": {"issues": {"nodes": [{"number": 1, "title": "t", "state": "OPEN",
+                                     "author": {"login": "x"}, "body": "b",
+                                     "comments": {"nodes": []}}]},
+               "pullRequests": {"nodes": []}},
+        "u0": {"nodes": []}}})
+    eq("a look against a quiet world seeds, and says nothing new",
+       W.run(loaded, once=True, runner=lambda _q: world)[0], 0)
+    ok("(a seed of a world with no events judges nothing, so it writes no log)",
+       not os.path.exists(W.decisions_path(loaded)))
+    out = cli(repo, "doctor")[1]
+    ok("NO LOG IS NOT NO LOOK: with a look on record and nothing judged, doctor says the log is "
+       "unwritten BECAUSE only judged events are logged, not that no look happened",
+       "though the last look on record was 0m ago" in out
+       and "no look has been recorded" not in out, out[-3000:])
+    ringing = json.dumps({"data": {
+        "r0": {"issues": {"nodes": [{"number": 1, "title": "t", "state": "OPEN",
+                                     "author": {"login": "x"}, "body": "b",
+                                     "comments": {"nodes": [{"databaseId": 7, "body": "hi",
+                                                             "author": {"login": "x"}}]}}]},
+               "pullRequests": {"nodes": []}},
+        "u0": {"nodes": []}}})
+    W.run(loaded, once=True, runner=lambda _q: ringing)
+    written = W.decisions_path(loaded)
+    ok("(the waker wrote its log under the campaign dir)",
+       os.path.exists(written) and os.sep + os.path.join("campaigns", "c1") + os.sep in written,
+       written)
+    out = cli(repo, "doctor")[1]
+    ok("...and doctor, a separate process resolving the same campaign, reads that file",
+       "waker-decisions.jsonl — 1 line(s)" in out
+       and os.path.join("campaigns", "c1", "waker-decisions.jsonl") in out, out[-3000:])
+
+    # THE HEARTBEAT, WRITER AND READER, with a campaign dir present. The real shim writes it;
+    # doctor must read that file, not one under the campaign's state dir.
+    sh_root = make_repo()
+    with open(os.path.join(sh_root.root, ".showrunner", "config.local.json"), "w") as fh:
+        json.dump({"campaign": "c2"}, fh)
+    os.makedirs(os.path.join(sh_root.root, ".showrunner", "campaigns", "c2"), exist_ok=True)
+    settings = os.path.join(sh_root.root, ".claude", "settings.json")
+    os.makedirs(os.path.dirname(settings), exist_ok=True)
+    with open(settings, "w") as fh:
+        json.dump({"hooks": {"Stop": [{"hooks": [
+            {"command": '"$CLAUDE_PROJECT_DIR"/.showrunner/hooks/github-waker.sh'}]}]}}, fh)
+    shim = os.path.join(ROOT, ".showrunner", "hooks", "github-waker.sh")
+    subprocess.run(["bash", shim], capture_output=True, text=True, cwd=sh_root.root,
+                   env=dict(env, CLAUDE_PROJECT_DIR=sh_root.root), stdin=subprocess.DEVNULL)
+    out = cli(sh_root, "doctor")[1]
+    ok("with a campaign selected, doctor reads the heartbeat the shim wrote (repo root, not the "
+       "campaign dir)", "Stop hook `github-waker` stamped an invocation 0m ago" in out,
+       out[-3000:])
+    redirected = os.path.join(tmpdir("watch-hb"), "hb.jsonl")
+    fresh = make_repo()
+    with open(os.path.join(fresh.root, ".showrunner", "config.local.json"), "w") as fh:
+        json.dump({"campaign": "c3"}, fh)
+    os.makedirs(os.path.dirname(os.path.join(fresh.root, ".claude", "x")), exist_ok=True)
+    shutil.copy(settings, os.path.join(fresh.root, ".claude", "settings.json"))
+    henv = dict(env, SHOWRUNNER_HEARTBEAT=redirected)
+    subprocess.run(["bash", shim], capture_output=True, text=True, cwd=fresh.root,
+                   env=dict(henv, CLAUDE_PROJECT_DIR=fresh.root), stdin=subprocess.DEVNULL)
+    p = subprocess.run([sys.executable, exe, "doctor"], capture_output=True, text=True,
+                       cwd=fresh.root, env=henv, stdin=subprocess.DEVNULL)
+    ok("...and with SHOWRUNNER_HEARTBEAT set, the shim and doctor both use that file — one "
+       "resolver for writer and reader",
+       os.path.exists(redirected) and not os.path.exists(
+           os.path.join(fresh.root, ".showrunner", "hook-heartbeat.jsonl"))
+       and "Stop hook `github-waker` stamped an invocation 0m ago" in p.stdout, p.stdout[-3000:])
+
+
 def _iso(epoch):
     import datetime as _dt
     return _dt.datetime.fromtimestamp(epoch, _dt.timezone.utc).isoformat().replace("+00:00", "Z")
@@ -20138,7 +20330,7 @@ def test_never_integrated_leaves_do_not_collide():
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_the_github_waker_stamps_every_invocation, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_the_github_waker_stamps_every_invocation, test_doctor_and_waker_show_state_the_effective_watch, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

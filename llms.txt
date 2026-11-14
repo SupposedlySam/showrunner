@@ -957,6 +957,12 @@ showrunner waker                     # Stop, asyncRewake (github-waker.sh): whil
                                      # Every decision, with its reason, goes to
                                      # waker-decisions.jsonl beside its state
                                      # (a bounded tail; doctor prints the path).
+                                     # `showrunner waker --show [--json]` prints the
+                                     # effective watch after the layers merge, each value
+                                     # with the layer it came from (schema
+                                     # showrunner.waker-watch/1, every key always present;
+                                     # see README). Never looks at GitHub. doctor prints
+                                     # the same watch.
                                      # `showrunner waker --once` looks once;
                                      # `showrunner waker --probe` exits 0 — how the shim tells
                                      # a binary that knows the verb from an older one.
@@ -1109,7 +1115,9 @@ to say, because both produce silence.
 
 So each Stop hook showrunner owns appends `{"hook": ..., "ts": ...}` to
 `.showrunner/hook-heartbeat.jsonl` **before it reads its payload** — a mark written after the
-first early return leaves the cheapest paths unprovable, and those are the weak ones.
+first early return leaves the cheapest paths unprovable, and those are the weak ones. The file is
+at the repo root's `.showrunner/`, never under a campaign's state dir, and `SHOWRUNNER_HEARTBEAT`
+redirects writer and reader alike.
 
 `showrunner doctor` reports it as a **relation between the hooks**, never against a tolerance:
 

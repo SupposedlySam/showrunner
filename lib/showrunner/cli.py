@@ -182,6 +182,34 @@ def _flatten_leaves(data, prefix=""):
     return out
 
 
+def _config_layers(cfg):
+    """(layer, path, flattened leaves) for each config FILE present, lowest first: user,
+    project, local — the order `config.load` merges them in."""
+    layers = []
+    if cfg.user_path:
+        layers.append(("user", cfg.user_path, config.read_config_file(cfg.user_path) or {}))
+    if os.path.exists(cfg.path):
+        layers.append(("project", cfg.path, config.read_config_file(cfg.path) or {}))
+    local_path = os.path.join(cfg.root, config.STATE_DIR, config.CONFIG_LOCAL_NAME)
+    if os.path.exists(local_path):
+        layers.append(("local", local_path, config.read_config_file(local_path) or {}))
+    return [(name, path, _flatten_leaves(data)) for name, path, data in layers]
+
+
+def _config_source(cfg, key, layers=None):
+    """(layer, path) of the file whose value for dotted `key` survived the merge, or
+    ("default", None) when no file sets it. A layer that sets a PARENT of `key` to a non-dict
+    replaced the whole subtree (see `deep_merge`), so it is the source too, though it names no
+    value for `key` itself."""
+    found = ("default", None)
+    parts = key.split(".")
+    parents = {".".join(parts[:i]) for i in range(1, len(parts))}
+    for name, path, flat in (_config_layers(cfg) if layers is None else layers):
+        if key in flat or any(p in flat and flat[p] != {} for p in parents):
+            found = (name, path)
+    return found
+
+
 def _config_layer_shadows(cfg):
     """Per-leaf-key provenance across the user/project/local layers.
 
@@ -191,16 +219,7 @@ def _config_layer_shadows(cfg):
     rather than threading provenance through `Config`/`deep_merge`: that channel would have to
     be carried by every consumer of a config object for the benefit of this one report.
     """
-    layers = []
-    if cfg.user_path:
-        layers.append(("user", cfg.user_path, config.read_config_file(cfg.user_path) or {}))
-    if os.path.exists(cfg.path):
-        layers.append(("project", cfg.path, config.read_config_file(cfg.path) or {}))
-    local_path = os.path.join(cfg.root, config.STATE_DIR, config.CONFIG_LOCAL_NAME)
-    if os.path.exists(local_path):
-        layers.append(("local", local_path, config.read_config_file(local_path) or {}))
-
-    flattened = [(name, path, _flatten_leaves(data)) for name, path, data in layers]
+    flattened = _config_layers(cfg)
     keys = set()
     for _, _, flat in flattened:
         keys.update(flat)
@@ -734,7 +753,13 @@ def cmd_doctor(args):
     # stamp across all of them is a proxy for the last turn-end that reached anything; a hook
     # whose own newest stamp sits far behind that was registered and not reached. That question
     # is answerable without knowing when turns happen, which showrunner does not schedule.
-    _hb = os.path.join(cfg.root, ".showrunner", "hook-heartbeat.jsonl")
+    #
+    # ONE RESOLVER FOR READER AND WRITER: `lostring.heartbeat_path`, which is the path the
+    # shims stamp — `$SHOWRUNNER_HEARTBEAT`, else the repo root's `.showrunner/`, never the
+    # campaign's state_dir. Reading it here a second way let the two disagree whenever the
+    # variable is set.
+    from . import lostring as _ls
+    _hb = _ls.heartbeat_path(cfg)
     _stamps = {}
     try:
         with open(_hb) as _fh:
@@ -831,6 +856,21 @@ def cmd_doctor(args):
     # gap that makes every own-writing verdict impossible.
     from . import waker as _gw
     _gw_sp = _gw.spec(cfg)
+    # WHAT IT WATCHES, after the merge, with the layer each value came from — the same dict
+    # `waker --show --json` prints, so a host reads this instead of re-merging the layers.
+    _gw_wt = _waker_watch(cfg)
+    _gw_lines = _gw.watch_lines(_gw_wt, lambda p: _shown_config_path(cfg, p))
+    if _gw_sp is None:
+        print("  %s the GitHub waker is %s" % (DIM + "note " + OFF, _gw_lines[0]))
+    else:
+        print("  %s the GitHub waker's effective watch (user, then project, then local; the "
+              "last layer to set a value wins):" % (GRN + "ok   " + OFF))
+        for _l in _gw_lines:
+            print("          %s" % _l)
+        for _i in _gw_wt["ignored"]:
+            print("  %s %s has an entry the waker IGNORES (%s): %s"
+                  % (YEL + "warn " + OFF, _i["key"], _i["why"],
+                     json.dumps(_i["value"], ensure_ascii=False)))
     if _gw_sp is not None:
         _gw_path = _gw.decisions_path(cfg)
         try:
@@ -838,11 +878,23 @@ def cmd_doctor(args):
                 _gw_rows = _fh.read().splitlines()
         except OSError:
             _gw_rows = None
+        # NO LOG IS NOT NO LOOK. Only a JUDGED event is logged (and every event, as seen, at a
+        # seed), so a waker that has looked for days at a quiet repo leaves no file at all. The
+        # state's `looked_at` is the record of a look; say which of the two this is.
+        _gw_looked = (_gw.load_state(cfg) or {}).get("looked_at")
+        if _gw_rows is not None:
+            _gw_note = "%d line(s), the last %d kept" % (len(_gw_rows), _gw.DECISIONS_KEEP)
+        elif isinstance(_gw_looked, (int, float)):
+            _age = max(0, int(now()) - int(_gw_looked))
+            _gw_note = ("not written yet, though the last look on record was %s ago: only a "
+                        "JUDGED event is logged, so no new event has arrived since logging began "
+                        "here (a log write that failed would read the same)"
+                        % (("%dm" % (_age // 60)) if _age < 7200 else ("%dh" % (_age // 3600))))
+        else:
+            _gw_note = "not written yet: no look has been recorded"
         print("  %s the GitHub waker logs every decision (rang/own/seen/older-than-window, with "
               "the reason) to %s — %s" % (
-                  GRN + "ok   " + OFF, os.path.relpath(_gw_path, cfg.root),
-                  "%d line(s), the last %d kept" % (len(_gw_rows), _gw.DECISIONS_KEEP)
-                  if _gw_rows is not None else "not written yet: no look has been recorded"))
+                  GRN + "ok   " + OFF, os.path.relpath(_gw_path, cfg.root), _gw_note))
         if not " ".join((_gw_sp.get("signature") or "").split()):
             print("  %s `waker.signature` is not set, so the waker cannot tell this agent's own "
                   "writing from anybody else's and rings for all of it. Set a signature no "
@@ -2053,6 +2105,11 @@ def cmd_waker(args):
         return 0
     if args.session_start:
         return _waker_session_start(args)
+    if args.show:
+        return _waker_show(args)
+    if args.json:
+        eprint("waker: --json goes with --show")
+        return 1
     from . import waker
     try:
         cfg = _cfg(args, required=False)
@@ -2069,6 +2126,31 @@ def cmd_waker(args):
     if text and (args.once or code == 1):
         (eprint if code else print)(text)
     return code
+
+
+def _shown_config_path(cfg, path):
+    """A config file as doctor names it: the user file absolute, a repo file repo-relative."""
+    return path if path == cfg.user_path else rel(path, cfg.root)
+
+
+def _waker_watch(cfg):
+    """`waker.watch` with each value's layer read from the config files themselves."""
+    from . import waker
+    layers = _config_layers(cfg)
+    return waker.watch(cfg, lambda key: _config_source(cfg, key, layers))
+
+
+def _waker_show(args):
+    """`waker --show`: the effective watch, read-only. Never looks at GitHub, never rings."""
+    from . import waker
+    cfg = _cfg(args, required=False)
+    wt = _waker_watch(cfg)
+    if args.json:
+        print(json.dumps(wt, indent=2, ensure_ascii=False))
+        return 0
+    for line in waker.watch_lines(wt, lambda p: _shown_config_path(cfg, p)):
+        print(line)
+    return 0
 
 
 def _hook_transcript(wait=0.5):
@@ -4550,6 +4632,11 @@ def build_parser():
     s.add_argument("--session-start", action="store_true",
                    help="SessionStart: report any ring (GitHub or Crawler waker) no turn end "
                         "followed, once, then look at GitHub once with a short timeout")
+    s.add_argument("--show", action="store_true",
+                   help="print the effective watch after the config layers merge, and which "
+                        "layer each value came from; never looks at GitHub")
+    s.add_argument("--json", action="store_true",
+                   help="with --show: the same as JSON (schema %s)" % "showrunner.waker-watch/1")
     s.set_defaults(func=cmd_waker)
 
     s = sub.add_parser("crawler-waker",

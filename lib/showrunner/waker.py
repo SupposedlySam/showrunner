@@ -104,6 +104,79 @@ def spec(cfg):
     }
 
 
+WATCH_SCHEMA = "showrunner.waker-watch/1"
+WATCH_KEYS = ("repos", "upstream", "signature", "trusted_logins", "trusted_names", "poll_sec",
+              "budget_sec")
+NO_SIGNATURE = "none: everything rings, and the wake text says so"
+
+
+def watch(cfg, source):
+    """What this waker EFFECTIVELY watches, after the config layers merged, as one dict.
+
+    `source(dotted_key)` names the (layer, path) a value came from. This is the reading a host
+    shows instead of re-implementing the merge: every value is what `spec` hands `run`, so a
+    malformed entry `spec` drops is listed under `ignored` rather than shown as watched. Keys
+    are always all present; when nothing is configured `state` is "inert" and the watch values
+    are empty or null, because an inert waker looks at nothing."""
+    w = (cfg.get("waker") if hasattr(cfg, "get") else None) or {}
+    w = w if isinstance(w, dict) else {}
+    sp = spec(cfg)
+    ignored = [{"key": "waker.repos", "value": r, "why": "not an owner/name string"}
+               for r in (w.get("repos") or []) if not (isinstance(r, str) and r.count("/") == 1)]
+    ignored += [{"key": "waker.upstream", "value": u,
+                 "why": "needs a repo of the form owner/name and an author"}
+                for u in (w.get("upstream") or [])
+                if not (isinstance(u, dict) and str(u.get("repo", "")).count("/") == 1
+                        and u.get("author"))]
+    sources = {}
+    for k in WATCH_KEYS:
+        layer, path = source("waker." + k)
+        # A falsy poll_sec or budget_sec is replaced by the built-in value in `spec`, so the file
+        # that set it did not decide the value the waker runs with.
+        if k in ("poll_sec", "budget_sec") and not w.get(k):
+            layer, path = "default", None
+        sources[k] = {"layer": layer, "path": path}
+    out = {"schema": WATCH_SCHEMA, "state": "inert" if sp is None else "watching",
+           "inert_reason": "no waker config" if sp is None else None,
+           "repos": [], "upstream": [], "signature": None, "signature_note": None,
+           "trusted_logins": [], "trusted_names": [], "poll_sec": None, "budget_sec": None,
+           "ignored": ignored, "source": sources,
+           "state_dir": cfg.state_dir, "decisions_log": decisions_path(cfg)}
+    if sp is not None:
+        sig = " ".join((sp.get("signature") or "").split())
+        out.update({"repos": list(sp["repos"]),
+                    "upstream": [{"repo": u["repo"], "author": u["author"]}
+                                 for u in sp["upstream"]],
+                    "signature": sig or None, "signature_note": None if sig else NO_SIGNATURE,
+                    "trusted_logins": sorted(sp["trusted_logins"]),
+                    "trusted_names": sorted(sp["trusted_names"]),
+                    "poll_sec": sp["poll_sec"], "budget_sec": sp["budget_sec"]})
+    return out
+
+
+def watch_lines(wt, shown_path=lambda p: p):
+    """The human form of `watch`: one line per value, each with the layer it came from."""
+    def src(k):
+        s = wt["source"][k]
+        return "[%s%s]" % (s["layer"], " " + shown_path(s["path"]) if s["path"] else "")
+    if wt["state"] == "inert":
+        return ["inert: no waker config (no `waker.repos` or `waker.upstream` in any layer; "
+                "repos %s, upstream %s)" % (src("repos"), src("upstream"))]
+    up = ", ".join("%s by %s" % (u["repo"], u["author"]) for u in wt["upstream"]) or "none"
+    return [
+        "repos       %s  %s" % (", ".join(wt["repos"]) or "none", src("repos")),
+        "upstream    %s  %s" % (up, src("upstream")),
+        "signature   %s  %s" % (json.dumps(wt["signature"], ensure_ascii=False)
+                                if wt["signature"] else wt["signature_note"], src("signature")),
+        "trusted     %d login(s) %s, %d name(s) %s" % (
+            len(wt["trusted_logins"]), src("trusted_logins"), len(wt["trusted_names"]),
+            src("trusted_names")),
+        "poll_sec    %d  %s" % (wt["poll_sec"], src("poll_sec")),
+        "budget_sec  %d  %s" % (wt["budget_sec"], src("budget_sec")),
+    ] + ["ignored     %s %s: %s" % (i["key"], json.dumps(i["value"], ensure_ascii=False),
+                                     i["why"]) for i in wt["ignored"]]
+
+
 def query(sp):
     """ONE GraphQL document for everything watched: an alias per repo and per upstream search."""
     parts = []

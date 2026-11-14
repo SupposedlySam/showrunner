@@ -598,6 +598,24 @@ signature.
 `showrunner waker --once` looks once and reports; `SHOWRUNNER_GH` names the `gh` binary when it
 is not on PATH.
 
+**`doctor` prints what the waker effectively watches**, after the user, project and local layers
+merge: the repos, the upstream searches, the signature (or "none: everything rings, and the wake
+text says so"), the trust sets, `poll_sec` and `budget_sec`, each with the layer and file it came
+from (`default` when no file sets it, and for a zero `poll_sec` or `budget_sec`, which the waker
+replaces with the built-in value). An entry the waker drops as malformed is a `warn`, not shown
+as watched. With no `waker.repos` or `waker.upstream` in any layer it reads "inert: no waker
+config". The decision log line says "not written yet" in one of two ways. When there is no look
+on record, it says no look has been recorded. When the state shows a look, it says how long ago
+that look was: only a judged event is logged, so a waker watching a quiet repo writes no log.
+`showrunner waker --show` prints the same watch without the rest of doctor, and
+`waker --show --json` prints it as JSON for a host to parse. The schema is
+`showrunner.waker-watch/1`, and every key is always present: `schema`, `state`
+(`watching`|`inert`), `inert_reason`, `repos`, `upstream` (`[{repo, author}]`), `signature`,
+`signature_note`, `trusted_logins`, `trusted_names`, `poll_sec`, `budget_sec`,
+`ignored` (`[{key, value, why}]`), `source` (`{<key>: {layer, path}}` for the seven watch keys,
+layer one of `user`|`project`|`local`|`default`), `state_dir` and `decisions_log`. `--show` never
+looks at GitHub.
+
 **A wake that never became a turn is reported at the next session start.** Both wakers exit
 after ringing, and the next one starts only when a turn ends, so a ring the host never delivers
 (the hosting `claude` process gone or restarted) leaves nothing watching. Each ring is therefore
