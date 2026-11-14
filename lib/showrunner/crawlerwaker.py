@@ -30,7 +30,9 @@ transcript has gone quiet for the window, when one's process ends, or when the j
 block to judge; a working Crawler writes its transcript constantly and costs one stat.
 
 ONE RING PER BLOCK. Every turn-end starts a waker; the newest owns the watch and an older one
-exits at its next poll, and a ring is recorded under a lock before it is sent.
+exits at its next poll, and a ring is recorded under a lock before it is sent — in `rings`, with
+its time and text, because exit 2 ends this waker and only a turn end starts the next. A ring the
+host never turns into a turn is reported at the next SessionStart by `lostring`.
 """
 import json
 import os
@@ -39,6 +41,7 @@ import time
 QUIET_SEC = 180
 POLL_SEC = 20
 BUDGET_SEC = 604740
+RINGS_KEEP = 50
 STATE = "crawler-waker-state.json"
 OWNER = "crawler-waker-owner"
 
@@ -258,6 +261,9 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, ask=None):
                     state["rung"] = sorted(rung | {i["key"] for i in ring})[-2000:]
                     state["last_fired"] = int(t)
                     state["last_crawlers"] = [i["crawler"] for i in ring]
+                    state["rings"] = ((state.get("rings") or []) + [{
+                        "at": int(t), "text": text,
+                        "events": [i["key"] for i in ring]}])[-RINGS_KEEP:]
                     _save_state(cfg, state)     # recorded FIRST: a wake re-sent is noise
                     return 2, text
             if once:

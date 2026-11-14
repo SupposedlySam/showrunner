@@ -146,6 +146,15 @@ the window, a Crawler's process ends, or the journal records a new block. Set
 `crawler_waker.enabled: false` to turn it off. `doctor` says whether it is registered and when
 it last rang.
 
+**A wake that never became a turn.** Both wakers exit after ringing, and only a turn end starts
+the next, so a ring the host never delivers leaves nothing watching. Each ring is recorded in its
+waker's state (time, text, events) before the exit. At SessionStart, including resume and
+compaction, `whoami.sh` runs `showrunner waker --session-start`. It reports, once, every ring with
+no turn-end stamp after it in `hook-heartbeat.jsonl` ("GitHub activity rang at <time> but no turn
+followed: <text>"), then looks at GitHub once (5 s timeout, the same locked compare-and-advance)
+and reports what arrived since. A failed look says FAILED, never "nothing new". The report reaches
+you with your first turn, and the waker restarts when that turn ends.
+
 **A probe's COST is part of its contract.** game_loop runs `waiting` under a hardcoded 15s
 timeout and reads a timeout as *"the probe did not run at all"* — which it reports as a broken
 watchdog and then **stops scheduling re-checks**. So a slow probe does not degrade the watchdog,
@@ -934,7 +943,10 @@ showrunner waker                     # Stop, asyncRewake (github-waker.sh): whil
                                      # `showrunner waker --once` looks once;
                                      # `showrunner waker --probe` exits 0 — how the shim tells
                                      # a binary that knows the verb from an older one.
-                                     # SHOWRUNNER_GH names the gh binary when it is not on PATH
+                                     # SHOWRUNNER_GH names the gh binary when it is not on PATH.
+                                     # `showrunner waker --session-start` (run by whoami.sh)
+                                     # reports, once, a ring of either waker no turn end
+                                     # followed, then looks at GitHub once (5 s timeout)
 showrunner write-guard               # PreToolUse on Write|Edit|MultiEdit|NotebookEdit|Bash
                                      #                               (write-guard.sh)
 ```
