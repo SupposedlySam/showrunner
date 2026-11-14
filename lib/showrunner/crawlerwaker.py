@@ -32,7 +32,13 @@ block to judge; a working Crawler writes its transcript constantly and costs one
 ONE RING PER BLOCK. Every turn-end starts a waker; the newest owns the watch and an older one
 exits at its next poll, and a ring is recorded under a lock before it is sent — in `rings`, with
 its time and text, because exit 2 ends this waker and only a turn end starts the next. A ring the
-host never turns into a turn is reported at the next SessionStart by `lostring`.
+host never turns into a turn is reported at the next SessionStart by `lostring`, and covered
+by the GitHub waker while the session idles (`cover`).
+
+CROSS-COVER keeps this waker alive with nothing to judge. With no Crawler alive and none pending
+it used to exit, so a dropped GitHub ring had nobody to cover it. While a GitHub waker is
+configured it now IDLES instead: per poll it reads its owner file and stats the GitHub waker's
+state, and it does not read the campaign. It rings once for that waker's dropped ring.
 """
 import json
 import os
@@ -189,8 +195,30 @@ def _ask(cfg):
     return campaign.waiting(cfg, open_graph(cfg))[1]
 
 
-def run(cfg, once=False, sleep=time.sleep, now=time.time, ask=None):
-    """(exit code, text). 2 with a wake; 0 quiet; `once` reports what it would ring now."""
+def _cover(cfg, start, transcript):
+    """This waker's watch over the GitHub waker's rings, or None when there is none to watch."""
+    from . import cover, waker
+    if cover.window(cfg) is None or waker.spec(cfg) is None:
+        return None
+    return cover.Cover(cfg, "github-waker", "crawler-waker", start, transcript)
+
+
+def _ring_cover(cfg, now_ts, text):
+    """Record a cover ring as this waker's own, so a cover the host drops too is reported by
+    `lostring` at SessionStart. Then it is rung."""
+    from .util import file_lock
+    with file_lock(_path(cfg, STATE)):
+        state = load_state(cfg)
+        state["rings"] = ((state.get("rings") or []) + [{
+            "at": int(now_ts), "at_f": round(now_ts, 3), "text": text,
+            "events": ["cover"]}])[-RINGS_KEEP:]
+        _save_state(cfg, state)     # not `last_fired`: doctor reads that as a Crawler's ring
+    return text
+
+
+def run(cfg, once=False, sleep=time.sleep, now=time.time, ask=None, transcript=None):
+    """(exit code, text). 2 with a wake; 0 quiet; `once` reports what it would ring now.
+    `transcript` is the session's, from the hook's stdin: cover reads it (see `cover`)."""
     from .util import file_lock
     ask = ask or _ask
     sp = spec(cfg)
@@ -212,6 +240,8 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, ask=None):
     if token:
         _owner(cfg, token)
     deadline = start + sp["budget_sec"]
+    watch = None if once else _cover(cfg, start, transcript)
+    idle = False
     asked = {}                      # crawler -> (transcript mtime, alive) when last judged
     journal_size = None
     due = None
@@ -221,8 +251,15 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, ask=None):
             sleep(sp["poll_sec"])
             if _owner(cfg) not in (None, token):
                 return 0, ""
+            text = watch.check(now()) if watch else None
+            if text:
+                return 2, _ring_cover(cfg, now(), text)
         first = False
         t = now()
+        if idle:
+            if t >= deadline:
+                return 0, ""
+            continue
         from . import campaign
         entries = [e for e in _crawlers(cfg) if e.get("crawler")]
         mtimes, need = {}, once or (due is not None and t >= due)
@@ -262,7 +299,7 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, ask=None):
                     state["last_fired"] = int(t)
                     state["last_crawlers"] = [i["crawler"] for i in ring]
                     state["rings"] = ((state.get("rings") or []) + [{
-                        "at": int(t), "text": text,
+                        "at": int(t), "at_f": round(t, 3), "text": text,
                         "events": [i["key"] for i in ring]}])[-RINGS_KEEP:]
                     _save_state(cfg, state)     # recorded FIRST: a wake re-sent is noise
                     return 2, text
@@ -280,5 +317,10 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, ask=None):
             return 0, ""
         if due is None and not any(st[1] for st in asked.values()):
             # NOTHING LEFT TO BLOCK: no Crawler is alive and none is pending. A spawn happens in
-            # one of the lead's turns, and that turn's end starts a fresh waker.
-            return 0, ""
+            # one of the lead's turns, and that turn's end starts a fresh waker. So there is
+            # nothing to judge, but while a GitHub waker runs this one stays to COVER its rings:
+            # it IDLES, a stat per poll and no campaign read, until replaced or out of budget.
+            # With no GitHub waker there is nothing to cover, and it exits as it always has.
+            if watch is None:
+                return 0, ""
+            idle = True

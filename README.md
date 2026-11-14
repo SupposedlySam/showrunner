@@ -615,6 +615,27 @@ check runs in a Crawler's worktree, and with no ring and no `waker` configured n
 printed. `SHOWRUNNER_LOSTRING=off` turns the check off, for a harness that drives the hook against
 a real checkout and must neither call GitHub nor mark that checkout's rings reported.
 
+**While the session is idle the two wakers cover each other, so a dropped ring is late, not
+lost.** The host sometimes drops an asyncRewake wake with no restart and no SessionStart after
+it, and the session just stays idle. So each waker watches the other's recorded rings. A ring
+counts as dropped when `waker_cover.window_sec` (default 60) has passed since it, no turn-end stamp
+of its waker came after it, and the session's transcript has not been written since. A delivered
+wake is written to the transcript at once, so a turn still running is not mistaken for a drop.
+The host hands each hook the transcript path on stdin; without one the heartbeat is the only
+guard. For a dropped ring the other waker rings once ("The GitHub waker rang at <time> and no
+turn followed: <its text>"), marks it `covered` so it is never rung a third time, and exits, as
+any ring does. It also logs a `covered-dropped-ring` line with both times to
+`waker-decisions.jsonl`, so the host's drop rate can be read from the record. A ring a turn
+followed is marked `delivered` and never rung. SessionStart does not report a covered ring again.
+It reports the cover ring, which is recorded as a ring of the covering waker, if that one was
+dropped too. While a GitHub waker runs, the Crawler waker stays alive with no Crawlers to
+watch: it idles on a stat per `crawler_waker.poll_sec` and does not read the campaign. It covers
+a GitHub ring within one of those polls after the window, and the GitHub waker covers a Crawler
+ring at its own `waker.poll_sec`, so neither costs more while idle. Cover needs both wakers. With
+no `waker` configured, or with `crawler_waker.enabled` false, the remaining waker's drops are
+reported only at SessionStart. A cover ring can itself be dropped, and then SessionStart reports
+it. `waker_cover.enabled: false` turns cover off.
+
 **A second spawn of a leaf a live process holds is refused before anything is created**, naming
 the holder's pid and tree. And the "worktree path already exists" refusal, whose way out is to
 remove the tree, checks the campaign record first: when a live Crawler stands in that tree it
@@ -1031,7 +1052,8 @@ itself. The wake names the Crawler, its leaf, why, and the commands to look:
 `showrunner status`, `showrunner show <leaf>`. A block already outstanding when your turn ended
 does not wake you, and a Crawler released and refused again does. It is silent in a Crawler's
 worktree, costs a stat per Crawler per poll while idle, and `doctor` says whether it is
-registered and when it last rang.
+registered and when it last rang. With no Crawler alive it stays only to cover a GitHub waker's
+dropped ring (see the cross-cover paragraph above), and with none configured it exits.
 
 It cannot arm it for you: a probe an agent can set is a watchdog an agent can switch off, and one
 that always exits 0 reads as "always waiting". Until it is armed, an orchestrator that has

@@ -46,7 +46,8 @@ A RING IS RECORDED BEFORE IT IS SENT, under the same lock as the state it advanc
 the wake text and the events it covered, in `rings`. Exit 2 ends this waker, and the next one
 starts only when a turn ends, so a wake the host never turns into a turn would leave the repo
 unwatched. `lostring` reads these at SessionStart: a ring no turn end followed is reported once,
-and one look catches up on what arrived since.
+and one look catches up on what arrived since. While the session idles, the Crawler waker
+covers a dropped ring of this one, and this one covers the Crawler waker's at each poll (`cover`).
 
 ONE GRAPHQL QUERY PER POLL, never a REST call per item: the 5,000/hour REST limit is shared by
 every agent on a machine and was measured exhausted. A failed look is never "nothing new" — it
@@ -314,7 +315,7 @@ def seeded(items):
 
 def ring_record(now_ts, text, judged):
     """What a ring covered, kept so a ring that never became a turn can be told at SessionStart."""
-    return {"at": int(now_ts), "text": text,
+    return {"at": int(now_ts), "at_f": round(now_ts, 3), "text": text,
             "events": ["%s %s" % (d["item"], d["event"]) for d in judged
                        if d.get("verdict") == "rang"]}
 
@@ -419,8 +420,31 @@ def first_wait(sp, state, now_ts):
     return sp["poll_sec"] if age < 0 else max(0, sp["poll_sec"] - age)
 
 
-def run(cfg, once=False, sleep=time.sleep, now=time.time, runner=None):
-    """(exit code, text). 2 with a wake; 0 quiet or not configured; 1 `once` that could not look."""
+def _cover(cfg, start, transcript):
+    """This waker's watch over the Crawler waker's rings, or None when there is none to watch."""
+    from . import cover, crawlerwaker
+    if cover.window(cfg) is None or not crawlerwaker.spec(cfg)["enabled"]:
+        return None
+    return cover.Cover(cfg, "crawler-waker", "github-waker", start, transcript)
+
+
+def _ring_cover(cfg, now_ts, text):
+    """Record a cover ring as this waker's own, under the lock that advances its state, so a
+    cover the host drops too is reported by `lostring` at SessionStart. Then it is rung."""
+    from .util import file_lock
+    with file_lock(_state_path(cfg)):
+        state = load_state(cfg)
+        if state is not None:
+            state["rings"] = (list(state.get("rings") or []) + [
+                {"at": int(now_ts), "at_f": round(now_ts, 3), "text": text,
+                 "events": ["cover"]}])[-RINGS_KEEP:]
+            save_state(cfg, state)
+    return text
+
+
+def run(cfg, once=False, sleep=time.sleep, now=time.time, runner=None, transcript=None):
+    """(exit code, text). 2 with a wake; 0 quiet or not configured; 1 `once` that could not look.
+    `transcript` is the session's, from the hook's stdin: cover reads it (see `cover`)."""
     from .util import file_lock
     sp = spec(cfg)
     if sp is None:
@@ -445,6 +469,7 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, runner=None):
     if token:
         _write_owner(cfg, token)
     deadline = now() + sp["budget_sec"]
+    watch = None if once else _cover(cfg, now(), transcript)
     wait = first_wait(sp, state, now())
     while True:
         if not once:
@@ -453,6 +478,9 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, runner=None):
             wait = sp["poll_sec"]
             if _read_owner(cfg) not in (None, token):
                 return 0, ""
+            text = watch.check(now()) if watch else None
+            if text:
+                return 2, _ring_cover(cfg, now(), text)
         items = look(sp, runner)
         # Compare against the state ON DISK, under a lock: another waker may have recorded this
         # same event since we last looked, and the first to record it is the only one to ring.

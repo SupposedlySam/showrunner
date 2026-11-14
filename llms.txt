@@ -144,7 +144,8 @@ pinned binary never wakes you with usage text. While idle it costs a stat per Cr
 (`crawler_waker.poll_sec`, default 20); `waiting` runs only when a transcript has gone quiet for
 the window, a Crawler's process ends, or the journal records a new block. Set
 `crawler_waker.enabled: false` to turn it off. `doctor` says whether it is registered and when
-it last rang.
+it last rang. With no Crawler alive it exits, unless a GitHub waker is configured: then it idles
+to cover that waker's dropped rings (below).
 
 **A wake that never became a turn.** Both wakers exit after ringing, and only a turn end starts
 the next, so a ring the host never delivers leaves nothing watching. Each ring is recorded in its
@@ -154,6 +155,22 @@ no turn-end stamp after it in `hook-heartbeat.jsonl` ("GitHub activity rang at <
 followed: <text>"), then looks at GitHub once (5 s timeout, the same locked compare-and-advance)
 and reports what arrived since. A failed look says FAILED, never "nothing new". The report reaches
 you with your first turn, and the waker restarts when that turn ends.
+
+**Cross-cover: a dropped ring is late, not lost.** The host sometimes drops a wake with no
+restart, so no SessionStart comes either. While idle, each waker watches the other's rings. One
+older than `waker_cover.window_sec` (60), with no turn-end stamp of its waker after it and no
+transcript write since, is rung ONCE more by the other waker: "The GitHub waker rang at <time>
+and no turn followed: <text>". The transcript path arrives on the hook's stdin, and a delivered
+wake writes the transcript at once, so a turn still running is never covered. The original ring
+is marked `covered`, so it is never rung a third time and SessionStart does not report it again.
+The cover ring is recorded as the covering waker's own, so SessionStart reports it if that one
+is dropped too. A ring a turn followed is marked `delivered`. Each cover logs a
+`covered-dropped-ring` line (`rang_at`, `covered_at`) to `waker-decisions.jsonl`. With no Crawler
+alive, the Crawler waker idles while a GitHub waker runs: a stat per `crawler_waker.poll_sec`
+(20 s), no campaign read. The GitHub waker checks at its own `poll_sec` (300 s), so a dropped
+Crawler ring is covered up to that late. Cover needs both wakers: with no `waker` configured, or
+`crawler_waker.enabled: false`, drops are reported only at SessionStart.
+`waker_cover.enabled: false` turns cover off.
 
 **A probe's COST is part of its contract.** game_loop runs `waiting` under a hardcoded 15s
 timeout and reads a timeout as *"the probe did not run at all"* — which it reports as a broken
@@ -1233,7 +1250,7 @@ verb gaining one, and the table below is the thing that has to stay right. It do
 | `unresearched-gate.sh` | by hand | same |
 | `write-guard.sh` | `showrunner worktree register --write-guard` | OPT-IN: it REFUSES writes, and on a seat no role maps the fallback may write nothing — wired by default, an upgrade alone would make a repo read-only |
 | `github-waker.sh` | `worktree register` (inert until `waker` is configured) | — it IS registered; listed so its config is findable: `waker.repos`, `waker.upstream` ({repo, author}), `waker.trusted_logins`, `waker.trusted_names`, `waker.signature`, `waker.poll_sec` |
-| `crawler-waker.sh` | `worktree register` | — it IS registered; listed so its config is findable: `crawler_waker.quiet_sec` (180), `crawler_waker.poll_sec` (20), `crawler_waker.budget_sec`, `crawler_waker.enabled` |
+| `crawler-waker.sh` | `worktree register` | — it IS registered; listed so its config is findable: `crawler_waker.quiet_sec` (180), `crawler_waker.poll_sec` (20), `crawler_waker.budget_sec`, `crawler_waker.enabled`; cross-cover: `waker_cover.window_sec` (60), `waker_cover.enabled` |
 | `waiting-probe.sh` | **NOBODY — deliberately** | arming an idle watchdog is a human decision, stated under "First thing, every session": *a probe an agent can set is a watchdog an agent can switch off* |
 
 Enforced by a default-deny check: every hook file present is registered in a settings file or

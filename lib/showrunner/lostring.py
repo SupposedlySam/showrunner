@@ -12,7 +12,8 @@ it: stamps are whole seconds, and a waker that looks at once rings within the se
 end that started it. A turn that ends within a second of its wake is the rarer case, and the
 error it costs is a ring reported that did land, which is the cheaper way to be wrong. A ring is reported once: it is marked `surfaced` when printed.
 A ring followed by a turn end is marked `delivered`, so the set left unmarked stays the
-ambiguous one.
+ambiguous one. A ring the other waker `covered` (see `cover`) is not reported: the cover ring
+carried its text, and is itself a ring reported here if it was dropped too.
 
 THE CATCH-UP is one GitHub look through the waker's locked compare-and-advance (`--once`
 semantics), with a short timeout, so what arrived after a lost ring is reported here and is
@@ -59,7 +60,7 @@ def lost(rings, turn_end):
     """The rings no turn end followed, not yet reported. `turn_end` None (unreadable) counts every
     unmarked ring as lost: the caller says it could not tell."""
     return [r for r in rings or []
-            if not r.get("surfaced") and not r.get("delivered")
+            if not r.get("surfaced") and not r.get("delivered") and not r.get("covered")
             and (turn_end is None or (r.get("at") or 0) >= turn_end)]
 
 
@@ -91,7 +92,7 @@ def surface(cfg, state_file, hook, label, now_ts):
                 r["surfaced"] = int(now_ts)
                 changed = True
             elif turn_end and not r.get("delivered") and not r.get("surfaced") \
-                    and (r.get("at") or 0) < turn_end:
+                    and not r.get("covered") and (r.get("at") or 0) < turn_end:
                 r["delivered"] = True
                 changed = True
         if changed:
