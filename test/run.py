@@ -1375,6 +1375,24 @@ def test_stop_gate():
     ok_, msg = gates.stop_gate(cfg, g)
     ok("REFUSES a turn-end while a claimed leaf is open", not ok_, msg)
     ok("the refusal names the leaf and its actor", "s1" in msg and "crawler" in msg, msg)
+    ok("...and with no job of its own running, the remedy is the close/release one",
+       "Either finish it through the close gate" in msg and "still running" not in msg, msg)
+    eq("...unchanged by an empty job list", gates.stop_gate(cfg, g, jobs=[])[1], msg)
+
+    # A Crawler that ended its turn to wait on its own background sweep was told to "finish it
+    # through the close gate" — which it meant to — and ended its turn again, four times.
+    ok_, msg = gates.stop_gate(cfg, g, jobs=[("python3 test/mutate.py --target x", 4242)])
+    ok("a refusal with the caller's own job running still refuses", not ok_, msg)
+    ok("...NAMES the job and its pid", "python3 test/mutate.py --target x (pid 4242) is still "
+       "running" in msg, msg)
+    ok("...and says to wait for it in the foreground, then close",
+       "Wait for it in the foreground (block on it and read its result), then close" in msg
+       and "Ending the turn while it runs is a refusal each time" in msg, msg)
+    ok("...in place of the close/release remedy, with the leaf and scope still stated",
+       "Either finish it" not in msg and "s1" in msg and "Scope:" in msg, msg)
+    ok("two jobs are both named, in the plural",
+       "a (pid 1), b (pid 2) are still running" in
+       gates.stop_gate(cfg, g, jobs=[("a", 1), ("b", 2)])[1])
 
     g.park("s1", "usage limit")
     ok_, msg = gates.stop_gate(cfg, g)
@@ -1739,6 +1757,11 @@ def test_spawn():
        "shell variable" in text and "silently" in text, )
     ok("the brief warns about the shared-state refusal without offering a bypass",
        "--no-verify" in text and "never bypass" in text.lower(), )
+    ok("the brief says to run long checks in the foreground and never end a turn to wait on "
+       "your own job — twice a Crawler backgrounded its sweep, ended its turn, and was refused "
+       "until the gate stood down",
+       "Run long checks in the foreground" in text
+       and "never end\na turn to wait for your own job" in text, )
 
     # WHAT A REPORT MAY CLAIM. A Crawler's sentences are read by an orchestrator that cannot
     # cheaply check them and then dispatches the next leaf on them — so a confident wrong
@@ -13823,6 +13846,30 @@ def test_cli():
     p = subprocess.run([sys.executable, exe, "stop-gate", "--leaf", "cli1"], cwd=cfg.root,
                        capture_output=True, text=True, env=env)
     eq("...still 2 for the caller that HOLDS the open leaf", p.returncode, 2)
+
+    # THE VERB GATHERS THE SESSION'S OWN JOBS, not just the library taking them. In-process,
+    # with this process standing in for the Claude session and a Bash-tool-shaped child as its
+    # backgrounded sweep.
+    import io as _io_bg
+    from contextlib import redirect_stderr as _err_bg
+    from showrunner import cli as _cli_bg
+    real_sp, here_bg, err_bg = _cli_bg.util_session_pid, os.getcwd(), _io_bg.StringIO()
+    sweep = subprocess.Popen(["sh", "-c", "true && eval 'sleep 30 # the sweep' < /dev/null"])
+    try:
+        time.sleep(0.3)
+        _cli_bg.util_session_pid = lambda: (os.getpid(), util.RESOLVED_BASIS)
+        os.chdir(cfg.root)
+        with _err_bg(err_bg):
+            rc_bg = _cli_bg.main(["stop-gate", "--leaf", "cli1", "--tree", cfg.root])
+    finally:
+        os.chdir(here_bg)
+        _cli_bg.util_session_pid = real_sp
+        sweep.kill()
+        sweep.wait()
+    ok("`stop-gate` refusing a session with its own job running NAMES the job and says to wait "
+       "for it in the foreground", rc_bg == 2 and "sleep 30 # the sweep (pid %d) is still "
+       "running" % sweep.pid in err_bg.getvalue() and "in the foreground" in err_bg.getvalue(),
+       (rc_bg, err_bg.getvalue()))
     p = subprocess.run([sys.executable, exe, "stop-gate", "--leaf", "cli2"], cwd=sib_tree,
                        capture_output=True, text=True, env=env)
     eq("...and 2 for the sibling about ITS own leaf, asked FROM that leaf's tree — which is the "
@@ -18006,6 +18053,29 @@ def test_provisioning_and_inert_helpers_directly():
     finally:
         kid.kill()
         kid.wait()
+
+    # jobs_before: the same evidence inverted, read at the refusal. Only a Bash-tool shell is
+    # the session's job; a bare long-lived child (an MCP server) is not.
+    eq("jobs_before with no pid names nothing", campaign.jobs_before(None, time.time()), [])
+    q = "'\\''"                              # how the wrapper quotes a ' inside the eval
+    job = subprocess.Popen(["sh", "-c", "true && eval 'sleep 30; echo %sdone%s' < /dev/null"
+                            % (q, q)])
+    bare = subprocess.Popen(["sleep", "30"])
+    try:
+        time.sleep(0.3)
+        eq("...names a Bash-tool shell by the command it evals, quotes restored, and skips a "
+           "bare child", campaign.jobs_before(os.getpid(), time.time() + 1),
+           [("sleep 30; echo 'done'", job.pid)])
+        started = util.process_started(job.pid)
+        eq("...and a job started AFTER the refusal is not one it ended its turn to wait on — "
+           "the same job, one second either side of its own start",
+           (campaign.jobs_before(os.getpid(), started - 1),
+            [p_ for _c, p_ in campaign.jobs_before(os.getpid(), started + 1)]),
+           ([], [job.pid]))
+    finally:
+        for proc_ in (job, bare):
+            proc_.kill()
+            proc_.wait()
 
     trees = os.path.join(d, "trees")
     for n in ("a", "b", "c"):

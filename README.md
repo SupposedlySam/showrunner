@@ -249,6 +249,11 @@ correctly proposing nothing. `showrunner reconcile` reports those as **BLOCKED**
 LIVE precisely because they *are* live. Such a Crawler wakes, reports and closes correctly the
 moment a message reaches it.
 
+One way in is a Crawler ending its turn to wait on its own background job — a suite or
+mutant sweep sent to the background, waiting for a notification that may never arrive. So when the
+refusing session still has a Bash-tool job running, the refusal names it with its pid and says to
+wait for it in the foreground, then close; the brief says the same up front.
+
 **Talking to a running Crawler is unbundled — and under `--launch`, not optional.** Clone a chat
 tool and point showrunner at it; nothing is vendored and no package manager is assumed:
 

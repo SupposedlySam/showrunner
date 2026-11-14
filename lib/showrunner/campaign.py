@@ -38,6 +38,7 @@ failure rather than stacking branches onto a broken trunk.
 import contextlib
 import json
 import os
+import re
 import time
 
 from .util import (atomic_write_json, boot_token, die, eprint, file_lock, git, now,
@@ -1269,6 +1270,56 @@ def _children_since(pid, since):
             rc2, name, _ = run(["ps", "-o", "comm=", "-p", line])
             found.append("%s (pid %s)" % (os.path.basename((name or "?").strip()) or "?", line))
     return found, True
+
+
+# Claude Code's Bash tool runs every command as `<shell> -c 'source <snapshot> ... && eval
+# '<command>' ...'`, backgrounded or not, as a direct child of the session.
+_BASH_TOOL_EVAL = re.compile(r"\beval '((?:[^']|'\\'')*)'")
+
+
+def jobs_before(pid, until):
+    """The session's OWN jobs still running at a refusal: list of (command, pid). Never raises.
+
+    `_children_since` inverted: there, a child started after the block is evidence the session
+    is working; here, at the refusal itself, a child started before it is the job the session
+    ended its turn to wait on. Twice in one day a Crawler sent its mutant sweep to the
+    background, ended its turn "until the monitor tells me", and was refused four times before
+    the gate stood down — the wake it was waiting for is a background-task notification, the
+    delivery path anthropics/claude-code#109944 shows dropping.
+
+    ONLY Bash-tool shells count, recognised by the `eval '...'` wrapper: an MCP server or a
+    language server is a long-lived child too and is not the Crawler's job, and neither is this
+    hook or a sibling turn-end hook running beside it. What this misses: a job started some
+    other way, and every job if the harness changes its wrapper — both return [], which leaves
+    the refusal as it was.
+    """
+    from .util import process_started
+    if not pid:
+        return []
+    rc, out, _ = run(["pgrep", "-P", str(pid)])
+    if rc != 0:
+        return []
+    mine, cur = set(), os.getpid()
+    for _ in range(64):                      # our own ancestry is the hook, never a job
+        mine.add(str(cur))
+        rc2, ppid, _ = run(["ps", "-o", "ppid=", "-p", str(cur)])
+        ppid = (ppid or "").strip()
+        if rc2 != 0 or not ppid.isdigit() or ppid in ("0", "1", str(pid)):
+            break
+        cur = int(ppid)
+    found = []
+    for line in (out or "").split():
+        if not line.isdigit() or line in mine:
+            continue
+        started = process_started(int(line))
+        if started is None or started > until:
+            continue
+        rc3, args, _ = run(["ps", "-o", "command=", "-p", line])
+        m = _BASH_TOOL_EVAL.search(args or "") if rc3 == 0 else None
+        if m:
+            command = " ".join(m.group(1).replace("'\\''", "'").split())
+            found.append((command[:77] + "..." if len(command) > 80 else command, int(line)))
+    return found
 
 
 def work_since_block(cfg, crawler, branch, worktree, scratch=None, session=None, pid=None):

@@ -1403,6 +1403,13 @@ def cmd_stop_gate(args):
     # belongs to whoever runs it. cwd last, for a hand-wired setup with no harness.
     tree = args.tree or os.environ.get("GAME_LOOP_REPO") or os.getcwd()
     ok, msg = gates.stop_gate(cfg, _graph(cfg), leaf_id=args.leaf, tree=tree)
+    if not ok:
+        # The session's own jobs, read only for a refusal's wording: the decision never rests
+        # on them, so a failed read costs the hint and nothing else.
+        pid, basis = util_session_pid()
+        jobs = campaign.jobs_before(pid, time.time()) if basis == RESOLVED_BASIS else []
+        if jobs:
+            ok, msg = gates.stop_gate(cfg, _graph(cfg), leaf_id=args.leaf, tree=tree, jobs=jobs)
     (print if ok else eprint)(msg)
     return 0 if ok else 2
 

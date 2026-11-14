@@ -1500,6 +1500,13 @@ showrunner stop-gate [--leaf <id>] [--tree <path>] # refuses a turn-end while YO
 `stop-gate` excludes epics (a container is expected to sit in progress while its children are worked)
 and parked leaves (accounted-for work, not abandoned work).
 
+**A refusal names the caller's own running job.** When the session still has a Bash-tool job it
+started (a backgrounded suite or mutant sweep), the remedy line names it with its pid and says to
+wait for it in the foreground, then close: ending a turn to wait on your own job is a refusal each
+time, and the background notification that would wake the session is a delivery path that drops.
+Only Bash-tool shells count, not MCP servers or hooks; with none found, the remedy is the
+close/release one.
+
 **`spawn --launch` wires `stop-gate --leaf <id>` into the Crawler's own tree** — merged into the
 harness's turn-end triggers, never replacing what is already there, and with no timeout of its
 own so the harness's budget governs. You do not wire it by hand.

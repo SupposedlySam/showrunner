@@ -244,6 +244,10 @@ A reason over 400 characters goes on STDIN, not in a file you write first:
 Writing it to a file would put it in your scratch dir, which is in the main checkout, where a
 write guard may correctly refuse you. If that happens, the guard is not wrong; use stdin.
 
+**Run long checks in the foreground** — the suite, the mutant sweep, a build — and never end
+a turn to wait for your own job. Each turn-end while it runs is a refusal, and the background
+notification that would wake you is a delivery path known to drop.
+
 Prefer to keep your edits inside the files this leaf is about. Your siblings are working
 other leaves right now, and the orchestrator predicted your file sets do not overlap.
 """
