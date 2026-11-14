@@ -2056,7 +2056,8 @@ def cmd_waker(args):
     from . import waker
     try:
         cfg = _cfg(args, required=False)
-        code, text = waker.run(cfg, once=args.once)
+        code, text = waker.run(cfg, once=args.once,
+                               transcript=None if args.once else _hook_transcript())
     except Exception as exc:                                    # noqa: BLE001
         if args.once:
             eprint("waker: %s" % exc)
@@ -2068,6 +2069,31 @@ def cmd_waker(args):
     if text and (args.once or code == 1):
         (eprint if code else print)(text)
     return code
+
+
+def _hook_transcript(wait=0.5):
+    """The session's transcript path, which the host hands a hook as JSON on stdin, or None.
+
+    Cover reads it to tell a ring a turn followed from a dropped one before that turn ends (see
+    `cover`). Bounded by `wait`, and None on any failure: a terminal, an empty or open pipe, or
+    stdin that is not JSON all mean the heartbeat is the only guard, never a waker that hangs."""
+    import select
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return None
+        fd, buf, until = sys.stdin.fileno(), b"", time.time() + wait
+        while True:
+            left = until - time.time()
+            if left <= 0 or not select.select([fd], [], [], left)[0]:
+                break
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            buf += chunk
+        path = json.loads(buf.decode("utf-8", "replace") or "{}").get("transcript_path")
+        return path if isinstance(path, str) and path else None
+    except Exception:                                           # noqa: BLE001
+        return None
 
 
 def _waker_session_start(args):
@@ -2098,7 +2124,8 @@ def cmd_crawler_waker(args):
     from . import crawlerwaker
     try:
         cfg = _cfg(args, required=False)
-        code, text = crawlerwaker.run(cfg, once=args.once)
+        code, text = crawlerwaker.run(cfg, once=args.once,
+                                      transcript=None if args.once else _hook_transcript())
     except Exception as exc:                                    # noqa: BLE001
         if args.once:
             eprint("crawler-waker: %s" % exc)
