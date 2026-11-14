@@ -76,6 +76,21 @@ elif [ -z "$out" ]; then
   out="showrunner: whoami exited 0 and printed NOTHING, which is the one outcome it is not allowed to have. Check: showrunner doctor"
 fi
 
+# A WAKE THAT NEVER BECAME A TURN. Both wakers exit after ringing, and only a turn end starts the
+# next, so a ring the host dropped left the repo unwatched until a human noticed. This reports
+# such a ring once and looks at GitHub once (a short timeout of its own), after the announcement
+# so a slow look cannot cost it. Silent when there is nothing to say; a binary too old to know
+# the flag is named, not hidden.
+if lost="$("$SR" waker --session-start 2>&1)"; then
+  [ -n "$lost" ] && out="$out
+
+$lost"
+else
+  out="$out
+
+showrunner: the lost-wake check did not run (\`waker --session-start\` exited non-zero: ${lost%%$'\n'*}), so a wake that rang while no turn followed is not reported here."
+fi
+
 python3 - "$out" <<'PY'
 import json, sys
 print(json.dumps({"hookSpecificOutput": {

@@ -42,6 +42,12 @@ EVERY DECISION IS LOGGED to `waker-decisions.jsonl` beside the state, one line p
 (rang, own, seen, older-than-window) with its reason, as a bounded tail: a miss is then read,
 not guessed.
 
+A RING IS RECORDED BEFORE IT IS SENT, under the same lock as the state it advances: the time,
+the wake text and the events it covered, in `rings`. Exit 2 ends this waker, and the next one
+starts only when a turn ends, so a wake the host never turns into a turn would leave the repo
+unwatched. `lostring` reads these at SessionStart: a ring no turn end followed is reported once,
+and one look catches up on what arrived since.
+
 ONE GRAPHQL QUERY PER POLL, never a REST call per item: the 5,000/hour REST limit is shared by
 every agent on a machine and was measured exhausted. A failed look is never "nothing new" — it
 returns None, and the first look after an unreadable state seeds silently instead of replaying
@@ -57,6 +63,7 @@ PR_ATTRIBUTION = "Generated with [Claude Code](https://claude.com/claude-code)"
 FIRST = 30
 LAST = 20
 DECISIONS_KEEP = 1000
+RINGS_KEEP = 50
 
 _THREAD = """
   number title state url updatedAt body
@@ -131,21 +138,30 @@ def _gh():
     return None
 
 
+def gh_runner(timeout=60):
+    """A runner that asks `gh` one GraphQL query, or None when there is no `gh`. The timeout is
+    the caller's: a SessionStart look must not hold a session's start for a minute."""
+    gh = _gh()
+    if not gh:
+        return None
+
+    def runner(q):
+        try:
+            out = subprocess.run([gh, "api", "graphql", "-f", "query=" + q],
+                                 capture_output=True, text=True, timeout=timeout,
+                                 stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return out.stdout if out.returncode == 0 else None
+    return runner
+
+
 def look(sp, runner=None):
     """Every watched item as {"repo#n": item}, or None when GitHub could not be read."""
     if runner is None:
-        gh = _gh()
-        if not gh:
+        runner = gh_runner()
+        if runner is None:
             return None
-
-        def runner(q):
-            try:
-                out = subprocess.run([gh, "api", "graphql", "-f", "query=" + q],
-                                     capture_output=True, text=True, timeout=60,
-                                     stdin=subprocess.DEVNULL)
-            except (OSError, subprocess.SubprocessError):
-                return None
-            return out.stdout if out.returncode == 0 else None
     raw = runner(query(sp))
     if not raw or not raw.strip():
         return None
@@ -296,6 +312,13 @@ def seeded(items):
             for key in sorted(items) for eid, login, _n, _t, _w in events(items[key])]
 
 
+def ring_record(now_ts, text, judged):
+    """What a ring covered, kept so a ring that never became a turn can be told at SessionStart."""
+    return {"at": int(now_ts), "text": text,
+            "events": ["%s %s" % (d["item"], d["event"]) for d in judged
+                       if d.get("verdict") == "rang"]}
+
+
 def decisions_path(cfg):
     return os.path.join(cfg.state_dir, "waker-decisions.jsonl")
 
@@ -439,6 +462,12 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, runner=None):
             wake, new_state = poll(sp, state, items, judged)
             if new_state is not None:
                 new_state["looked_at"] = now()
+                rings = list(state.get("rings") or [])
+                if wake and not once:
+                    # RECORDED HERE, in the save that advances: exit 2 ends this waker, and if
+                    # the host never turns the wake into a turn, nothing starts another.
+                    rings.append(ring_record(now(), wake, judged))
+                new_state["rings"] = rings[-RINGS_KEEP:]
                 save_state(cfg, new_state)      # advance FIRST: a wake re-sent is noise
                 state = new_state
                 log_decisions(cfg, judged, now())

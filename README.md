@@ -598,6 +598,23 @@ signature.
 `showrunner waker --once` looks once and reports; `SHOWRUNNER_GH` names the `gh` binary when it
 is not on PATH.
 
+**A wake that never became a turn is reported at the next session start.** Both wakers exit
+after ringing, and the next one starts only when a turn ends, so a ring the host never delivers
+(the hosting `claude` process gone or restarted) leaves nothing watching. Each ring is therefore
+recorded in the waker's state, under the lock that advances it, with its time, its text and the
+events it covered. At SessionStart (startup, resume and compaction) `whoami.sh` runs
+`showrunner waker --session-start`, which reports any ring with no turn-end stamp after it in
+`hook-heartbeat.jsonl` (a stamp in the same second does not count as after it), as "GitHub
+activity rang at <time> but no turn followed", or the same for the Crawler waker. It marks each
+one reported, so it is reported once. It then looks at GitHub once, through the waker's locked
+compare-and-advance with a 5-second timeout, and reports what arrived since in the same block,
+recorded as seen so the next waker does not ring it again. A look that fails or times out says
+so and is never "nothing new". The report reaches the agent with its first turn, since a
+SessionStart hook cannot start one, and the waker starts again when that turn ends. Neither
+check runs in a Crawler's worktree, and with no ring and no `waker` configured nothing is
+printed. `SHOWRUNNER_LOSTRING=off` turns the check off, for a harness that drives the hook against
+a real checkout and must neither call GitHub nor mark that checkout's rings reported.
+
 **A second spawn of a leaf a live process holds is refused before anything is created**, naming
 the holder's pid and tree. And the "worktree path already exists" refusal, whose way out is to
 remove the tree, checks the campaign record first: when a live Crawler stands in that tree it

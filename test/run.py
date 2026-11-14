@@ -99,6 +99,10 @@ os.environ["XDG_CONFIG_HOME"] = _CFG_HOME
 # so an unset var here has the suite stat the DEVELOPER's own sessions. An env var rather than a
 # patch, again, so the subprocess CLI assertions inherit it.
 os.environ["CLAUDE_CONFIG_DIR"] = os.path.join(_CFG_HOME, "claude-home")
+# SAME RULE, FOR THE WAKES. `whoami.sh` now runs `waker --session-start`, and several groups drive
+# it against ROOT — a real checkout, whose `waker` may be configured. Unset, the suite would call
+# GitHub and mark that checkout's own lost rings reported. The lost-ring group clears it.
+os.environ["SHOWRUNNER_LOSTRING"] = "off"
 # SAME RULE, THIRD VARIABLE (#39). SHOWRUNNER_CAMPAIGN selects where every state path lives, and
 # it is EXPORTED INTO EVERY CRAWLER by design -- a session dispatched into a campaign inherits it
 # and so do its children, this suite among them. So a suite run from inside a campaign was
@@ -19245,6 +19249,187 @@ def test_a_stand_down_on_an_open_leaf_needs_the_lead():
         H.run = orig_run
 
 
+def test_a_ring_no_turn_followed_is_reported_once():
+    group("a waker ring that never became a turn: recorded before exit, reported ONCE at the next "
+          "SessionStart, and one catch-up look reports what came after it")
+    if not have("git"):
+        skip("the lost-ring group", "git is not installed")
+        return
+    from showrunner import crawlerwaker as CW
+    from showrunner import lostring as L
+    from showrunner import waker as W
+    # REPORTED by a consumer: a ring at 23:32:50Z reached no turn, the waker had exited after
+    # ringing, and with no turn end nothing started another; three PRs went unjudged until a
+    # human came back seventeen hours later. Every case below uses its own heartbeat file and a
+    # fake clock, and the runner seam: nothing here calls GitHub.
+    saved = {k: os.environ.get(k) for k in ("SHOWRUNNER_HEARTBEAT", "SHOWRUNNER_LOSTRING")}
+    hb = os.path.join(tmpdir("lostring-hb"), "hook-heartbeat.jsonl")
+    os.environ["SHOWRUNNER_HEARTBEAT"] = hb
+    os.environ.pop("SHOWRUNNER_LOSTRING", None)
+    try:
+        _lost_ring_cases(W, L, CW, hb)
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def _lost_ring_cases(W, L, CW, hb):
+    cfg = make_repo()
+    cfg.data["waker"] = {"repos": ["me/fork"], "signature": "— 🤖 x owner agent",
+                         "poll_sec": 300}
+
+    def pr(n):
+        return {"number": n, "title": "pr %d" % n, "state": "OPEN", "author": {"login": "bot"},
+                "body": "b", "comments": {"nodes": []}, "reviews": {"nodes": []}}
+
+    def world(*ns):
+        return lambda _q: json.dumps({"data": {"r0": {"issues": {"nodes": []},
+                                                      "pullRequests": {"nodes": [pr(n) for n in
+                                                                                 ns]}}}})
+
+    def stamp(hook, ts):
+        with open(hb, "a") as fh:
+            fh.write(json.dumps({"hook": hook, "ts": int(ts)}) + "\n")
+
+    clock = [1_800_000_000.0]
+
+    def ring(runner):
+        def nap(_s):
+            clock[0] += 10
+        return W.run(cfg, sleep=nap, now=lambda: clock[0], runner=runner)
+
+    eq("seeded silently on the first look", W.run(cfg, once=True, runner=world(31))[0], 0)
+    stamp("github-waker", clock[0])                     # the turn end that started the waker
+    code, text = ring(world(31, 32))
+    ok("the waker rings for new PR #32 (exit 2)", code == 2 and "me/fork#32" in text,
+       (code, text))
+    rings = (W.load_state(cfg) or {}).get("rings") or []
+    ok("...and the ring is RECORDED in its state before it exits: time, wake text, events",
+       len(rings) == 1 and rings[0].get("text") == text and rings[0].get("at") == int(clock[0])
+       and rings[0].get("events") == ["me/fork#32 new"], rings)
+    rang_at = int(clock[0])
+
+    clock[0] += 3600
+    lines = L.session_start(cfg, now=lambda: clock[0], runner=world(31, 32, 33, 34))
+    said = "\n".join(lines)
+    ok("a SessionStart with a ring NEWER than the last turn end reports it, with its time and "
+       "text", "rang at %s but no turn followed" % L._when(rang_at) in said
+       and "me/fork#32" in said, said)
+    ok("...and the catch-up look reports what arrived AFTER the lost ring, in the same block",
+       "me/fork#33" in said and "me/fork#34" in said and "one look at this start" in said, said)
+    said2 = "\n".join(L.session_start(cfg, now=lambda: clock[0], runner=world(31, 32, 33, 34)))
+    ok("a SECOND start does not repeat the ring, and the look it caught up on is not re-reported",
+       "rang at" not in said2 and "me/fork#33" not in said2 and "nothing new" in said2, said2)
+    ok("...because the ring is marked surfaced in the state",
+       [bool(r.get("surfaced")) for r in (W.load_state(cfg) or {}).get("rings") or []]
+       == [True], W.load_state(cfg))
+    stamp("github-waker", clock[0])
+    code, text = ring(world(31, 32, 33, 34, 35))
+    ok("a second ring, for #35", code == 2 and "me/fork#35" in text, (code, text))
+    stamp("github-waker", clock[0] + 30)                # ...whose turn ended: it landed
+    said3 = "\n".join(L.session_start(cfg, now=lambda: clock[0] + 60,
+                                      runner=world(31, 32, 33, 34, 35)))
+    ok("a ring FOLLOWED by a turn end is not reported", "rang at" not in said3, said3)
+    eq("...and is marked delivered, so what stays unmarked is only what is still in doubt",
+       [r.get("delivered") for r in W.load_state(cfg)["rings"]], [None, True])
+    eq("the rule itself: only a ring no turn end came after (a same-second stamp is not after "
+       "it), not yet surfaced, is lost",
+       [r["at"] for r in L.lost([{"at": 5}, {"at": 10}, {"at": 11}, {"at": 12, "surfaced": 1}],
+                                10)], [10, 11])
+    eq("...and an unreadable turn-end record counts every unmarked ring, rather than none",
+       len(L.lost([{"at": 5}, {"at": 11}], None)), 2)
+
+    clock[0] += 3600
+    stamp("github-waker", clock[0])
+    code, text = ring(world(31, 32, 33, 34, 35, 36))
+    t = time.time()
+    said4 = "\n".join(L.session_start(cfg, now=lambda: clock[0] + 60, runner=lambda _q: None))
+    ok("a FAILED catch-up look says so, and is never reported as nothing new",
+       "FAILED" in said4 and "unknown, not absent" in said4
+       and "one look at this start: nothing new" not in said4,
+       said4)
+    ok("...and the lost ring is still reported alongside it", "me/fork#36" in said4, said4)
+    stub = os.path.join(tmpdir("lostring-gh"), "gh")
+    with open(stub, "w") as fh:
+        fh.write("#!/bin/sh\nsleep 30\n")
+    os.chmod(stub, 0o755)
+    prev_gh = os.environ.get("SHOWRUNNER_GH")
+    os.environ["SHOWRUNNER_GH"] = stub
+    try:
+        t = time.time()
+        said5 = "\n".join(L.session_start(cfg, timeout=1))
+        took = time.time() - t
+    finally:
+        if prev_gh is None:
+            os.environ.pop("SHOWRUNNER_GH", None)
+        else:
+            os.environ["SHOWRUNNER_GH"] = prev_gh
+    ok("a look that HANGS is cut off by its own timeout and does not hold the start",
+       took < 10 and "FAILED" in said5, (took, said5))
+
+    # THE CRAWLER WAKER has the same exit-after-ring shape, so the same rule covers it.
+    from showrunner.util import atomic_write_json
+    st_path = os.path.join(cfg.state_dir, CW.STATE)
+    atomic_write_json(st_path, {"rung": ["k"], "rings": [
+        {"at": int(clock[0]) + 100, "text": "A Crawler needs you: W9 BLOCKED", "events": ["k"]},
+        {"at": int(clock[0]) - 100, "text": "old and landed", "events": ["j"]}]})
+    stamp("crawler-waker", clock[0])
+    said6 = "\n".join(L.session_start(cfg, now=lambda: clock[0] + 200, runner=world()))
+    ok("a Crawler-waker ring no turn end followed is reported too, and one that landed is not",
+       "The Crawler waker rang at" in said6 and "W9 BLOCKED" in said6
+       and "old and landed" not in said6, said6)
+    ok("...once", "W9" not in "\n".join(L.session_start(cfg, now=lambda: clock[0] + 300,
+                                                        runner=world())))
+
+    # THE VERB AND THE HOOK, end to end: `whoami.sh` is what SessionStart actually runs.
+    repo = make_repo()
+    with open(os.path.join(repo.root, ".showrunner", "config.local.json"), "w") as fh:
+        json.dump({"waker": cfg.data["waker"]}, fh)
+    os.makedirs(repo.state_dir, exist_ok=True)
+    atomic_write_json(os.path.join(repo.state_dir, "waker-state.json"),
+                      {"events": [], "states": {"me/fork#31": "OPEN"}, "looked_at": 1,
+                       "rings": [{"at": int(time.time()) - 60, "text": "NEW PR me/fork#32",
+                                  "events": ["me/fork#32 new"]}]})
+    answer = os.path.join(tmpdir("lostring-answer"), "answer.json")
+    with open(answer, "w") as fh:
+        fh.write(world(31, 32, 33)(None))
+    gh = os.path.join(os.path.dirname(answer), "gh")
+    with open(gh, "w") as fh:
+        fh.write("#!/bin/sh\ncat '%s'\n" % answer)
+    os.chmod(gh, 0o755)
+    # The hook's FIRST candidate, since a scratch repo may carry another one it would reach first.
+    os.makedirs(os.path.join(repo.root, ".showrunner_self", "bin"), exist_ok=True)
+    shim = os.path.join(repo.root, ".showrunner_self", "bin", "showrunner")
+    with open(shim, "w") as fh:
+        fh.write('#!/bin/sh\nexec "%s" "%s" "$@"\n'
+                 % (sys.executable, os.path.join(ROOT, "bin", "showrunner")))
+    os.chmod(shim, 0o755)
+    env = dict(os.environ, SHOWRUNNER_GH=gh, CLAUDE_PROJECT_DIR=repo.root,
+               SHOWRUNNER_HEARTBEAT=os.path.join(tmpdir("lostring-hb2"), "hb.jsonl"))
+    env.pop("SHOWRUNNER_LOSTRING", None)
+    hp = subprocess.run(["bash", os.path.join(ROOT, ".showrunner", "hooks", "whoami.sh")],
+                        input="{}", capture_output=True, text=True, cwd=repo.root, env=env)
+    try:
+        ctx = json.loads(hp.stdout)["hookSpecificOutput"]["additionalContext"]
+    except Exception:                                            # noqa: BLE001
+        ctx = hp.stdout + hp.stderr
+    ok("whoami.sh, the SessionStart hook, carries the lost ring and the catch-up into "
+       "additionalContext", "no turn followed" in ctx and "NEW PR me/fork#32" in ctx
+       and "me/fork#33" in ctx, ctx[-600:])
+    hp = subprocess.run(["bash", os.path.join(ROOT, ".showrunner", "hooks", "whoami.sh")],
+                        input="{}", capture_output=True, text=True, cwd=repo.root, env=env)
+    ok("...and the next start does not repeat it", "no turn followed" not in hp.stdout
+       and "me/fork#33" not in hp.stdout, hp.stdout[-400:])
+    tree = os.path.join(repo.root, ".worktrees", "lost-probe")
+    sh(["git", "worktree", "add", "-q", "-b", "lost-probe", tree], repo.root)
+    from showrunner import config as C
+    eq("in a LINKED worktree it says nothing, as the wakers do",
+       L.session_start(C.load(start=tree), runner=world(31, 32, 33, 99)), [])
+
+
 def test_the_crawler_waker():
     group("the Crawler waker: an idle orchestrator is woken when a Crawler STAYS blocked, once per "
           "block, and never from a Crawler's tree")
@@ -19285,6 +19470,11 @@ def test_the_crawler_waker():
     st = CW.load_state(cfg)
     ok("...and records when it fired, for `doctor`", isinstance(st.get("last_fired"), int)
        and st.get("last_crawlers") == [c], st)
+    _ring = (st.get("rings") or [{}])[-1]
+    ok("...and records the RING itself, time, text and block, so a ring no turn followed can be "
+       "reported at the next SessionStart", _ring.get("text") == text
+       and _ring.get("at") == st.get("last_fired")
+       and _ring.get("events") == [CW.block_key(c, t0 - 600, None)], _ring)
     code, _t, _n = drive(blocked(t0 - 600))
     eq("the same block does not ring a second waker", code, 0)
 
@@ -19685,7 +19875,7 @@ def test_never_integrated_leaves_do_not_collide():
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_the_github_waker_stamps_every_invocation, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_the_github_waker_stamps_every_invocation, test_a_ring_no_turn_followed_is_reported_once, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

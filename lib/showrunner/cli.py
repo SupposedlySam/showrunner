@@ -2051,6 +2051,8 @@ def cmd_waker(args):
     """
     if args.probe:
         return 0
+    if args.session_start:
+        return _waker_session_start(args)
     from . import waker
     try:
         cfg = _cfg(args, required=False)
@@ -2066,6 +2068,22 @@ def cmd_waker(args):
     if text and (args.once or code == 1):
         (eprint if code else print)(text)
     return code
+
+
+def _waker_session_start(args):
+    """SessionStart: report wakes that never became a turn, then one catch-up look. Exits 0 on
+    every path — `whoami.sh` appends this to the seat announcement, which must never break."""
+    from . import lostring
+    try:
+        cfg = _cfg(args, required=False)
+        lines = lostring.session_start(cfg)
+    except Exception as exc:                                    # noqa: BLE001
+        lines = ["showrunner: the lost-wake check FAILED (%s: %s), so a GitHub or Crawler wake "
+                 "that rang while no turn followed would not be reported here."
+                 % (type(exc).__name__, exc)]
+    for line in lines:
+        print(line)
+    return 0
 
 
 def cmd_crawler_waker(args):
@@ -4502,6 +4520,9 @@ def build_parser():
     s.formatter_class = argparse.RawDescriptionHelpFormatter
     s.add_argument("--once", action="store_true", help="look once and report, instead of waiting")
     s.add_argument("--probe", action="store_true", help="exit 0: this binary knows the verb")
+    s.add_argument("--session-start", action="store_true",
+                   help="SessionStart: report any ring (GitHub or Crawler waker) no turn end "
+                        "followed, once, then look at GitHub once with a short timeout")
     s.set_defaults(func=cmd_waker)
 
     s = sub.add_parser("crawler-waker",
