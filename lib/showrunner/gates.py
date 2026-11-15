@@ -188,8 +188,13 @@ def _ts(epoch):
 
 
 # ---------------------------------------------------------------- stop gate
-def stop_gate(cfg, graph, leaf_id=None, tree=None):
+def stop_gate(cfg, graph, leaf_id=None, tree=None, jobs=None):
     """Refuse a turn-end while THIS CALLER's claimed LEAF is open. Returns (ok, message).
+
+    `jobs` is the caller's own jobs still running, as (command, pid) — `campaign.jobs_before`,
+    gathered by `cmd_stop_gate`. With any, the refusal's remedy names them and says to wait in
+    the foreground: a Crawler that ended its turn to wait on its own sweep was told to "finish
+    it through the close gate", which it already meant to, and ended its turn again.
 
     Epics are containers — expected to sit in progress while their children are worked —
     so they are excluded. Parked leaves are excluded too: a Crawler parked at a usage
@@ -301,9 +306,16 @@ def stop_gate(cfg, graph, leaf_id=None, tree=None):
     if mine:
         detail = "\n".join("  - %s (%s) — %s" % (x["id"], x.get("actor") or "?", x.get("title", ""))
                            for x in mine)
+        if jobs:
+            named = ", ".join("%s (pid %s)" % (c, p) for c, p in jobs)
+            remedy = ("Your %s %s still running. Wait for it in the foreground (block on it and "
+                      "read its result), then close. Ending the turn while it runs is a refusal "
+                      "each time." % (named, "is" if len(jobs) == 1 else "are"))
+        else:
+            remedy = ("Either finish it through the close gate, or release it, or explicitly "
+                      "checkpoint and hand back.")
         msg = ("STOP REFUSED: YOUR claimed-but-open leaf work is still in progress:\n%s\n"
-               "  Either finish it through the close gate, or release it, or explicitly "
-               "checkpoint and hand back.\n  Scope: %s" % (detail, basis))
+               "  %s\n  Scope: %s" % (detail, remedy, basis))
         if lines:
             msg += "\n  " + "\n  ".join(lines)
         return False, msg
