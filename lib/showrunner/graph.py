@@ -25,6 +25,7 @@ import os
 import shutil
 import sqlite3
 import time
+import urllib.parse
 
 from .util import (Refused, boot_token, die, eprint, now, pid_alive, pid_readable, run,
                    session_pid,
@@ -157,8 +158,12 @@ def _claim_pid():
 class SqliteGraph:
     name = "vendored"
 
-    def __init__(self, path):
+    def __init__(self, path, readonly=False):
         self.path = path
+        if readonly:
+            self.db = self._open_readonly(path)
+            self.db.row_factory = sqlite3.Row
+            return
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self.db = sqlite3.connect(path, timeout=30, isolation_level="IMMEDIATE")
         self.db.row_factory = sqlite3.Row
@@ -169,6 +174,28 @@ class SqliteGraph:
         self.db.execute("PRAGMA busy_timeout=30000")
         self.db.executescript(SCHEMA)
         self.db.commit()
+
+    @staticmethod
+    def _open_readonly(path):
+        """A connection that leaves the state dir byte-identical, mtimes included.
+
+        `mode=ro` alone is not that: on a WAL database with no sidecars it CREATES `-wal` and
+        `-shm` and leaves them behind. So the sidecars decide. None present means the last
+        writer checkpointed and closed, the main file is the whole graph, and `immutable=1`
+        reads it without the shared-memory file. Present means a writer is live or died
+        mid-transaction; `mode=ro` then uses the files that already exist and creates none.
+        A graph that does not exist yet reads as an empty one instead of being created.
+        """
+        if not os.path.exists(path):
+            db = sqlite3.connect(":memory:")
+            db.executescript(SCHEMA)
+            return db
+        uri = "file:%s?mode=ro" % urllib.parse.quote(os.path.abspath(path))
+        if not os.path.exists(path + "-wal"):
+            uri += "&immutable=1"
+        db = sqlite3.connect(uri, uri=True, timeout=30)
+        db.execute("PRAGMA busy_timeout=30000")
+        return db
 
     # -- reads -------------------------------------------------------------
     def _rows(self, sql, args=()):
@@ -849,8 +876,12 @@ class BrGraph:
         return []
 
 
-def open_graph(cfg):
-    """Resolve the configured backend. `auto` prefers br when it is genuinely usable."""
+def open_graph(cfg, readonly=False):
+    """Resolve the configured backend. `auto` prefers br when it is genuinely usable.
+
+    `readonly` is for the report verbs: the vendored graph is then opened so that nothing under
+    the state dir changes, and a write through it raises. The br backend is a separate binary
+    and is opened as it always was."""
     backend = cfg.graph_backend
     if backend == "br":
         if not BrGraph.available(cfg.br_db):
@@ -858,9 +889,9 @@ def open_graph(cfg):
                 % ("" if not cfg.br_db else " (or %s is missing)" % cfg.br_db), code=2)
         return BrGraph(cfg.br_db)
     if backend == "vendored":
-        return SqliteGraph(cfg.graph_db)
+        return SqliteGraph(cfg.graph_db, readonly=readonly)
     if backend != "auto":
         die("graph.backend must be one of: auto, vendored, br", code=2)
     if cfg.br_db and BrGraph.available(cfg.br_db):
         return BrGraph(cfg.br_db)
-    return SqliteGraph(cfg.graph_db)
+    return SqliteGraph(cfg.graph_db, readonly=readonly)

@@ -417,8 +417,9 @@ it every call, so a poller would otherwise get one identical line per poll. Each
 refusal (`since`, `blocks_total`, and `stood_down` when the harness stood down). The journal says
 what `waiting` concluded, not only what the harness did: when the work-since-block evidence
 releases a Crawler that the harness still reports blocked, `crawler.unblocked` is appended once,
-with `why` set to the evidence and `released_by: "evidence"`, by whichever verb notices first. A
-new refusal is a new `crawler.blocked`. So a reader of the journal and `waiting --porcelain`
+with `why` set to the evidence and `released_by: "evidence"`, by whichever recording verb notices
+first (`snapshot` and `waiting --no-record` journal nothing; the next recording pass emits what
+they saw). A new refusal is a new `crawler.blocked`. So a reader of the journal and `waiting --porcelain`
 agree about who is blocked.
 
 Frames carry their own type. `ready` marks the end of the replay, so attaching to a running
@@ -435,6 +436,38 @@ integers, the comparison succeeding, nothing able to notice.
 **If you are relaying these somewhere, the cursor is the CONSUMER's.** `watch` keeps no durable
 position; you supply yours. Never record a cursor as proof of delivery before whatever you are
 feeding has actually taken the frames — that turns at-least-once into at-most-once, silently.
+
+## Read-only verbs (for a host)
+
+A host that runs showrunner on repos it must not change can rely on these to leave
+`.showrunner/`, the campaign dir included, byte-identical, mtimes included:
+
+```
+showrunner doctor
+showrunner status
+showrunner show <leaf>
+showrunner list
+showrunner ready
+showrunner plan
+showrunner snapshot
+showrunner whoami
+showrunner waiting --porcelain --no-record
+showrunner waker --show [--json]
+showrunner --version
+showrunner self --dest <path>
+```
+
+**`waiting` records by design; `--no-record` is how to ask without recording.** Plain `waiting`
+appends its verdict to `waiting.jsonl` and journals `crawler.blocked`/`crawler.unblocked`
+transitions. That journal is the evidence `doctor` reads that the watchdog's probe actually
+fires, so a host's calls would inflate it. `--no-record` reaches the same verdict, journals
+nothing, and its porcelain says `"journal": "not recorded"`.
+
+Two limits. With a writer holding the graph open, a read still updates `graph.db-shm`, the
+shared-memory index SQLite keeps beside a live database; the reader needs it to see the writer's
+committed rows, and nothing in it is a record. And under `graph.backend: br` the graph is a
+separate binary that showrunner does not open read-only. `test_report_verbs_write_nothing` in
+`test/run.py` holds this list to the claim.
 
 ## One session per worktree
 

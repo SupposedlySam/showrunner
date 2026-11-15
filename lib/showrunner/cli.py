@@ -38,8 +38,8 @@ def _cfg(args, required=True, guard=False):
                        fallback=package_root() if guard else None)
 
 
-def _graph(cfg):
-    return G.open_graph(cfg)
+def _graph(cfg, readonly=False):
+    return G.open_graph(cfg, readonly=readonly)
 
 
 # ------------------------------------------------------------------- init
@@ -236,6 +236,28 @@ def _config_layer_shadows(cfg):
 
 
 # ----------------------------------------------------------------- doctor
+def _check_appendable(path):
+    """Raise OSError if `path` could not be opened for append. Creates nothing.
+
+    A missing file is judged by the nearest directory that exists, because that is where an
+    append would have to create it and everything between."""
+    probe = path
+    while not os.path.lexists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    if probe == path:
+        if os.path.isdir(path):
+            raise IsADirectoryError(21, "Is a directory", path)
+        if not os.access(path, os.W_OK):
+            raise PermissionError(13, "Permission denied", path)
+    elif not os.path.isdir(probe):
+        raise NotADirectoryError(20, "Not a directory", probe)
+    elif not os.access(probe, os.W_OK | os.X_OK):
+        raise PermissionError(13, "Permission denied", probe)
+
+
 def cmd_doctor(args):
     cfg = _cfg(args, required=False)
     # THE CODE AND THE PROJECT ARE TWO DIFFERENT THINGS, and under a central install they are
@@ -284,7 +306,7 @@ def cmd_doctor(args):
 
     backend = "?"
     try:
-        g = _graph(cfg)
+        g = _graph(cfg, readonly=True)
         backend = g.name
         print("  %s graph backend: %s (%s)" % (GRN + "ok   " + OFF, backend,
                                                cfg.graph_db if backend == "vendored" else cfg.br_db or "br"))
@@ -425,11 +447,14 @@ def cmd_doctor(args):
     # It matters because that journal is the evidence a consumer needs before adopting the
     # watchdog at all: a write that stops silently makes "the gate never fired" and "the record
     # could not be written" the same reading, and the second one argues FOR adoption.
+    #
+    # ASKED WITHOUT WRITING. This used to create the state dir and the journal to prove they
+    # could be appended to, so the first `doctor` in a campaign left a file behind. A host runs
+    # doctor on repos it promises not to change; whether the append WOULD succeed is answered
+    # from the permissions of what already exists.
     _wj = os.path.join(cfg.state_dir, "waiting.jsonl")
     try:
-        os.makedirs(cfg.state_dir, exist_ok=True)
-        with open(_wj, "a"):
-            pass
+        _check_appendable(_wj)
         # AND WHEN IT LAST ANSWERED. Registration and FIRING are two claims, and everything
         # above reports the first. The Stop trigger reaches `waiting --porcelain` on every
         # turn-end it examines, and that appends a line here — so this file's newest timestamp
@@ -672,7 +697,7 @@ def cmd_doctor(args):
         if len(_trees) >= 12:
             try:
                 from . import idle as _idle
-                _found, _kept, _unreg = _idle.classify(cfg, _graph(cfg), 86400)
+                _found, _kept, _unreg = _idle.classify(cfg, _graph(cfg, readonly=True), 86400)
             except Exception:                                   # noqa: BLE001
                 _found = None
             if _found:
@@ -1036,7 +1061,7 @@ def cmd_doctor(args):
 # ----------------------------------------------------------------- status
 def cmd_status(args):
     cfg = _cfg(args)
-    g = _graph(cfg)
+    g = _graph(cfg, readonly=True)
     ready = g.ready()
     in_prog = [x for x in g.list(status=G.IN_PROGRESS) if not x.is_epic]
     print("%s%s%s — graph %s" % (BOLD, cfg.project_name, OFF, g.name))
@@ -1273,7 +1298,7 @@ def cmd_campaign(args):
 
 def cmd_list(args):
     cfg = _cfg(args)
-    leaves = _graph(cfg).list(status=args.status)
+    leaves = _graph(cfg, readonly=True).list(status=args.status)
     if args.json:
         print(json.dumps(leaves, indent=2, sort_keys=True))
         return 0
@@ -1296,7 +1321,7 @@ def cmd_show(args):
     them would let a stale campaign entry read as graph state.
     """
     cfg = _cfg(args)
-    leaf = _graph(cfg).show(args.id)
+    leaf = _graph(cfg, readonly=True).show(args.id)
     entry = next((c for c in (campaign.load(cfg).get("crawlers") or [])
                   if c.get("leaf") == args.id), None)
     if entry:
@@ -1311,7 +1336,7 @@ def cmd_show(args):
 
 def cmd_ready(args):
     cfg = _cfg(args)
-    ready = _graph(cfg).ready()
+    ready = _graph(cfg, readonly=True).ready()
     if args.json:
         print(json.dumps(ready, indent=2, sort_keys=True))
         return 0
@@ -2729,7 +2754,7 @@ def cmd_route(args):
 
 def cmd_plan(args):
     cfg = _cfg(args)
-    g = _graph(cfg)
+    g = _graph(cfg, readonly=True)
     ready = g.ready()
     if not ready:
         print("no ready work — `showrunner ready` is dry")
@@ -3830,11 +3855,12 @@ def cmd_snapshot(args):
     events are already reflected here rather than guessing an overlap.
     """
     cfg = _cfg(args)
-    g = _graph(cfg)
+    g = _graph(cfg, readonly=True)
     ready = g.ready()
     in_prog = [x for x in g.list(status=G.IN_PROGRESS) if not x.is_epic]
-    findings = campaign.reconcile(cfg, g, base=args.base)
-    is_waiting, waiting_detail = campaign.waiting(cfg, g, base=args.base)
+    findings = campaign.reconcile(cfg, g, base=args.base, record=False)
+    # NOT RECORDED: a viewer's picture is not a verdict the watchdog acted on.
+    is_waiting, waiting_detail = campaign.waiting(cfg, g, base=args.base, record=False)
     _, _, unreadable = events.read(cfg, limit=1)
     backlog, _, _ = events.read(cfg)
     seq = backlog[-1]["seq"] if backlog else 0
@@ -3958,7 +3984,8 @@ def cmd_watch(args):
 
 def cmd_waiting(args):
     cfg = _cfg(args)
-    is_waiting, detail = campaign.waiting(cfg, _graph(cfg), base=args.base)
+    is_waiting, detail = campaign.waiting(cfg, _graph(cfg, readonly=True), base=args.base,
+                                           record=not getattr(args, "no_record", False))
     # --follow BLOCKS WHILE THE ANSWER IS "waiting", then answers exactly as a single call would.
     # An orchestrator with nothing left but its Crawlers runs it in the background: the harness
     # re-invokes the session when it exits, whether the Crawler closed, died, or stopped working.
@@ -3967,7 +3994,8 @@ def cmd_waiting(args):
     while (getattr(args, "follow", False) and is_waiting
            and not (detail.get("blocked_crawlers") or detail.get("stalled_crawlers"))):
         time.sleep(max(5, args.interval))
-        is_waiting, detail = campaign.waiting(cfg, _graph(cfg), base=args.base)
+        is_waiting, detail = campaign.waiting(cfg, _graph(cfg, readonly=True), base=args.base,
+                                           record=not getattr(args, "no_record", False))
     if args.porcelain:
         # The porcelain branch returns through the same three-code path below, so a structured
         # consumer and a prose one cannot disagree about the verdict.
@@ -4703,6 +4731,11 @@ def build_parser():
     s.add_argument("--porcelain", action="store_true",
                    help="JSON on stdout — THE CONTRACT. The prose form splits its verdict across "
                         "stdout and its BLOCKED finding across both streams; build on this one")
+    s.add_argument("--no-record", action="store_true",
+                   help="answer without appending the verdict to waiting.jsonl, which records "
+                        "the verdicts a watchdog acted on. Use it from anything that asks out of "
+                        "curiosity -- a host, a viewer, a person -- so the record stays the "
+                        "watchdog's")
     s.add_argument("--follow", action="store_true",
                    help="block while waiting, then answer as one call would: exits when no "
                         "dispatched work is live, or a Crawler is BLOCKED or STALLED. Run it in "

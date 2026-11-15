@@ -702,7 +702,7 @@ def campaign_state(cfg):
     try:
         from . import graph as _graph
 
-        g = _graph.open_graph(cfg)
+        g = _graph.open_graph(cfg, readonly=True)
         rows = g.list()
         ready = len(g.ready())
     except Exception:                                           # noqa: BLE001
