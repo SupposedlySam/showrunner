@@ -2456,8 +2456,8 @@ def test_parked_beats_blocked():
        [c["crawler"] for c in detail["parked_crawlers"]], ["c-both"])
     ok("...and the reason says it is BOTH, so its owner learns the run is stalled rather than "
        "reading an ordinary usage-limit park",
-       "refused at a turn-end" in detail["parked_crawlers"][0]["why"],
-       detail["parked_crawlers"][0]["why"])
+       "refused at a turn-end" in ((detail["parked_crawlers"] or [{}])[0].get("why") or ""),
+       detail["parked_crawlers"])
 
     # WHOSE LEAF IT IS, carried in the report. The gate fires in whichever session is nearest,
     # which in a multi-campaign checkout is routinely not the owner — so it told a stranger to
@@ -2474,7 +2474,7 @@ def test_parked_beats_blocked():
         _w3, d3 = campaign.waiting(cfg, g)
     finally:
         campaign.reconcile = real_reconcile
-    b3 = d3["blocked_crawlers"][0]
+    b3 = (d3["blocked_crawlers"] or [{}])[0]
     eq("a blocked report NAMES the actor who claimed the leaf, so the session it fires in can "
        "tell whether it is theirs at all", b3.get("actor"), "crawler-txt-paint")
     ok("...and the claiming SESSION, because two agents can share an actor name and the session "
@@ -4483,7 +4483,7 @@ def test_worktree_lease():
 
     def waiting_exit(blocked, waiting_now=False):
         _ow = campaign.waiting
-        campaign.waiting = lambda c, g, base=None: (waiting_now, {
+        campaign.waiting = lambda c, g, base=None, record=True: (waiting_now, {
             "live_crawlers": [], "parked_crawlers": [], "waiting": waiting_now,
             "blocked_crawlers": ([{"crawler": "c-x", "leaf": "X1", "why": "refused at turn-end"}]
                                  if blocked else []), "basis": "t"})
@@ -19057,6 +19057,198 @@ def test_the_github_waker_stamps_every_invocation():
        and "`github-waker` has NEVER" not in out, out[-1500:])
 
 
+def test_report_verbs_write_nothing():
+    group("the report verbs leave .showrunner/ byte-identical, mtimes included; only `waiting` "
+          "records, and `waiting --no-record` does not")
+    if not have("git"):
+        skip("the read-only verbs group", "git is not installed")
+        return
+    # REPORTED: a host runs these on every repo it serves and promises never to run a verb that
+    # writes. doctor created the waiting journal (and under a fresh campaign, the campaign dir
+    # and its graph.db), and every verb that opened the graph created and deleted SQLite's WAL
+    # sidecars, so the state dir's own mtime moved on each `status`.
+    from showrunner import events as EV
+    import showrunner.harness as _HB
+    cfg, g, rec, _tp = _crawler_fixture("R1")
+    g.add("second leaf", leaf_id="R2", labels=["backend"])
+    g.db.close()                 # no writer left open: the state a host normally finds
+    exe = os.path.join(ROOT, "bin", "showrunner")
+    home = tmpdir("ro-home")
+
+    def sr(*argv, campaign=None):
+        env = dict(os.environ, HOME=home)
+        env.pop("SHOWRUNNER_CAMPAIGN", None)
+        if campaign:
+            env["SHOWRUNNER_CAMPAIGN"] = campaign
+        return subprocess.run([sys.executable, exe] + list(argv), capture_output=True, text=True,
+                              cwd=cfg.root, stdin=subprocess.DEVNULL, env=env)
+
+    def tree(root):
+        """Every path under root, the root itself included: (mtime_ns, mode, sha1 of bytes)."""
+        out = {}
+        if not os.path.lexists(root):
+            return out
+        out["."] = (os.lstat(root).st_mtime_ns, os.lstat(root).st_mode, None)
+        for d, dirs, files in os.walk(root):
+            for n in dirs + files:
+                pth = os.path.join(d, n)
+                st = os.lstat(pth)
+                digest = None
+                if os.path.isfile(pth) and not os.path.islink(pth):
+                    with open(pth, "rb") as fh:
+                        digest = hashlib.sha1(fh.read()).hexdigest()
+                out[os.path.relpath(pth, root)] = (st.st_mtime_ns, st.st_mode, digest)
+        return out
+
+    def changed(a, b):
+        return sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
+
+    state = os.path.join(cfg.root, ".showrunner")
+    # Each verb with a fragment of the output it must have produced, per state: a verb that
+    # died before reaching its reads would also leave the tree alone. The second state is a
+    # campaign selected by name and never written to, where doctor used to create a directory,
+    # a graph and a journal; its graph is empty, so its fragments are the empty answers.
+    verbs = [(["doctor"], "graph backend", "graph backend"),
+             (["status"], "R1", "ready: 0"),
+             (["show", "R1"], "R1", "no such leaf"),
+             (["list"], "R2", ""),
+             (["ready"], "R2", ""),
+             (["plan"], "R2", "no ready work"),
+             (["waiting", "--porcelain", "--no-record"], '"journal": "not recorded"',
+              '"journal": "not recorded"'),
+             (["snapshot"], "R1", '"waiting"'),
+             (["whoami"], "", ""),
+             (["waker", "--show"], "", ""),
+             (["waker", "--show", "--json"], "{", "{"),
+             (["--version"], "showrunner", "showrunner"),
+             (["self", "--dest", cfg.root], "no pinned checkout", "no pinned checkout")]
+    for camp in (None, "never-written"):
+        where = "the default state dir" if camp is None else "a never-written campaign"
+        for argv, must_default, must_fresh in verbs:
+            must = must_default if camp is None else must_fresh
+            before = tree(state)
+            p = sr(*argv, campaign=camp)
+            after = tree(state)
+            label = " ".join(x if x != cfg.root else "<repo>" for x in argv)
+            ok("`%s` ran (in %s)" % (label, where),
+               p.returncode in (0, 1, 2) and "Traceback" not in p.stderr
+               and must in (p.stdout + p.stderr), (p.returncode, p.stdout[-300:], p.stderr[-300:]))
+            eq("`%s` changes nothing under .showrunner/ (in %s)" % (label, where),
+               changed(before, after), [])
+
+    # THE PAIR: the same comparison sees a write when one happens. `waiting` without the flag
+    # records its verdict, which is its documented job, and that is the only path it changes.
+    before = tree(state)
+    p = sr("waiting", "--porcelain")
+    after = tree(state)
+    ok("`waiting --porcelain` says it wrote its record", '"journal": "written"' in p.stdout,
+       p.stdout[-300:])
+    eq("...and the comparison sees exactly that write: the journal and the dir that holds it",
+       changed(before, after), [".", "waiting.jsonl"])
+    rows = []
+    if os.path.exists(os.path.join(state, "waiting.jsonl")):
+        with open(os.path.join(state, "waiting.jsonl")) as fh:
+            rows = [json.loads(l) for l in fh if l.strip()]
+    eq("...one row, carrying the live leaf the verdict was about",
+       [r.get("leaves") for r in rows], [["R1"]])
+    before = tree(state)
+    p = sr("waiting", "--porcelain", "--no-record")
+    ok("`--no-record` reaches the same verdict: waiting on the live Crawler",
+       json.loads(p.stdout).get("waiting") is True
+       and [c["leaf"] for c in json.loads(p.stdout).get("live_crawlers") or []] == ["R1"], p.stdout[-300:])
+    eq("...and appends nothing", changed(before, tree(state)), [])
+
+    # A BLOCK TRANSITION is the other write `waiting` makes: the event journal. A recording pass
+    # emits it; a non-recording one reports the same block and emits nothing, and the change is
+    # still there for the next recording pass to emit.
+    orig = _HB.stop_gate
+
+    def blocked_sg(_c, _w, _s, seen=None):
+        if seen is not None:
+            seen.update({"since": int(time.time()) + 1000, "blocks_total": 1})
+        return True, "refused at turn-end"
+    _HB.stop_gate = blocked_sg
+    try:
+        g2 = G.open_graph(cfg, readonly=True)
+        before = tree(state)
+        _w, d = campaign.waiting(cfg, g2, record=False)
+        eq("a block seen by a non-recording `waiting` is reported",
+           [b["crawler"] for b in d.get("blocked_crawlers") or []], [rec["crawler"]])
+        eq("...and nothing is journalled", changed(before, tree(state)), [])
+        _w, d = campaign.waiting(cfg, g2)
+        last = EV.latest(cfg, ("crawler.blocked",), "crawler", rec["crawler"])
+        ok("...while the next recording pass still emits the transition", bool(last), last)
+    finally:
+        _HB.stop_gate = orig
+
+    # A LIVE WRITER is the one case that is not byte-identical, and it is the shared-memory
+    # index SQLite keeps beside a live database rather than any record: the reader must take a
+    # read mark there to see the writer's committed rows at all. Asserted so the exception
+    # stays as narrow as the docs say.
+    w = new_graph(cfg)
+    w.claim("R2", "crawler-r2", pid=os.getpid())
+    before = tree(state)
+    p = sr("list")
+    after = tree(state)
+    ok("with a writer holding the graph open, `list` still sees its committed rows",
+       "in_progress" in [ln.split()[1] for ln in p.stdout.splitlines() if ln.startswith("R2")],
+       p.stdout[-300:])
+    ok("...and changes nothing but graph.db-shm",
+       set(changed(before, after)) <= {"graph.db-shm"}, changed(before, after))
+    w.db.close()
+
+    # DOCTOR ASKS WHETHER THE JOURNAL COULD BE APPENDED TO, WITHOUT APPENDING. Each refusal it
+    # can give, and the permit beside it: a missing journal under a writable dir is fine AND
+    # stays missing, which is the half a "no exception" check alone cannot see.
+    import showrunner.cli as _C
+    box = tmpdir("appendable")
+    missing = os.path.join(box, "campaigns", "c", "waiting.jsonl")
+    eq("a journal that does not exist yet, under a writable dir, could be appended to",
+       attempt_message(lambda: _C._check_appendable(missing)), (None, ""))
+    ok("...and asking created nothing on the way", not os.path.lexists(os.path.join(box, "campaigns")))
+    os.makedirs(os.path.join(box, "isdir.jsonl"))
+    ok("a DIRECTORY where the journal goes is refused",
+       "Is a directory" in attempt_message(
+           lambda: _C._check_appendable(os.path.join(box, "isdir.jsonl")))[1])
+    with open(os.path.join(box, "plain"), "w") as fh:
+        fh.write("x")
+    ok("a FILE where a parent directory has to be is refused",
+       "Not a directory" in attempt_message(
+           lambda: _C._check_appendable(os.path.join(box, "plain", "waiting.jsonl")))[1])
+    if os.geteuid() != 0:
+        ro_file = os.path.join(box, "ro.jsonl")
+        with open(ro_file, "w") as fh:
+            fh.write("")
+        os.chmod(ro_file, 0o444)
+        ro_dir = os.path.join(box, "rodir")
+        os.makedirs(ro_dir)
+        os.chmod(ro_dir, 0o555)
+        try:
+            ok("an existing journal without write permission is refused",
+               "Permission denied" in attempt_message(lambda: _C._check_appendable(ro_file))[1])
+            ok("a missing journal whose nearest existing dir is not writable is refused",
+               "Permission denied" in attempt_message(
+                   lambda: _C._check_appendable(os.path.join(ro_dir, "c", "waiting.jsonl")))[1])
+            # And the verb says so: doctor reports an unwritable state dir as the ERROR it was
+            # when it probed by appending, without creating anything to find out.
+            os.chmod(state, 0o555)
+            try:
+                before = tree(state)
+                p = sr("doctor", campaign="never-written")
+                after = tree(state)
+            finally:
+                os.chmod(state, 0o755)
+            ok("`doctor` says CANNOT BE WRITTEN for a campaign dir it could not create",
+               "CANNOT BE WRITTEN" in p.stdout and p.returncode != 0,
+               (p.returncode, p.stdout[-300:]))
+            eq("...and changed nothing while finding out", changed(before, after), [])
+        finally:
+            os.chmod(ro_dir, 0o755)
+            os.chmod(ro_file, 0o644)
+    else:
+        skip("appendable permission cases", "running as root, where permission bits do not refuse")
+
+
 def test_doctor_and_waker_show_state_the_effective_watch():
     group("doctor and `waker --show --json` state what the GitHub waker EFFECTIVELY watches, with "
           "the layer each value came from, and read the same paths the waker and its shim write")
@@ -19488,7 +19680,7 @@ def test_a_stand_down_on_an_open_leaf_needs_the_lead():
            last.get("kind") == "crawler.blocked" and last.get("stood_down") == 4, last)
         from showrunner import crawlerwaker as CW
         eq("the wake text names the stand-down", "stood down after 4 refusals, leaf still open"
-           in CW.wake_text(dict(b, kind="blocked"), 180), True)
+           in (CW.wake_text(dict(b, kind="blocked"), 180) if b else ""), True)
 
         dead = subprocess.Popen(["true"])
         dead.wait()
@@ -20400,7 +20592,7 @@ def test_never_integrated_leaves_do_not_collide():
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_the_github_waker_stamps_every_invocation, test_doctor_and_waker_show_state_the_effective_watch, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_report_verbs_write_nothing, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_the_github_waker_stamps_every_invocation, test_doctor_and_waker_show_state_the_effective_watch, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

@@ -557,7 +557,7 @@ def remove_reclaimed(cfg, row):
     return True, ""
 
 
-def _shallow_tail(cfg, graph, entry, f, wt):
+def _shallow_tail(cfg, graph, entry, f, wt, record=True):
     """Leaf status, parked and blocked — the fields BOTH modes need (#76).
 
     Extracted rather than copied into the shallow path. Two computations of "is this Crawler
@@ -601,7 +601,7 @@ def _shallow_tail(cfg, graph, entry, f, wt):
             blocked, detail = None, ""          # dead and not stood down: not this question
         f["blocked"], f["blocked_detail"] = blocked, detail
         if f["blocked"] is not None:
-            _journal_block(cfg, f, entry, wt, seen)
+            _journal_block(cfg, f, entry, wt, seen, record)
     return f
 
 
@@ -611,7 +611,7 @@ def _refusal(seen):
             "stood_down": seen.get("stood_down")}
 
 
-def _journal_block(cfg, f, entry, wt, seen):
+def _journal_block(cfg, f, entry, wt, seen, record=True):
     """Journal the block, and the verdict on it, as TRANSITIONS — once each, by whoever sees it.
 
     reconcile computes `blocked` fresh on every call and a watchdog may call it every few seconds,
@@ -629,14 +629,19 @@ def _journal_block(cfg, f, entry, wt, seen):
     refusal it released, so the next poll, which still sees the harness say blocked, knows this
     refusal is answered and does not re-announce it. A NEW refusal (the harness rewrites `at` and
     counts it) is a new `crawler.blocked`, whatever came before.
+
+    `record=False` decides the same verdict and journals nothing. A transition it saw is not
+    lost: the latest event is unchanged, so the next recording pass sees the same change and
+    emits it.
     """
+    emit = events.emit if record else (lambda *_a, **_k: None)
     ident = _refusal(seen)
     f["refusal"] = ident
     prev = events.latest(cfg, ("crawler.blocked", "crawler.unblocked"), "crawler", f["crawler"])
     prev = prev or {}
     if not f["blocked"]:
         if prev.get("kind") == "crawler.blocked":
-            events.emit(cfg, "crawler.unblocked", {"crawler": f["crawler"], "leaf": f["leaf"],
+            emit(cfg, "crawler.unblocked", {"crawler": f["crawler"], "leaf": f["leaf"],
                                                    "why": None, "since": None})
         return
     same = (prev.get("refusal") or {k: prev.get(k) for k in ident}) == ident
@@ -644,7 +649,7 @@ def _journal_block(cfg, f, entry, wt, seen):
         f["released"] = prev.get("why") or "released by evidence"
         return
     if prev.get("kind") != "crawler.blocked" or not same:
-        events.emit(cfg, "crawler.blocked", dict(
+        emit(cfg, "crawler.blocked", dict(
             {"crawler": f["crawler"], "leaf": f["leaf"], "why": f["blocked_detail"] or None},
             **ident))
     worked, why = work_since_block(cfg, f["crawler"], f.get("branch"), f.get("worktree") or "",
@@ -653,7 +658,7 @@ def _journal_block(cfg, f, entry, wt, seen):
     f["work_why"] = why
     if worked:
         f["released"] = why
-        events.emit(cfg, "crawler.unblocked", {"crawler": f["crawler"], "leaf": f["leaf"],
+        emit(cfg, "crawler.unblocked", {"crawler": f["crawler"], "leaf": f["leaf"],
                                                "why": why, "released_by": "evidence",
                                                "refusal": ident, "since": None})
 
@@ -671,7 +676,7 @@ def _is_tracked(cfg, path):
     return False if rc2 == 0 else None
 
 
-def reconcile(cfg, graph, base="HEAD", deep=True):
+def reconcile(cfg, graph, base="HEAD", deep=True, record=True):
     """Answer the first question a resumed orchestrator has to ask.
 
     Returns a list of per-Crawler findings. Nothing here mutates anything: reconciliation
@@ -689,6 +694,9 @@ def reconcile(cfg, graph, base="HEAD", deep=True):
     gets a KeyError, which is loud and immediate; None would be indistinguishable from "not
     merged" and would quietly invert the answer. This file spends most of its comments on
     exactly that class of mistake, so the shallow mode must not introduce one.
+
+    `record=False` is for the verbs that promise to write nothing: the block transitions
+    `_journal_block` appends to the event journal are skipped (see there).
     """
     data = load(cfg)
     # ONE ref read for the whole pass (#76). Three branch questions per Crawler, each its own
@@ -721,7 +729,7 @@ def reconcile(cfg, graph, base="HEAD", deep=True):
             # Crawler the campaign ever had. The keys are left ABSENT on purpose — see the
             # docstring — so reading one is a KeyError rather than a quiet wrong answer.
             f["scratch_files"] = []
-            findings.append(_shallow_tail(cfg, graph, entry, f, wt))
+            findings.append(_shallow_tail(cfg, graph, entry, f, wt, record))
             continue
         f["scratch_files"] = []
         f["uncommitted"] = []
@@ -781,7 +789,7 @@ def reconcile(cfg, graph, base="HEAD", deep=True):
         else:
             f["harness"], f["harness_detail"], f["harness_mis_certified"] = None, "", False
 
-        f = _shallow_tail(cfg, graph, entry, f, wt)
+        f = _shallow_tail(cfg, graph, entry, f, wt, record)
         if f["harness"] == "drifted" and (f["alive"] or f["blocked"]):
             # Louder than LIVE: this tree's gate is answering a different question than the
             # orchestrator's, so anything it certifies means less than it appears to.
@@ -1463,7 +1471,7 @@ def _undetermined(readable):
             "processes and its tree could not be read, which is not the same as doing nothing")
 
 
-def waiting(cfg, graph, base="HEAD"):
+def waiting(cfg, graph, base="HEAD", record=True):
     """Is this orchestrator legitimately waiting on work it dispatched? (game_loop#32)
 
     An idle-watchdog whose only signal is transcript growth cannot see a subagent: an
@@ -1479,6 +1487,10 @@ def waiting(cfg, graph, base="HEAD"):
     Returns (is_waiting, detail). Deliberately conservative in the *opposite* direction to
     most of showrunner: when in doubt it reports NOT waiting, because a false "waiting"
     silences a watchdog that exists to catch a genuinely wedged run.
+
+    `record=False` computes the same verdict and appends nothing to `waiting.jsonl`: the journal
+    is the record of verdicts the watchdog acted on, and a host or a viewer asking out of
+    curiosity would inflate it. `detail["journal"]` then says "not recorded".
     """
     live, parked, blocked, stalled = [], [], [], []
     # STALLED IS NOT WAITING (#101). `stalled_claims` already knows a live session whose
@@ -1495,7 +1507,7 @@ def waiting(cfg, graph, base="HEAD"):
     # of them on every Crawler the campaign had ever recorded, which is what put it past the 15s
     # probe timeout a consumer runs it under — and a timeout there reads as "the probe did not
     # run at all", which stops the watchdog scheduling any further re-check.
-    for f in reconcile(cfg, graph, base, deep=False):
+    for f in reconcile(cfg, graph, base, deep=False, record=record):
         worked, why_worked = (False, "")
         if f["blocked"] and "released" in f:
             # DECIDED ONCE, IN RECONCILE, which journalled it: the journal and this verdict are
@@ -1586,6 +1598,9 @@ def waiting(cfg, graph, base="HEAD"):
     # too aggressive there is no evidence either way. It is also the evidence a consumer
     # needs before adopting this at all: a gate wants a logged, observed failure behind it,
     # and this is where that record accumulates.
+    if not record:
+        detail["journal"] = "not recorded"
+        return bool(live or parked), detail
     try:
         path = os.path.join(cfg.state_dir, "waiting.jsonl")
         os.makedirs(cfg.state_dir, exist_ok=True)

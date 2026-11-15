@@ -1371,9 +1371,27 @@ TARGETS = [
     # Added by applying the RECENCY lens: the most recently argued producer is the one with
     # the least behind it, because the argument is fresh and feels like evidence.
     ("waiting (orchestrator liveness)", "campaign.waiting", "lib/showrunner/campaign.py",
-     r'(def waiting\(cfg, graph, base="HEAD"\):\n)',
+     r'(def waiting\(cfg, graph, base="HEAD", record=True\):\n)',
      "    return False, {'waiting': False, 'live_crawlers': [], 'parked_crawlers': [],\n"
-     "                   'basis': ''}\ndef _neutered_waiting(cfg, graph, base='HEAD'):\n"),
+     "                   'blocked_crawlers': [], 'stalled_crawlers': [], 'basis': ''}\n"
+     "def _neutered_waiting(cfg, graph, base='HEAD', record=True):\n"),
+    # THE REPORT VERBS' RESTRAINT. Both are asserted by observing that nothing changed, which
+    # is what a broken producer also yields -- so each mutant puts the old write back. Opening
+    # the graph read-write again must turn the byte-identical tree red; answering "appendable"
+    # for everything must turn doctor's CANNOT BE WRITTEN case red.
+    ("a report verb's graph, opened without writing", "graph.SqliteGraph._open_readonly",
+     "lib/showrunner/graph.py",
+     r"(    @staticmethod\n    def _open_readonly\(path\):\n)",
+     "        os.makedirs(os.path.dirname(path), exist_ok=True)\n"
+     "        db = sqlite3.connect(path)\n"
+     "        db.execute('PRAGMA journal_mode=WAL')\n"
+     "        db.executescript(SCHEMA)\n"
+     "        return db\n"
+     "    @staticmethod\n    def _neutered_open_readonly(path):\n"),
+    ("doctor's journal writability, asked without writing", "cli._check_appendable",
+     "lib/showrunner/cli.py",
+     r"(def _check_appendable\(path\):\n)",
+     "    return None\ndef _neutered_check_appendable(path):\n"),
     # Both added by the derived candidate scan rather than by me noticing them.
     ("claim --next (fleet work division)", "graph.SqliteGraph.claim_next", "lib/showrunner/graph.py",
      r"(    def claim_next\(self, actor, pid=None, tree=None, session=None, prefer=None\):\n)",

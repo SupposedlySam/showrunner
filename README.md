@@ -972,6 +972,12 @@ four round trips and returns a composite of instants that never co-existed. They
 `cursor`: `snapshot`'s names the last event it could have seen, so `watch --since <that>` gives
 exactly what is not already reflected, with no overlap and no gap.
 
+**A host that must not change the repo has a fixed set of verbs that write nothing**, `snapshot`,
+`status` and `doctor` among them; llms.txt lists them under "Read-only verbs". `waiting` is the
+exception by design: it records its verdict in `waiting.jsonl`, the evidence that the watchdog's
+probe fires, so ask with `waiting --porcelain --no-record` to get the same answer without the
+record.
+
 ```jsonc
 {"kind":"leaf.claimed","seq":2,"leaf":"gh-15","actor":"crawler-a","instance":"/path/to/repo"}
 {"type":"ready","replayed":2,"seq":2,"cursor":"fd4620f33271@2","project":"showrunner"}
