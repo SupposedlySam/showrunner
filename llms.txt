@@ -1453,7 +1453,12 @@ checkout, not your worktree, because it has to outlive the tree. A directory ins
 YOUR seat — the campaign record names it for you exactly as it names your worktree — so a guard
 that asks `whoami --porcelain` from there gets your role, not the orchestrator's; nothing else
 under the scratch root resolves that way. If a guard still refuses it, say so rather than routing
-around it through Bash; `whoami --porcelain` also publishes the path as `scratch`. Commit messages,
+around it through Bash; `whoami --porcelain` also publishes the path as `scratch`. game_loop's
+write guard is told about it too: spawn puts exactly this path in your tree's gitignored
+`.game_loop/config.local.json` as `allow_write_roots`, so a clone or throwaway git repo inside
+your scratch can be written and removed (the guard's same-repository rule alone stops at a nested
+repo). A sibling's nested repo is still refused. Nothing else from the main checkout's
+`config.local.json` is copied into your tree. Commit messages,
 captured output, fixtures, before/after artifacts. Not a shared temp dir: two Crawlers that pick
 the same obvious filename there can commit one's message onto the other's changes — a real
 commit, plausible message, describing work it does not contain, every gate green. You and your siblings are the same model solving similar tasks from similar prompts, so

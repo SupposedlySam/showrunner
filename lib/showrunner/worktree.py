@@ -1109,7 +1109,7 @@ def spawn(cfg, leaf, actor="crawler", base="HEAD", branch=None, sparse=None, dri
         provisioned.append(_mirrored)
 
     from . import harness
-    hp2, harness_problems, harness_warnings = harness.provision(cfg, path)
+    hp2, harness_problems, harness_warnings = harness.provision(cfg, path, scratch=scratch)
     provisioned += hp2
     provisioned += ["NOTE: %s" % w for w in harness_warnings]
     if harness_problems and harness.spec(cfg)["require"]:

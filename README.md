@@ -910,7 +910,15 @@ behaviour.
   outlive the tree: `gc` treats a dead Crawler's scratch as possibly the only copy of real work. A
   write guard that judges a path by the TREE it is in would read it as the main checkout, so a
   directory inside a Crawler's recorded scratch resolves to THAT Crawler's seat — the record names
-  it exactly as it names the worktree, and nothing else under the scratch root does. A long close
+  it exactly as it names the worktree, and nothing else under the scratch root does. game_loop's
+  write guard reaches the main checkout from a tree only through its same-repository rule, which
+  stops at a nested git repository, so spawn also writes exactly this one path into the tree's
+  gitignored `.game_loop/config.local.json` as `allow_write_roots` and reports it as
+  `scratch write root:`. A clone or throwaway repo in the Crawler's own scratch can then be written
+  and removed; one in a sibling's scratch still cannot. Nothing else from the main checkout's
+  `config.local.json` reaches the tree, so a waiting probe armed there stays the main checkout's.
+  The tree check reads that one entry as clean, and any other difference in the file still reports
+  notes-drifted. A long close
   reason still goes on
   stdin instead (`--reason-file -`), so no file needs writing at all. Two Crawlers reaching for
   `commitmsg.txt` in one shared temp dir means one can commit the other's commit message onto its
