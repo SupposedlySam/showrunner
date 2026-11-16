@@ -25,6 +25,11 @@ rather than as a one-time result.
 Not part of `test/run.py`: it runs the whole suite once per target and is far too slow to
 owe on every change. Run it when adding a producer, or when a restraint behaviour changes.
 
+A full sweep outlasts the 10-minute cap on one foreground tool call. A Crawler runs it in the
+background of its own session (never `nohup` or detached: the suite needs a live session as its
+ancestor) and waits with repeated foreground waits of under 10 minutes each, an until-loop on
+its exit or its output, never by ending the turn.
+
 WHAT THIS CANNOT SEE — stated here because a number in a docstring becomes a target, and a
 target gets optimised rather than understood:
 

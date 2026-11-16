@@ -245,8 +245,12 @@ Writing it to a file would put it in your scratch dir, which is in the main chec
 write guard may correctly refuse you. If that happens, the guard is not wrong; use stdin.
 
 **Run long checks in the foreground** — the suite, the mutant sweep, a build — and never end
-a turn to wait for your own job. Each turn-end while it runs is a refusal, and the background
-notification that would wake you is a delivery path known to drop.
+a turn to wait for your own job. A job that fits in one tool call runs in the foreground. One
+foreground call is capped at 10 minutes, and a full mutant sweep runs the suite many times, so a
+job longer than that may run in the background of this session — never `nohup` or detached —
+and you wait for it with repeated foreground waits of under 10 minutes each (an until-loop on
+the job's exit or its output), never by ending the turn. Each turn-end while it runs is a
+refusal, and the background notification that would wake you is a delivery path known to drop.
 
 Prefer to keep your edits inside the files this leaf is about. Your siblings are working
 other leaves right now, and the orchestrator predicted your file sets do not overlap.

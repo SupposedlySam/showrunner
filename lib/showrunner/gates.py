@@ -194,7 +194,10 @@ def stop_gate(cfg, graph, leaf_id=None, tree=None, jobs=None):
     `jobs` is the caller's own jobs still running, as (command, pid) — `campaign.jobs_before`,
     gathered by `cmd_stop_gate`. With any, the refusal's remedy names them and says to wait in
     the foreground: a Crawler that ended its turn to wait on its own sweep was told to "finish
-    it through the close gate", which it already meant to, and ended its turn again.
+    it through the close gate", which it already meant to, and ended its turn again. It also
+    names the 10-minute cap on one foreground call and says to wait in repeated foreground
+    waits: a sweep outlasts one call, and a rule that says only "foreground" cannot be followed
+    for it.
 
     Epics are containers — expected to sit in progress while their children are worked —
     so they are excluded. Parked leaves are excluded too: a Crawler parked at a usage
@@ -308,9 +311,11 @@ def stop_gate(cfg, graph, leaf_id=None, tree=None, jobs=None):
                            for x in mine)
         if jobs:
             named = ", ".join("%s (pid %s)" % (c, p) for c, p in jobs)
-            remedy = ("Your %s %s still running. Wait for it in the foreground (block on it and "
-                      "read its result), then close. Ending the turn while it runs is a refusal "
-                      "each time." % (named, "is" if len(jobs) == 1 else "are"))
+            remedy = ("Your %s %s still running. Wait for it in the foreground, then read its "
+                      "result and close. One foreground call is capped at 10 minutes, so for a "
+                      "longer job use repeated foreground waits of under 10 minutes each (an "
+                      "until-loop on its exit or its output). Ending the turn while it runs is a "
+                      "refusal each time." % (named, "is" if len(jobs) == 1 else "are"))
         else:
             remedy = ("Either finish it through the close gate, or release it, or explicitly "
                       "checkpoint and hand back.")
