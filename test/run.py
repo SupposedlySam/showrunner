@@ -19018,11 +19018,13 @@ def test_a_state_change_the_agent_made_itself_does_not_ring():
        kinds("cd %s && gh pr merge 7" % wt, cwd=elsewhere), [("merge", "me/fork", 7)])
     eq("bash: outside any checkout and with no --repo, the repo is unknown",
        kinds("gh pr merge 7", cwd=elsewhere), [("merge", None, 7)])
-    eq("mcp: mergePullRequest", O.mcp_call("mcp__github__mergePullRequest",
-                                          {"owner": "me", "repo": "fork", "pull_number": 7})[:3],
+    eq("mcp: mergePullRequest", (O.mcp_call("mcp__github__mergePullRequest",
+                                           {"owner": "me", "repo": "fork", "pull_number": 7})
+                                or ())[:3],
        ("merge", "me/fork", 7))
-    eq("mcp: closePullRequest", O.mcp_call("mcp__github__closePullRequest",
-                                          {"owner": "me", "repo": "fork", "pull_number": 7})[:3],
+    eq("mcp: closePullRequest", (O.mcp_call("mcp__github__closePullRequest",
+                                           {"owner": "me", "repo": "fork", "pull_number": 7})
+                                or ())[:3],
        ("close", "me/fork", 7))
     eq("mcp: an omitted owner/repo defaults to the server's env, which cannot be seen",
        O.mcp_call("mcp__github__mergePullRequest", {"pull_number": 7}), None)
