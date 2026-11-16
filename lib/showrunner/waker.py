@@ -23,9 +23,10 @@ comment at all; a comment; a REVIEW with a body or an approve/request-changes ve
 review comment. Comments on a closed item count: closed is not finished. A close, merge or reopen
 rings unless there is evidence the agent made it (`ownstate`): a tool call in the session's own
 transcript that made it, or else an own-signed newest comment or review within
-`own_state_window_sec` of it. A state change carries no signature, and the account that made it is
-shared, so with neither kind of evidence it rings: a merge by the maintainer or another agent
-must wake.
+`own_state_window_sec` of it. An issue GitHub closed for a "Fixes #N" is judged by its closer: the
+PR or commit, landed by an own merge or an own push. A state change carries no signature, and the
+account that made it is shared, so with no evidence it rings: a merge by the maintainer or
+another agent must wake.
 
 ONE RING PER EVENT, however many wakers are running. Each turn-end starts one, so several can be
 alive at once: the newest owns the watch and an older one exits when it sees it was replaced, and
@@ -91,6 +92,19 @@ _PR = _THREAD + """
     comments(last: %d) { nodes { databaseId createdAt body
       author { login ... on User { name } } } } } }
 """ % (LAST, LAST)
+# What closed an issue (`ownstate.by_closer`): the newest ClosedEvent's closer, a PR or a commit.
+# Only the newest comment and review of a closing PR is read: the fallback judges the newest alone.
+_LANDING = """
+  number mergedAt repository { nameWithOwner }
+  comments(last: 1) { nodes { createdAt body } }
+  reviews(last: 1) { nodes { createdAt body comments(last: 1) { nodes { createdAt body } } } }
+"""
+_ISSUE = _THREAD + """
+  timelineItems(itemTypes: [CLOSED_EVENT], last: 1) { nodes { ... on ClosedEvent { createdAt
+    closer { __typename ... on PullRequest { %s }
+      ... on Commit { oid repository { nameWithOwner }
+        associatedPullRequests(first: 5) { nodes { %s } } } } } } }
+""" % (_LANDING, _LANDING)
 
 
 # A WEEK, a minute under the hook's timeout. This was 1800, so a session idle past half an hour
@@ -205,12 +219,12 @@ def query(sp):
                      '{ nodes { %s } }\n'
                      '  pullRequests(first: %d, orderBy: {field: UPDATED_AT, direction: DESC}) '
                      '{ nodes { %s } }\n}'
-                     % (i, json.dumps(owner), json.dumps(name), FIRST, _THREAD, FIRST, _PR))
+                     % (i, json.dumps(owner), json.dumps(name), FIRST, _ISSUE, FIRST, _PR))
     for i, up in enumerate(sp["upstream"]):
         parts.append('u%d: search(query: %s, type: ISSUE, first: %d) {\n'
                      '  nodes { ... on PullRequest { %s } ... on Issue { %s } }\n}'
                      % (i, json.dumps("repo:%s author:%s" % (up["repo"], up["author"])),
-                        FIRST, _PR, _THREAD))
+                        FIRST, _PR, _ISSUE))
     return "query {\n%s\n}" % "\n".join(parts)
 
 

@@ -611,8 +611,14 @@ its `/merge`, and the GitHub MCP's `mergePullRequest` and `closePullRequest`. A 
 `--repo` acts on the remote of the directory it ran in. The fallback is the item's newest comment
 or review: own-signed and within that window of the change, on either side. With neither, the
 change rings, and the decision log's reason names the call and its time, or says why each rule
-found nothing. A close GitHub made because an own-merged pull request said "Fixes #N" has no
-call and no comment of its own, so it rings.
+found nothing. An issue GitHub closed because a pull request or commit said "Fixes #N" is judged
+by that closer, read from the issue's closing event: it does not ring when the closing PR, or a
+PR that carried the closing commit, was merged within the window of the close by a merge these
+rules call the agent's own, or when the closing commit is the new tip of a successful `git push`
+in the transcript to that repository, at or up to the window before the close. Only the tip
+counts, because whether a commit lies inside a pushed range takes the repository's history, and
+a `git push -q` prints no range at all; such a close falls back to the rules above. A closer by
+anybody else, or none (closed by hand), rings, and the reason names the closer.
 `showrunner waker --once` looks once and reports; `SHOWRUNNER_GH` names the `gh` binary when it
 is not on PATH.
 

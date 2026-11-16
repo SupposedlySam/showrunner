@@ -1011,8 +1011,13 @@ showrunner waker                     # Stop + SessionStart startup|resume, async
                                      # transcript, at or up to
                                      # waker.own_state_window_sec (120) before it;
                                      # else an own-signed newest comment or review
-                                     # within that window either side. Neither:
-                                     # it rings, and the log says why.
+                                     # within that window either side. An issue
+                                     # closed by a "Fixes #N" PR or commit does
+                                     # not ring when that closer landed by an
+                                     # own merge, or the commit is the tip of an
+                                     # own `git push` in the transcript (a -q push
+                                     # prints no tip). Neither: it rings, and the
+                                     # log says why, naming the closer.
                                      # Every decision, with its reason, goes to
                                      # waker-decisions.jsonl beside its state
                                      # (a bounded tail; doctor prints the path).

@@ -22,6 +22,19 @@ TWO KINDS OF EVIDENCE, tried in order; with neither the change rings, as it alwa
    change, either side. An agent that merges and says so in one breath is caught; one whose
    signed comment came ten minutes earlier is not, because somebody else may have merged since.
 
+AN ISSUE GITHUB CLOSED for a "Fixes #N" is a third case: no call closed it, so neither rule above
+can match it. Its newest closing event names the closer, and the close is own when that closer
+landed by the agent's own hand, judged at the close's own time:
+
+3. A CLOSER PR, or a PR that carried the closer commit, merged within the window of the close by
+   a merge the rules above call own (`by_closer`).
+4. A CLOSER COMMIT that is the new tip of a `git push` in the transcript to that repo, at or up to
+   the window before the close (`push_refs`). Only the tip: whether a commit lies inside a pushed
+   range takes the repository's history, which the transcript does not hold, and a push run with
+   `-q` prints no range at all. Those closes ring.
+
+A closer by anybody else, or none (closed by hand), rings, and the decision log names the closer.
+
 The window bounds the transcript rule from below too: a close the agent made last week is no
 evidence for a close somebody made today after a reopen. A reopen has no timestamp of its own in
 the query, so `updatedAt` stands in for it: it is at or after the reopen, and a later comment
@@ -199,12 +212,42 @@ def mcp_call(name, inp):
     return kind, "%s/%s" % (inp["owner"], inp["repo"]), int(num), "%s #%s" % (name, num)
 
 
+_PUSH_TO = re.compile(r"^To\s+(\S+)\s*$", re.M)
+_PUSH_REF = re.compile(r"^\s*\+?\s*([0-9a-f]{7,40})\.\.\.?([0-9a-f]{7,40})\s+\S+\s+->\s+\S+", re.M)
+
+
+def is_push(command):
+    """Does `command` run a `git push`? Parsed, never run."""
+    return any(seg and os.path.basename(seg[0]) == "git" and "push" in seg[1:]
+               for seg in _segments(command.replace("\n", ";")) or [])
+
+
+def push_refs(text):
+    """[(repo, old, new)] for every ref update a `git push` printed, under its `To` line."""
+    out, repo, at = [], None, 0
+    tos = [(m.start(), m.group(1)) for m in _PUSH_TO.finditer(text or "")]
+    for m in _PUSH_REF.finditer(text or ""):
+        while at < len(tos) and tos[at][0] < m.start():
+            repo = tos[at][1]
+            at += 1
+        r = _REMOTE.search(repo or "")
+        if r:
+            out.append(("%s/%s" % (r.group(1), r.group(2)), m.group(1), m.group(2)))
+    return out
+
+
+def _text(content):
+    if isinstance(content, str):
+        return content
+    return "\n".join(str(c.get("text") or "") for c in content or [] if isinstance(c, dict))
+
+
 def calls(transcript):
     """Every state-changing tool call in the transcript whose result was not an error, as dicts
     {kind, repo, number, at, what}. Raises OSError when it cannot be read: could not look is
     never "no calls"."""
     from .lostring import _entries
-    pending = {}
+    pending, pushes = {}, {}
     for at, rec in _entries(transcript, (b'"tool_use"', b'"tool_result"')):
         msg = rec.get("message") if isinstance(rec, dict) else None
         content = msg.get("content") if isinstance(msg, dict) else None
@@ -215,6 +258,8 @@ def calls(transcript):
                 name, inp = c.get("name") or "", c.get("input") or {}
                 if name == "Bash":
                     found = bash_calls(str(inp.get("command") or ""), rec.get("cwd"))
+                    if is_push(str(inp.get("command") or "")):
+                        pushes[c.get("id")] = at
                 else:
                     one = mcp_call(name, inp)
                     found = [one] if one else []
@@ -224,6 +269,13 @@ def calls(transcript):
             elif c.get("type") == "tool_result" and c.get("tool_use_id") in pending:
                 for d in pending[c["tool_use_id"]]:
                     d["ok"] = not c.get("is_error")
+            if c.get("type") == "tool_result" and c.get("tool_use_id") in pushes \
+                    and not c.get("is_error"):
+                t = pushes.pop(c["tool_use_id"])
+                for repo, old, new in push_refs(_text(c.get("content"))):
+                    pending.setdefault(c["tool_use_id"], []).append(dict(
+                        kind="push", repo=repo, number=None, tip=new, at=t, ok=True,
+                        what="git push %s..%s" % (old, new)))
     return [d for ds in pending.values() for d in ds if d["ok"]]
 
 
@@ -289,6 +341,64 @@ def by_signature(sp, item, at, window):
         abs(gap), "after" if gap > 0 else "before", window)
 
 
+def closed_event(item):
+    """The issue's newest ClosedEvent, or None."""
+    nodes = [n for n in ((item.get("timelineItems") or {}).get("nodes") or []) if n]
+    return nodes[-1] if nodes else None
+
+
+def pushed(call, repo, oid):
+    """Is `call` a push to `repo` whose new tip is the commit `oid`?"""
+    tip = call.get("tip") or ""
+    return call["kind"] == "push" and len(tip) >= 7 and (oid or "").startswith(tip) and \
+        (call["repo"] or "").lower() == (repo or "").lower()
+
+
+def own_landing(sp, pr, at, window, found):
+    """(matched, why) for one PR that closed the issue at `at`: merged beside it, by my merge."""
+    key = "%s#%s" % (((pr.get("repository") or {}).get("nameWithOwner") or "?"), pr.get("number"))
+    merged = _epoch(pr.get("mergedAt"))
+    if merged is None:
+        return False, "PR %s has no mergedAt" % key
+    if not near_change(merged, at, window):
+        return False, "PR %s merged %ds from the close, outside %ds" % (
+            key, abs(round(merged - at)), window)
+    hit, why = judge(sp, key, pr, "MERGED", found)
+    return hit, "PR %s %s: %s" % (key, "is my own merge" if hit else "is not my own merge", why)
+
+
+def by_closer(sp, item, at, window, found):
+    """(matched, why) for a close GitHub made because a PR or commit said it fixes the issue."""
+    ev = closed_event(item)
+    t = _epoch((ev or {}).get("createdAt"))
+    if t is None or not near_change(t, at, window):
+        return False, "no closing event at the close"
+    closer = ev.get("closer") or {}
+    typ = closer.get("__typename")
+    if typ == "PullRequest":
+        hit, why = own_landing(sp, closer, at, window, found)
+        return hit, "closer: " + why
+    if typ != "Commit":
+        return False, "closer: none (closed by hand, or by %s)" % (typ or "nobody named")
+    oid, repo = closer.get("oid") or "", (closer.get("repository") or {}).get("nameWithOwner")
+    whys = []
+    for pr in (closer.get("associatedPullRequests") or {}).get("nodes") or []:
+        hit, why = own_landing(sp, pr or {}, at, window, found)
+        if hit:
+            return True, "closer: commit %s, landed by %s" % (oid[:7], why)
+        whys.append(why)
+    if isinstance(found, list):
+        for d in sorted(found, key=lambda d: -d["at"]):
+            if pushed(d, repo, oid) and before_change(d["at"], at, window):
+                return True, "closer: commit %s, the tip of my %s at %s, %ds before the close" % (
+                    oid[:7], d["what"], _stamp(d["at"]), round(at - d["at"]))
+        whys.append("no push in the transcript with %s as its tip, at or up to %ds before the "
+                    "close" % (oid[:7], window))
+    else:
+        whys.append(found)
+    return False, "closer: commit %s on %s; %s" % (oid[:7], repo, "; ".join(whys))
+
+
 def judge(sp, key, item, now, found):
     """(is it mine, why) for a state change of `item` to `now`. `found` is `calls(transcript)`,
     or an explanation string when the transcript could not be read or there was none."""
@@ -305,6 +415,11 @@ def judge(sp, key, item, now, found):
     hit, why_sig = by_signature(sp, item, at, window)
     if hit:
         return True, "fallback: %s; %s" % (why_sig, why_tx)
+    if now == "CLOSED" and not item.get("is_pr"):
+        hit, why_cl = by_closer(sp, item, at, window, found)
+        if hit:
+            return True, why_cl
+        return False, "%s; %s; %s" % (why_cl, why_tx, why_sig)
     return False, "%s; %s" % (why_tx, why_sig)
 
 
