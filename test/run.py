@@ -11574,10 +11574,54 @@ def test_publishable():
     # about what is actually enforced on this machine. Today those are the same thing because
     # no machine-wide file exists here, and a check that passes for the right reason today
     # passes identically for the wrong one tomorrow. Mirrors the guard's own source list.
+    #
+    # ONE GRANTED EXCEPTION: in a Crawler's tree, spawn writes exactly that Crawler's own scratch
+    # into the tree's gitignored config.local.json (`harness.provision_scratch_root`), because the
+    # scratch lives in the main checkout and must outlive the tree. Only that layer, and only the
+    # realpath spawn's record names for this session (`roles.crawler_scratch`): a second root
+    # beside it, a sibling's scratch, or the same path in a wider layer is still a widening.
+    from showrunner import config as _config, roles as _roles, util as _util
+    try:
+        own_scratch = _roles.crawler_scratch(_config.load(ROOT), _util.caller_session())
+    except Exception:                                           # noqa: BLE001
+        own_scratch = None
+    local_layer = os.path.join(ROOT, ".game_loop", "config.local.json")
+
+    def widened(layers, root_dir, own):
+        """[(src, root)] granted outside `root_dir` by `layers` ([(src, data)]), less the one
+        exception: `own` in the tree's config.local.json."""
+        out = []
+        for src, d in layers:
+            for root in d.get("allow_write_roots") or []:
+                if os.path.abspath(root).startswith(root_dir):
+                    continue
+                if own and src == os.path.join(root_dir, ".game_loop", "config.local.json") \
+                        and os.path.realpath(root) == os.path.realpath(own):
+                    continue
+                out.append("%s → %s" % (src, root))
+        return out
+
+    fake_root, fake_own = "/r/tree", "/r/main/.showrunner/campaigns/c/scratch/me"
+    fake_local, fake_cfg = "/r/tree/.game_loop/config.local.json", "/r/tree/.game_loop/config.json"
+    for label, layers, want in (
+            ("the Crawler's own scratch in config.local.json", [(fake_local, {
+                "allow_write_roots": [fake_own]})], 0),
+            ("a SECOND root beside it", [(fake_local, {
+                "allow_write_roots": [fake_own, "/elsewhere"]})], 1),
+            ("a SIBLING Crawler's scratch", [(fake_local, {
+                "allow_write_roots": ["/r/main/.showrunner/campaigns/c/scratch/sib"]})], 1),
+            ("its own scratch in the tracked config.json", [(fake_cfg, {
+                "allow_write_roots": [fake_own]})], 1),
+            ("its own scratch in ~/.game_loop/config.json", [(os.path.expanduser(
+                "~/.game_loop/config.json"), {"allow_write_roots": [fake_own]})], 1)):
+        eq("the write-root exception: %s -> %d widening(s)" % (label, want),
+           len(widened(layers, fake_root, fake_own)), want)
+    eq("...and with no scratch of its own (not a Crawler), nothing is excepted",
+       len(widened([(fake_local, {"allow_write_roots": [fake_own]})], fake_root, None)), 1)
+
     layered = [os.path.expanduser("~/.game_loop/config.json"),
-               os.path.join(ROOT, ".game_loop", "config.json"),
-               os.path.join(ROOT, ".game_loop", "config.local.json")]
-    present, granted = [], []
+               os.path.join(ROOT, ".game_loop", "config.json"), local_layer]
+    present, read = [], []
     for src in layered:
         try:
             with open(src) as fh:
@@ -11586,9 +11630,8 @@ def test_publishable():
             continue
         present.append(os.path.basename(src) if not src.startswith(os.path.expanduser("~/.game"))
                        else "~/.game_loop/config.json")
-        for root in d.get("allow_write_roots") or []:
-            if not os.path.abspath(root).startswith(ROOT):
-                granted.append("%s → %s" % (src, root))
+        read.append((src, d))
+    granted = widened(read, ROOT, own_scratch)
     # THREE STATES, NOT TWO. `present` is a positive control: "no grants found" must not come
     # from having read nothing. But NO LAYERS AT ALL is a third answer — this checkout no longer
     # tracks `.game_loop/`, so a clone has none, and asserting a layer exists made the control
@@ -11602,8 +11645,10 @@ def test_publishable():
     else:
         ok("...and so does the EFFECTIVE config — the union game_loop actually reads, not just "
            "the file this repo ships. showrunner's docs promise a Crawler cannot write outside "
-           "the repo, and a machine-wide layer can widen that without touching anything tracked",
-           not granted, granted)
+           "the repo, and a machine-wide layer can widen that without touching anything tracked. "
+           "The one granted exception is a Crawler's own scratch in its tree's config.local.json, "
+           "which spawn writes because that scratch lives in the main checkout and must outlive "
+           "the tree", not granted, granted)
         ok("...checked against the layers that exist here, so this is a verdict rather than a "
            "file that happened to be missing", bool(present), present)
 
@@ -19370,6 +19415,179 @@ def test_a_state_change_the_agent_made_itself_does_not_ring():
         for r in rows if r["event"].startswith("state:")], [("state:MERGED", "own", True)])
 
 
+def test_an_issue_closed_by_my_own_merge_or_push_does_not_ring():
+    group("an issue GitHub closes for a \"Fixes #N\" does not ring when the PR or commit that "
+          "closed it landed by my hand, and rings, naming the closer, when it did not")
+    from showrunner import waker as W, ownstate as O
+    # MEASURED on a consumer: since 11-13 eleven issues closed this way rang, ten of them closed
+    # by PRs (or commits in PRs) that same session had merged a second or three earlier.
+    sig = "— 🤖 x owner agent"
+    sp = {"repos": ["me/fork"], "upstream": [], "trusted_logins": {"me"}, "trusted_names": set(),
+          "signature": sig, "own_state_window_sec": 120, "poll_sec": 300, "budget_sec": 1800}
+    q = W.query(dict(sp, upstream=[{"repo": "them/up", "author": "me"}]))
+    ok("the one query asks every issue for its closing event's PR or commit closer",
+       q.count("timelineItems(itemTypes: [CLOSED_EVENT], last: 1)") == 2
+       and "... on PullRequest {" in q and "associatedPullRequests" in q
+       and "timelineItems" not in W._PR, q)
+
+    def iso(t):
+        return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t)) + ".000Z"
+
+    def z(t):
+        return iso(t)[:19] + "Z"
+
+    T = 1794844800      # the close
+    seq = [0]
+
+    def use(t, name, inp, out="ok", error=False):
+        seq[0] += 1
+        tid = "toolu_c%d" % seq[0]
+        return [{"type": "assistant", "timestamp": iso(t), "cwd": "/nowhere", "message": {
+                    "content": [{"type": "tool_use", "id": tid, "name": name, "input": inp}]}},
+                {"type": "user", "timestamp": iso(t + 1), "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": tid, "is_error": error,
+                     "content": [{"type": "text", "text": out}]}]}}]
+
+    def transcript(*entries):
+        p = os.path.join(tmpdir("closer-tx"), "t.jsonl")
+        with open(p, "w") as fh:
+            for e in entries:
+                for rec in e:
+                    fh.write(json.dumps(rec) + "\n")
+        return p
+
+    def merge(t, n=7, repo="fork"):
+        return use(t, "mcp__github__mergePullRequest",
+                   {"owner": "me", "repo": repo, "pull_number": n})
+
+    def push(t, old="aaaaaaa", new="1234567", to="git@github.com:me/fork.git", error=False):
+        return use(t, "Bash", {"command": "git push origin main"}, error=error,
+                   out="To %s\n   %s..%s  main -> main\n" % (to, old, new))
+
+    def pr(n=7, merged=T - 2, repo="me/fork", comments=()):
+        d = {"number": n, "repository": {"nameWithOwner": repo},
+             "comments": {"nodes": list(comments)}, "reviews": {"nodes": []}}
+        if merged is not None:
+            d["mergedAt"] = z(merged)
+        return d
+
+    def issue(closer, at=T, ev_at=None, n=9):
+        return {"number": n, "title": "t%d" % n, "state": "CLOSED", "author": {"login": "me"},
+                "body": "b", "updatedAt": z(T + 5), "closedAt": z(at),
+                "comments": {"nodes": []}, "repo": "me/fork", "is_pr": False,
+                "timelineItems": {"nodes": [{"createdAt": z(at if ev_at is None else ev_at),
+                                             "closer": closer}]}}
+
+    def by_pr(**kw):
+        return dict(pr(**kw), __typename="PullRequest")
+
+    def by_commit(oid="1234567890abcdef1234567890abcdef12345678", prs=(), repo="me/fork"):
+        return {"__typename": "Commit", "oid": oid, "repository": {"nameWithOwner": repo},
+                "associatedPullRequests": {"nodes": list(prs)}}
+
+    st = {"events": [], "states": {"me/fork#9": "OPEN"}}
+
+    def verdict(world, tx=None):
+        log = []
+        wake, _ = W.poll(sp, st, {"me/fork#9": world}, log, tx)
+        d = [x for x in log if x["event"].startswith("state:")]
+        return wake, (d[0]["verdict"] if d else None), (d[0]["reason"] if d else "")
+
+    signed = {"createdAt": z(T - 1), "body": "merged.\n\n" + sig}
+    for label, world, tx, want in (
+            ("a closer PR I merged 2 s before", issue(by_pr()), transcript(merge(T - 3)), "own"),
+            ("a closer PR whose own-signed comment sits beside its merge (the fallback)",
+             issue(by_pr(comments=[signed])), None, "own"),
+            ("a closer commit carried by a PR I merged", issue(by_commit(prs=[pr()])),
+             transcript(merge(T - 3)), "own"),
+            ("a closer commit that is the tip of my push", issue(by_commit()),
+             transcript(push(T - 3)), "own"),
+            ("a closer PR merged by somebody else", issue(by_pr()), transcript(merge(T - 3, n=8)),
+             "rang"),
+            ("a closer PR on another repo with the same number",
+             issue(by_pr(repo="them/up")), transcript(merge(T - 3)), "rang"),
+            ("a closer PR I merged, but long before this close (a reopen since)",
+             issue(by_pr(merged=T - 600)), transcript(merge(T - 601)), "rang"),
+            ("a closer PR with no mergedAt", issue(by_pr(merged=None)), transcript(merge(T - 3)),
+             "rang"),
+            ("a closer commit in a PR somebody else merged", issue(by_commit(prs=[pr(n=8)])),
+             transcript(merge(T - 3)), "rang"),
+            ("a closer commit that is NOT the tip of my push", issue(by_commit()),
+             transcript(push(T - 3, new="7654321")), "rang"),
+            ("a closer commit pushed to ANOTHER repo's tip", issue(by_commit()),
+             transcript(push(T - 3, to="https://github.com/them/up.git")), "rang"),
+            ("a closer commit whose push FAILED", issue(by_commit()),
+             transcript(push(T - 3, error=True)), "rang"),
+            ("a closer commit pushed AFTER the close", issue(by_commit()),
+             transcript(push(T + 5)), "rang"),
+            ("a closer commit pushed long before the close", issue(by_commit()),
+             transcript(push(T - 600)), "rang"),
+            ("a quiet push that printed no range", issue(by_commit()), transcript(use(
+                T - 3, "Bash", {"command": "git push -q origin main"}, out="")), "rang"),
+            ("no closer: closed by hand", issue(None), transcript(merge(T - 3)), "rang"),
+            ("a closer PR I merged, on a closing event that is not this close",
+             issue(by_pr(), ev_at=T - 900), transcript(merge(T - 3)), "rang")):
+        wake, v, why = verdict(world, tx)
+        eq("closer: %s -> %s" % (label, want), v, want)
+        if want == "rang":
+            ok("...and it RINGS", wake and "me/fork#9 CLOSED" in wake, wake)
+
+    # THE DECISION LOG names the closer, both ways.
+    wake, v, why = verdict(issue(by_pr()), transcript(merge(T - 3)))
+    ok("an own close's reason names the closer PR and the merge that made it mine",
+       why.startswith("state OPEN -> CLOSED; closer: PR me/fork#7 is my own merge: transcript: "
+                      "mcp__github__mergePullRequest #7 at "), why)
+    wake, v, why = verdict(issue(by_commit()), transcript(push(T - 3)))
+    ok("...and a commit's names the push whose tip it was",
+       "closer: commit 1234567, the tip of my git push aaaaaaa..1234567 at " in why
+       and "3s before the close" in why, why)
+    wake, v, why = verdict(issue(by_pr()), transcript(merge(T - 3, n=8)))
+    ok("a ring's reason names the foreign closer and why it was not mine",
+       v == "rang" and "closer: PR me/fork#7 is not my own merge: no merge call on me/fork#7"
+       in why, why)
+    wake, v, why = verdict(issue(by_commit(prs=[pr(n=8)])), transcript(merge(T - 3)))
+    ok("...a commit closer's, with its PR and the push it was not the tip of",
+       v == "rang" and why.startswith("state OPEN -> CLOSED; no evidence it was mine: closer: "
+                                      "commit 1234567 on me/fork; PR me/fork#8 is not my own")
+       and "no push in the transcript with 1234567 as its tip" in why, why)
+    wake, v, why = verdict(issue(None), transcript(merge(T - 3)))
+    ok("...and a hand close says there was no closer", v == "rang"
+       and "closer: none (closed by hand" in why, why)
+    wake, v, why = verdict(issue(by_commit()), os.path.join(tmpdir("closer-none"), "gone.jsonl"))
+    ok("an unreadable transcript is said in a commit closer's reason, not read as no push",
+       v == "rang" and "closer: commit 1234567 on me/fork; transcript could not be read" in why,
+       why)
+
+    # A PR's own close is judged as before: a closer is an issue's alone.
+    p_closed = dict(issue(by_pr()), is_pr=True, number=9)
+    log = []
+    W.poll(sp, st, {"me/fork#9": p_closed}, log, transcript(merge(T - 3)))
+    eq("a closed PR is not judged by a closer", [x["verdict"] for x in log
+                                                 if x["event"].startswith("state:")], ["rang"])
+
+    # THE PUSH PARSE, shape by shape.
+    for label, text, want in (
+            ("a fast-forward", "To github.com:me/fork.git\n   a1b2c3d..e4f5a6b  main -> main\n",
+             [("me/fork", "a1b2c3d", "e4f5a6b")]),
+            ("a forced update", "To https://github.com/me/fork.git\n + a1b2c3d...e4f5a6b  x -> x "
+             "(forced update)\n", [("me/fork", "a1b2c3d", "e4f5a6b")]),
+            ("two remotes, each ref under its own To line",
+             "To github.com:me/fork.git\n   a1b2c3d..e4f5a6b  main -> main\n"
+             "To github.com:them/up.git\n   1111111..2222222  main -> main\n",
+             [("me/fork", "a1b2c3d", "e4f5a6b"), ("them/up", "1111111", "2222222")]),
+            ("a new branch prints no range", "To github.com:me/fork.git\n * [new branch]      "
+             "x -> x\n", []),
+            ("a range with no To line names no repo", "   a1b2c3d..e4f5a6b  main -> main\n", []),
+            ("nothing printed", "", [])):
+        eq("push_refs: %s" % label, O.push_refs(text), want)
+    for label, cmd, want in (("git push", "git push origin main", True),
+                             ("after a commit, chained", "git commit -qm x && git push -q", True),
+                             ("git -C dir push", "git -C /x push", True),
+                             ("git log is not a push", "git log --oneline -1", False),
+                             ("the word in an echo", "echo git push", False)):
+        eq("is_push: %s" % label, O.is_push(cmd), want)
+
+
 def test_the_github_waker_stamps_every_invocation():
     group("The GitHub waker stamps the heartbeat on every exit path, so doctor's NEVER line about "
           "it is true when it appears")
@@ -21428,7 +21646,7 @@ def test_never_integrated_leaves_do_not_collide():
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_report_verbs_write_nothing, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_state_change_the_agent_made_itself_does_not_ring, test_the_github_waker_stamps_every_invocation, test_doctor_and_waker_show_state_the_effective_watch, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_a_waker_whose_host_is_gone_stops, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_report_verbs_write_nothing, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_state_change_the_agent_made_itself_does_not_ring, test_an_issue_closed_by_my_own_merge_or_push_does_not_ring, test_the_github_waker_stamps_every_invocation, test_doctor_and_waker_show_state_the_effective_watch, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_a_waker_whose_host_is_gone_stops, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,
