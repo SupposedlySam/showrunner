@@ -35,6 +35,10 @@ its time and text, because exit 2 ends this waker and only a turn end starts the
 host never turns into a turn is reported at the next SessionStart by `lostring`, and covered
 by the GitHub waker while the session idles (`cover`).
 
+ITS HOST is checked as the GitHub waker checks its own (`waker`, A WAKER SERVES ONE HOST): at
+start, at every poll, and under the lock before it rings or covers. Gone, it exits 0, records
+nothing as rung, and logs `host-gone`.
+
 CROSS-COVER keeps this waker alive with nothing to judge. With no Crawler alive and none pending
 it used to exit, so a dropped GitHub ring had nobody to cover it. While a GitHub waker is
 configured it now IDLES instead: per poll it reads its owner file and stats the GitHub waker's
@@ -195,31 +199,36 @@ def _ask(cfg):
     return campaign.waiting(cfg, open_graph(cfg))[1]
 
 
-def _cover(cfg, start, transcript):
+def _cover(cfg, start, transcript, alive=None):
     """This waker's watch over the GitHub waker's rings, or None when there is none to watch."""
     from . import cover, waker
     if cover.window(cfg) is None or waker.spec(cfg) is None:
         return None
-    return cover.Cover(cfg, "github-waker", "crawler-waker", start, transcript)
+    return cover.Cover(cfg, "github-waker", "crawler-waker", start, transcript, alive=alive)
 
 
-def _ring_cover(cfg, now_ts, text):
+def _ring_cover(cfg, now_ts, text, host=None, started=None):
     """Record a cover ring as this waker's own, so a cover the host drops too is reported by
     `lostring` at SessionStart. Then it is rung."""
     from .util import file_lock
+    from .waker import ring_host
     with file_lock(_path(cfg, STATE)):
         state = load_state(cfg)
-        state["rings"] = ((state.get("rings") or []) + [{
+        state["rings"] = ((state.get("rings") or []) + [dict({
             "at": int(now_ts), "at_f": round(now_ts, 3), "text": text,
-            "events": ["cover"]}])[-RINGS_KEEP:]
+            "events": ["cover"]}, **ring_host(host, started))])[-RINGS_KEEP:]
         _save_state(cfg, state)     # not `last_fired`: doctor reads that as a Crawler's ring
     return text
 
 
-def run(cfg, once=False, sleep=time.sleep, now=time.time, ask=None, transcript=None):
+def run(cfg, once=False, sleep=time.sleep, now=time.time, ask=None, transcript=None,
+        host=None):
     """(exit code, text). 2 with a wake; 0 quiet; `once` reports what it would ring now.
-    `transcript` is the session's, from the hook's stdin: cover reads it (see `cover`)."""
-    from .util import file_lock
+    `transcript` is the session's, from the hook's stdin: cover reads it (see `cover`). `host`
+    is the claude process this waker serves, checked as the GitHub waker checks it (`waker`)."""
+    from .util import file_lock, host_record
+    from .util import host_gone as gone
+    from .waker import host_gone, ring_host
     ask = ask or _ask
     sp = spec(cfg)
     if in_linked_worktree(cfg):
@@ -227,6 +236,10 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, ask=None, transcript=N
     if not sp["enabled"]:
         return 0, "crawler-waker: disabled (`crawler_waker.enabled` is false)"
     start = now()
+    if not once:
+        host = host or host_record()
+        if gone(host):
+            return host_gone(cfg, host, "crawler-waker", "at start", now())
     base_seq = _journal_seq(cfg)
     # SEEN AT THE TURN-END: every block the journal holds outstanding now, and every stall that
     # was already a stall. The lead's own turn-end ran the inert-Crawler gate over them.
@@ -239,8 +252,9 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, ask=None, transcript=N
     token = None if once else "%d:%r" % (os.getpid(), start)
     if token:
         _owner(cfg, token)
+    owner = (_path(cfg, OWNER), token)
     deadline = start + sp["budget_sec"]
-    watch = None if once else _cover(cfg, start, transcript)
+    watch = None if once else _cover(cfg, start, transcript, alive=lambda: not gone(host))
     idle = False
     asked = {}                      # crawler -> (transcript mtime, alive) when last judged
     journal_size = None
@@ -251,9 +265,13 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, ask=None, transcript=N
             sleep(sp["poll_sec"])
             if _owner(cfg) not in (None, token):
                 return 0, ""
+            if gone(host):
+                return host_gone(cfg, host, "crawler-waker", "at a poll", now(), owner)
             text = watch.check(now()) if watch else None
+            if watch and watch.host_gone:
+                return host_gone(cfg, host, "crawler-waker", "before a cover ring", now(), owner)
             if text:
-                return 2, _ring_cover(cfg, now(), text)
+                return 2, _ring_cover(cfg, now(), text, host, start)
         first = False
         t = now()
         if idle:
@@ -293,16 +311,21 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, ask=None, transcript=N
                 state = load_state(cfg)
                 rung = set(state.get("rung") or [])
                 ring, due = judge(cfg, sp, detail, seen, rung, t, mtimes)
-                if ring and not once:
+                if ring and not once and gone(host):
+                    ring = None             # nobody to hear it: record nothing as rung
+                elif ring and not once:
                     text = "\n\n".join(wake_text(i, sp["quiet_sec"]) for i in ring)
                     state["rung"] = sorted(rung | {i["key"] for i in ring})[-2000:]
                     state["last_fired"] = int(t)
                     state["last_crawlers"] = [i["crawler"] for i in ring]
-                    state["rings"] = ((state.get("rings") or []) + [{
+                    state["rings"] = ((state.get("rings") or []) + [dict({
                         "at": int(t), "at_f": round(t, 3), "text": text,
-                        "events": [i["key"] for i in ring]}])[-RINGS_KEEP:]
+                        "events": [i["key"] for i in ring]}, **ring_host(host, start))])[
+                        -RINGS_KEEP:]
                     _save_state(cfg, state)     # recorded FIRST: a wake re-sent is noise
                     return 2, text
+            if ring is None:
+                return host_gone(cfg, host, "crawler-waker", "before ringing", now(), owner)
             if once:
                 if ring:
                     return 0, "would ring now:\n\n" + "\n\n".join(

@@ -279,6 +279,45 @@ def process_started(pid):
 PROCESS_START_SLACK = 5     # seconds: lstart is whole seconds, and Popen returns before exec
 
 
+def host_record(start=None):
+    """The Claude Code process a waker runs under: {"pid", "started", "direct", "basis"}, or None
+    when the ancestry names none.
+
+    A WAKER OUTLIVES ITS HOST. It is a Stop hook's background child, and when the host is
+    replaced (SRCode restarts and resumes the session under a new `claude -p`) the old waker is
+    reparented to launchd and keeps polling, holding the watch and ringing into nothing. Measured:
+    one rang for a new PR 30 hours after its host was replaced, and marked it seen. `started` is
+    what makes a recycled pid count as a different process; `direct` records that the host is
+    this process's own parent, which `host_gone` can then check for free."""
+    pid, basis = session_pid(start)
+    if not pid:
+        return None
+    return {"pid": int(pid), "started": process_started(pid), "basis": basis,
+            "direct": start is None and os.getppid() == int(pid)}
+
+
+def host_gone(host):
+    """True only when PROVED that the process `host_record` named is not running: a direct
+    parent we were reparented away from, a pid nothing holds, or a pid now held by a process that
+    started at a different time. None or unreadable is never "gone": a waker that cannot tell
+    keeps working, as it did before it could ask."""
+    if not host or not host.get("pid"):
+        return False
+    pid = int(host["pid"])
+    if host.get("direct"):
+        # A parent cannot change identity under its child: its death reparents us.
+        return os.getppid() != pid
+    if not pid_alive(pid):
+        return True
+    recorded = host.get("started")
+    if recorded is None:
+        return False
+    now_started = process_started(pid)
+    if now_started is None:
+        return False
+    return abs(now_started - float(recorded)) > PROCESS_START_SLACK
+
+
 def pid_is_ours(entry):
     """True / False / None: is the process at `entry["pid"]` the one this record started?
 

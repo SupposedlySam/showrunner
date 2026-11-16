@@ -49,6 +49,15 @@ unwatched. `lostring` reads these at SessionStart: a ring no turn end followed i
 and one look catches up on what arrived since. While the session idles, the Crawler waker
 covers a dropped ring of this one, and this one covers the Crawler waker's at each poll (`cover`).
 
+A WAKER SERVES ONE HOST. It is a child of the claude process whose turn-end started it, and it
+outlives that process: when the host is replaced (SRCode resumes the session under a new
+`claude -p`) the old waker is reparented to launchd and would poll on, hold the watch and ring
+into nothing, marking what it rang seen. So it records its host at start (`util.host_record`:
+the pid and that process's start time, so a recycled pid is a different process) and checks it
+at every poll, and again under the lock before it rings or covers. With the host gone it exits 0
+having rung nothing, advanced nothing and given up the watch, and logs one `host-gone` line.
+Every ring records `host` and `waker_started`, which `lostring` reads.
+
 ONE GRAPHQL QUERY PER POLL, never a REST call per item: the 5,000/hour REST limit is shared by
 every agent on a machine and was measured exhausted. A failed look is never "nothing new" — it
 returns None, and the first look after an unreadable state seeds silently instead of replaying
@@ -386,11 +395,47 @@ def seeded(items):
             for key in sorted(items) for eid, login, _n, _t, _w in events(items[key])]
 
 
-def ring_record(now_ts, text, judged):
-    """What a ring covered, kept so a ring that never became a turn can be told at SessionStart."""
-    return {"at": int(now_ts), "at_f": round(now_ts, 3), "text": text,
-            "events": ["%s %s" % (d["item"], d["event"]) for d in judged
-                       if d.get("verdict") == "rang"]}
+def ring_record(now_ts, text, judged, host=None, started=None):
+    """What a ring covered, kept so a ring that never became a turn can be told at SessionStart.
+    `host` and `started` say which claude process the ringing waker ran under and when it
+    started, so `lostring` can tell a ring that went to a host already replaced."""
+    return dict({"at": int(now_ts), "at_f": round(now_ts, 3), "text": text,
+                 "events": ["%s %s" % (d["item"], d["event"]) for d in judged
+                            if d.get("verdict") == "rang"]}, **ring_host(host, started))
+
+
+def ring_host(host, started):
+    """The host fields a ring record carries: none when neither is known."""
+    out = {}
+    if host and host.get("pid"):
+        out["host"] = {"pid": host["pid"], "started": host.get("started")}
+    if started is not None:
+        out["waker_started"] = round(started, 3)
+    return out
+
+
+def host_gone(cfg, host, by, where, now_ts, owner=None):
+    """(0, "") after logging one `host-gone` decision: the claude process this waker started
+    under is gone, so nobody is left to deliver a ring to. It rings nothing, advances nothing,
+    and gives up the watch: `owner` is (path, token), and the owner file is emptied only while it
+    still names this waker."""
+    log_decisions(cfg, [{
+        "item": "-", "event": "%s host pid %s" % (by, host.get("pid")), "author": "-",
+        "verdict": "host-gone", "by": by, "host_pid": host.get("pid"),
+        "host_started": host.get("started"),
+        "reason": "the claude process %s started under is gone (checked %s): exited without "
+                  "ringing, without advancing its state, and without holding the watch"
+                  % (by, where)}], now_ts)
+    if owner:
+        path, token = owner
+        try:
+            with open(path) as fh:
+                ours = fh.read().strip() == token
+            if ours:
+                os.remove(path)
+        except OSError:
+            pass
+    return 0, ""
 
 
 def decisions_path(cfg):
@@ -493,37 +538,46 @@ def first_wait(sp, state, now_ts):
     return sp["poll_sec"] if age < 0 else max(0, sp["poll_sec"] - age)
 
 
-def _cover(cfg, start, transcript):
+def _cover(cfg, start, transcript, alive=None):
     """This waker's watch over the Crawler waker's rings, or None when there is none to watch."""
     from . import cover, crawlerwaker
     if cover.window(cfg) is None or not crawlerwaker.spec(cfg)["enabled"]:
         return None
-    return cover.Cover(cfg, "crawler-waker", "github-waker", start, transcript)
+    return cover.Cover(cfg, "crawler-waker", "github-waker", start, transcript, alive=alive)
 
 
-def _ring_cover(cfg, now_ts, text):
+def _ring_cover(cfg, now_ts, text, host=None, started=None):
     """Record a cover ring as this waker's own, under the lock that advances its state, so a
     cover the host drops too is reported by `lostring` at SessionStart. Then it is rung."""
     from .util import file_lock
     with file_lock(_state_path(cfg)):
         state = load_state(cfg)
         if state is not None:
-            state["rings"] = (list(state.get("rings") or []) + [
+            state["rings"] = (list(state.get("rings") or []) + [dict(
                 {"at": int(now_ts), "at_f": round(now_ts, 3), "text": text,
-                 "events": ["cover"]}])[-RINGS_KEEP:]
+                 "events": ["cover"]}, **ring_host(host, started))])[-RINGS_KEEP:]
             save_state(cfg, state)
     return text
 
 
-def run(cfg, once=False, sleep=time.sleep, now=time.time, runner=None, transcript=None):
+def run(cfg, once=False, sleep=time.sleep, now=time.time, runner=None, transcript=None,
+        host=None):
     """(exit code, text). 2 with a wake; 0 quiet or not configured; 1 `once` that could not look.
-    `transcript` is the session's, from the hook's stdin: cover reads it (see `cover`)."""
-    from .util import file_lock
+    `transcript` is the session's, from the hook's stdin: cover reads it (see `cover`). `host` is
+    the claude process this waker serves (`util.host_record`), resolved here when not given; a
+    looping waker re-checks it at every poll and again before it rings or covers."""
+    from .util import file_lock, host_record
+    from .util import host_gone as gone
     sp = spec(cfg)
     if sp is None:
         return 0, "waker: nothing configured (no `waker.repos` or `waker.upstream`)"
     if in_linked_worktree(cfg):
         return 0, "waker: a linked worktree — the main checkout's session watches, not a Crawler"
+    started = now()
+    if not once:
+        host = host or host_record()
+        if gone(host):
+            return host_gone(cfg, host, "github-waker", "at start", now())
     state = load_state(cfg)
     if state is None:
         items = look(sp, runner)
@@ -541,8 +595,9 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, runner=None, transcrip
     token = None if once else "%d:%r" % (os.getpid(), now())
     if token:
         _write_owner(cfg, token)
+    owner = (_owner_path(cfg), token)
     deadline = now() + sp["budget_sec"]
-    watch = None if once else _cover(cfg, now(), transcript)
+    watch = None if once else _cover(cfg, now(), transcript, alive=lambda: not gone(host))
     wait = first_wait(sp, state, now())
     while True:
         if not once:
@@ -551,9 +606,13 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, runner=None, transcrip
             wait = sp["poll_sec"]
             if _read_owner(cfg) not in (None, token):
                 return 0, ""
+            if gone(host):
+                return host_gone(cfg, host, "github-waker", "at a poll", now(), owner)
             text = watch.check(now()) if watch else None
+            if watch and watch.host_gone:
+                return host_gone(cfg, host, "github-waker", "before a cover ring", now(), owner)
             if text:
-                return 2, _ring_cover(cfg, now(), text)
+                return 2, _ring_cover(cfg, now(), text, host, started)
         items = look(sp, runner)
         # Compare against the state ON DISK, under a lock: another waker may have recorded this
         # same event since we last looked, and the first to record it is the only one to ring.
@@ -561,17 +620,26 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, runner=None, transcrip
             state = _current(cfg, state)
             judged = []
             wake, new_state = poll(sp, state, items, judged)
+            if wake and not once and gone(host):
+                # The look found something to ring, and nobody is left to hear it. Recording it
+                # as seen would hide it from the session that resumes: leave the state alone.
+                lost_host = True
+                wake, new_state = None, None
+            else:
+                lost_host = False
             if new_state is not None:
                 new_state["looked_at"] = now()
                 rings = list(state.get("rings") or [])
                 if wake and not once:
                     # RECORDED HERE, in the save that advances: exit 2 ends this waker, and if
                     # the host never turns the wake into a turn, nothing starts another.
-                    rings.append(ring_record(now(), wake, judged))
+                    rings.append(ring_record(now(), wake, judged, host, started))
                 new_state["rings"] = rings[-RINGS_KEEP:]
                 save_state(cfg, new_state)      # advance FIRST: a wake re-sent is noise
                 state = new_state
                 log_decisions(cfg, judged, now())
+        if lost_host:
+            return host_gone(cfg, host, "github-waker", "before ringing", now(), owner)
         if wake:
             return 2, wake
         if once:

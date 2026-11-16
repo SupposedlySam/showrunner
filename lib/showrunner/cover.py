@@ -20,6 +20,8 @@ one started:
   hook on stdin, the guard is the heartbeat alone.
 * a dropped ring is marked `covered` under the other waker's lock, and this waker rings ONCE
   for it, quoting its text, then exits as any ring does. The next turn end starts both again.
+* the coverer checks ITS OWN host first, under that lock: a waker whose claude process is gone
+  (see `waker`, HOST) marks nothing covered and exits, so the ring stays for `lostring`.
 * a ring a turn did follow is marked `delivered` and never rung. A covered ring is never
   covered again, and `lostring` does not report it at SessionStart: the cover ring carried its
   text, and the cover ring is a ring of its own that `lostring` reports if it is dropped too.
@@ -107,9 +109,11 @@ def cover_text(label, rings, by_label):
 class Cover(object):
     """One waker's watch over the other's rings. `check` is called once per poll."""
 
-    def __init__(self, cfg, other, by, started, transcript=None):
+    def __init__(self, cfg, other, by, started, transcript=None, alive=None):
         self.cfg, self.other, self.by, self.started = cfg, other, by, started
         self.transcript = transcript
+        self.alive = alive
+        self.host_gone = False
         self.window = window(cfg)
         self.path = os.path.join(cfg.state_dir, WAKERS[other]["state"])
         self.seen_sig = None
@@ -150,6 +154,11 @@ class Cover(object):
             tx = _mtime(self.transcript)
             cover, landed, self.due = dropped(rings, self.started, now_ts, self.window,
                                               turn_end, tx)
+            if cover and self.alive is not None and not self.alive():
+                # The coverer's own host is gone: a cover rung now reaches nobody, and marking
+                # the ring covered would hide it from the session that resumes. Mark nothing.
+                self.host_gone = True
+                return None
             for r in landed:
                 r["delivered"] = True
             for r in cover:

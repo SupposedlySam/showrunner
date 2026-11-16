@@ -1828,6 +1828,9 @@ def _registered_hooks(write_guard=False):
              (lease.register_wake_gate, "wake gate (PreToolUse on Bash; advice, never refuses)"),
              (lease.register_waker, "GitHub waker (Stop, asyncRewake; inert until `waker` is "
                                     "configured)"),
+             (lease.register_waker_session_start, "GitHub waker on SessionStart (asyncRewake; "
+                                                  "watches a resumed session before its first "
+                                                  "turn ends)"),
              (lease.register_crawler_waker, "Crawler waker (Stop, asyncRewake; wakes the idle "
                                             "orchestrator when a Crawler needs it)")]
     if write_guard:
@@ -2216,7 +2219,10 @@ def _waker_session_start(args):
     from . import lostring
     try:
         cfg = _cfg(args, required=False)
-        lines = lostring.session_start(cfg)
+        # The session's transcript, which `whoami.sh` reads off SessionStart's stdin: an env
+        # var and not a flag, so a pinned binary older than it ignores it instead of exiting 2.
+        lines = lostring.session_start(
+            cfg, transcript=os.environ.get("SHOWRUNNER_TRANSCRIPT") or None)
     except Exception as exc:                                    # noqa: BLE001
         lines = ["showrunner: the lost-wake check FAILED (%s: %s), so a GitHub or Crawler wake "
                  "that rang while no turn followed would not be reported here."

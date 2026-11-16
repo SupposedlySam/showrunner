@@ -81,7 +81,20 @@ fi
 # such a ring once and looks at GitHub once (a short timeout of its own), after the announcement
 # so a slow look cannot cost it. Silent when there is nothing to say; a binary too old to know
 # the flag is named, not hidden.
-if lost="$("$SR" waker --session-start 2>&1)"; then
+# The transcript path rides along in the environment: from it `waker --session-start` tells a
+# ring rung under a host process that had already been replaced. A binary too old to read it
+# ignores it.
+tx=""
+if [ -n "$payload" ]; then
+  tx="$(printf '%s' "$payload" | python3 -c '
+import json, sys
+try:
+    print((json.load(sys.stdin).get("transcript_path") or "").strip())
+except Exception:
+    pass
+' 2>/dev/null)" || tx=""
+fi
+if lost="$(SHOWRUNNER_TRANSCRIPT="$tx" "$SR" waker --session-start 2>&1)"; then
   [ -n "$lost" ] && out="$out
 
 $lost"
