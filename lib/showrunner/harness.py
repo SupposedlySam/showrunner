@@ -320,6 +320,7 @@ def check_tree(cfg, worktree_path):
     mis_certified = False
     for dirname in spec(cfg)["dirs"]:
         rc, payload = _verify_with_harness(worktree_path, dirname)
+        rc, payload = _excuse_scratch_root(cfg, worktree_path, rc, payload)
         if rc is None:
             continue
         # OR'd across harness directories on purpose: any one of them reporting a false clean
@@ -334,7 +335,116 @@ def check_tree(cfg, worktree_path):
     return names.get(worst), detail, mis_certified
 
 
-def provision(cfg, worktree_path):
+# ------------------------------------------------------------ the scratch write root
+# game_loop's, named here, and the one place showrunner writes a key of the layer below. The
+# write guard allows the repo, temp dirs and `allow_write_roots`; a Crawler's scratch lives in
+# the MAIN checkout, which the guard reaches only through its same-git-dir rule, and that rule
+# stops at a nested repository. So a clone or a throwaway repo in scratch could be created and
+# then never written or removed. The guard has no verb for "allow one extra root in this tree",
+# so the key is written directly, into the gitignored per-tree layer, and nowhere wider.
+SCRATCH_HARNESS = ".game_loop"
+LOCAL_OVERRIDE = "config.local.json"
+WRITE_ROOTS_KEY = "allow_write_roots"
+
+
+def provision_scratch_root(worktree_path, scratch, main_root=None):
+    """Add exactly `scratch` to this tree's game_loop allow_write_roots. Returns (action, problem).
+
+    ONLY THAT PATH, AND NOTHING FROM MAIN. The main checkout's config.local.json holds decisions
+    a human made for that checkout (arming the watchdog's waiting probe is one), and a Crawler
+    inheriting them by way of spawn is a decision nobody made. game_loop's own .gitignore keeps
+    the copy step from carrying it over; a harness whose .gitignore does not would, so a tree
+    file identical to main's is taken as that copy and replaced, not merged into.
+    """
+    d = os.path.join(worktree_path, SCRATCH_HARNESS)
+    if not scratch or not os.path.isdir(d):
+        return None, None
+    path = os.path.join(d, LOCAL_OVERRIDE)
+    root = os.path.realpath(scratch)
+    data = {}
+    if os.path.exists(path):
+        try:
+            with open(path) as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as exc:
+            return None, ("%s/%s exists and cannot be read as JSON (%s), so the Crawler's scratch "
+                          "was NOT added to its write roots" % (SCRATCH_HARNESS, LOCAL_OVERRIDE, exc))
+        if not isinstance(data, dict) or not isinstance(data.get(WRITE_ROOTS_KEY, []), list):
+            return None, ("%s/%s is not a JSON object with a list %s, so the Crawler's scratch was "
+                          "NOT added" % (SCRATCH_HARNESS, LOCAL_OVERRIDE, WRITE_ROOTS_KEY))
+    dropped = ""
+    if data and main_root and data == _load_local(main_root):
+        data, dropped = {}, (" (the copy of the main checkout's %s that came with the harness "
+                             "was replaced, not merged into)" % LOCAL_OVERRIDE)
+    roots = list(data.get(WRITE_ROOTS_KEY) or [])
+    if root not in roots:
+        roots.append(root)
+    data[WRITE_ROOTS_KEY] = roots
+    with open(path, "w") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    return ("scratch write root: %s added to %s/%s -> %s, so the write guard lets this Crawler "
+            "write and delete anywhere in its own scratch, a nested repo included%s"
+            % (root, SCRATCH_HARNESS, LOCAL_OVERRIDE, WRITE_ROOTS_KEY, dropped)), None
+
+
+def _load_local(tree):
+    try:
+        with open(os.path.join(tree, SCRATCH_HARNESS, LOCAL_OVERRIDE)) as fh:
+            d = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def local_drift_is_scratch_only(cfg, worktree_path):
+    """True when the tree's config.local.json differs from main's ONLY by spawn's scratch root.
+
+    The entry spawn wrote is recomputed, not read back from the tree: scratch_root/<the
+    worktree's name>, which is how spawn names both. The tree's file, with that one entry taken
+    out, must then be empty, because spawn writes it from nothing. That is narrower than "equal to
+    main's with the key removed": main's own keys reaching a Crawler is the drift that must stay
+    visible. Anything else the tree carries is a difference this does not excuse.
+    """
+    mine = _load_local(worktree_path)
+    if mine is None:
+        return False
+    ours = os.path.realpath(os.path.join(cfg.scratch_root, os.path.basename(
+        os.path.normpath(worktree_path))))
+    roots = mine.get(WRITE_ROOTS_KEY)
+    if not isinstance(roots, list) or ours not in roots:
+        return False
+    rest = dict(mine)
+    left = [r for r in roots if r != ours]
+    if left:
+        rest[WRITE_ROOTS_KEY] = left
+    else:
+        rest.pop(WRITE_ROOTS_KEY)
+    return rest == {}
+
+
+def _excuse_scratch_root(cfg, worktree_path, rc, payload):
+    """Turn game_loop's notes-drifted into clean when the ONLY drift is spawn's scratch root.
+
+    Narrow on purpose: the verdict must be notes-drifted, the harness must name config.local.json
+    as the differing local override, no owned file may differ, and the difference must be that
+    one entry. Every other notes-drifted passes through unchanged.
+    """
+    if rc != NOTES_DRIFTED or not isinstance(payload, dict):
+        return rc, payload
+    local = (payload.get("local_override") or {}).get("drifted") or []
+    owned_drift = (payload.get("owned_files") or {}).get("drifted") or []
+    if LOCAL_OVERRIDE not in local or owned_drift:
+        return rc, payload
+    if not local_drift_is_scratch_only(cfg, worktree_path):
+        return rc, payload
+    return CLEAN, dict(payload, status="clean", detail=(
+        "every owned file and harness script matches the main checkout; %s differs only by the "
+        "Crawler's scratch write root that spawn added (game_loop reported it as notes-drifted)"
+        % LOCAL_OVERRIDE))
+
+
+def provision(cfg, worktree_path, scratch=None):
     """Make the worktree carry the SAME harness. Returns (actions, problems, warnings)."""
     sp = spec(cfg)
     actions, problems, warnings = [], [], []
@@ -380,8 +490,16 @@ def provision(cfg, worktree_path):
                     "per-worktree, so that would change the main checkout's ignores too."
                     % dirname)
 
+        if dirname == SCRATCH_HARNESS and scratch:
+            act, prob = provision_scratch_root(worktree_path, scratch, cfg.root)
+            if act:
+                actions.append(act)
+            if prob:
+                problems.append(prob)
+
         # Authoritative check: the harness compares its own trees.
         rc, payload = _verify_with_harness(worktree_path, dirname)
+        rc, payload = _excuse_scratch_root(cfg, worktree_path, rc, payload)
         if rc is None:
             # Not answering the contract. showrunner does NOT substitute a comparison of
             # its own here: guessing which files are rules is exactly the hardcoded list

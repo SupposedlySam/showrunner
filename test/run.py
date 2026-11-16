@@ -270,8 +270,10 @@ def have(binary):
 TMPDIRS = []
 
 
-def tmpdir(name="showrunner-test"):
-    d = tempfile.mkdtemp(prefix=name + "-")
+def tmpdir(name="showrunner-test", where=None):
+    if where:
+        os.makedirs(where, exist_ok=True)
+    d = tempfile.mkdtemp(prefix=name + "-", dir=where)
     TMPDIRS.append(d)
     return d
 
@@ -288,9 +290,9 @@ def sh(cmd, cwd, check=True):
     return p
 
 
-def make_repo(extra_config=None, files=None):
+def make_repo(extra_config=None, files=None, where=None):
     """A throwaway git repo with a showrunner config. Returns a Config."""
-    d = tmpdir("repo")
+    d = tmpdir("repo", where)
     sh(["git", "init", "-q", "-b", "main"], d)
     sh(["git", "config", "user.email", "test@example.com"], d)
     sh(["git", "config", "user.name", "showrunner test"], d)
@@ -18509,6 +18511,138 @@ def test_a_crawler_can_write_the_scratch_spawn_gave_it():
         roles.USER_PATH = prev
 
 
+def test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch():
+    group("spawn adds the Crawler's scratch to its tree's game_loop allow_write_roots, so a nested "
+          "repo there can be written and removed, and a sibling's still cannot")
+    real_bin = os.path.join(ROOT, ".game_loop", "bin")
+    if not have("git"):
+        skip("the scratch write-root group", "git is not installed")
+        return
+    if not os.path.isfile(os.path.join(real_bin, "guard-writes-impl.sh")):
+        skip("the scratch write-root group", "no vendored game_loop write guard to drive")
+        return
+    from showrunner import harness as H
+    # REPORTED by three Crawlers: game_loop's guard allows the main checkout from a worktree only
+    # through its same-git-dir rule, and that rule stops at a NESTED repository. A clone or a
+    # throwaway repo made in scratch could then be neither written nor removed.
+    # NOT UNDER A TEMP DIR: the guard allows /tmp, /private/tmp, /var/folders and $TMPDIR outright,
+    # so a fixture there passes every write and a refusal could never be observed. The repo's own
+    # tmp/ is gitignored and is none of those, except in mutate.py's copy, which lives in a temp
+    # dir itself; that run gets a per-process dir under ~/.cache instead, removed at exit.
+    temp_roots = ("/tmp/", "/private/tmp/", "/var/folders/", "/private/var/folders/")
+    base = None
+    for cand in (os.path.join(ROOT, "tmp"),
+                 os.path.join(os.path.expanduser("~"), ".cache", "showrunner-test-%d" % os.getpid())):
+        if not (os.path.realpath(cand) + "/").startswith(temp_roots):
+            base = cand
+            break
+    if base is None:
+        skip("the scratch write-root group", "every candidate fixture dir is under a temp root, "
+             "where the guard allows all writes, so no refusal could be observed")
+        return
+    if not base.startswith(ROOT):
+        atexit.register(shutil.rmtree, base, True)
+    cfg = make_repo(where=base)
+    _seed_harness(cfg.root)
+    gl = os.path.join(cfg.root, ".game_loop")
+    shutil.rmtree(os.path.join(gl, "bin"))
+    shutil.copytree(real_bin, os.path.join(gl, "bin"),
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    os.remove(os.path.join(gl, "TESTMODE"))
+    # The fixture's .gitignore does not name config.local.json, unlike game_loop's own, so the
+    # copy step carries main's file into the tree and spawn must replace it, not merge into it.
+    ok("the fixture harness's .gitignore lets the copy carry config.local.json, so the test "
+       "below exercises spawn refusing to inherit it",
+       "config.local.json" not in open(os.path.join(gl, ".gitignore")).read())
+    # The main checkout's own local layer, armed by a human. It must NOT reach a Crawler.
+    with open(os.path.join(gl, "config.local.json"), "w") as fh:
+        json.dump({"watchdog": {"waiting_probe": "/bin/true"}}, fh)
+    g = new_graph(cfg)
+    g.add("a", leaf_id="SW1")
+    g.add("b", leaf_id="SW2")
+    ra = attempt(lambda: worktree.spawn(cfg, g.show("SW1"), actor="crawler"), {})
+    rb = attempt(lambda: worktree.spawn(cfg, g.show("SW2"), actor="crawler"), {})
+    ok("spawn succeeds with the real game_loop harness provisioned", bool(ra and rb),
+       attempt_message(lambda: worktree.spawn(cfg, g.show("SW1"), actor="crawler")))
+    if not (ra and rb):
+        return
+    wa, sa, sb = ra["worktree"], cfg.abspath(ra["scratch"]), cfg.abspath(rb["scratch"])
+    local = os.path.join(wa, ".game_loop", "config.local.json")
+    eq("the tree's config.local.json holds exactly the Crawler's own scratch, and nothing else",
+       json.load(open(local)) if os.path.exists(local) else None,
+       {"allow_write_roots": [os.path.realpath(sa)]})
+    ok("spawn's report says it added the scratch write root",
+       any("scratch write root" in a and os.path.realpath(sa) in a
+           for a in ra.get("provisioned") or []), ra.get("provisioned"))
+
+    binp = os.path.join(wa, ".game_loop", "bin", "game_loop")
+    raw = subprocess.run([binp, "worktree", "--porcelain"], capture_output=True, text=True,
+                         cwd=os.path.dirname(binp))
+    eq("THE PAIR: game_loop itself reports the tree notes-drifted, so the excuse below is exercised",
+       raw.returncode, H.NOTES_DRIFTED)
+    eq("...and showrunner reads that one difference as clean", H.check_tree(cfg, wa)[0], "clean")
+    mine = H._load_local(wa) or {}
+    with open(local, "w") as fh:
+        json.dump(dict(mine, mcp_trusted_servers=["mcp__anything__"]), fh)
+    eq("...but any OTHER difference in config.local.json stays notes-drifted",
+       H.check_tree(cfg, wa)[0], "notes-drifted")
+    with open(local, "w") as fh:
+        json.dump(dict(mine, allow_write_roots=(mine.get("allow_write_roots") or []) +
+                       ["/elsewhere"]), fh)
+    eq("...and so does a second write root beside spawn's", H.check_tree(cfg, wa)[0],
+       "notes-drifted")
+    if mine:
+        with open(local, "w") as fh:
+            json.dump(mine, fh)
+    else:
+        os.remove(local)
+
+    for s in (sa, sb):
+        sh(["git", "init", "-q", os.path.join(s, "repo")], s)
+    env = dict(os.environ, CLAUDE_PROJECT_DIR=wa, TMPDIR="/nonexistent-tmpdir",
+               GAME_LOOP_GLOBAL_CONFIG=os.path.join(cfg.root, "no-global-config.json"))
+    env.pop("GAME_LOOP_HOME", None)
+
+    def guard(tool, arg):
+        ti = {"file_path": arg, "content": "x"} if tool == "Write" else {"command": arg}
+        payload = {"session_id": "sw-probe", "tool_name": tool, "tool_input": ti, "cwd": wa,
+                   "hook_event_name": "PreToolUse"}
+        p = subprocess.run(["bash", os.path.join(wa, ".game_loop", "bin", "guard-writes.sh")],
+                           input=json.dumps(payload), capture_output=True, text=True, env=env)
+        return not (p.returncode == 2 or '"deny"' in p.stdout)
+
+    own_f, sib_f = os.path.join(sa, "repo", "f.txt"), os.path.join(sb, "repo", "f.txt")
+    ok("a Write inside a nested repo in the Crawler's OWN scratch passes the guard",
+       guard("Write", own_f))
+    ok("...and so does rm -rf of that nested repo", guard("Bash", "rm -rf %s" % os.path.join(sa, "repo")))
+    ok("a Write inside a nested repo in a SIBLING's scratch is still refused",
+       not guard("Write", sib_f))
+    ok("...and so is rm -rf of it", not guard("Bash", "rm -rf %s" % os.path.join(sb, "repo")))
+    if os.path.exists(local):
+        os.rename(local, local + ".off")
+    try:
+        ok("THE PAIR: without the provisioned root, the guard refuses the Crawler's own nested "
+           "repo, so the write root is what lets it through", not guard("Write", own_f))
+    finally:
+        if os.path.exists(local + ".off"):
+            os.rename(local + ".off", local)
+
+    t = tmpdir("sw-unit")
+    os.makedirs(os.path.join(t, ".game_loop"))
+    tl = os.path.join(t, ".game_loop", "config.local.json")
+    with open(tl, "w") as fh:
+        json.dump({"allow_write_roots": ["/kept"], "mcp_trusted_servers": ["x"]}, fh)
+    act, prob = H.provision_scratch_root(t, sa, cfg.root)
+    eq("a tree file that is NOT main's copy is merged into, its own keys and roots kept",
+       json.load(open(tl)), {"allow_write_roots": ["/kept", os.path.realpath(sa)],
+                             "mcp_trusted_servers": ["x"]})
+    with open(tl, "w") as fh:
+        fh.write("{not json")
+    act, prob = H.provision_scratch_root(t, sa, cfg.root)
+    ok("an unreadable tree file is reported as a problem, and left as it was",
+       act is None and prob and "NOT added" in prob and open(tl).read() == "{not json", prob)
+
+
 def test_the_github_waker_rings_and_stays_quiet():
     group("the shipped GitHub waker: configured, one GraphQL query, rings on reviews and merges, "
           "quiet on its own writing, and never in a Crawler's tree")
@@ -21019,7 +21153,7 @@ def test_never_integrated_leaves_do_not_collide():
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_report_verbs_write_nothing, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_the_github_waker_stamps_every_invocation, test_doctor_and_waker_show_state_the_effective_watch, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_a_waker_whose_host_is_gone_stops, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_report_verbs_write_nothing, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_the_github_waker_stamps_every_invocation, test_doctor_and_waker_show_state_the_effective_watch, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_a_waker_whose_host_is_gone_stops, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

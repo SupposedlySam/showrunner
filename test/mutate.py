@@ -1341,6 +1341,19 @@ TARGETS = [
     ("harness drift check", "harness.check_tree", "lib/showrunner/harness.py",
      r"(def check_tree\(cfg, worktree_path\):\n)",
      "    return 'clean', '', False\ndef _neutered_check_tree(cfg, worktree_path):\n"),
+    # Neutered, spawn writes no scratch write root and says nothing: a Crawler's nested repo in
+    # its own scratch is refused again, which is the report this exists to end.
+    ("scratch write root provisioning", "harness.provision_scratch_root",
+     "lib/showrunner/harness.py",
+     r"(def provision_scratch_root\(worktree_path, scratch, main_root=None\):\n)",
+     "    return None, None\ndef _neutered_provision_scratch_root(worktree_path, scratch, "
+     "main_root=None):\n"),
+    # Neutered toward the reassuring answer, ANY config.local.json drift reads as clean: the
+    # check silenced wholesale, which is exactly what the excuse must stay narrower than.
+    ("scratch-only drift excuse", "harness.local_drift_is_scratch_only",
+     "lib/showrunner/harness.py",
+     r"(def local_drift_is_scratch_only\(cfg, worktree_path\):\n)",
+     "    return True\ndef _neutered_local_drift_is_scratch_only(cfg, worktree_path):\n"),
     # All four below were invisible until the candidate scan learned that `return None, ""` is
     # the same report as `return None`. Two are new; two have been in this file since the
     # harness contract was written, uncovered AND unlisted, which is the exact defect this tool
@@ -1650,6 +1663,7 @@ def candidates():
 # list, is the gaming this whole family is about — so where the honest answer is "should be
 # swept, is not yet", it says that and stays visible instead of being excused.
 NOT_SWEPT = {
+    "harness._load_local": "read only by local_drift_is_scratch_only and provision_scratch_root, both swept. Its reassuring answer is None (no file), which makes the drift excuse False and so fails the scratch group's 'showrunner reads that one difference as clean'; a None for main's file keeps a copied waiting probe, which fails 'holds exactly the Crawler's own scratch'",
     # Exercised entirely through a swept caller; a wrong answer surfaces there, and sweeping
     # each costs a full suite run for a signal already carried.
     "campaign.commits_ahead": "read only by is_merged/is_empty, both reached via reconcile in BOTH directions — the abandoned group asserts a branch with a commit and one without",
