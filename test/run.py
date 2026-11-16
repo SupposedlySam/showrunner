@@ -20514,11 +20514,15 @@ def _host_gone_cases(hb):
     class _Cfg(object):
         state_dir = cs
     skip = L._covers_reported(_Cfg(), "waker-state.json")
-    eq("a cover ring for a ring reported as gone is skipped; another cover, or a cover too far "
-       "from it, or a ring that is no cover, is not",
-       [skip({"at": T + 72, "events": ["cover"]}), skip({"at": T + 900, "events": ["cover"]}),
-        skip({"at": T + 80, "events": ["cover"]}), skip({"at": T + 70, "events": ["x"]})],
-       [True, False, False, False])
+    eq("a cover ring for a ring reported as gone is skipped",
+       skip({"at": T + 72, "events": ["cover"]}), True)
+    eq("...as is one recorded up to 5 s before the ring was marked covered",
+       skip({"at": T + 65, "events": ["cover"]}), True)
+    eq("...a cover of a ring NOT reported as gone is not",
+       skip({"at": T + 900, "events": ["cover"]}), False)
+    eq("...nor a cover too far from when that ring was covered",
+       skip({"at": T + 80, "events": ["cover"]}), False)
+    eq("...nor a ring that is no cover", skip({"at": T + 70, "events": ["x"]}), False)
     missing = "\n".join(L.session_start(scfg, now=lambda: T + 200_002, runner=world(49),
                                         transcript=os.path.join(tmpdir("host-none"), "no.jsonl")))
     ok("an unreadable transcript is said, not read as no host change",
