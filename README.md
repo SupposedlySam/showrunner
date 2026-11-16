@@ -252,7 +252,10 @@ moment a message reaches it.
 One way in is a Crawler ending its turn to wait on its own background job — a suite or
 mutant sweep sent to the background, waiting for a notification that may never arrive. So when the
 refusing session still has a Bash-tool job running, the refusal names it with its pid and says to
-wait for it in the foreground, then close; the brief says the same up front.
+wait for it in the foreground, then close; the brief says the same up front. One foreground call is
+capped at 10 minutes and a full mutant sweep is longer, so both say how to wait for a job that does
+not fit: run it in the background of the session (never `nohup` or detached) and wait with repeated
+foreground waits of under 10 minutes each, an until-loop on its exit or its output.
 
 **Talking to a running Crawler is unbundled — and under `--launch`, not optional.** Clone a chat
 tool and point showrunner at it; nothing is vendored and no package manager is assumed:

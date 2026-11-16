@@ -1555,7 +1555,10 @@ and parked leaves (accounted-for work, not abandoned work).
 started (a backgrounded suite or mutant sweep), the remedy line names it with its pid and says to
 wait for it in the foreground, then close: ending a turn to wait on your own job is a refusal each
 time, and the background notification that would wake the session is a delivery path that drops.
-Only Bash-tool shells count, not MCP servers or hooks; with none found, the remedy is the
+One foreground call is capped at 10 minutes, so the remedy also says how to wait for a job longer
+than that: repeated foreground waits of under 10 minutes each, an until-loop on its exit or its
+output. The brief carries the same rule, and adds that such a job runs in the background of the
+session, never `nohup` or detached. Only Bash-tool shells count, not MCP servers or hooks; with none found, the remedy is the
 close/release one.
 
 **`spawn --launch` wires `stop-gate --leaf <id>` into the Crawler's own tree** — merged into the

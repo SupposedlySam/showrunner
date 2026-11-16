@@ -1385,8 +1385,13 @@ def test_stop_gate():
     ok("a refusal with the caller's own job running still refuses", not ok_, msg)
     ok("...NAMES the job and its pid", "python3 test/mutate.py --target x (pid 4242) is still "
        "running" in msg, msg)
-    ok("...and says to wait for it in the foreground, then close",
-       "Wait for it in the foreground (block on it and read its result), then close" in msg
+    # A full sweep outlasts the 10-minute cap on one foreground call, so "foreground" alone
+    # forbade the only way to follow the rule: background it in-session and wait repeatedly.
+    ok("...and says to wait for it in the foreground, naming the 10-minute cap and the "
+       "repeated-wait instruction for a longer job, then close",
+       "Wait for it in the foreground, then read its result and close" in msg
+       and "capped at 10 minutes" in msg and "repeated foreground waits of under 10 minutes each" in msg
+       and "until-loop on its exit or its output" in msg
        and "Ending the turn while it runs is a refusal each time" in msg, msg)
     ok("...in place of the close/release remedy, with the leaf and scope still stated",
        "Either finish it" not in msg and "s1" in msg and "Scope:" in msg, msg)
@@ -1757,11 +1762,16 @@ def test_spawn():
        "shell variable" in text and "silently" in text, )
     ok("the brief warns about the shared-state refusal without offering a bypass",
        "--no-verify" in text and "never bypass" in text.lower(), )
-    ok("the brief says to run long checks in the foreground and never end a turn to wait on "
-       "your own job — twice a Crawler backgrounded its sweep, ended its turn, and was refused "
+    ok("the brief says to run long checks in the foreground, waits for a job longer than one "
+       "call in repeated foreground waits, and never ends a turn to wait on your own job — twice a Crawler backgrounded its sweep, ended its turn, and was refused "
        "until the gate stood down",
        "Run long checks in the foreground" in text
-       and "never end\na turn to wait for your own job" in text, )
+       and "never end\na turn to wait for your own job" in text
+       # ...and how, for a job longer than one call: a sweep cannot fit one, and the bare rule
+       # forbade the only way to follow it.
+       and "capped at 10 minutes" in text and "never `nohup` or detached" in text
+       and "repeated foreground waits of under 10 minutes each" in text
+       and "until-loop on\nthe job's exit or its output" in text, )
 
     # WHAT A REPORT MAY CLAIM. A Crawler's sentences are read by an orchestrator that cannot
     # cheaply check them and then dispatches the next leaf on them — so a confident wrong
@@ -13867,8 +13877,10 @@ def test_cli():
         sweep.kill()
         sweep.wait()
     ok("`stop-gate` refusing a session with its own job running NAMES the job and says to wait "
-       "for it in the foreground", rc_bg == 2 and "sleep 30 # the sweep (pid %d) is still "
-       "running" % sweep.pid in err_bg.getvalue() and "in the foreground" in err_bg.getvalue(),
+       "for it in the foreground, repeatedly if it outlasts one call", rc_bg == 2
+       and "sleep 30 # the sweep (pid %d) is still running" % sweep.pid in err_bg.getvalue()
+       and "in the foreground" in err_bg.getvalue()
+       and "repeated foreground waits" in err_bg.getvalue(),
        (rc_bg, err_bg.getvalue()))
     p = subprocess.run([sys.executable, exe, "stop-gate", "--leaf", "cli2"], cwd=sib_tree,
                        capture_output=True, text=True, env=env)
