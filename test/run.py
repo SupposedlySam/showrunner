@@ -11574,10 +11574,54 @@ def test_publishable():
     # about what is actually enforced on this machine. Today those are the same thing because
     # no machine-wide file exists here, and a check that passes for the right reason today
     # passes identically for the wrong one tomorrow. Mirrors the guard's own source list.
+    #
+    # ONE GRANTED EXCEPTION: in a Crawler's tree, spawn writes exactly that Crawler's own scratch
+    # into the tree's gitignored config.local.json (`harness.provision_scratch_root`), because the
+    # scratch lives in the main checkout and must outlive the tree. Only that layer, and only the
+    # realpath spawn's record names for this session (`roles.crawler_scratch`): a second root
+    # beside it, a sibling's scratch, or the same path in a wider layer is still a widening.
+    from showrunner import config as _config, roles as _roles, util as _util
+    try:
+        own_scratch = _roles.crawler_scratch(_config.load(ROOT), _util.caller_session())
+    except Exception:                                           # noqa: BLE001
+        own_scratch = None
+    local_layer = os.path.join(ROOT, ".game_loop", "config.local.json")
+
+    def widened(layers, root_dir, own):
+        """[(src, root)] granted outside `root_dir` by `layers` ([(src, data)]), less the one
+        exception: `own` in the tree's config.local.json."""
+        out = []
+        for src, d in layers:
+            for root in d.get("allow_write_roots") or []:
+                if os.path.abspath(root).startswith(root_dir):
+                    continue
+                if own and src == os.path.join(root_dir, ".game_loop", "config.local.json") \
+                        and os.path.realpath(root) == os.path.realpath(own):
+                    continue
+                out.append("%s → %s" % (src, root))
+        return out
+
+    fake_root, fake_own = "/r/tree", "/r/main/.showrunner/campaigns/c/scratch/me"
+    fake_local, fake_cfg = "/r/tree/.game_loop/config.local.json", "/r/tree/.game_loop/config.json"
+    for label, layers, want in (
+            ("the Crawler's own scratch in config.local.json", [(fake_local, {
+                "allow_write_roots": [fake_own]})], 0),
+            ("a SECOND root beside it", [(fake_local, {
+                "allow_write_roots": [fake_own, "/elsewhere"]})], 1),
+            ("a SIBLING Crawler's scratch", [(fake_local, {
+                "allow_write_roots": ["/r/main/.showrunner/campaigns/c/scratch/sib"]})], 1),
+            ("its own scratch in the tracked config.json", [(fake_cfg, {
+                "allow_write_roots": [fake_own]})], 1),
+            ("its own scratch in ~/.game_loop/config.json", [(os.path.expanduser(
+                "~/.game_loop/config.json"), {"allow_write_roots": [fake_own]})], 1)):
+        eq("the write-root exception: %s -> %d widening(s)" % (label, want),
+           len(widened(layers, fake_root, fake_own)), want)
+    eq("...and with no scratch of its own (not a Crawler), nothing is excepted",
+       len(widened([(fake_local, {"allow_write_roots": [fake_own]})], fake_root, None)), 1)
+
     layered = [os.path.expanduser("~/.game_loop/config.json"),
-               os.path.join(ROOT, ".game_loop", "config.json"),
-               os.path.join(ROOT, ".game_loop", "config.local.json")]
-    present, granted = [], []
+               os.path.join(ROOT, ".game_loop", "config.json"), local_layer]
+    present, read = [], []
     for src in layered:
         try:
             with open(src) as fh:
@@ -11602,8 +11646,10 @@ def test_publishable():
     else:
         ok("...and so does the EFFECTIVE config — the union game_loop actually reads, not just "
            "the file this repo ships. showrunner's docs promise a Crawler cannot write outside "
-           "the repo, and a machine-wide layer can widen that without touching anything tracked",
-           not granted, granted)
+           "the repo, and a machine-wide layer can widen that without touching anything tracked. "
+           "The one granted exception is a Crawler's own scratch in its tree's config.local.json, "
+           "which spawn writes because that scratch lives in the main checkout and must outlive "
+           "the tree", not granted, granted)
         ok("...checked against the layers that exist here, so this is a verdict rather than a "
            "file that happened to be missing", bool(present), present)
 
