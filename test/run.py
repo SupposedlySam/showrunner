@@ -19209,8 +19209,10 @@ def test_a_state_change_the_agent_made_itself_does_not_ring():
     code, text = W.run(cfg, once=True, runner=lambda _q: gql("MERGED", mergedAt=T),
                        transcript=transcript(merge_mcp(T - 2)))
     eq("run(): my own merge is nothing new", code, 0)
-    with open(W.decisions_path(cfg)) as fh:
-        rows = [json.loads(x) for x in fh if x.strip()]
+    rows = []
+    if os.path.exists(W.decisions_path(cfg)):
+        with open(W.decisions_path(cfg)) as fh:
+            rows = [json.loads(x) for x in fh if x.strip()]
     eq("...and the decision log says own, from the transcript",
        [(r["event"], r["verdict"], "transcript: mcp__github__mergePullRequest" in r["reason"])
         for r in rows if r["event"].startswith("state:")], [("state:MERGED", "own", True)])
