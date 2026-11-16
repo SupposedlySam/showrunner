@@ -891,8 +891,29 @@ TARGETS = [
      r"(def look\(sp, runner=None\):\n)",
      "    return {}\ndef _neutered_look(sp, runner=None):\n"),
     ("what is new since the last look", "waker.poll", "lib/showrunner/waker.py",
-     r"(def poll\(sp, state, items, log=None\):\n)",
-     "    return None, state\ndef _neutered_poll(sp, state, items, log=None):\n"),
+     r"(def poll\(sp, state, items, log=None, transcript=None\):\n)",
+     "    return None, state\ndef _neutered_poll(sp, state, items, log=None, transcript=None):\n"),
+    # A STATE CHANGE OF MY OWN. The restraint is a ring withheld, so each rule that withholds it
+    # is neutered toward withholding MORE: a match that accepts any call, and windows that
+    # accept any time. Each is killed only by a case that must still ring.
+    ("a tool call made THIS change: same kind, number and repo", "ownstate.made_it",
+     "lib/showrunner/ownstate.py", r"(def made_it\(call, key, now\):\n)",
+     "    return True\ndef _neutered_made_it(call, key, now):\n"),
+    ("the transcript window: at or before the change, not long before", "ownstate.before_change",
+     "lib/showrunner/ownstate.py", r"(def before_change\(call_at, at, window\):\n)",
+     "    return True\ndef _neutered_before_change(call_at, at, window):\n"),
+    ("the fallback window, either side of the change", "ownstate.near_change",
+     "lib/showrunner/ownstate.py", r"(def near_change\(t, at, window\):\n)",
+     "    return True\ndef _neutered_near_change(t, at, window):\n"),
+    ("the gh calls a Bash command makes", "ownstate.bash_calls", "lib/showrunner/ownstate.py",
+     r"(def bash_calls\(command, cwd\):\n)",
+     "    return []\ndef _neutered_bash_calls(command, cwd):\n"),
+    ("the MCP calls that change a state", "ownstate.mcp_call", "lib/showrunner/ownstate.py",
+     r"(def mcp_call\(name, inp\):\n)",
+     "    return None\ndef _neutered_mcp_call(name, inp):\n"),
+    ("the repo a gh call with no --repo acts on", "ownstate.remote_repo",
+     "lib/showrunner/ownstate.py", r"(def remote_repo\(path, _cache=\{\}\):\n)",
+     "    return None\ndef _neutered_remote_repo(path, _cache={}):\n"),
     ("the waker's loop", "waker.run", "lib/showrunner/waker.py",
      r"(def run\(cfg, once=False, sleep=time.sleep, now=time.time, runner=None, transcript=None,\n        host=None\):\n)",
      "    return 0, \"\"\ndef _neutered_run(cfg, once=False, sleep=time.sleep, now=time.time, runner=None, transcript=None, host=None):\n"),
@@ -989,7 +1010,7 @@ TARGETS = [
      "    return 0, \"\"\ndef _neutered_host_gone(cfg, host, by, where, now_ts, owner=None):\n"),
     ("the GitHub waker does not advance under a gone host", "waker.run",
      "lib/showrunner/waker.py",
-     r"(            wake, new_state = poll\(sp, state, items, judged\)\n)",
+     r"(            wake, new_state = poll\(sp, state, items, judged, transcript\)\n)",
      "            gone = lambda _h: False\n"),
     ("the Crawler waker records no ring under a gone host", "crawlerwaker.run",
      "lib/showrunner/crawlerwaker.py",
@@ -1664,6 +1685,9 @@ def candidates():
 # swept, is not yet", it says that and stays visible instead of being excused.
 NOT_SWEPT = {
     "harness._load_local": "read only by local_drift_is_scratch_only and provision_scratch_root, both swept. Its reassuring answer is None (no file), which makes the drift excuse False and so fails the scratch group's 'showrunner reads that one difference as clean'; a None for main's file keeps a copied waiting probe, which fails 'holds exactly the Crawler's own scratch'",
+    "ownstate._git_config": "read only by remote_repo, which is swept; the worktree and no-checkout cases assert both of its answers through it",
+    "ownstate._opt": "read only by bash_calls, which is swept; the --repo, -R and --method shapes are asserted case by case",
+    "ownstate._segments": "read only by bash_calls, which is swept; the two-calls-in-one-command and cd-first cases assert the split",
     # Exercised entirely through a swept caller; a wrong answer surfaces there, and sweeping
     # each costs a full suite run for a signal already carried.
     "campaign.commits_ahead": "read only by is_merged/is_empty, both reached via reconcile in BOTH directions — the abandoned group asserts a branch with a commit and one without",

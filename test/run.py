@@ -19101,6 +19101,275 @@ def test_the_github_waker_rings_and_stays_quiet():
        q.returncode == 0 and "usage" not in q.stderr, (q.returncode, q.stderr))
 
 
+def test_a_state_change_the_agent_made_itself_does_not_ring():
+    group("a close, merge or reopen the agent made itself does not ring: its own transcript "
+          "first, an own-signed comment beside the change second, and a ring without either")
+    from showrunner import waker as W, ownstate as O
+    # MEASURED on a consumer: of 32 rings in an afternoon, 10 were MERGED on PRs that session had
+    # just merged itself with `mcp__github__mergePullRequest`, each a turn re-reading the context.
+    sig = "— 🤖 x owner agent"
+    sp = {"repos": ["me/fork"], "upstream": [], "trusted_logins": {"me"}, "trusted_names": set(),
+          "signature": sig, "own_state_window_sec": 120, "poll_sec": 300, "budget_sec": 1800}
+    eq("the window defaults to 120 s", (W.spec(make_repo({"waker": {"repos": ["a/b"]}})) or {})
+       .get("own_state_window_sec"), 120)
+    q = W.query(sp)
+    ok("the one query asks for the change times and every comment's and review's time",
+       "mergedAt" in W._PR and "closedAt" in W._THREAD and W._PR.count("createdAt") == 3
+       and "mergedAt" in q, q)
+
+    # A checkout whose origin is me/fork, and a linked worktree of it: `gh` with no --repo acts
+    # on the remote of the directory it ran in.
+    home = tmpdir("own-state-repo")
+    os.makedirs(os.path.join(home, ".git", "worktrees", "wt"))
+    with open(os.path.join(home, ".git", "config"), "w") as fh:
+        fh.write('[core]\n\tbare = false\n[remote "upstream"]\n\turl = https://github.com/'
+                 'them/up.git\n[remote "origin"]\n\turl = git@github.com:me/fork.git\n')
+    with open(os.path.join(home, ".git", "worktrees", "wt", "commondir"), "w") as fh:
+        fh.write("../..\n")
+    wt = os.path.join(home, "wt")
+    os.makedirs(os.path.join(wt, "sub"))
+    with open(os.path.join(wt, ".git"), "w") as fh:
+        fh.write("gitdir: %s\n" % os.path.join(home, ".git", "worktrees", "wt"))
+    elsewhere = tmpdir("own-state-norepo")
+    eq("the cwd's remote is origin's, read from git config", O.remote_repo(home), "me/fork")
+    eq("...from a linked worktree's subdirectory too, through its commondir",
+       O.remote_repo(os.path.join(wt, "sub")), "me/fork")
+    eq("...and none outside a checkout", O.remote_repo(elsewhere), None)
+
+    def kinds(cmd, cwd=home):
+        return [(k, r, n) for k, r, n, _w in O.bash_calls(cmd, cwd)]
+    for label, cmd, want in (
+            ("gh pr merge N --repo", "gh pr merge 7 --repo me/fork --squash",
+             [("merge", "me/fork", 7)]),
+            ("gh pr close N -R", "gh pr close 7 -R me/fork", [("close", "me/fork", 7)]),
+            ("gh issue close N in the checkout", "gh issue close 7", [("close", "me/fork", 7)]),
+            ("gh issue reopen N", "gh issue reopen '#7'", [("reopen", "me/fork", 7)]),
+            ("gh pr reopen N", "gh pr reopen 7", [("reopen", "me/fork", 7)]),
+            ("a URL target names its own repo", "gh pr merge https://github.com/them/up/pull/9",
+             [("merge", "them/up", 9)]),
+            ("an env assignment and an absolute gh", "GH_PROMPT_DISABLED=1 /opt/homebrew/bin/gh "
+             "pr merge 7", [("merge", "me/fork", 7)]),
+            ("gh api PUT .../pulls/N/merge", "gh api -X PUT repos/me/fork/pulls/7/merge",
+             [("merge", "me/fork", 7)]),
+            ("gh api PATCH state=closed", "gh api --method PATCH repos/me/fork/issues/7 "
+             "-f state=closed", [("close", "me/fork", 7)]),
+            ("gh api fields imply POST; {owner}/{repo} is the cwd's",
+             "gh api repos/{owner}/{repo}/issues/7 -f state=open", [("reopen", "me/fork", 7)]),
+            ("two calls in one command", "gh pr merge 7; gh issue close 8 && echo done",
+             [("merge", "me/fork", 7), ("close", "me/fork", 8)]),
+            ("gh api GET is a read", "gh api repos/me/fork/pulls/7", []),
+            ("gh api PATCH of a title changes no state",
+             "gh api -X PATCH repos/me/fork/issues/7 -f title=x", []),
+            ("gh pr view is a read", "gh pr view 7", []),
+            ("gh pr merge with no number names no item", "gh pr merge --squash", []),
+            ("gh issue merge is not a verb", "gh issue merge 7", []),
+            ("the words in an echo are not a call", "echo gh pr merge 7", []),
+            ("a commented-out call is not a call", "true # gh pr merge 7", [])):
+        eq("bash: %s" % label, kinds(cmd), want)
+    eq("bash: `cd` into the checkout first decides the repo",
+       kinds("cd %s && gh pr merge 7" % wt, cwd=elsewhere), [("merge", "me/fork", 7)])
+    eq("bash: outside any checkout and with no --repo, the repo is unknown",
+       kinds("gh pr merge 7", cwd=elsewhere), [("merge", None, 7)])
+    eq("mcp: mergePullRequest", (O.mcp_call("mcp__github__mergePullRequest",
+                                           {"owner": "me", "repo": "fork", "pull_number": 7})
+                                or ())[:3],
+       ("merge", "me/fork", 7))
+    eq("mcp: closePullRequest", (O.mcp_call("mcp__github__closePullRequest",
+                                           {"owner": "me", "repo": "fork", "pull_number": 7})
+                                or ())[:3],
+       ("close", "me/fork", 7))
+    eq("mcp: an omitted owner/repo defaults to the server's env, which cannot be seen",
+       O.mcp_call("mcp__github__mergePullRequest", {"pull_number": 7}), None)
+    eq("mcp: a comment is not a state change", O.mcp_call(
+        "mcp__github__addIssueComment", {"owner": "me", "repo": "fork", "issue_number": 7}), None)
+
+    def iso(t):
+        return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t)) + ".000Z"
+
+    T = 1794844800      # the change
+    seq = [0]
+
+    def use(t, name, inp, error=False, cwd=home):
+        seq[0] += 1
+        tid = "toolu_%d" % seq[0]
+        return [{"type": "assistant", "timestamp": iso(t), "cwd": cwd, "message": {
+                    "content": [{"type": "tool_use", "id": tid, "name": name, "input": inp}]}},
+                {"type": "user", "timestamp": iso(t + 1), "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": tid, "is_error": error,
+                     "content": "BLOCKED" if error else "ok"}]}}]
+
+    def transcript(*entries):
+        p = os.path.join(tmpdir("own-state-tx"), "t.jsonl")
+        with open(p, "w") as fh:
+            for e in entries:
+                for rec in e:
+                    fh.write(json.dumps(rec) + "\n")
+        return p
+
+    def merge_mcp(t, n=7, repo="fork", **kw):
+        return use(t, "mcp__github__mergePullRequest",
+                   {"owner": "me", "repo": repo, "pull_number": n}, **kw)
+
+    found = O.calls(transcript(merge_mcp(T - 2), merge_mcp(T - 1, error=True, n=8),
+                               use(T - 3, "Bash", {"command": "gh issue close 9"})))
+    eq("calls(): every state-changing call whose result was not an error, nothing else",
+       sorted((d["kind"], d["repo"], d["number"]) for d in found),
+       [("close", "me/fork", 9), ("merge", "me/fork", 7)])
+    try:
+        O.calls(os.path.join(elsewhere, "missing.jsonl"))
+        unread = None
+    except OSError as e:
+        unread = e
+    ok("calls(): a transcript that cannot be read RAISES, never reads as no calls",
+       isinstance(unread, OSError), unread)
+
+    def c(i, who, body, t):
+        return {"databaseId": i, "createdAt": iso(t)[:19] + "Z", "body": body,
+                "author": {"login": who}}
+
+    def item(state="OPEN", comments=(), reviews=(), n=7, **times):
+        d = {"number": n, "title": "t%d" % n, "state": state, "author": {"login": "me"},
+             "body": "b", "updatedAt": iso(T + 5)[:19] + "Z",
+             "comments": {"nodes": list(comments)}, "reviews": {"nodes": list(reviews)},
+             "repo": "me/fork", "is_pr": True}
+        d.update({k: iso(v)[:19] + "Z" for k, v in times.items()})
+        return d
+
+    base = {"me/fork#7": item()}
+    ids, states = W.snapshot(base)
+    st = {"events": sorted(ids), "states": states}
+    merged = {"me/fork#7": item("MERGED", mergedAt=T)}
+
+    def verdict(world, tx=None, s=sp):
+        log = []
+        wake, _ = W.poll(s, st, world, log, tx)
+        d = [x for x in log if x["event"].startswith("state:")]
+        return wake, (d[0]["verdict"] if d else None), (d[0]["reason"] if d else "")
+
+    # THE TRANSCRIPT RULE, shape by shape.
+    for label, entry, want in (
+            ("an MCP mergePullRequest 2 s before", merge_mcp(T - 2), "own"),
+            ("a Bash gh pr merge 2 s before", use(T - 2, "Bash", {"command": "gh pr merge 7"}),
+             "own"),
+            ("a Bash gh api PUT merge", use(T - 2, "Bash", {
+                "command": "gh api -X PUT repos/me/fork/pulls/7/merge"}), "own"),
+            ("a call AT the change", merge_mcp(T), "own"),
+            ("a call for a DIFFERENT item number", merge_mcp(T - 2, n=8), "rang"),
+            ("a call on a DIFFERENT repo with the same number", merge_mcp(T - 2, repo="other"),
+             "rang"),
+            ("a call AFTER the change is not evidence", merge_mcp(T + 5), "rang"),
+            ("a call older than the window is not evidence", merge_mcp(T - 121), "rang"),
+            ("a call whose result was an ERROR is not evidence", merge_mcp(T - 2, error=True),
+             "rang"),
+            ("a CLOSE call is no evidence for a MERGE", use(T - 2, "mcp__github__closePullRequest",
+                                                          {"owner": "me", "repo": "fork",
+                                                           "pull_number": 7}), "rang")):
+        wake, v, why = verdict(merged, transcript(entry))
+        eq("transcript: %s -> %s" % (label, want), v, want)
+        if want == "own":
+            ok("...and it does not ring", wake is None, wake)
+        else:
+            ok("...and it RINGS", wake and "MERGED" in wake, wake)
+    wake, v, why = verdict(merged, transcript(merge_mcp(T - 2)))
+    ok("the decision log's reason names the tool call and its time",
+       "transcript: mcp__github__mergePullRequest #7 at " in why and "2s before" in why
+       and iso(T - 2)[:19] in why, why)
+    closed = {"me/fork#7": item("CLOSED", closedAt=T)}
+    eq("a CLOSE: gh issue close in the checkout, by closedAt", verdict(closed, transcript(
+        use(T - 2, "Bash", {"command": "cd %s; gh issue close 7 2>&1 | tail -1" % wt},
+            cwd=elsewhere)))[1], "own")
+    reopened = {"me/fork#7": dict(item("OPEN"), updatedAt=iso(T)[:19] + "Z")}
+    st_closed = {"events": st["events"], "states": {"me/fork#7": "CLOSED"}}
+    log = []
+    W.poll(sp, st_closed, reopened, log, transcript(use(T - 2, "Bash",
+                                                        {"command": "gh pr reopen 7"})))
+    eq("a REOPEN: gh pr reopen, with updatedAt standing in for the reopen time",
+       [(x["verdict"], "updatedAt" in x["reason"]) for x in log], [("own", True)])
+
+    # THE FALLBACK: the newest comment or review is own-signed and beside the change.
+    signed = sig
+    for label, world, want in (
+            ("an own-signed comment 30 s AFTER the merge",
+             item("MERGED", [c(1, "me", "merged.\n\n" + signed, T + 30)], mergedAt=T), "own"),
+            ("an own-signed comment 30 s BEFORE the merge",
+             item("MERGED", [c(1, "me", "merging.\n\n" + signed, T - 30)], mergedAt=T), "own"),
+            ("an own-signed REVIEW beside it", item("MERGED", reviews=[{
+                "databaseId": 3, "state": "APPROVED", "body": "ok\n\n" + signed,
+                "createdAt": iso(T + 3)[:19] + "Z", "author": {"login": "me"}}], mergedAt=T),
+             "own"),
+            ("an own-signed comment 10 MINUTES earlier: somebody else may have merged since",
+             item("MERGED", [c(1, "me", "ready.\n\n" + signed, T - 600)], mergedAt=T), "rang"),
+            ("an own-signed comment 121 s after: just outside the window",
+             item("MERGED", [c(1, "me", "x\n\n" + signed, T + 121)], mergedAt=T), "rang"),
+            ("an UNSIGNED newest comment on the shared login",
+             item("MERGED", [c(1, "me", "merged", T + 3)], mergedAt=T), "rang"),
+            ("ANOTHER agent's signature", item("MERGED", [c(1, "me", "x\n\n— 🤖 another agent",
+                                                            T + 3)], mergedAt=T), "rang"),
+            ("mine is not the NEWEST: somebody wrote after it",
+             item("MERGED", [c(1, "me", "x\n\n" + signed, T + 2), c(2, "boss", "merged it",
+                                                                   T + 4)], mergedAt=T), "rang"),
+            ("no comment at all", item("MERGED", mergedAt=T), "rang"),
+            ("no mergedAt to compare against",
+             item("MERGED", [c(1, "me", "x\n\n" + signed, T + 2)]), "rang")):
+        wake, v, why = verdict({"me/fork#7": world})
+        eq("fallback: %s -> %s" % (label, want), v, want)
+    wake, v, why = verdict({"me/fork#7": item("MERGED", [c(1, "me", "x\n\n" + signed, T + 30)],
+                                              mergedAt=T)})
+    ok("the decision log's reason names the fallback rule and the gap",
+       why.startswith("state OPEN -> MERGED; fallback: own-signed comment or review 30s after "
+                      "the change, within 120s") and "no transcript path" in why, why)
+    wake, v, why = verdict({"me/fork#7": item("MERGED", [c(1, "me", "x\n\n" + signed, T - 600)],
+                                              mergedAt=T)})
+    ok("a ring's reason says why neither rule held", v == "rang" and
+       why.startswith("state OPEN -> MERGED; no evidence it was mine: no transcript path; ")
+       and "600s before the change, outside the 120s window" in why, why)
+    wake, v, why = verdict(merged, os.path.join(elsewhere, "missing.jsonl"))
+    ok("an UNREADABLE transcript is said in the reason, not read as no calls",
+       v == "rang" and "transcript could not be read" in why, why)
+    wake, v, why = verdict({"me/fork#7": item("MERGED", [c(1, "me", "x\n\n" + signed, T + 2)],
+                                              mergedAt=T)},
+                           os.path.join(elsewhere, "missing.jsonl"))
+    eq("...and the fallback still applies when it cannot be read", v, "own")
+    wake, v, why = verdict({"me/fork#7": item("MERGED", [c(1, "me", "x\n\n" + signed, T + 2)],
+                                              mergedAt=T)}, transcript(merge_mcp(T - 900)))
+    ok("...and when the transcript holds no matching call", v == "own"
+       and "no merge call on me/fork#7" in why, why)
+    wake, v, why = verdict({"me/fork#7": item("MERGED", [c(1, "me", "x\n\n" + signed, T + 2)],
+                                              mergedAt=T)}, s=dict(sp, own_state_window_sec=1))
+    eq("the window is the configured one", v, "rang")
+
+    # NO EVIDENCE RINGS, and an own change is counted beside what does ring.
+    world = {"me/fork#7": item("MERGED", mergedAt=T),
+             "me/fork#8": item("MERGED", n=8, mergedAt=T)}
+    st2 = {"events": [], "states": {"me/fork#7": "OPEN", "me/fork#8": "OPEN"}}
+    wake, _ = W.poll(sp, st2, world, None, transcript(merge_mcp(T - 2)))
+    ok("a merge by somebody else rings beside my own, which is counted, not shown",
+       wake and "me/fork#8 MERGED" in wake and "me/fork#7" not in wake
+       and "1 of my own" in wake, wake)
+
+    # THE LOOP hands the transcript through: `run` with a transcript logs `own`.
+    cfg = make_repo()
+    cfg.data["waker"] = {"repos": ["me/fork"], "signature": sig}
+
+    def gql(state, **times):
+        n = {"number": 7, "title": "t7", "state": state, "author": {"login": "me"}, "body": "b",
+             "updatedAt": iso(T)[:19] + "Z", "comments": {"nodes": []}, "reviews": {"nodes": []}}
+        n.update({k: iso(v)[:19] + "Z" for k, v in times.items()})
+        return json.dumps({"data": {"r0": {"issues": {"nodes": []},
+                                           "pullRequests": {"nodes": [n]}}}})
+    W.run(cfg, once=True, runner=lambda _q: gql("OPEN"))
+    code, text = W.run(cfg, once=True, runner=lambda _q: gql("MERGED", mergedAt=T),
+                       transcript=transcript(merge_mcp(T - 2)))
+    eq("run(): my own merge is nothing new", code, 0)
+    rows = []
+    if os.path.exists(W.decisions_path(cfg)):
+        with open(W.decisions_path(cfg)) as fh:
+            rows = [json.loads(x) for x in fh if x.strip()]
+    eq("...and the decision log says own, from the transcript",
+       [(r["event"], r["verdict"], "transcript: mcp__github__mergePullRequest" in r["reason"])
+        for r in rows if r["event"].startswith("state:")], [("state:MERGED", "own", True)])
+
+
 def test_the_github_waker_stamps_every_invocation():
     group("The GitHub waker stamps the heartbeat on every exit path, so doctor's NEVER line about "
           "it is true when it appears")
@@ -21159,7 +21428,7 @@ def test_never_integrated_leaves_do_not_collide():
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_report_verbs_write_nothing, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_the_github_waker_stamps_every_invocation, test_doctor_and_waker_show_state_the_effective_watch, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_a_waker_whose_host_is_gone_stops, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_report_verbs_write_nothing, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_state_change_the_agent_made_itself_does_not_ring, test_the_github_waker_stamps_every_invocation, test_doctor_and_waker_show_state_the_effective_watch, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_a_waker_whose_host_is_gone_stops, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

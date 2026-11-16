@@ -12,6 +12,7 @@ running in the background after a turn ends and turns an exit 2 with stderr into
       "trusted_logins":  ["login", ...],
       "trusted_names":   ["Display Name", ...],
       "signature":       "— 🤖 <name> owner agent",
+      "own_state_window_sec": 120,
       "poll_sec": 300, "budget_sec": 604740
     }
 
@@ -19,8 +20,12 @@ Nothing configured means the hook exits at once: it costs nothing until a projec
 
 WHAT RINGS: a new issue or PR; a state change — closed, MERGED, reopened, which arrives as no
 comment at all; a comment; a REVIEW with a body or an approve/request-changes verdict; an INLINE
-review comment. Comments on a closed item count: closed is not finished. A close or merge rings
-even when the agent made it: a state change carries no signature to recognise.
+review comment. Comments on a closed item count: closed is not finished. A close, merge or reopen
+rings unless there is evidence the agent made it (`ownstate`): a tool call in the session's own
+transcript that made it, or else an own-signed newest comment or review within
+`own_state_window_sec` of it. A state change carries no signature, and the account that made it is
+shared, so with neither kind of evidence it rings: a merge by the maintainer or another agent
+must wake.
 
 ONE RING PER EVENT, however many wakers are running. Each turn-end starts one, so several can be
 alive at once: the newest owns the watch and an older one exits when it sees it was replaced, and
@@ -31,7 +36,7 @@ last look on record, so an event that arrived during a long turn rings at that t
 WHAT DOES NOT, stated so silence is not read as a broken watcher: the agent's own writing — a
 comment, review or PR body whose last signature is `signature`, with or without Claude Code's
 attribution line after it; anything older than the last 20 comments/reviews on one item between
-two polls; chat debts, which llm_chat's own waker rings for. OWN WRITING IS JUDGED BY THE
+two polls; a close, merge or reopen the evidence above says was its own; chat debts, which llm_chat's own waker rings for. OWN WRITING IS JUDGED BY THE
 SIGNATURE ALONE. The author cannot tell: the agent posts under its maintainer's account, and so
 may other agents. Nor can the attribution line, which every Claude Code agent's PR ends with:
 read as "mine" it silenced another agent's PR on the shared account. So agents sharing an account
@@ -76,13 +81,15 @@ DECISIONS_KEEP = 1000
 RINGS_KEEP = 50
 
 _THREAD = """
-  number title state url updatedAt body
+  number title state url updatedAt closedAt body
   author { login ... on User { name } }
-  comments(last: %d) { nodes { databaseId body author { login ... on User { name } } } }
+  comments(last: %d) { nodes { databaseId createdAt body author { login ... on User { name } } } }
 """ % LAST
 _PR = _THREAD + """
-  reviews(last: %d) { nodes { databaseId state body author { login ... on User { name } }
-    comments(last: %d) { nodes { databaseId body author { login ... on User { name } } } } } }
+  mergedAt
+  reviews(last: %d) { nodes { databaseId createdAt state body author { login ... on User { name } }
+    comments(last: %d) { nodes { databaseId createdAt body
+      author { login ... on User { name } } } } } }
 """ % (LAST, LAST)
 
 
@@ -91,6 +98,7 @@ _PR = _THREAD + """
 # Now the newest waker owns the watch and an older one exits at its next poll, so a long budget is
 # one poller, and the harness ends it with the session.
 BUDGET_SEC = 604740
+OWN_STATE_WINDOW_SEC = 120
 
 
 def spec(cfg):
@@ -108,6 +116,7 @@ def spec(cfg):
         "trusted_logins": {str(x).lower() for x in (w.get("trusted_logins") or [])},
         "trusted_names": {str(x).lower() for x in (w.get("trusted_names") or [])},
         "signature": w.get("signature") or "",
+        "own_state_window_sec": int(w.get("own_state_window_sec") or OWN_STATE_WINDOW_SEC),
         "poll_sec": int(w.get("poll_sec") or 300),
         "budget_sec": int(w.get("budget_sec") or BUDGET_SEC),
     }
@@ -322,14 +331,17 @@ def snapshot(items):
     return ids, {k: it.get("state") for k, it in items.items()}
 
 
-def poll(sp, state, items, log=None):
+def poll(sp, state, items, log=None, transcript=None):
     """(wake_text or None, new_state). `items` is one look's result; None means could not look.
-    Every event judged is appended to `log`, when given, as a decision record."""
+    Every event judged is appended to `log`, when given, as a decision record. `transcript` is
+    the session's, read only when a state changed, for evidence the change was its own."""
+    from . import ownstate
     if items is None:
         return None, None
     log = [] if log is None else log
     seen, states = set(state["events"]), dict(state["states"])
     lines, own, untrusted = [], 0, False
+    found = None    # the transcript's state-changing calls, read on the first state change
 
     def decide(key, eid, login, verdict, reason):
         log.append({"item": key, "event": eid, "author": login, "verdict": verdict,
@@ -351,10 +363,17 @@ def poll(sp, state, items, log=None):
                              % (kind, key, login, (it.get("title") or "")[:70]))
                 decide(key, "new", login, "rang", "new %s; body %s" % (kind, why))
         elif was != now:
-            note = {"MERGED": "MERGED", "CLOSED": "CLOSED", "OPEN": "REOPENED"}.get(now, now)
-            lines.append("  %s %s %s: %s" % (kind, key, note, (it.get("title") or "")[:60]))
-            decide(key, "state:%s" % now, "?", "rang",
-                   "state %s -> %s; a state change carries no signature" % (was, now))
+            if found is None:
+                found = ownstate.load(transcript)
+            is_mine, why = ownstate.judge(sp, key, it, now, found)
+            if is_mine:
+                own += 1
+                decide(key, "state:%s" % now, "?", "own", "state %s -> %s; %s" % (was, now, why))
+            else:
+                note = {"MERGED": "MERGED", "CLOSED": "CLOSED", "OPEN": "REOPENED"}.get(now, now)
+                lines.append("  %s %s %s: %s" % (kind, key, note, (it.get("title") or "")[:60]))
+                decide(key, "state:%s" % now, "?", "rang",
+                       "state %s -> %s; no evidence it was mine: %s" % (was, now, why))
         fresh = 0
         for eid, login, name, text, what in events(it):
             if eid in seen:
@@ -619,7 +638,7 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, runner=None, transcrip
         with file_lock(_state_path(cfg)):
             state = _current(cfg, state)
             judged = []
-            wake, new_state = poll(sp, state, items, judged)
+            wake, new_state = poll(sp, state, items, judged, transcript)
             if wake and not once and gone(host):
                 # The look found something to ring, and nobody is left to hear it. Recording it
                 # as seen would hide it from the session that resumes: leave the state alone.
