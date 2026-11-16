@@ -129,7 +129,8 @@ DEFAULTS = {
     "spawn": {"default_base": None},
     # The GitHub waker: what to watch. Empty means the hook exits at once (see waker.py).
     "waker": {"repos": [], "upstream": [], "trusted_logins": [], "trusted_names": [],
-              "signature": "", "poll_sec": 300, "budget_sec": 604740},
+              "signature": "", "poll_sec": 300, "budget_sec": 604740,
+              "own_state_window_sec": 120},
 }
 
 

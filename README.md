@@ -599,8 +599,17 @@ waker, so several can be alive at once; each event still rings once, because the
 the watch and every poll compares against the saved state under a lock. A new waker sleeps only
 what is left of `waker.poll_sec` since the last look, so an event that arrived during a long turn
 rings when that turn ends, and turn-ends however frequent never look more than once per
-`poll_sec`. A close or merge the agent made itself still rings: a state change carries no
-signature.
+`poll_sec`. A merge, close or reopen the agent made itself does not ring, and it is judged by
+evidence, because a state change carries no signature. The first evidence is the session's own
+transcript: a successful tool call that made that change to that item number in that repository,
+dated at or up to `waker.own_state_window_sec` (default 120) seconds before it. The calls read are
+`gh pr merge|close|reopen`, `gh issue close|reopen`, `gh api` with a mutating method on the item or
+its `/merge`, and the GitHub MCP's `mergePullRequest` and `closePullRequest`. A `gh` call with no
+`--repo` acts on the remote of the directory it ran in. The fallback is the item's newest comment
+or review: own-signed and within that window of the change, on either side. With neither, the
+change rings, and the decision log's reason names the call and its time, or says why each rule
+found nothing. A close GitHub made because an own-merged pull request said "Fixes #N" has no
+call and no comment of its own, so it rings.
 `showrunner waker --once` looks once and reports; `SHOWRUNNER_GH` names the `gh` binary when it
 is not on PATH.
 

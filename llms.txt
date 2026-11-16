@@ -1005,6 +1005,14 @@ showrunner waker                     # Stop + SessionStart startup|resume, async
                                      # Code's attribution line: agents sharing
                                      # an account need distinct signatures, and
                                      # with none set everything rings, saying so.
+                                     # A merge/close/reopen it made itself does
+                                     # not ring: a successful tool call for that
+                                     # change, item and repo in the session
+                                     # transcript, at or up to
+                                     # waker.own_state_window_sec (120) before it;
+                                     # else an own-signed newest comment or review
+                                     # within that window either side. Neither:
+                                     # it rings, and the log says why.
                                      # Every decision, with its reason, goes to
                                      # waker-decisions.jsonl beside its state
                                      # (a bounded tail; doctor prints the path).
@@ -1308,7 +1316,7 @@ verb gaining one, and the table below is the thing that has to stay right. It do
 | `pipeline-status-gate.sh` | by hand | same |
 | `unresearched-gate.sh` | by hand | same |
 | `write-guard.sh` | `showrunner worktree register --write-guard` | OPT-IN: it REFUSES writes, and on a seat no role maps the fallback may write nothing — wired by default, an upgrade alone would make a repo read-only |
-| `github-waker.sh` | `worktree register` (inert until `waker` is configured) | — it IS registered; listed so its config is findable: `waker.repos`, `waker.upstream` ({repo, author}), `waker.trusted_logins`, `waker.trusted_names`, `waker.signature`, `waker.poll_sec` |
+| `github-waker.sh` | `worktree register` (inert until `waker` is configured) | — it IS registered; listed so its config is findable: `waker.repos`, `waker.upstream` ({repo, author}), `waker.trusted_logins`, `waker.trusted_names`, `waker.signature`, `waker.poll_sec`, `waker.own_state_window_sec` |
 | `crawler-waker.sh` | `worktree register` | — it IS registered; listed so its config is findable: `crawler_waker.quiet_sec` (180), `crawler_waker.poll_sec` (20), `crawler_waker.budget_sec`, `crawler_waker.enabled`; cross-cover: `waker_cover.window_sec` (60), `waker_cover.enabled` |
 | `waiting-probe.sh` | **NOBODY — deliberately** | arming an idle watchdog is a human decision, stated under "First thing, every session": *a probe an agent can set is a watchdog an agent can switch off* |
 
