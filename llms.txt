@@ -172,6 +172,23 @@ Crawler ring is covered up to that late. Cover needs both wakers: with no `waker
 `crawler_waker.enabled: false`, drops are reported only at SessionStart.
 `waker_cover.enabled: false` turns cover off.
 
+**A waker whose host is gone stops.** A waker outlives the `claude` process that launched it (a
+host app resuming the session under a new `claude -p` leaves the old waker reparented to
+launchd). Each waker records its host's pid and start time, so a recycled pid counts as gone. It
+checks the host at every poll and under the lock before it rings or covers. Gone, it exits 0:
+nothing rung, nothing marked seen, watch given up, one `host-gone` line in
+`waker-decisions.jsonl`. At SessionStart, from the transcript `whoami.sh` passes in
+`SHOWRUNNER_TRANSCRIPT`, a ring whose waker started before a `SessionStart:startup`/`resume`
+that preceded the ring, with its wake text nowhere in the transcript after it, is reported once
+as "rang ... under a host that had already gone", with the events it marked seen. With a
+transcript, any ring counts as heard only when its text appears there (a delivered wake's user
+entry, or the `queued_command` attachment of one that arrived during a turn). A later turn end
+that a user started does not count. That holds even if it
+was marked covered or delivered. The GitHub waker is also registered on SessionStart
+(`startup|resume`, asyncRewake, `github-waker.sh session-start`, stamped `github-waker-start`),
+so a resumed session is watched before its first turn ends. On 2.1.322 `-p` stream-json this was
+measured not to hold startup.
+
 **A probe's COST is part of its contract.** game_loop runs `waiting` under a hardcoded 15s
 timeout and reads a timeout as *"the probe did not run at all"* — which it reports as a broken
 watchdog and then **stops scheduling re-checks**. So a slow probe does not degrade the watchdog,
@@ -970,7 +987,8 @@ showrunner crawler-waker             # Stop, asyncRewake (crawler-waker.sh): WAK
                                      # `showrunner crawler-waker --once` judges now and says
                                      # what it would ring; `showrunner crawler-waker --probe`
                                      # exits 0 — how the shim tells a binary that knows the verb
-showrunner waker                     # Stop, asyncRewake (github-waker.sh): while the session is
+showrunner waker                     # Stop + SessionStart startup|resume, asyncRewake
+                                     # (github-waker.sh): while the session is
                                      # idle, ONE GraphQL query every poll_sec over the repos the
                                      # `waker` config names; WAKES it on a new issue or PR, a
                                      # comment, a REVIEW verdict or inline review comment, and a

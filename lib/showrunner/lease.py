@@ -1058,6 +1058,35 @@ def register_waker(cfg, local=False):
                                     atomic_write_json)
 
 
+def register_waker_session_start(cfg, local=False):
+    """Register the GitHub waker on SessionStart (startup, resume) with asyncRewake too. Returns
+    (changed, message).
+
+    A WAKER STARTS ONLY AT A TURN END, so a session resumed under a new host (SRCode restarts it
+    on every launch) was watched by nobody until its first turn ended; the old host's waker, if
+    any, is an orphan and now exits. MEASURED on Claude Code 2.1.322 under `claude -p` stream-json:
+    an asyncRewake SessionStart hook does not hold startup (`init` at 0.23 s, against 15.25 s for
+    the same hook without asyncRewake), and its exit 2 at 15 s started a turn. The shim is told
+    `session-start`, so its heartbeat stamp is not read as a turn end.
+    """
+    import json
+    from .util import atomic_write_json, file_lock
+
+    path = settings_target(cfg.root, local)
+    entry = {"matcher": "startup|resume",
+             "hooks": [{"type": "command",
+                        "command": "\"$CLAUDE_PROJECT_DIR\"/" + WAKER_SHIM + " session-start",
+                        "asyncRewake": True,
+                        "timeout": 604800,
+                        "statusMessage": "showrunner: watching GitHub for activity"}]}
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with file_lock(_register_lock(cfg)):
+        return _register_locked(
+            cfg, path, entry, json, atomic_write_json, "SessionStart",
+            lambda p: _registration(p, "SessionStart", "github-waker"),
+            "GitHub waker on SessionStart")
+
+
 def _raise_waker_timeout(cfg, path, want, json, atomic_write_json):
     """An entry registered with a shorter timeout is raised in place. Returns (changed, message).
 

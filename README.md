@@ -579,7 +579,8 @@ the commit, because its subject says whether the code moved or was removed.
 changed there is a note about a likely conflict, not a refusal. Both reach the brief.
 
 **An owner agent is woken by GitHub, not by remembering to look.** `worktree register` wires a
-Stop hook with `asyncRewake` that, while the session is idle, polls the repositories the `waker`
+Stop hook with `asyncRewake`, and the same on SessionStart (startup, resume), that, while the
+session is idle, polls the repositories the `waker`
 section of config names — one GraphQL query per poll, because the REST budget is shared by every
 agent on the machine — and wakes the session on a new issue or pull request, a comment, a review
 verdict or inline review comment, and a merge, close or reopen, which arrive as no comment at
@@ -658,6 +659,31 @@ ring at its own `waker.poll_sec`, so neither costs more while idle. Cover needs 
 no `waker` configured, or with `crawler_waker.enabled` false, the remaining waker's drops are
 reported only at SessionStart. A cover ring can itself be dropped, and then SessionStart reports
 it. `waker_cover.enabled: false` turns cover off.
+
+**A waker serves one host, and stops when that host is gone.** A waker is a child of the
+`claude` process whose turn end or session start launched it, and it outlives that process: when
+the host is replaced (an app that resumes the session under a new `claude -p`) the old waker is
+reparented to launchd. So each waker records its host at start, as the pid and that process's
+start time (a recycled pid with another start time counts as gone). It checks the host at every
+poll, and again under the lock just before it rings or covers. With the host gone it exits 0
+having rung nothing, advanced nothing and given up the watch, and logs one `host-gone` line
+(`host_pid`, `by`, where it checked) to `waker-decisions.jsonl`. A waker that cannot tell keeps
+working. Every ring records `host` and `waker_started`. At SessionStart `whoami.sh` hands
+`waker --session-start` the session's transcript (`SHOWRUNNER_TRANSCRIPT`). A ring counts as
+rung under a host that had already gone when, in that transcript, a `SessionStart:startup` or
+`resume` came after its waker started and before the ring, and the transcript does not hold the
+wake's text. With the transcript, a ring counts as heard only when an entry dated at or after it
+carries its text: the user entry a delivered wake becomes, or the `queued_command` attachment of
+one that arrived during a turn. A later turn end is not enough, because a turn the user started
+ends after a dropped ring too. The turn-end rule above applies only with no readable transcript. Its waker's start is the recorded `waker_started`, or for an older ring that waker's
+last turn-end stamp. A ring whose recorded host is still running never counts. Such a ring is
+reported once, whatever it was marked, with the events it marked seen ("GitHub activity rang at
+<time> under a host that had already gone ... It marked these seen, so no later look rang them:
+<events>"). A cover ring quoting it is not repeated. An unreadable transcript is said, not read
+as no host change. The SessionStart registration of the GitHub waker watches a resumed session
+before its first turn ends. Measured on Claude Code 2.1.322 under `claude -p` stream-json, an
+asyncRewake SessionStart hook does not hold startup, and its exit 2 starts a turn. Its heartbeat
+stamp is `github-waker-start`, which is not read as a turn end.
 
 **A second spawn of a leaf a live process holds is refused before anything is created**, naming
 the holder's pid and tree. And the "worktree path already exists" refusal, whose way out is to

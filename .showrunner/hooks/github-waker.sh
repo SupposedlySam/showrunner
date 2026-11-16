@@ -17,7 +17,11 @@ if [ -z "$_hb" ]; then
   _hb_root="${CLAUDE_PROJECT_DIR:-}"
   [ -n "$_hb_root" ] && [ -d "$_hb_root/.showrunner" ] && _hb="$_hb_root/.showrunner/hook-heartbeat.jsonl"
 fi
-[ -n "$_hb" ] && { printf '{"hook":"github-waker","ts":%s}\n' "$(date +%s)" >> "$_hb" 2>/dev/null || true; }
+# Registered on SessionStart too, called `github-waker.sh session-start`: that stamp is not a turn
+# end, which `lostring` and `cover` read this hook's stamps as, so it carries its own name.
+_hook="github-waker"
+[ "${1:-}" = "session-start" ] && _hook="github-waker-start"
+[ -n "$_hb" ] && { printf '{"hook":"%s","ts":%s}\n' "$_hook" "$(date +%s)" >> "$_hb" 2>/dev/null || true; }
 anchor="${CLAUDE_PROJECT_DIR:-$PWD}"
 common="$(git -C "$anchor" rev-parse --git-common-dir 2>/dev/null)" || exit 0
 case "$common" in /*) ;; *) common="$anchor/$common" ;; esac

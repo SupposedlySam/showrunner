@@ -212,7 +212,7 @@ for hook_name in worktree-guard.sh inert-crawler-gate.sh waiting-probe.sh whoami
     pipeline-status-gate.sh) note="PreToolUse on Bash: notices when \$? is about to read a pipe's truncator instead of the command" ;;
     reach-gate.sh)          note="PreToolUse: names the showrunner mechanism for what a call reached for; advice only, never refuses" ;;
     wake-gate.sh)           note="PreToolUse on Bash: says ONCE when long work starts with no mandate bound, so a wake has a goal to return to; advice only" ;;
-    github-waker.sh)        note="Stop (asyncRewake): wakes an idle session on GitHub activity in the repos \`waker\` config names; inert until configured" ;;
+    github-waker.sh)        note="Stop and SessionStart (asyncRewake): wakes an idle session on GitHub activity in the repos \`waker\` config names, from a resumed session's first moment; inert until configured" ;;
     crawler-waker.sh)       note="Stop (asyncRewake): wakes the idle orchestrator when a Crawler stays blocked, stands down or stalls; silent in a Crawler's worktree" ;;
     write-guard.sh)         note="PreToolUse on the edit tools AND Bash: refuses a write the session's role may not make, heredocs and redirections included" ;;
   esac
