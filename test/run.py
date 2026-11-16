@@ -18581,6 +18581,8 @@ def test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch():
     eq("THE PAIR: game_loop itself reports the tree notes-drifted, so the excuse below is exercised",
        raw.returncode, H.NOTES_DRIFTED)
     eq("...and showrunner reads that one difference as clean", H.check_tree(cfg, wa)[0], "clean")
+    ok("...and says why it is clean, naming the scratch write root",
+       "scratch write root" in (H.check_tree(cfg, wa)[1] or ""), H.check_tree(cfg, wa)[1])
     mine = H._load_local(wa) or {}
     with open(local, "w") as fh:
         json.dump(dict(mine, mcp_trusted_servers=["mcp__anything__"]), fh)
@@ -18591,11 +18593,15 @@ def test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch():
                        ["/elsewhere"]), fh)
     eq("...and so does a second write root beside spawn's", H.check_tree(cfg, wa)[0],
        "notes-drifted")
+    with open(local, "w") as fh:
+        json.dump(dict(mine, watchdog={"waiting_probe": "/bin/true"}), fh)
+    ok("...and a tree that inherited main's waiting probe beside spawn's root is NOT excused",
+       not H.local_drift_is_scratch_only(cfg, wa))
+    os.remove(local)
+    ok("...nor is a tree with no config.local.json at all", not H.local_drift_is_scratch_only(cfg, wa))
     if mine:
         with open(local, "w") as fh:
             json.dump(mine, fh)
-    else:
-        os.remove(local)
 
     for s in (sa, sb):
         sh(["git", "init", "-q", os.path.join(s, "repo")], s)
