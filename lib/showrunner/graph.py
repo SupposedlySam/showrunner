@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS leaves (
   heartbeat_ts  INTEGER,
   parked        INTEGER NOT NULL DEFAULT 0,
   park_reason   TEXT,
+  park_watch    TEXT,
   outcome       TEXT,
   proof         TEXT,
   close_reason  TEXT,
@@ -173,6 +174,12 @@ class SqliteGraph:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA busy_timeout=30000")
         self.db.executescript(SCHEMA)
+        # A COLUMN ADDED AFTER A GRAPH EXISTED. `CREATE TABLE IF NOT EXISTS` leaves an older
+        # table as it was, so the writer adds what it lacks. A read-only open never alters: a
+        # row from an older graph simply has no `park_watch`, which reads as "no watcher".
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(leaves)").fetchall()}
+        if "park_watch" not in cols:
+            self.db.execute("ALTER TABLE leaves ADD COLUMN park_watch TEXT")
         self.db.commit()
 
     @staticmethod
@@ -432,7 +439,7 @@ class SqliteGraph:
 
         cur = self.db.execute(
             "UPDATE leaves SET status=?, actor=?, claim_pid=?, claim_boot=?, claim_host=?, "
-            "claim_tree=?, claim_session=?, claim_ts=?, heartbeat_ts=?, parked=0, park_reason=NULL "
+            "claim_tree=?, claim_session=?, claim_ts=?, heartbeat_ts=?, parked=0, park_reason=NULL, park_watch=NULL "
             "WHERE id=? AND status=?",
             (IN_PROGRESS, actor, pid if pid is not None else _claim_pid(), boot_token(),
              os.uname().nodename,
@@ -579,12 +586,15 @@ class SqliteGraph:
         self.db.execute("UPDATE leaves SET heartbeat_ts=? WHERE id=?", (now(), leaf_id))
         self.db.commit()
 
-    def park(self, leaf_id, reason):
+    def park(self, leaf_id, reason, watch=None):
+        """`watch` is the process a lead waits on ({"pid", "started"}), or None. Re-parking
+        replaces it, so a lead whose watcher was restarted records the new one."""
         leaf = self.show(leaf_id)
         if leaf["status"] != IN_PROGRESS:
             die("only a claimed leaf can be parked (%s is %s)" % (leaf_id, leaf["status"]), code=2)
-        self.db.execute("UPDATE leaves SET parked=1, park_reason=? WHERE id=?", (reason, leaf_id))
-        self._event(leaf_id, "park", reason)
+        self.db.execute("UPDATE leaves SET parked=1, park_reason=?, park_watch=? WHERE id=?",
+                        (reason, json.dumps(watch, sort_keys=True) if watch else None, leaf_id))
+        self._event(leaf_id, "park", reason + (" [watcher pid %s]" % watch["pid"] if watch else ""))
         self.db.commit()
 
     def unpark(self, leaf_id):
@@ -602,7 +612,7 @@ class SqliteGraph:
         What finds it is asking where else the rule applies and enumerating the answers.
         """
         self.db.execute(
-            "UPDATE leaves SET parked=0, park_reason=NULL, claim_pid=?, claim_boot=?, heartbeat_ts=? "
+            "UPDATE leaves SET parked=0, park_reason=NULL, park_watch=NULL, claim_pid=?, claim_boot=?, heartbeat_ts=? "
             "WHERE id=?", (_claim_pid(), boot_token(), now(), leaf_id))
         self._event(leaf_id, "unpark", "")
         self.db.commit()
@@ -610,7 +620,7 @@ class SqliteGraph:
     def release(self, leaf_id, reason=""):
         self.db.execute(
             "UPDATE leaves SET status=?, actor=NULL, claim_pid=NULL, claim_boot=NULL, "
-            "claim_host=NULL, claim_tree=NULL, claim_session=NULL, parked=0, park_reason=NULL "
+            "claim_host=NULL, claim_tree=NULL, claim_session=NULL, parked=0, park_reason=NULL, park_watch=NULL "
             "WHERE id=?", (OPEN, leaf_id))
         self._event(leaf_id, "release", reason)
         self.db.commit()
@@ -626,7 +636,7 @@ class SqliteGraph:
         # evidence of something.
         self.db.execute(
             "UPDATE leaves SET status=?, outcome=?, proof=?, close_reason=?, closed_ts=?, "
-            "parked=0, park_reason=NULL WHERE id=?",
+            "parked=0, park_reason=NULL, park_watch=NULL WHERE id=?",
             (outcome, outcome, proof, reason, now(), leaf_id))
         self._event(leaf_id, outcome, "%s [proof: %s]" % (reason, proof))
         self.db.commit()
@@ -843,7 +853,7 @@ class BrGraph:
     def heartbeat(self, leaf_id):
         pass
 
-    def park(self, leaf_id, reason):
+    def park(self, leaf_id, reason, watch=None):
         raise Refused("the br backend has no park state; park is vendored-only", code=3)
 
     def unpark(self, leaf_id):

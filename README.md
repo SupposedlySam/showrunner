@@ -1100,6 +1100,15 @@ Crawler refused at a turn-end is live and is deliberately counted as NEITHER wai
 it is doing nothing, only a message restarts it, and calling that "waiting" would silence the
 watchdog on the one run that needs it.
 
+A lead can wait on something no Crawler runs, such as the next commit on `origin/main`. It claims
+the leaf itself and parks it with the pid of the background process that will wake it:
+`showrunner park <leaf> --reason "..." --watcher-pid <pid>`. `park` records that pid together with
+its start time. `waiting` then counts the park, under `parked_leads`, only while a process with that
+pid and that start time is running. A recycled pid does not count, and neither does the lead's own
+claim pid, because the asking session is always alive. A lead park with no watcher, or with one
+that has exited, does not count as waiting. It is listed under `unwatched_leads` with the reason,
+so the lead can see why the watchdog still rings, and `park` says so when no watcher is given.
+
 Processes a dead Crawler left running in its worktree — a test runner, a build daemon — are found
 by working directory and listed by `status` and `reconcile`. `gc` will not remove a tree with one
 running in it, and `showrunner reap --apply` stops only those proven to be the Crawler's
