@@ -40,10 +40,10 @@ from .util import (Refused, boot_token, die, eprint, now, pid_alive, pid_readabl
 # toward SILENCE.
 #
 # The floor is set by the longest legitimate quiet stretch, because the transcript gains a line
-# when a tool call RETURNS, not while it runs. showrunner's own `verify` re-runs the suite once
-# per stale pattern and is documented to its Crawlers as taking "minutes, not seconds", so a
-# healthy session genuinely writes nothing for several minutes at a time. Fifteen minutes clears
-# that with room; the incident that filed #69 sat frozen for fifty-five.
+# when a tool call RETURNS, not while it runs. The harness's `verify` runs each distinct command
+# once, one suite run takes minutes, and it is documented to its Crawlers as taking "minutes, not
+# seconds", so a healthy session genuinely writes nothing for several minutes at a time. Fifteen
+# minutes clears that with room; the incident that filed #69 sat frozen for fifty-five.
 #
 # And the raw measurement rides along with every verdict, so a reader who thinks this number is
 # wrong for their run can discount it without having to trust it.

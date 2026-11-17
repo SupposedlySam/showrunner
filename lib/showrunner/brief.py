@@ -165,8 +165,8 @@ is more than one candidate — but only this tree's record can clear this tree's
 run it in the main checkout, and do not reach for `--no-verify`.
 
 **Expect `verify` to take minutes, not seconds**, and run it as its own earlier step rather
-than in front of the commit you want. It re-runs the suite once per stale pattern, so a change
-touching several gated files costs several suite runs. It has not hung and it does not need
+than in front of the commit you want. It runs each distinct stale command once, and one suite
+run alone takes minutes. It has not hung and it does not need
 interrupting; a verb that quietly became slow is easy to mistake for a wedged session, which
 is the mistake to avoid here.
 

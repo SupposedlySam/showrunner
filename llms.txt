@@ -1471,7 +1471,9 @@ write guard is told about it too: spawn puts exactly this path in your tree's gi
 `.game_loop/config.local.json` as `allow_write_roots`, so a clone or throwaway git repo inside
 your scratch can be written and removed (the guard's same-repository rule alone stops at a nested
 repo). A sibling's nested repo is still refused. Nothing else from the main checkout's
-`config.local.json` is copied into your tree. Commit messages,
+`config.local.json` is copied into your tree. The tree check reads that one entry as clean,
+judged from game_loop's own key list (`local_override.keys`) or, on an older game_loop, by
+recomputing the file; any other key, and any drifted harness script, is still reported. Commit messages,
 captured output, fixtures, before/after artifacts. Not a shared temp dir: two Crawlers that pick
 the same obvious filename there can commit one's message onto the other's changes — a real
 commit, plausible message, describing work it does not contain, every gate green. You and your siblings are the same model solving similar tasks from similar prompts, so
