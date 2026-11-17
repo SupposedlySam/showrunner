@@ -20342,6 +20342,35 @@ def test_a_stand_down_on_an_open_leaf_needs_the_lead():
         H.run = orig_run
 
 
+# A LOOPING WAKER STOPS ONLY WHEN IT RINGS OR ITS CLOCK PASSES ITS BUDGET. Under a fake clock that
+# stands still, or creeps 10 s at a time toward a week-long budget, a waker that never rings is a
+# suite that never ends: neutering `waker.poll` made the sweep report SUITE HUNG, no measurement,
+# for three groups that each expect a ring. Every ring these groups expect comes within a couple
+# of naps, so a run still napping after WAKER_POLLS is a waker that will not stop, and it returns
+# (None, why) for the caller's assertion to fail on, rather than hanging or crashing the group.
+WAKER_POLLS = 20
+
+
+class _WakerDidNotStop(Exception):
+    pass
+
+
+def stopped(run, *args, **kw):
+    """`run(*args, **kw)` with its `sleep` allowed WAKER_POLLS naps; past that, (None, why)."""
+    inner, naps = kw.get("sleep") or (lambda _s: None), [0]
+
+    def nap(sec):
+        naps[0] += 1
+        if naps[0] > WAKER_POLLS:
+            raise _WakerDidNotStop("the waker was still looping after %d polls" % WAKER_POLLS)
+        return inner(sec)
+    kw["sleep"] = nap
+    try:
+        return run(*args, **kw)
+    except _WakerDidNotStop as exc:
+        return None, str(exc)
+
+
 def test_a_ring_no_turn_followed_is_reported_once():
     group("a waker ring that never became a turn: recorded before exit, reported ONCE at the next "
           "SessionStart, and one catch-up look reports what came after it")
@@ -20392,7 +20421,7 @@ def _lost_ring_cases(W, L, CW, hb):
     def ring(runner):
         def nap(_s):
             clock[0] += 10
-        return W.run(cfg, sleep=nap, now=lambda: clock[0], runner=runner)
+        return stopped(W.run, cfg, sleep=nap, now=lambda: clock[0], runner=runner)
 
     eq("seeded silently on the first look", W.run(cfg, once=True, runner=world(31))[0], 0)
     stamp("github-waker", clock[0])                     # the turn end that started the waker
@@ -20590,8 +20619,8 @@ def _cover_cases(hb):
         # Both wakers start at the same turn end; the GitHub one rings during the first poll.
         sleeps.append(sec)
         if "ring" not in gh:
-            gh["ring"] = W.run(cfg, sleep=lambda _s: None, now=lambda: clock[0],
-                               runner=world(38, 39))
+            gh["ring"] = stopped(W.run, cfg, sleep=lambda _s: None, now=lambda: clock[0],
+                                 runner=world(38, 39))
         clock[0] += sec
     started = clock[0]
     code, text = CW.run(cfg, sleep=crawler_nap, now=lambda: clock[0], ask=lambda _c: {})
@@ -20624,7 +20653,8 @@ def _cover_cases(hb):
 
     # THE WINDOW, at its edge, and a ring a turn DID follow.
     def gh_ring_at(t, n):
-        W.run(cfg, sleep=lambda _s: None, now=lambda: t, runner=world(*range(38, n + 1)))
+        stopped(W.run, cfg, sleep=lambda _s: None, now=lambda: t,
+                runner=world(*range(38, n + 1)))
         return gh_rings()[-1]
     clock[0] += 1000
     stamp("github-waker", clock[0])
@@ -20705,7 +20735,7 @@ def _cover_cases(hb):
     st = W.load_state(ccfg) or {"events": [], "states": {}}
     st["looked_at"] = cclock[0]
     W.save_state(ccfg, st)
-    code, text = W.run(ccfg, sleep=gh_nap, now=lambda: cclock[0], runner=world(38))
+    code, text = stopped(W.run, ccfg, sleep=gh_nap, now=lambda: cclock[0], runner=world(38))
     crang = (CW.load_state(ccfg).get("rings") or [{}])[0]
     ok("the Crawler waker rang for the block, and no turn followed",
        cw.get("ring", (0,))[0] == 2 and c in cw["ring"][1], cw)
@@ -21010,8 +21040,8 @@ def _host_gone_cases(hb):
             fh.write(json.dumps({"hook": hook, "ts": int(ts)}) + "\n")
     t = clock[0] + 10_000
     stamp("github-waker", t - 5)
-    W.run(cfg, sleep=tick(), now=lambda: t, runner=world(38, 39, 40, 41, 42),
-          host={"pid": me, "started": born})
+    stopped(W.run, cfg, sleep=tick(), now=lambda: t, runner=world(38, 39, 40, 41, 42),
+            host={"pid": me, "started": born})
     r = ((W.load_state(cfg) or {}).get("rings") or [{}])[-1]
     orphan = CV.Cover(cfg, "github-waker", "crawler-waker", t - 5, alive=lambda: False)
     eq("a coverer whose host is gone rings no cover for a dropped ring", orphan.check(t + 60),
