@@ -1508,6 +1508,93 @@ def watcher_alive(watch, claim_pid=None):
     return True, "watcher pid %d is alive and is the process recorded at park time" % pid
 
 
+# THE FORMS game_loop's `authorize --expires` TAKES, plus epoch seconds, because drops' deadline
+# file holds an epoch. A bare number below EPOCH_FLOOR is refused for the reason authorize refuses
+# one: "2" read as minutes lapses during the call, read as days it silences a week, and nothing
+# downstream can tell which was meant. An epoch is unambiguous because no duration is that large.
+_UNTIL_DUR = re.compile(r"^\s*(\d+)\s*([mhdw])\s*$", re.I)
+_UNTIL_DATE = re.compile(r"^\s*(\d{4}-\d{2}-\d{2})\s*$")
+_UNTIL_FULL = re.compile(r"^\s*(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}(?::\d{2})?)\s*$")
+_UNTIL_EPOCH = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*$")
+_UNTIL_SECONDS = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
+EPOCH_FLOOR = 1000000000        # 2001-09-09: anything smaller is a bare number, not an instant
+
+
+def parse_until(spec, max_sec, at=None):
+    """A `park --until` value as epoch seconds. Raises ValueError, with the remedy, on anything
+    it will not record: nonsense, a bare small number, a deadline already past, or one further
+    out than `max_sec`.
+
+    THE DEADLINE IS SELF-DECLARED, unlike a watcher, which is why it is bounded: an unbounded one
+    is a way to silence the watchdog for as long as the lead likes. A date with no time means
+    the end of that day, as it does for authorize.
+    """
+    import datetime
+    at = time.time() if at is None else at
+    raw = str(spec).strip()
+    m = _UNTIL_DUR.match(raw)
+    if m:
+        until = at + int(m.group(1)) * _UNTIL_SECONDS[m.group(2).lower()]
+    elif _UNTIL_DATE.match(raw) or _UNTIL_FULL.match(raw):
+        d = _UNTIL_DATE.match(raw)
+        text = (d.group(1) + "T23:59:59") if d else raw.replace(" ", "T")
+        try:
+            until = datetime.datetime.fromisoformat(text).timestamp()
+        except ValueError:
+            raise ValueError("--until %r is not a real date" % raw)
+    elif _UNTIL_EPOCH.match(raw) and float(raw) >= EPOCH_FLOOR:
+        until = float(raw)
+    else:
+        raise ValueError(
+            "--until %r is neither a duration, a date nor epoch seconds.\n"
+            "  duration : 30m  2h  7d  1w   (m is MINUTES)\n"
+            "  date     : 2026-09-30   or   2026-09-30T17:00\n"
+            "  epoch    : seconds, as `date +%%s` prints them\n"
+            "A bare small number is refused on purpose: read as minutes it lapses during this "
+            "call, read as days it silences the watchdog for a week, and nothing downstream can "
+            "tell which you meant." % raw)
+    if until <= at:
+        raise ValueError("--until %r is already past, so the park would never count" % raw)
+    if until - at > max_sec:
+        raise ValueError(
+            "--until %r is %ds out, past the %ds maximum (config park.until_max_sec). A "
+            "self-declared deadline is bounded so a park cannot silence the watchdog "
+            "indefinitely — park until the next slot, and re-park after it fires"
+            % (raw, int(until - at), int(max_sec)))
+    return int(until)
+
+
+def lead_park_counts(watch, claim_pid=None, at=None):
+    """(counts, why) for a lead's own park: its recorded watcher, its deadline, or both (#115).
+
+    BOTH MUST HOLD when both were given. `watcher_alive` refuses to count anything it cannot
+    prove, because a wrong "alive" silences the watchdog; a deadline letting a dead watcher
+    count would undo exactly that, and is the case where the watcher dying is the news. The
+    deadline in turn bounds a watcher that hangs alive forever.
+
+    A DEADLINE-ONLY PARK COSTS NO PROCESS CALL: it is a comparison against the clock, so
+    `waiting` stays inside the probe's budget (#76).
+    """
+    watch = watch or {}
+    until = watch.get("until")
+    if until is None:
+        return watcher_alive(watch, claim_pid)
+    at = time.time() if at is None else at
+    if at >= float(until):
+        return False, ("its deadline %s lapsed %ds ago — the slot it waited on should have fired "
+                       "by now; if it did not, the timer is the thing to look at"
+                       % (_stamp(until), int(at - float(until))))
+    left = "deadline %s, %ds left" % (_stamp(until), int(float(until) - at))
+    if not watch.get("pid"):
+        return True, left
+    counts, why = watcher_alive(watch, claim_pid)
+    return counts, ("%s; %s" % (why, left)) if counts else why
+
+
+def _stamp(epoch):
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(float(epoch)))
+
+
 def waiting(cfg, graph, base="HEAD", record=True):
     """Is this orchestrator legitimately waiting on work it dispatched? (game_loop#32)
 
@@ -1623,8 +1710,8 @@ def waiting(cfg, graph, base="HEAD", record=True):
             live.append({"crawler": f["crawler"], "leaf": f["leaf"], "branch": f["branch"]})
 
     # A LEAF THE LEAD CLAIMED AND PARKED ITSELF (#114): no Crawler record names it, so the loop
-    # above never saw it. It counts only while the watcher it recorded is alive; one without a
-    # watcher, or with a dead one, is reported with the reason and counts for nothing, so the
+    # above never saw it. It counts only while the watcher it recorded is alive and the deadline
+    # it recorded (#115) is ahead; one with neither, a dead watcher or a lapsed deadline, is reported with the reason and counts for nothing, so the
     # lead learns why the watchdog still rings. One graph read and a `ps` per such leaf, so
     # this stays inside the probe's budget (#76).
     try:
@@ -1632,15 +1719,19 @@ def waiting(cfg, graph, base="HEAD", record=True):
                     if l.get("parked") and l["id"] not in crawler_leaves]
     except Exception:                                           # noqa: BLE001
         _claimed = []
+    _at = time.time()
     for leaf in _claimed:
         try:
             watch = json.loads(leaf.get("park_watch") or "null")
         except ValueError:
             watch = None
-        counts, why = watcher_alive(watch, leaf.get("claim_pid"))
+        counts, why = lead_park_counts(watch, leaf.get("claim_pid"), at=_at)
+        until = (watch or {}).get("until")
         entry = {"leaf": leaf["id"], "actor": leaf.get("actor"),
                  "reason": leaf.get("park_reason"),
-                 "watcher_pid": (watch or {}).get("pid"), "why": why}
+                 "watcher_pid": (watch or {}).get("pid"), "why": why,
+                 "until": until,
+                 "seconds_left": None if until is None else max(0, int(float(until) - _at))}
         (leads if counts else unwatched).append(entry)
 
     detail = {
@@ -1652,7 +1743,8 @@ def waiting(cfg, graph, base="HEAD", record=True):
         "parked_leads": leads,
         "unwatched_leads": unwatched,
         "basis": "a live owning PID recorded at spawn, an explicit park, or a lead's park "
-                 "backed by a live watcher process it recorded — never a guess "
+                 "backed by a live watcher process it recorded and/or a bounded deadline not yet "
+                 "passed — never a guess "
                  "about activity. A Crawler refused at a turn-end is counted in neither: it "
                  "is alive and doing nothing, and calling that waiting silences the watchdog "
                  "on the run that needs it most",

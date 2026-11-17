@@ -3632,6 +3632,155 @@ def test_a_lead_park_counts_only_while_its_watcher_lives():
        json.loads(go.show("lw4").get("park_watch") or "null"), {"pid": 1, "started": 0})
 
 
+def test_a_lead_park_until_counts_only_before_its_deadline():
+    group("A lead waiting on a scheduled slot counts as waiting only until its deadline (#115)")
+    if not have("git"):
+        skip("the park --until group", "git is not installed")
+        return
+    from showrunner.util import process_started
+    exe = os.path.join(ROOT, "bin", "showrunner")
+
+    def cli(repo, *argv):
+        p = subprocess.run([sys.executable, exe] + list(argv), capture_output=True, text=True,
+                           cwd=repo.root, stdin=subprocess.DEVNULL)
+        return p.returncode, p.stdout, p.stderr
+
+    def watcher(seconds=60):
+        return int(subprocess.run(["sh", "-c", "sleep %d >/dev/null 2>&1 & echo $!" % seconds],
+                                  capture_output=True, text=True).stdout.strip())
+
+    def why(detail):
+        return ([c.get("why") or "" for c in detail.get("unwatched_leads") or []] + [""])[0]
+
+    def watch_of(g, leaf):
+        return json.loads(g.show(leaf).get("park_watch") or "null")
+
+    cfg = make_repo()
+    g = new_graph(cfg)
+    g.add("next daily slot", leaf_id="pu1")
+    g.claim("pu1", "lead", pid=os.getpid())
+    until = int(time.time()) + 600
+    g.park("pu1", "waiting on the 06:00 job", watch={"until": until})
+    is_waiting, detail = campaign.waiting(cfg, g, record=False)
+    ok("a deadline-only lead park with a FUTURE deadline counts as waiting",
+       is_waiting is True and [c["leaf"] for c in detail["parked_leads"]] == ["pu1"]
+       and not detail["unwatched_leads"], detail)
+    entry = (detail["parked_leads"] + [{}])[0]
+    ok("...and the entry carries the deadline and the time left",
+       entry.get("until") == until and 590 <= (entry.get("seconds_left") or 0) <= 600
+       and "left" in (entry.get("why") or ""), entry)
+    eq("...and it has no watcher", entry.get("watcher_pid"), None)
+
+    g.park("pu1", "waiting on the 06:00 job", watch={"until": int(time.time()) - 30})
+    is_waiting, detail = campaign.waiting(cfg, g, record=False)
+    ok("a LAPSED deadline does not count, and is reported under unwatched_leads saying so",
+       is_waiting is False and not detail["parked_leads"] and "lapsed" in why(detail), detail)
+    eq("...with seconds_left at zero, never negative",
+       [c.get("seconds_left") for c in detail["unwatched_leads"]], [0])
+
+    # BOTH MUST HOLD. Each half alone failing must flip the verdict, or the rule is "either".
+    pid = watcher()
+    try:
+        started = process_started(pid)
+        g.park("pu1", "w", watch={"pid": pid, "started": started, "until": int(time.time()) + 600})
+        is_waiting, detail = campaign.waiting(cfg, g, record=False)
+        ok("a live watcher AND a future deadline counts",
+           is_waiting is True and [c.get("watcher_pid") for c in detail["parked_leads"]] == [pid],
+           detail)
+        g.park("pu1", "w", watch={"pid": pid, "started": started, "until": int(time.time()) - 30})
+        is_waiting, detail = campaign.waiting(cfg, g, record=False)
+        ok("a live watcher with a LAPSED deadline does not count — the deadline bounds a watcher "
+           "that hangs alive", is_waiting is False and "lapsed" in why(detail), detail)
+    finally:
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+    for _ in range(50):
+        if not campaign.pid_alive(pid):
+            break
+        time.sleep(0.1)
+    g.park("pu1", "w", watch={"pid": pid, "started": started, "until": int(time.time()) + 600})
+    is_waiting, detail = campaign.waiting(cfg, g, record=False)
+    ok("a DEAD watcher with a future deadline does not count — the deadline never masks it",
+       is_waiting is False and "not running" in why(detail), detail)
+
+    # CLEARED by every verb that ends or moves the park.
+    g.park("pu1", "w", watch={"until": int(time.time()) + 600})
+    g.unpark("pu1")
+    eq("unpark clears the deadline", watch_of(g, "pu1"), None)
+    g.park("pu1", "w", watch={"until": int(time.time()) + 600})
+    g.release("pu1", "done waiting")
+    eq("release clears the deadline", watch_of(g, "pu1"), None)
+    # A stale value on an OPEN row, as an older writer could leave one: claim must not inherit it.
+    g.db.execute("UPDATE leaves SET park_watch=? WHERE id=?",
+                 (json.dumps({"until": int(time.time()) + 600}), "pu1"))
+    g.db.commit()
+    g.claim("pu1", "lead", pid=os.getpid())
+    eq("claim clears a deadline left on the row", watch_of(g, "pu1"), None)
+    g.park("pu1", "w", watch={"until": int(time.time()) + 600})
+    g.close("pu1", "closed", "proof.txt", "fired")
+    eq("close clears the deadline", watch_of(g, "pu1"), None)
+
+    # THE PARSER, directly: each form, and each refusal.
+    at = 1800000000
+    eq("durations are minutes/hours/days from now",
+       [campaign.parse_until(v, 26 * 3600, at=at) - at for v in ("30m", "2h", "1d")],
+       [1800, 7200, 86400])
+    eq("epoch seconds are taken as an instant", campaign.parse_until(str(at + 60), 3600, at=at),
+       at + 60)
+    for bad, said in (("2", "bare small number"), ("90", "bare small number"),
+                      ("soon", "neither a duration"), (str(at - 1), "already past"),
+                      ("2d", "park.until_max_sec")):
+        try:
+            campaign.parse_until(bad, 26 * 3600, at=at)
+            got = "accepted"
+        except ValueError as e:
+            got = str(e)
+        ok("parse_until refuses %r, saying why" % bad, said in got, got)
+
+    # THE CLI, and the configured maximum it reads.
+    cli_repo = make_repo(extra_config={"park": {"until_max_sec": 3 * 3600}})
+    gc_ = new_graph(cli_repo)
+    gc_.add("lead duty", leaf_id="pu2")
+    gc_.claim("pu2", "lead", pid=os.getpid())
+    rc, out, err = cli(cli_repo, "park", "pu2", "--reason", "w", "--until", "4h")
+    ok("`park --until` past the CONFIGURED maximum is refused, naming the key",
+       rc == 2 and "park.until_max_sec" in err and "10800" in err, (rc, out, err))
+    rc, out, err = cli(cli_repo, "park", "pu2", "--reason", "w", "--until", "2")
+    ok("`park --until 2` is refused as ambiguous", rc == 2 and "bare small number" in err,
+       (rc, out, err))
+    rc, out, err = cli(cli_repo, "park", "pu2", "--reason", "w", "--until", "1700000000")
+    ok("`park --until` a past epoch is refused", rc == 2 and "already past" in err, (rc, out, err))
+    eq("...and no refused --until left a deadline behind", watch_of(gc_, "pu2"), None)
+    rc, out, err = cli(cli_repo, "park", "pu2", "--reason", "waiting on the slot", "--until", "2h")
+    ok("`park --until 2h` within the maximum is recorded and says when it stops counting",
+       rc == 0 and "counts it until" in out, (rc, out, err))
+    rc, out, err = cli(cli_repo, "waiting", "--porcelain", "--no-record")
+    try:
+        d = json.loads(out)
+    except ValueError:
+        d = {"_unparsed": out + err}
+    ok("porcelain: waiting is true and exit 0 on a lead park before its deadline",
+       rc == 0 and d.get("waiting") is True, (rc, d))
+    eq("porcelain: parked_leads carries leaf, reason, watcher_pid, until and seconds_left",
+       [(c.get("leaf"), c.get("reason"), c.get("watcher_pid"),
+         isinstance(c.get("until"), int), 7000 < (c.get("seconds_left") or 0) <= 7200)
+        for c in d.get("parked_leads", [])],
+       [("pu2", "waiting on the slot", None, True, True)])
+    gc_.park("pu2", "waiting on the slot", watch={"until": int(time.time()) - 5})
+    rc, out, err = cli(cli_repo, "waiting")
+    ok("plain `waiting` prints UNWATCHED with the lapse and exits 1",
+       rc == 1 and "UNWATCHED pu2" in out and "lapsed" in out, (rc, out, err))
+
+    rec = worktree.spawn(cli_repo, gc_.show(gc_.add("crawler leaf", leaf_id="pu3")), actor="c1")
+    campaign.record_spawn(cli_repo, rec, pid=DeadPid().pid)
+    gc_.claim("pu3", "c1", pid=DeadPid().pid)
+    rc, out, err = cli(cli_repo, "park", "pu3", "--reason", "w", "--until", "1h")
+    ok("`park --until` refuses a Crawler's leaf, whose park already counts",
+       rc == 2 and "Crawler's leaf" in err and "--until" in err, (rc, out, err))
+
+
 def test_concurrency():
     group("More than one orchestrator may share this state (real races, not theoretical)")
     if not have("git"):
@@ -22049,6 +22198,7 @@ def main():
                test_worktree_dirty,
                test_guards_anchor_off_cwd,
                test_waiting, test_a_lead_park_counts_only_while_its_watcher_lives,
+               test_a_lead_park_until_counts_only_before_its_deadline,
                test_work_since_block,
                test_unconfigured_checks,
                test_concurrency,

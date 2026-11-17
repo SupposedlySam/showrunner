@@ -587,14 +587,18 @@ class SqliteGraph:
         self.db.commit()
 
     def park(self, leaf_id, reason, watch=None):
-        """`watch` is the process a lead waits on ({"pid", "started"}), or None. Re-parking
-        replaces it, so a lead whose watcher was restarted records the new one."""
+        """`watch` is what a lead waits on: the process ({"pid", "started"}), a deadline
+        ({"until": epoch}, #115), both, or None. Re-parking replaces it, so a lead whose watcher
+        was restarted, or whose slot moved, records the new one."""
         leaf = self.show(leaf_id)
         if leaf["status"] != IN_PROGRESS:
             die("only a claimed leaf can be parked (%s is %s)" % (leaf_id, leaf["status"]), code=2)
         self.db.execute("UPDATE leaves SET parked=1, park_reason=?, park_watch=? WHERE id=?",
                         (reason, json.dumps(watch, sort_keys=True) if watch else None, leaf_id))
-        self._event(leaf_id, "park", reason + (" [watcher pid %s]" % watch["pid"] if watch else ""))
+        watch = watch or {}
+        self._event(leaf_id, "park", reason
+                    + (" [watcher pid %s]" % watch["pid"] if watch.get("pid") else "")
+                    + (" [until %s]" % watch["until"] if watch.get("until") else ""))
         self.db.commit()
 
     def unpark(self, leaf_id):

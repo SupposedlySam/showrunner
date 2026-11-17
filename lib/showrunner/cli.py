@@ -1381,9 +1381,10 @@ def cmd_park(args):
     # caller can still fix it, rather than discovered dead by the probe.
     lead = args.id not in {c.get("leaf") for c in campaign.load(cfg).get("crawlers", [])}
     watch = None
-    if args.watcher_pid and not lead:
-        die("%s is a Crawler's leaf, and a Crawler's park already counts as waiting — "
-            "--watcher-pid is for a leaf the lead claimed itself" % args.id, code=2)
+    for flag, given in (("--watcher-pid", args.watcher_pid), ("--until", args.until)):
+        if given and not lead:
+            die("%s is a Crawler's leaf, and a Crawler's park already counts as waiting — "
+                "%s is for a leaf the lead claimed itself" % (args.id, flag), code=2)
     if args.watcher_pid:
         from .util import process_started, session_pid
         pid = args.watcher_pid
@@ -1397,17 +1398,33 @@ def cmd_park(args):
                 "recycled pid could not be told apart from it — not recorded. Record the process "
                 "that will wake you while it is alive" % pid, code=2)
         watch = {"pid": pid, "started": started}
+    # A SCHEDULED SLOT (#115) has no process between firings, so the lead declares when it
+    # expects to be woken. Bounded by config, so the declaration cannot silence the watchdog for
+    # longer than one slot plus slack; with --watcher-pid as well, both must hold.
+    if args.until:
+        max_sec = int(((cfg.get("park") if hasattr(cfg, "get") else None) or {})
+                      .get("until_max_sec") or config.DEFAULTS["park"]["until_max_sec"])
+        try:
+            until = campaign.parse_until(args.until, max_sec)
+        except ValueError as e:
+            die(str(e), code=2)
+        watch = dict(watch or {}, until=until)
     g.park(args.id, args.reason, watch=watch)
     events.emit(cfg, "leaf.parked", {"leaf": args.id, "reason": args.reason,
-                                     "watcher_pid": args.watcher_pid})
-    if watch:
+                                     "watcher_pid": args.watcher_pid,
+                                     "until": (watch or {}).get("until")})
+    if watch and watch.get("until"):
+        print("parked %s — `waiting` counts it until %s%s, and stops counting once that passes."
+              % (args.id, campaign._stamp(watch["until"]),
+                 " and only while watcher pid %d is alive" % watch["pid"] if watch.get("pid") else ""))
+    elif watch:
         print("parked %s — `waiting` counts it while watcher pid %d is alive, and stops the "
               "moment it exits." % (args.id, watch["pid"]))
     elif lead:
         print("parked %s — the claim survives, but it will NOT count as waiting: no Crawler "
               "owns this leaf and no watcher was recorded, so `waiting` still says not waiting "
               "and the watchdog keeps ringing. Re-park with --watcher-pid <pid> to name the "
-              "process that will wake you." % args.id)
+              "process that will wake you, or --until <when> for a scheduled slot." % args.id)
     else:
         print("parked %s — the claim survives; a Crawler at a usage limit is not dead." % args.id)
     return 0
@@ -4361,6 +4378,11 @@ def build_parser():
                    help="for a leaf the lead claimed itself: the background process it waits on "
                         "(e.g. a `git ls-remote` loop). `waiting` counts the park only while "
                         "that pid is alive and is the same process (pid + start time)")
+    s.add_argument("--until", metavar="WHEN",
+                   help="for a leaf the lead claimed itself, waiting on a scheduled slot: count "
+                        "the park only until WHEN (30m / 2h / 7d / 2026-09-30[T17:00] / epoch "
+                        "seconds). Bounded by config park.until_max_sec; a bare small number is "
+                        "refused. With --watcher-pid, both must hold")
     s.set_defaults(func=cmd_park)
 
     s = sub.add_parser("unpark", help="resume a parked claim under a new owner")

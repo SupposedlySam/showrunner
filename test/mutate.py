@@ -1527,6 +1527,28 @@ TARGETS = [
     ("a lead park's watcher (#114)", "campaign.watcher_alive", "lib/showrunner/campaign.py",
      r"(def watcher_alive\(watch, claim_pid=None\):\n)",
      "    return False, ''\ndef _neutered_watcher_alive(watch, claim_pid=None):\n"),
+    # #115. A parser that refuses nothing lets a lead silence the watchdog for a week with
+    # `--until 7d`, or for any span at all with a bare "2" read whichever way it lands. Silent
+    # because every accepted deadline also parses.
+    ("park --until's bounded parse (#115)", "campaign.parse_until", "lib/showrunner/campaign.py",
+     r"(def parse_until\(spec, max_sec, at=None\):\n)",
+     "    return int((time.time() if at is None else at) + 60)\n"
+     "def _neutered_parse_until(spec, max_sec, at=None):\n"),
+    # Answering "does not count" always puts back #115 itself: a lead on a scheduled slot reads
+    # as not waiting and the watchdog rings until the slot fires.
+    ("a lead park's deadline (#115)", "campaign.lead_park_counts", "lib/showrunner/campaign.py",
+     r"(def lead_park_counts\(watch, claim_pid=None, at=None\):\n)",
+     "    return False, ''\ndef _neutered_lead_park_counts(watch, claim_pid=None, at=None):\n"),
+    # THE OTHER DIRECTION: "either" instead of "both". A future deadline then masks a dead
+    # watcher, which is the one case where the watcher dying is the news.
+    ("a lead park's deadline AND watcher (#115)", "campaign.lead_park_counts",
+     "lib/showrunner/campaign.py",
+     r"(def lead_park_counts\(watch, claim_pid=None, at=None\):\n)",
+     "    w = watch or {}\n"
+     "    if w.get('until') is not None and (time.time() if at is None else at) < float(w['until']):\n"
+     "        return True, 'left'\n"
+     "    return watcher_alive(w, claim_pid)\n"
+     "def _neutered_lead_park_counts(watch, claim_pid=None, at=None):\n"),
     # THE REPORT VERBS' RESTRAINT. Both are asserted by observing that nothing changed, which
     # is what a broken producer also yields -- so each mutant puts the old write back. Opening
     # the graph read-write again must turn the byte-identical tree red; answering "appendable"

@@ -1109,6 +1109,18 @@ claim pid, because the asking session is always alive. A lead park with no watch
 that has exited, does not count as waiting. It is listed under `unwatched_leads` with the reason,
 so the lead can see why the watchdog still rings, and `park` says so when no watcher is given.
 
+A lead waiting on a scheduled slot, such as a one-shot timer for a daily job, has no process to
+watch between firings. It parks with a deadline instead: `showrunner park <leaf> --reason "..."
+--until <when>`, where `<when>` is a duration (`30m`, `2h`, `1d`), a date (`2026-09-30`, meaning
+the end of that day, or `2026-09-30T17:00`) or epoch seconds. `waiting` counts the park only
+while the deadline is ahead, and reports its `until` and `seconds_left`. Once the deadline
+passes, the park goes under `unwatched_leads` with the lapse as its reason, so a timer that
+failed to fire makes the watchdog ring again. The deadline is self-declared, so `park` refuses
+one further out than the config key `park.until_max_sec`, as well as one already past and a bare
+small number such as `2`, which could mean minutes or days. Given both `--until` and
+`--watcher-pid`, the park counts only while both hold: the watcher is alive and the deadline is
+ahead. A deadline never masks a dead watcher, and it bounds a watcher that hangs.
+
 Processes a dead Crawler left running in its worktree — a test runner, a build daemon — are found
 by working directory and listed by `status` and `reconcile`. `gc` will not remove a tree with one
 running in it, and `showrunner reap --apply` stops only those proven to be the Crawler's
