@@ -1375,9 +1375,41 @@ def cmd_release(args):
 
 def cmd_park(args):
     cfg = _cfg(args)
-    _graph(cfg).park(args.id, args.reason)
-    events.emit(cfg, "leaf.parked", {"leaf": args.id, "reason": args.reason})
-    print("parked %s — the claim survives; a Crawler at a usage limit is not dead." % args.id)
+    g = _graph(cfg)
+    # A LEAD'S OWN CLAIM (#114) is a parked leaf no Crawler record names. `waiting` counts it
+    # only while the watcher recorded here is alive, so the watcher is checked now, while the
+    # caller can still fix it, rather than discovered dead by the probe.
+    lead = args.id not in {c.get("leaf") for c in campaign.load(cfg).get("crawlers", [])}
+    watch = None
+    if args.watcher_pid and not lead:
+        die("%s is a Crawler's leaf, and a Crawler's park already counts as waiting — "
+            "--watcher-pid is for a leaf the lead claimed itself" % args.id, code=2)
+    if args.watcher_pid:
+        from .util import process_started, session_pid
+        pid = args.watcher_pid
+        if pid in (g.show(args.id).get("claim_pid"), session_pid()[0]):
+            die("watcher pid %d is this lead's own session, which is alive for as long as it "
+                "asks and so proves nothing — name the background watcher's pid" % pid, code=2)
+        # `ps` answering for the pid is the liveness check: a pid nothing holds has no start time.
+        started = process_started(pid)
+        if started is None:
+            die("watcher pid %d is not running, or its start time could not be read so a "
+                "recycled pid could not be told apart from it — not recorded. Record the process "
+                "that will wake you while it is alive" % pid, code=2)
+        watch = {"pid": pid, "started": started}
+    g.park(args.id, args.reason, watch=watch)
+    events.emit(cfg, "leaf.parked", {"leaf": args.id, "reason": args.reason,
+                                     "watcher_pid": args.watcher_pid})
+    if watch:
+        print("parked %s — `waiting` counts it while watcher pid %d is alive, and stops the "
+              "moment it exits." % (args.id, watch["pid"]))
+    elif lead:
+        print("parked %s — the claim survives, but it will NOT count as waiting: no Crawler "
+              "owns this leaf and no watcher was recorded, so `waiting` still says not waiting "
+              "and the watchdog keeps ringing. Re-park with --watcher-pid <pid> to name the "
+              "process that will wake you." % args.id)
+    else:
+        print("parked %s — the claim survives; a Crawler at a usage limit is not dead." % args.id)
     return 0
 
 
@@ -3911,6 +3943,7 @@ def cmd_snapshot(args):
         "waiting": {"waiting": is_waiting,
                     "live": len(waiting_detail["live_crawlers"]),
                     "parked": len(waiting_detail["parked_crawlers"]),
+                    "parked_leads": len(waiting_detail.get("parked_leads") or []),
                     "blocked": len(waiting_detail.get("blocked_crawlers") or [])},
     }
     print(json.dumps(snap, indent=2, sort_keys=True, default=str))
@@ -4015,14 +4048,23 @@ def cmd_waiting(args):
         print(json.dumps(detail, indent=2, sort_keys=True))
     else:
         if is_waiting:
-            print("WAITING on %d live and %d parked Crawler(s):"
-                  % (len(detail["live_crawlers"]), len(detail["parked_crawlers"])))
+            print("WAITING on %d live and %d parked Crawler(s) and %d watched lead park(s):"
+                  % (len(detail["live_crawlers"]), len(detail["parked_crawlers"]),
+                     len(detail.get("parked_leads") or [])))
             for c in detail["live_crawlers"]:
                 print("  live   %s (%s)" % (c["crawler"], c["leaf"]))
             for c in detail["parked_crawlers"]:
                 print("  parked %s (%s) — %s" % (c["crawler"], c["leaf"], c["why"]))
+            for c in detail.get("parked_leads") or []:
+                print("  lead   %s (%s) — %s" % (c["leaf"], c["reason"], c["why"]))
         else:
-            print("not waiting — no dispatched work has a live owner or an explicit park")
+            print("not waiting — no dispatched work has a live owner or an explicit park, and no "
+                  "lead park has a live watcher")
+        # PRINTED ON BOTH BRANCHES: a lead park that does not count is why the watchdog still
+        # rings, and the lead who parked it believes it is waiting.
+        for c in detail.get("unwatched_leads") or []:
+            print("UNWATCHED %s (%s) — does not count as waiting: %s"
+                  % (c["leaf"], c["reason"], c["why"]))
         # PRINTED ON BOTH BRANCHES, because a blocked Crawler is the reason this can say NOT
         # waiting while Crawlers are alive, and a verdict whose cause is invisible is one the
         # reader argues with. These are the sessions somebody has to go and prompt.
@@ -4315,6 +4357,10 @@ def build_parser():
     s = sub.add_parser("park", help="pause a claim (usage limit) — it survives the reaper")
     s.add_argument("id")
     s.add_argument("--reason", required=True)
+    s.add_argument("--watcher-pid", type=int,
+                   help="for a leaf the lead claimed itself: the background process it waits on "
+                        "(e.g. a `git ls-remote` loop). `waiting` counts the park only while "
+                        "that pid is alive and is the same process (pid + start time)")
     s.set_defaults(func=cmd_park)
 
     s = sub.add_parser("unpark", help="resume a parked claim under a new owner")

@@ -1471,6 +1471,43 @@ def _undetermined(readable):
             "processes and its tree could not be read, which is not the same as doing nothing")
 
 
+def watcher_alive(watch, claim_pid=None):
+    """(counts, why) for the watcher a lead recorded when it parked its own leaf (#114).
+
+    A LEAD WAITING ON AN EXTERNAL EVENT has no Crawler, so nothing in the crawler records says
+    it is waiting. What can say so is the process it waits ON — a `git ls-remote` loop, a CI
+    poller — recorded at park time with its start time, so the answer stays a fact the record
+    holds rather than a declaration the lead makes.
+
+    THE POSTURE IS THE INVERSE OF `util.host_gone`. That one answers "proved gone" and treats
+    unreadable as alive, because a waker that cannot tell must keep working. Here a wrong "alive"
+    silences the watchdog, so only a pid that answers AND started when the record says counts;
+    a start time that cannot be read is not counted, and says so.
+
+    The lead's own claim pid is refused: the session asking is always alive while it asks, so
+    it would make every parked lead claim "waiting" for as long as the lead exists.
+    """
+    from .util import PROCESS_START_SLACK, process_started
+    if not watch or not watch.get("pid"):
+        return False, ("parked with no watcher recorded, so nothing the record holds says it is "
+                       "waiting — re-park it with --watcher-pid <the process that will wake you>")
+    pid = int(watch["pid"])
+    if claim_pid and pid == int(claim_pid):
+        return False, ("its watcher pid %d is the lead's own claim pid, which is alive for as "
+                       "long as the lead is and so proves nothing" % pid)
+    if not pid_alive(pid):
+        return False, "its watcher pid %d is not running" % pid
+    started, recorded = process_started(pid), watch.get("started")
+    if started is None or recorded is None:
+        return False, ("its watcher pid %d answers, but its start time could not be read, so it "
+                       "cannot be told apart from a recycled pid" % pid)
+    if abs(started - float(recorded)) > PROCESS_START_SLACK:
+        return False, ("its watcher pid %d is now held by a different process (started %s, the "
+                       "record says %s) — the watcher is gone and the pid was recycled"
+                       % (pid, int(started), int(float(recorded))))
+    return True, "watcher pid %d is alive and is the process recorded at park time" % pid
+
+
 def waiting(cfg, graph, base="HEAD", record=True):
     """Is this orchestrator legitimately waiting on work it dispatched? (game_loop#32)
 
@@ -1493,6 +1530,8 @@ def waiting(cfg, graph, base="HEAD", record=True):
     curiosity would inflate it. `detail["journal"]` then says "not recorded".
     """
     live, parked, blocked, stalled = [], [], [], []
+    leads, unwatched = [], []
+    crawler_leaves = set()
     # STALLED IS NOT WAITING (#101). `stalled_claims` already knows a live session whose
     # transcript has frozen — `status` prints it in red — but this put every alive Crawler in
     # `live`, so `waiting` exited 0 for exactly the case the stall detector exists for, and the
@@ -1508,6 +1547,7 @@ def waiting(cfg, graph, base="HEAD", record=True):
     # probe timeout a consumer runs it under — and a timeout there reads as "the probe did not
     # run at all", which stops the watchdog scheduling any further re-check.
     for f in reconcile(cfg, graph, base, deep=False, record=record):
+        crawler_leaves.add(f.get("leaf"))
         worked, why_worked = (False, "")
         if f["blocked"] and "released" in f:
             # DECIDED ONCE, IN RECONCILE, which journalled it: the journal and this verdict are
@@ -1582,13 +1622,37 @@ def waiting(cfg, graph, base="HEAD", record=True):
         elif f["alive"]:
             live.append({"crawler": f["crawler"], "leaf": f["leaf"], "branch": f["branch"]})
 
+    # A LEAF THE LEAD CLAIMED AND PARKED ITSELF (#114): no Crawler record names it, so the loop
+    # above never saw it. It counts only while the watcher it recorded is alive; one without a
+    # watcher, or with a dead one, is reported with the reason and counts for nothing, so the
+    # lead learns why the watchdog still rings. One graph read and a `ps` per such leaf, so
+    # this stays inside the probe's budget (#76).
+    try:
+        _claimed = [l for l in graph.list(status="in_progress")
+                    if l.get("parked") and l["id"] not in crawler_leaves]
+    except Exception:                                           # noqa: BLE001
+        _claimed = []
+    for leaf in _claimed:
+        try:
+            watch = json.loads(leaf.get("park_watch") or "null")
+        except ValueError:
+            watch = None
+        counts, why = watcher_alive(watch, leaf.get("claim_pid"))
+        entry = {"leaf": leaf["id"], "actor": leaf.get("actor"),
+                 "reason": leaf.get("park_reason"),
+                 "watcher_pid": (watch or {}).get("pid"), "why": why}
+        (leads if counts else unwatched).append(entry)
+
     detail = {
-        "waiting": bool(live or parked),
+        "waiting": bool(live or parked or leads),
         "live_crawlers": live,
         "parked_crawlers": parked,
         "blocked_crawlers": blocked,
         "stalled_crawlers": stalled,
-        "basis": "a live owning PID recorded at spawn, or an explicit park — never a guess "
+        "parked_leads": leads,
+        "unwatched_leads": unwatched,
+        "basis": "a live owning PID recorded at spawn, an explicit park, or a lead's park "
+                 "backed by a live watcher process it recorded — never a guess "
                  "about activity. A Crawler refused at a turn-end is counted in neither: it "
                  "is alive and doing nothing, and calling that waiting silences the watchdog "
                  "on the run that needs it most",
@@ -1600,7 +1664,7 @@ def waiting(cfg, graph, base="HEAD", record=True):
     # and this is where that record accumulates.
     if not record:
         detail["journal"] = "not recorded"
-        return bool(live or parked), detail
+        return detail["waiting"], detail
     try:
         path = os.path.join(cfg.state_dir, "waiting.jsonl")
         os.makedirs(cfg.state_dir, exist_ok=True)
@@ -1612,7 +1676,9 @@ def waiting(cfg, graph, base="HEAD", record=True):
                 "parked": len(parked),
                 "blocked": len(blocked),
                 "stalled": len(stalled),
-                "leaves": [c["leaf"] for c in live + parked],
+                "parked_leads": len(leads),
+                "unwatched_leads": len(unwatched),
+                "leaves": [c["leaf"] for c in live + parked + leads],
                 "blocked_leaves": [c["leaf"] for c in blocked],
             }, sort_keys=True) + "\n")
         detail["journal"] = "written"
@@ -1627,7 +1693,7 @@ def waiting(cfg, graph, base="HEAD", record=True):
         # So it goes on the channel that reaches somebody who CAN act: the porcelain a human or
         # a doctor reads, rather than a stderr line the probe discards.
         detail["journal"] = "FAILED: %s" % e
-    return bool(live or parked), detail
+    return detail["waiting"], detail
 
 
 # ------------------------------------------------------------- integration

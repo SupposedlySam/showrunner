@@ -1518,8 +1518,15 @@ TARGETS = [
     ("waiting (orchestrator liveness)", "campaign.waiting", "lib/showrunner/campaign.py",
      r'(def waiting\(cfg, graph, base="HEAD", record=True\):\n)',
      "    return False, {'waiting': False, 'live_crawlers': [], 'parked_crawlers': [],\n"
-     "                   'blocked_crawlers': [], 'stalled_crawlers': [], 'basis': ''}\n"
+     "                   'blocked_crawlers': [], 'stalled_crawlers': [], 'parked_leads': [],\n"
+     "                   'unwatched_leads': [], 'basis': ''}\n"
      "def _neutered_waiting(cfg, graph, base='HEAD', record=True):\n"),
+    # Answering "does not count" always puts back #114 exactly: a lead waiting on an external
+    # event with a live watcher reads as not waiting, and the watchdog rings it every 300 s. It
+    # is silent because "not waiting" is also the right answer for every unwatched lead park.
+    ("a lead park's watcher (#114)", "campaign.watcher_alive", "lib/showrunner/campaign.py",
+     r"(def watcher_alive\(watch, claim_pid=None\):\n)",
+     "    return False, ''\ndef _neutered_watcher_alive(watch, claim_pid=None):\n"),
     # THE REPORT VERBS' RESTRAINT. Both are asserted by observing that nothing changed, which
     # is what a broken producer also yields -- so each mutant puts the old write back. Opening
     # the graph read-write again must turn the byte-identical tree red; answering "appendable"

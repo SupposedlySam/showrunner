@@ -1528,6 +1528,24 @@ A parked leaf is excluded from `reap`, does not block `stop-gate`, and does not 
 inert-Crawler gate either — but it is still reported, and the report says when a parked Crawler
 is ALSO inert so its owner learns the run is stalled.
 
+## A lead waiting on an external event
+
+A leaf the lead claims and parks itself, with no Crawler record naming it, counts as waiting only
+while a watcher process it recorded is alive:
+
+```
+showrunner park <leaf> --reason "waiting on the next origin/main commit" --watcher-pid <pid>
+```
+
+`park` refuses a pid that is not running, the lead's own session pid, and a pid whose start time
+cannot be read. It records the pid together with its start time. `waiting --porcelain` lists the
+park under `parked_leads` while a process with that pid and that start time runs. A recycled pid
+does not count. Without a watcher, or once the watcher exits, the park goes under `unwatched_leads`
+with a `why` and the verdict is not waiting. `park` without `--watcher-pid` on such a leaf says
+that it will not count. The lead's claim pid is never evidence, because the session asking is
+always alive while it asks. Re-parking replaces the recorded watcher; `unpark`, `release` and
+`close` clear it.
+
 **What counts as working since a block**, before the gate calls a Crawler inert: a commit on its
 branch, a tracked-file change in its tree, its session ACTING in its transcript after the block,
 or a process it STARTED after the block — a test run or a build changes no tracked file while it runs.

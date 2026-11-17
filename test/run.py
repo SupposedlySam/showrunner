@@ -3481,6 +3481,157 @@ def test_waiting():
        p.returncode == 1 and time.time() - t0 < 5, (p.returncode, time.time() - t0))
 
 
+def test_a_lead_park_counts_only_while_its_watcher_lives():
+    group("A lead waiting on an external event counts as waiting only while its watcher lives (#114)")
+    if not have("git"):
+        skip("the lead-park group", "git is not installed")
+        return
+    from showrunner.util import process_started
+    exe = os.path.join(ROOT, "bin", "showrunner")
+
+    def cli(repo, *argv):
+        p = subprocess.run([sys.executable, exe] + list(argv), capture_output=True, text=True,
+                           cwd=repo.root, stdin=subprocess.DEVNULL)
+        return p.returncode, p.stdout, p.stderr
+
+    # A DETACHED GRANDCHILD, as a real watcher is: a child of this process lingers as a zombie
+    # after it exits, and a zombie's pid still answers alive.
+    def watcher(seconds=60):
+        return int(subprocess.run(["sh", "-c", "sleep %d >/dev/null 2>&1 & echo $!" % seconds],
+                                  capture_output=True, text=True).stdout.strip())
+
+    # The first unwatched reason, or "" — an assertion that fails, never an IndexError that ends
+    # the group before its other assertions run.
+    def why(detail):
+        return ([c.get("why") or "" for c in detail.get("unwatched_leads") or []] + [""])[0]
+
+    cfg = make_repo()
+    g = new_graph(cfg)
+    g.add("keep the PR current with main", leaf_id="lw1")
+    # THE LEAD'S OWN PID IS ALIVE, which is the point: it must not be what makes this count.
+    g.claim("lw1", "lead", pid=os.getpid())
+    g.park("lw1", "waiting on the next origin/main commit")
+    is_waiting, detail = campaign.waiting(cfg, g, record=False)
+    ok("a lead park with NO watcher is not waiting, though the lead's claim pid is alive",
+       is_waiting is False and not detail["parked_leads"], detail)
+    eq("...and it is reported in unwatched_leads, with the reason, rather than dropped",
+       [(c["leaf"], "no watcher recorded" in c["why"]) for c in detail["unwatched_leads"]],
+       [("lw1", True)])
+    eq("...and never mixed into parked_crawlers", detail["parked_crawlers"], [])
+
+    g.park("lw1", "waiting", watch={"pid": os.getpid(), "started": process_started(os.getpid())})
+    is_waiting, detail = campaign.waiting(cfg, g, record=False)
+    ok("the lead's own claim pid recorded AS the watcher does not count either",
+       is_waiting is False and "own claim pid" in why(detail), detail)
+
+    pid = watcher()
+    try:
+        g.park("lw1", "waiting", watch={"pid": pid, "started": process_started(pid)})
+        is_waiting, detail = campaign.waiting(cfg, g, record=False)
+        ok("a LIVE watcher recorded with its start time makes the lead park count",
+           is_waiting is True and [c["leaf"] for c in detail["parked_leads"]] == ["lw1"]
+           and not detail["unwatched_leads"], detail)
+        eq("...and the entry names the watcher it rests on",
+           [c.get("watcher_pid") for c in detail["parked_leads"]], [pid])
+
+        g.park("lw1", "waiting", watch={"pid": pid, "started": process_started(pid) - 3600})
+        is_waiting, detail = campaign.waiting(cfg, g, record=False)
+        ok("a RECYCLED pid (alive, but started at another time) does not count",
+           is_waiting is False and "recycled" in why(detail), detail)
+
+        g.park("lw1", "waiting", watch={"pid": pid, "started": None})
+        is_waiting, _d = campaign.waiting(cfg, g, record=False)
+        ok("a watcher with no recorded start time does not count — it cannot be told apart "
+           "from a recycled pid", is_waiting is False, _d)
+
+        g.park("lw1", "waiting", watch={"pid": pid, "started": process_started(pid)})
+    finally:
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+    for _ in range(50):
+        if not campaign.pid_alive(pid):
+            break
+        time.sleep(0.1)
+    is_waiting, detail = campaign.waiting(cfg, g, record=False)
+    ok("when the watcher DIES the verdict flips back to not waiting",
+       is_waiting is False and "not running" in why(detail), detail)
+
+    # A CRAWLER'S PARK IS STILL A CRAWLER'S. A leaf a Crawler record names stays in
+    # parked_crawlers and is never re-judged as a lead park.
+    rec = worktree.spawn(cfg, g.show(g.add("crawler leaf", leaf_id="lw2")), actor="c1")
+    campaign.record_spawn(cfg, rec, pid=DeadPid().pid)
+    g.claim("lw2", "c1", pid=DeadPid().pid)
+    g.park("lw2", "usage limit")
+    _w, detail = campaign.waiting(cfg, g, record=False)
+    eq("a parked Crawler leaf is not listed as a lead park",
+       ([c["leaf"] for c in detail["parked_crawlers"]],
+        [c["leaf"] for c in detail["parked_leads"] + detail["unwatched_leads"]]),
+       (["lw2"], ["lw1"]))
+    rc, out, err = cli(cfg, "park", "lw2", "--reason", "w", "--watcher-pid", str(os.getpid()))
+    ok("`park --watcher-pid` refuses a Crawler's leaf, whose park already counts",
+       rc == 2 and "Crawler's leaf" in err, (rc, out, err))
+
+    # THE CLI: what `park` says, what it refuses, and the porcelain shape.
+    cli_repo = make_repo()
+    gc_ = new_graph(cli_repo)
+    gc_.add("lead duty", leaf_id="lw3")
+    gc_.claim("lw3", "lead", pid=os.getpid())
+    rc, out, err = cli(cli_repo, "park", "lw3", "--reason", "waiting on main")
+    ok("`park` on a lead-claimed leaf with no watcher says plainly it will NOT count as waiting",
+       rc == 0 and "will NOT count as waiting" in out and "--watcher-pid" in out, (rc, out, err))
+    rc, out, err = cli(cli_repo, "park", "lw3", "--reason", "w", "--watcher-pid",
+                       str(DeadPid().pid))
+    ok("`park --watcher-pid` refuses a pid that is not running", rc == 2, (rc, out, err))
+    pid = watcher()
+    try:
+        rc, out, err = cli(cli_repo, "park", "lw3", "--reason", "waiting on main",
+                           "--watcher-pid", str(pid))
+        ok("`park --watcher-pid` records a live watcher and says it counts while that pid lives",
+           rc == 0 and ("watcher pid %d" % pid) in out, (rc, out, err))
+        rc, out, err = cli(cli_repo, "waiting", "--porcelain", "--no-record")
+        try:
+            d = json.loads(out)
+        except ValueError:
+            d = {"_unparsed": out + err}
+        ok("porcelain: waiting is true and exit 0 on a watched lead park",
+           rc == 0 and d.get("waiting") is True, (rc, d))
+        eq("porcelain: parked_leads names the leaf, its watcher and the reason",
+           [(c.get("leaf"), c.get("watcher_pid"), c.get("reason")) for c in d.get("parked_leads", [])],
+           [("lw3", pid, "waiting on main")])
+        eq("porcelain: unwatched_leads is present and empty",
+           d.get("unwatched_leads"), [])
+    finally:
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+    rc, out, err = cli(cli_repo, "park", "lw3", "--reason", "w", "--watcher-pid", str(os.getpid()))
+    ok("`park --watcher-pid` refuses the lead's own claim pid", rc == 2, (rc, out, err))
+    gc_.park("lw3", "waiting on main")
+    rc, out, err = cli(cli_repo, "waiting")
+    ok("plain `waiting` prints the UNWATCHED line with its reason and exits 1",
+       rc == 1 and "UNWATCHED lw3" in out and "no watcher recorded" in out, (rc, out, err))
+
+    # A GRAPH WRITTEN BEFORE THE COLUMN EXISTED. `CREATE TABLE IF NOT EXISTS` leaves it as it
+    # was, so a park with a watcher on it would fail with "no such column" unless the writer
+    # adds it.
+    import sqlite3
+    old = make_repo()
+    os.makedirs(os.path.dirname(old.graph_db), exist_ok=True)
+    db = sqlite3.connect(old.graph_db)
+    db.executescript(G.SCHEMA.replace("  park_watch    TEXT,\n", ""))
+    db.commit()
+    db.close()
+    go = new_graph(old)
+    go.add("old graph", leaf_id="lw4")
+    go.claim("lw4", "lead", pid=os.getpid())
+    go.park("lw4", "w", watch={"pid": 1, "started": 0})
+    eq("an older graph gains park_watch on first write, and a watcher can be recorded on it",
+       json.loads(go.show("lw4").get("park_watch") or "null"), {"pid": 1, "started": 0})
+
+
 def test_concurrency():
     group("More than one orchestrator may share this state (real races, not theoretical)")
     if not have("git"):
@@ -11516,10 +11667,16 @@ def test_publishable():
     # reason it is unsafe in `lingering`: this reader REPORTS and nothing acts on the result,
     # so the worst case is a line of output about a claim nobody may touch anyway.
     #
+    # `campaign.watcher_alive` (#114) is the ninth. It never trusts the pid alone: a lead park
+    # counts only when the live process also STARTED at the time `park` recorded, and a process
+    # in a later boot cannot have started before that boot, so a pid carried across a reboot
+    # reads as recycled. An unreadable start time does not count. It reports a verdict that can
+    # only quiet a watchdog while that exact process runs, and nothing acts on it.
+    #
     # Every one of them must decide what a pid means ACROSS A BOOT before it trusts the answer.
     # If this number changes, the new reader is the thing to look at — not this assertion.
     eq("pid_alive has exactly the readers that were audited for boot scoping; a new one must "
-       "justify itself rather than inherit the audit", len(readers), 8)
+       "justify itself rather than inherit the audit", len(readers), 9)
 
     # INTERNAL TOOLING MUST NOT REACH A PUBLIC CLONE. The package manager used to dogfood
     # these repos is ours; a stranger has never heard of it, cannot install it, and should
@@ -21891,7 +22048,8 @@ def main():
                test_path_problem,
                test_worktree_dirty,
                test_guards_anchor_off_cwd,
-               test_waiting, test_work_since_block,
+               test_waiting, test_a_lead_park_counts_only_while_its_watcher_lives,
+               test_work_since_block,
                test_unconfigured_checks,
                test_concurrency,
                test_integration, test_worktree_lease, test_worktree_guard_from_inside_a_worktree,
