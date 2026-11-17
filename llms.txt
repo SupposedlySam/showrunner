@@ -1543,8 +1543,27 @@ park under `parked_leads` while a process with that pid and that start time runs
 does not count. Without a watcher, or once the watcher exits, the park goes under `unwatched_leads`
 with a `why` and the verdict is not waiting. `park` without `--watcher-pid` on such a leaf says
 that it will not count. The lead's claim pid is never evidence, because the session asking is
-always alive while it asks. Re-parking replaces the recorded watcher; `unpark`, `release` and
-`close` clear it.
+always alive while it asks. Re-parking replaces the recorded watcher; `unpark`, `release`,
+`close` and `claim` clear it.
+
+A lead waiting on a scheduled slot has no process to watch between firings, so it parks with a
+deadline:
+
+```
+showrunner park <leaf> --reason "waiting on the 06:00 job" --until <when>
+```
+
+`<when>` takes the forms game_loop's `authorize --expires` takes, plus epoch seconds: `30m`, `2h`,
+`1d`, `2026-09-30` (the end of that day), `2026-09-30T17:00`, or epoch seconds as `date +%s` prints
+them. `park` refuses a deadline already past, a bare small number such as `2` (minutes or days
+cannot be told apart), and a deadline further out than the config key `park.until_max_sec`, because
+the deadline is self-declared. `waiting --porcelain` lists the park under `parked_leads` while the
+deadline is ahead. Each lead entry carries `until` (epoch seconds) and `seconds_left`, both null
+for a park with no deadline. Once the deadline passes, the park goes under `unwatched_leads` with
+the lapse in its `why`, and `seconds_left` is 0. A deadline-only park costs `waiting` no process
+call. With both `--until` and `--watcher-pid`, the park counts only while BOTH hold. A future
+deadline never makes a dead watcher count, and the deadline bounds a watcher that hangs alive.
+Re-parking replaces the deadline, and `unpark`, `release`, `close` and `claim` clear it.
 
 **What counts as working since a block**, before the gate calls a Crawler inert: a commit on its
 branch, a tracked-file change in its tree, its session ACTING in its transcript after the block,

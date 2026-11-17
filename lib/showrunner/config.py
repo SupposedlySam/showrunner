@@ -127,6 +127,9 @@ DEFAULTS = {
     # `spawn.default_base`: the ref an unnamed --base means (#103). Unset, it is the primary
     # checkout's HEAD — refused when that is off, or behind, the default branch.
     "spawn": {"default_base": None},
+    # `park --until` (#115): the furthest a lead may declare its own deadline. 26 h covers a daily
+    # job plus slack; a self-declared deadline with no bound silences the watchdog at will.
+    "park": {"until_max_sec": 26 * 3600},
     # The GitHub waker: what to watch. Empty means the hook exits at once (see waker.py).
     "waker": {"repos": [], "upstream": [], "trusted_logins": [], "trusted_names": [],
               "signature": "", "poll_sec": 300, "budget_sec": 604740,
