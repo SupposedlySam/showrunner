@@ -18,13 +18,13 @@ Dependency arrow points one way: **showrunner → game_loop.** game_loop never l
 | Whether a **turn** may end | game_loop | Its Stop gate. showrunner supplies the graph the gate reads. |
 | Whether a **leaf** may close | showrunner | Proof-of-done and the premise verdict. |
 | A commit's **provenance** under fan-out | game_loop | `attribute --merge <ref>`, recomputed from the ref. |
-| Whether an orchestrator is **waiting on dispatched work** | showrunner | `showrunner waiting` — a live PID or an explicit park; game_loop's watchdog holds only for this session's own in-flight subagents and workflows; a Crawler is another session, which it cannot see. |
+| Whether an orchestrator is **waiting on dispatched work** | showrunner | `showrunner waiting` — a live PID or an explicit park. On its own, game_loop's watchdog holds for this session's in-flight subagents and workflows, and for a mandate's `--wake-check` path (a pid file whose process is alive, or Slack listening) while nothing is owed. A Crawler is another session, which it cannot see, so it asks this verb through `watchdog.waiting_probe`. |
 | What a change **owes**, and whether evidence postdates it | game_loop | A fact about a tree. |
 | **Merge order and timing** | showrunner | Which branch lands when, and whether to stop. |
 | Proving a **fix** on the merged trunk | showrunner | `fix --prove` is scoped to the session that proved it — deliberately, so a Crawler's branch-local proof can never satisfy the integrator's handback. Branch-green is not trunk-green, so the integrating session must exercise the fix's own consumer against the merge. `integrate` writes the merged-result checks out as a citable artifact. |
 | Whether **the resulting tree is verified** | game_loop | Amended — after per-tree commit gates this is already answered per tree. showrunner decides *when* to merge; game_loop decides whether what came out is verified. |
 | Where a Crawler may **write**, and what it gets | showrunner | Worktree placement, injection, scratch. |
-| The Crawler's scratch as a **game_loop write root** | showrunner writes, game_loop enforces | The one game_loop key showrunner writes by name: `allow_write_roots` in the tree's `.game_loop/config.local.json`, holding exactly that Crawler's scratch. game_loop has no verb for "allow one root in this tree"; `game_loop allow-root --tree <t> <path>`, or install taking `--allow-write-root`, would let showrunner ask instead of write. Its `worktree --porcelain` reports that entry as notes-drifted and cannot say which key differs, so showrunner recomputes the entry and excuses only a file that holds nothing else. |
+| The Crawler's scratch as a **game_loop write root** | showrunner writes, game_loop enforces | The one game_loop key showrunner writes by name: `allow_write_roots` in the tree's `.game_loop/config.local.json`, holding exactly that Crawler's scratch. game_loop deliberately has no verb that writes `allow_write_roots`: any session could call it and widen its own write roots, which is what `authorize` exists to stop. Its `worktree --porcelain` reports that entry as notes-drifted and names each differing key in `local_override.keys` (a list key as `only_here`/`only_there`, an unreadable copy as `unparsed`). showrunner does not read those keys: it recomputes its own entry and excuses only a file that holds nothing else. |
 | What is **runtime state** vs. a **rule** inside the harness | game_loop | It is the thing that knows: `.game_loop/.gitignore` and `game_loop owned`. |
 | What a **new tree** must carry to run the harness as the parent runs it | game_loop, unanswered | `owned` answers for *home*, not *code*. With a pinned checkout the code lives in a gitignored dir wired through a gitignored settings file, so neither crosses a worktree. Raised in `#game_loop_owner`. |
 
@@ -151,9 +151,14 @@ The fix belongs below (the gate is game_loop's), and it is raised there. What be
 the mitigation showrunner owns: every Crawler brief now says to commit from the tree it is
 already in rather than `cd`-ing to it through a variable.
 
-Worth recording alongside it, because it is the same shape one level out: the write guard
-refused a *chat message* whose quoted example text contained shell-looking commands. Right
-rule, wrong subject — the mirror of the provenance check firing on merges.
+The same shape one level out is prose that the write guard reads as shell — the mirror of the
+provenance check firing on merges. A here-doc body fed to a known data reader is text: `cat`,
+`tee`, `llm_chat`, `gh`, `jq`, `git commit -F -`, and showrunner's own `--<prose>-file -` flags
+(`reason`, `title`, `who`, `stale-proof-reason`, `note`, `prompt`). A body fed to any other
+program is scanned as shell, so a placeholder like `<tree>/path` in it reads as a redirect and
+is refused; the refusal says the text came from a reader the guard does not know and names
+`cat > <file>` as the way through. That list of six is game_loop's copy of `PROSE_OPTS` in
+`lib/showrunner/cli.py`: a prose flag added here stays scanned there until game_loop lists it.
 
 ## The interface showrunner consumes
 
@@ -182,10 +187,12 @@ blocks on 1 and 2 and never on 3, so a per-tree local override warns rather than
 merge. A worktree with no local wiring while its parent has some stays **clean** — the ordinary
 adopted case, and flagging it would make every worktree notes-drifted on day one, which is a
 check people stop believing. All four states walked here rather than read: neither, parent only,
-both-and-disagreeing, both-and-agreeing. And a drifted harness **script** still wins over a
-local-override difference — verified by making both true at once and requiring `code-drifted`,
-because a widening that swallows the finding it was added beside is the failure both sides of
-this boundary have now shipped once each.
+both-and-disagreeing, both-and-agreeing. And a drifted harness **script** wins over every notes
+difference — a local override, and per-tree notes such as `LEDGER.md` — because the verb decides
+rules first, then every could-not-tell, then code, then notes. A ledger with notes in it beside a
+drifted script is `code-drifted`, exit 1; a ledger-only difference is `notes-drifted`, exit 3. A
+widening that swallows the finding it was added beside is the failure both sides of this
+boundary have shipped.
 
 **1 said "rule files drifted" here until game_loop #66, and that was a claim about the layer
 below outliving the thing it described.** A drifted harness SCRIPT had no entry in that map and
@@ -198,31 +205,18 @@ re-derived — the verb compares trees as they are now, so once a branch is merg
 was certified is gone. showrunner carries it out of `check_tree` and into `reconcile` and
 `integrate` for that reason.
 
-## Open upstream, measured here and NOT patched here
+## What one `verify` run costs
 
-**`verify` runs the same command once per matching pattern.** Five of this repo's six rules owe
-`python3 test/run.py`, so a commit touching `lib/` and `test/` — which is most commits — runs the
-suite twice.
+**`verify` runs each distinct owed command once**, however many stale patterns owe it, then
+stamps every stale pattern whose commands all passed. Most of this repo's rules owe
+`python3 test/run.py`, so a commit touching `lib/` and `test/` costs one suite run, not two.
+It fails fast: a pattern whose command never ran stays stale rather than inheriting a stamp.
 
-Measured rather than reasoned: two stale patterns, **117s**, against ~58s for one run. Exactly
-half that gate is a duplicate, and a commit also touching `install.sh` and `templates/` pays
-four times over.
+The stamp is the time the checks **started**. A file edited while the suite runs is newer than
+that evidence and still owes a run, because the run checked its old form.
 
-The config comment beside those rules already argues the shape, against a catch-all `"*"`:
-*verify runs each stale pattern independently.* Avoiding `"*"` avoids the worst case; it does not
-avoid two ordinary globs legitimately owing the same command, which is the normal arrangement
-when code and its tests are separate patterns.
-
-**Not patched here, deliberately.** `.game_loop/` is vendored and read-only by the rule at the
-top of this file — a local edit would be overwritten by the next installer run and would drift
-silently until then. Reported upstream, where llm_chat's owner had independently found it in a
-three-pattern config; this repo is the worse case at five.
-
-Their suggested fix, which showrunner does not get a vote on beyond agreeing it is sound:
-dedupe by (command, resolved cwd) within one invocation, and mark **every** stale pattern fresh
-rather than only the first — marking one would leave the others stale forever and turn a
-speedup into a gate that never passes. A command is a pure function of the tree at the moment it
-runs, so a second identical run in the same invocation is not a second check.
+`.game_loop/` is vendored and read-only by the rule at the top of this file, so verify's cost is
+game_loop's to change; a local edit would be overwritten by the next installer run.
 
 ## Closed asks
 
@@ -302,21 +296,21 @@ re-reading everything: the assumptions above cite `guard-writes-impl.sh`, `verif
 cannot have moved. That is the difference between a check being satisfied and a check being
 skipped, and it is worth writing down because the skip is the tempting one.
 
-<!-- game_loop-verified: 54d822d1 — payload digest. THIS is the gated value, and it moves only
+<!-- game_loop-verified: 15c6b32c — payload digest. THIS is the gated value, and it moves only
      when the claims below have been re-read against that payload. It is not a claim about what
      is installed now; `.game_loop/VERSION` answers that and is not prose. -->
 
 
 - The commit gate resolves **per target tree** — the resolution lands in `commit_root`, and the
   no-harness branch then carries it in `_gl_unharnessed` — and denies in two cases: when that
-  tree carries no harness (`guard-writes-impl.sh:1752`, where the `undetermined:` resolution
+  tree carries no harness (`guard-writes-impl.sh:1863`, where the `undetermined:` resolution
   becomes `_gl_unharnessed`), and
   when the target is built from a **shell variable** so the gate cannot resolve it without
-  executing it (line 1733). The second is newer than the first — it used to pass silently,
+  executing it (line 1844). The second is newer than the first — it used to pass silently,
   which is the default shape under fan-out.
 - A **FOURTH** denial, newest of all and the only one keyed on a *mandate* rather than on a
   path: a Bash `rm` carrying BOTH recursive and force, while a mandate is active and not parked
-  (`guard-writes-impl.sh:1164`); a cleared mandate does not count. The reasoning is not about the delete — it is that an
+  (`guard-writes-impl.sh:1175`); a cleared mandate does not count. The reasoning is not about the delete — it is that an
   interactive approval is the one hazard in an unattended run that fails SILENT: no timeout, no
   log line, and the watchdog cannot answer it because a run blocked on a prompt is not idle.
   Both flags are required, in any spelling (`-rf`, `-r -f`, `--recursive --force`), and the
@@ -347,7 +341,7 @@ skipped, and it is worth writing down because the skip is the tempting one.
   calls, so showrunner writing that file into a worktree from its own process is unaffected.
   Verified here, same path both ways — the orchestrator's write lands, the session's is denied.
 - A **fifth** denial, and the one that reaches into showrunner's own tree: a Write, Edit or shell
-  write to the script `watchdog.waiting_probe` names (`guard-writes-impl.sh:802`, and line 2819
+  write to the script `watchdog.waiting_probe` names (`guard-writes-impl.sh:802`, and line 2930
   for the shell path). Here that is `.showrunner/hooks/waiting-probe.sh`. The guard resolves the
   script from the config value rather than by name, and refuses it because a probe that exits 0
   tells the watchdog the run is waiting, so a session that edits it decides when its own idle
@@ -362,15 +356,15 @@ skipped, and it is worth writing down because the skip is the tempting one.
 - A **sixth** denial, and the only one a project has to switch on: a write matching a
   `require_read` rule's globs, when the file that rule names has not been read since the
   human's last message. It sits on both paths — Write/Edit (`guard-writes-impl.sh:890`) and
-  shell writes (line 2806), both calling `require_read_gate` — and hands the targets the guard
+  shell writes (line 2917), both calling `require_read_gate` — and hands the targets the guard
   already resolved to `game_loop readcheck`, so there is one parser of where a command writes.
   It costs nothing unconfigured and fails open on any error. This repo configures no
   `require_read` rule, so nothing here is refused by it.
 - The edited-file set is scoped to the **session**, not the tree — one session is one session
   however many trees it touches. (`EDITED_F` at line 353.)
 - The blast-radius check is a **warning, never a denial** — `blast_note` reaches `commit_note`
-  and nothing else (`blast_note` assigned at 1880, consumed at 3257) — and is silent when the
-  session's `edited` set is empty, which is no evidence rather than a clean bill (line 1897,
+  and nothing else (`blast_note` assigned at 1991, consumed at 3395) — and is silent when the
+  session's `edited` set is empty, which is no evidence rather than a clean bill (line 2008,
   with the set's design stated at 463).
 **The two below cite `install.sh` by ANCHOR, not by line, and that is a correction.** It is
 the one file here that is not vendored — it lives in game_loop's own checkout — so the payload
