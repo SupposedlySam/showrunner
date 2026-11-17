@@ -409,8 +409,7 @@ def local_drift_is_scratch_only(cfg, worktree_path):
     mine = _load_local(worktree_path)
     if mine is None:
         return False
-    ours = os.path.realpath(os.path.join(cfg.scratch_root, os.path.basename(
-        os.path.normpath(worktree_path))))
+    ours = _scratch_entry(cfg, worktree_path)
     roots = mine.get(WRITE_ROOTS_KEY)
     if not isinstance(roots, list) or ours not in roots:
         return False
@@ -423,25 +422,77 @@ def local_drift_is_scratch_only(cfg, worktree_path):
     return rest == {}
 
 
+def _scratch_entry(cfg, worktree_path):
+    """The write root spawn adds to this tree: scratch_root/<the worktree's name>, realpath'd."""
+    return os.path.realpath(os.path.join(cfg.scratch_root, os.path.basename(
+        os.path.normpath(worktree_path))))
+
+
+def keys_say_scratch_only(cfg, worktree_path, keys):
+    """True when game_loop's own key list names spawn's scratch root as the tree's ONLY addition.
+
+    The list is `local_override.keys` from `worktree --porcelain`. allow_write_roots must be there,
+    in one of the two shapes game_loop gives it: {"only_here": [ours], "only_there": [...]} when
+    both trees hold a list, or {"here": [ours], "there": null, "present": "here"} when main has
+    none, which is the ordinary case. only_there is main's own roots, which spawn does not copy.
+    Every other key must be one main has and this tree lacks, for the same reason. Anything this
+    tree holds that main does not, an "unparsed" side, or a shape not listed here is not excused.
+
+    What the list cannot show: game_loop leaves out keys equal on both sides, so a key this tree
+    inherited from main verbatim is not in it. Identical keys are the same policy, so that is not
+    drift; provision_scratch_root is what refuses to inherit them.
+    """
+    if not isinstance(keys, dict) or not keys or "unparsed" in keys:
+        return False
+    ours = _scratch_entry(cfg, worktree_path)
+    for k, v in keys.items():
+        if not isinstance(v, dict):
+            return False
+        if k == WRITE_ROOTS_KEY:
+            if set(v) == {"only_here", "only_there"}:
+                if v["only_here"] != [ours] or not isinstance(v["only_there"], list):
+                    return False
+            elif v != {"here": [ours], "there": None, "present": "here"}:
+                return False
+        elif not (set(v) == {"here", "there", "present"} and v["present"] == "there"
+                  and v["here"] is None):
+            return False
+    return WRITE_ROOTS_KEY in keys
+
+
 def _excuse_scratch_root(cfg, worktree_path, rc, payload):
     """Turn game_loop's notes-drifted into clean when the ONLY drift is spawn's scratch root.
 
     Narrow on purpose: the verdict must be notes-drifted, the harness must name config.local.json
-    as the differing local override, no owned file may differ, and the difference must be that
-    one entry. Every other notes-drifted passes through unchanged.
+    as the differing local override, no owned file and no harness script may differ, and the
+    difference must be that one entry. Every other notes-drifted passes through unchanged.
+
+    game_loop's key list judges it when the payload carries one; an older game_loop names only the
+    file, and then the tree's file is recomputed by hand. The detail says which did. The script
+    check is for that older game_loop too: it reported a drifted script beside per-tree notes as
+    notes-drifted, where df5eed5 and later answer code-drifted, exit 1, which never reaches here.
     """
     if rc != NOTES_DRIFTED or not isinstance(payload, dict):
         return rc, payload
-    local = (payload.get("local_override") or {}).get("drifted") or []
+    lo = payload.get("local_override") or {}
+    local = lo.get("drifted") or []
     owned_drift = (payload.get("owned_files") or {}).get("drifted") or []
-    if LOCAL_OVERRIDE not in local or owned_drift:
+    code_drift = (payload.get("code") or {}).get("drifted") or []
+    if LOCAL_OVERRIDE not in local or owned_drift or code_drift:
         return rc, payload
-    if not local_drift_is_scratch_only(cfg, worktree_path):
-        return rc, payload
+    if "keys" in lo:
+        if not keys_say_scratch_only(cfg, worktree_path, lo["keys"]):
+            return rc, payload
+        judged = "judged from game_loop's own key list"
+    else:
+        if not local_drift_is_scratch_only(cfg, worktree_path):
+            return rc, payload
+        judged = ("judged by recomputing the tree's file, because this game_loop does not name "
+                  "the differing keys")
     return CLEAN, dict(payload, status="clean", detail=(
         "every owned file and harness script matches the main checkout; %s differs only by the "
-        "Crawler's scratch write root that spawn added (game_loop reported it as notes-drifted)"
-        % LOCAL_OVERRIDE))
+        "Crawler's scratch write root that spawn added (game_loop reported it as notes-drifted; "
+        "%s)" % (LOCAL_OVERRIDE, judged)))
 
 
 def provision(cfg, worktree_path, scratch=None):

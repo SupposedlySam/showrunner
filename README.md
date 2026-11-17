@@ -933,7 +933,11 @@ behaviour.
   and removed; one in a sibling's scratch still cannot. Nothing else from the main checkout's
   `config.local.json` reaches the tree, so a waiting probe armed there stays the main checkout's.
   The tree check reads that one entry as clean, and any other difference in the file still reports
-  notes-drifted. A long close
+  notes-drifted. game_loop's own `local_override.keys` judges it when the porcelain carries one: the
+  tree may add only that entry to `allow_write_roots`, and may lack main's keys but hold none main
+  lacks. An older game_loop names only the file, so the tree's file is recomputed instead, and the
+  check's line says which judged it. A key the tree holds with main's exact value is not in that
+  list, because it is the same policy. A drifted harness script beside the entry is never excused. A long close
   reason still goes on
   stdin instead (`--reason-file -`), so no file needs writing at all. Two Crawlers reaching for
   `commitmsg.txt` in one shared temp dir means one can commit the other's commit message onto its

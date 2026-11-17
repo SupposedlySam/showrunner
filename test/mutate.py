@@ -1395,6 +1395,28 @@ TARGETS = [
      "lib/showrunner/harness.py",
      r"(def local_drift_is_scratch_only\(cfg, worktree_path\):\n)",
      "    return True\ndef _neutered_local_drift_is_scratch_only(cfg, worktree_path):\n"),
+    # The same excuse judged from game_loop's own key list, which is the path a current game_loop
+    # takes. Stubbed toward the reassuring answer, every config.local.json drift reads clean.
+    ("scratch key list match", "harness.keys_say_scratch_only", "lib/showrunner/harness.py",
+     r"(def keys_say_scratch_only\(cfg, worktree_path, keys\):\n)",
+     "    return True\ndef _neutered_keys_say_scratch_only(cfg, worktree_path, keys):\n"),
+    # NOT STUBS, each one narrowing the match lets through, spliced after its anchor. Membership
+    # for "exactly": a second root beside ours, a grant nobody made, reads as spawn's.
+    ("scratch key list: only_here exactly ours", "harness.keys_say_scratch_only",
+     "lib/showrunner/harness.py",
+     r"(            if set\(v\) == \{\"only_here\", \"only_there\"\}:\n)",
+     '                v = dict(v, only_here=[ours]) if ours in v["only_here"] else v\n'),
+    # Any other key accepted: a tree that ADDED an mcp_* grant beside our entry reads clean.
+    ("scratch key list: other keys must be main's", "harness.keys_say_scratch_only",
+     "lib/showrunner/harness.py",
+     r"(    for k, v in keys.items\(\):\n)",
+     "        if k != WRITE_ROOTS_KEY:\n            continue\n"),
+    # The script check dropped: on a game_loop older than df5eed5, a drifted harness script next
+    # to the scratch entry came back notes-drifted, and the excuse turned it into clean.
+    ("scratch key list: a drifted script is never excused", "harness._excuse_scratch_root",
+     "lib/showrunner/harness.py",
+     r"(    code_drift = \(payload.get\(\"code\"\) or \{\}\).get\(\"drifted\"\) or \[\]\n)",
+     "    code_drift = []\n"),
     # All four below were invisible until the candidate scan learned that `return None, ""` is
     # the same report as `return None`. Two are new; two have been in this file since the
     # harness contract was written, uncovered AND unlisted, which is the exact defect this tool

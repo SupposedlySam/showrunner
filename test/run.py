@@ -18556,6 +18556,107 @@ def test_a_crawler_can_write_the_scratch_spawn_gave_it():
         roles.USER_PATH = prev
 
 
+def test_the_scratch_excuse_reads_game_loops_key_list():
+    group("the scratch-root excuse reads game_loop's own key list, falls back to recomputing the "
+          "file, and never excuses a drifted script")
+    from showrunner import harness as H
+    # SHAPES FROM THE REAL PORCELAIN, not from the brief. game_loop df5eed5's _local_key_diff gives
+    # only_here/only_there only when BOTH sides hold a list; when main has no allow_write_roots,
+    # which is the ordinary case, the key is a scalar entry with "present". Main's own keys spawn
+    # does not copy are entries of their own with present "there".
+    base = tempfile.mkdtemp(prefix="sr-keys-")
+    atexit.register(shutil.rmtree, base, True)
+
+    class _Cfg(object):
+        scratch_root = os.path.join(base, "scratch")
+    cfg = _Cfg()
+    wt = os.path.join(base, "trees", "crawler-k")
+    os.makedirs(os.path.join(wt, ".game_loop"))
+    ours = os.path.realpath(os.path.join(cfg.scratch_root, "crawler-k"))
+
+    def excuse(keys, code=None, rc=None):
+        lo = {"drifted": ["config.local.json"]}
+        if keys is not None:
+            lo["keys"] = keys
+        payload = {"status": "notes-drifted", "detail": "game_loop's", "local_override": lo,
+                   "owned_files": {"drifted": []}, "code": {"drifted": code or []}}
+        return H._excuse_scratch_root(cfg, wt, H.NOTES_DRIFTED if rc is None else rc, payload)
+
+    main_only = {"here": None, "there": {"waiting_probe": "/bin/true"}, "present": "there"}
+    scalar = {"here": [ours], "there": None, "present": "here"}
+    lists = {"only_here": [ours], "only_there": ["/main/own/root"]}
+    rc, p = excuse({"allow_write_roots": scalar, "watchdog": main_only})
+    eq("main has no write roots: the scalar shape naming only our entry is clean", rc, H.CLEAN)
+    ok("...and the line says the key list judged it", "key list" in p["detail"], p["detail"])
+    eq("both hold lists: only_here exactly ours, only_there main's own roots, is clean",
+       excuse({"allow_write_roots": lists})[0], H.CLEAN)
+    eq("...and an empty only_there is clean too",
+       excuse({"allow_write_roots": dict(lists, only_there=[])})[0], H.CLEAN)
+    for why, keys in (
+            ("a second root beside ours", {"allow_write_roots": dict(lists, only_here=[ours, "/x"])}),
+            ("a second root, scalar shape", {"allow_write_roots": dict(scalar, here=[ours, "/x"])}),
+            ("only_here that is not ours", {"allow_write_roots": dict(lists, only_here=["/x"])}),
+            ("a second root listed before ours", {"allow_write_roots": dict(lists,
+                                                                         only_here=["/x", ours])}),
+            ("only_here empty", {"allow_write_roots": dict(lists, only_here=[])}),
+            ("our entry absent, only main's keys", {"watchdog": main_only}),
+            ("another key the tree added", {"allow_write_roots": scalar,
+                                            "mcp_trusted_servers": {"here": ["mcp__x__"],
+                                                                    "there": None,
+                                                                    "present": "here"}}),
+            ("a key whose value differs on both sides", {"allow_write_roots": scalar,
+                                                         "watchdog": {"here": 1, "there": 2}}),
+            ("main's key shape with a value here", {"allow_write_roots": scalar,
+                                                    "watchdog": dict(main_only, here=1)}),
+            ("an extra field on our entry", {"allow_write_roots": dict(lists, extra=1)}),
+            ("an unparsed side", {"unparsed": ["here"]}),
+            ("unparsed beside a matching entry", {"allow_write_roots": scalar,
+                                                  "unparsed": ["there"]}),
+            ("an empty key list", {}),
+            ("a key list that is not a dict", ["allow_write_roots"])):
+        eq("NOT excused: %s" % why, excuse(keys)[0], H.NOTES_DRIFTED)
+
+    # THE FALLBACK, for a game_loop that names the file and not the keys.
+    local = os.path.join(wt, ".game_loop", "config.local.json")
+    with open(local, "w") as fh:
+        json.dump({"allow_write_roots": [ours]}, fh)
+    rc, p = excuse(None)
+    eq("no key list: the recomputed file holding only our entry is clean", rc, H.CLEAN)
+    ok("...and the line says the file was recomputed", "recomputing" in p["detail"], p["detail"])
+    with open(local, "w") as fh:
+        json.dump({"allow_write_roots": [ours], "watchdog": {"waiting_probe": "/bin/true"}}, fh)
+    eq("no key list: a recomputed file with anything else is not excused", excuse(None)[0],
+       H.NOTES_DRIFTED)
+    with open(local, "w") as fh:
+        json.dump({"allow_write_roots": [ours]}, fh)
+
+    # A SCRIPT DRIFT BESIDE OUR ENTRY. game_loop df5eed5 answers code-drifted, exit 1, which this
+    # never turns into anything; an older one answered notes-drifted, so the payload is read too.
+    eq("a drifted script beside our entry is not excused, key list or not",
+       excuse({"allow_write_roots": scalar}, code=["bin/verify"])[0], H.NOTES_DRIFTED)
+    eq("...nor on the fallback path", excuse(None, code=["bin/verify"])[0], H.NOTES_DRIFTED)
+    eq("and exit 1 passes through untouched", excuse({"allow_write_roots": scalar},
+                                                     rc=H.DRIFTED)[0], H.DRIFTED)
+    # Through check_tree, as an older game_loop answers it: the script drift rides in a
+    # notes-drifted payload, and the verdict a caller sees must stay that, with game_loop's words.
+    cfg.root = base
+    cfg.get = lambda key, default=None: {"dirs": [".game_loop"]} if key == "harness" else default
+    older = (H.NOTES_DRIFTED, {
+        "status": "notes-drifted", "detail": "an older game_loop's notes sentence",
+        "local_override": {"drifted": ["config.local.json"]}, "owned_files": {"drifted": []},
+        "code": {"drifted": ["bin/verify"]}})
+    orig = H._verify_with_harness
+    H._verify_with_harness = lambda w, d: older
+    try:
+        status, detail, _ = H.check_tree(cfg, wt)
+    finally:
+        H._verify_with_harness = orig
+    eq("an older game_loop's script drift beside our entry stays notes-drifted through check_tree",
+       status, "notes-drifted")
+    ok("...and carries game_loop's own sentence, not the scratch excuse's",
+       detail == "an older game_loop's notes sentence", detail)
+
+
 def test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch():
     group("spawn adds the Crawler's scratch to its tree's game_loop allow_write_roots, so a nested "
           "repo there can be written and removed, and a sibling's still cannot")
@@ -18628,6 +18729,20 @@ def test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch():
     eq("...and showrunner reads that one difference as clean", H.check_tree(cfg, wa)[0], "clean")
     ok("...and says why it is clean, naming the scratch write root",
        "scratch write root" in (H.check_tree(cfg, wa)[1] or ""), H.check_tree(cfg, wa)[1])
+    ok("...judged from the key list the real game_loop sends, not by recomputing the file",
+       "key list" in (H.check_tree(cfg, wa)[1] or ""), H.check_tree(cfg, wa)[1])
+    # A REAL script drift beside the entry: game_loop answers code-drifted, exit 1, and showrunner
+    # must read that as drifted, not let the scratch excuse or the notes tier absorb it.
+    flair = os.path.join(wa, ".game_loop", "bin", "flair.py")
+    flair_was = open(flair).read()
+    with open(flair, "a") as fh:
+        fh.write("\n# drifted by the test\n")
+    raw = subprocess.run([binp, "worktree", "--porcelain"], capture_output=True, text=True,
+                         cwd=os.path.dirname(binp))
+    eq("a drifted script beside the scratch entry: game_loop exits 1", raw.returncode, H.DRIFTED)
+    eq("...and showrunner reports the tree drifted", H.check_tree(cfg, wa)[0], "drifted")
+    with open(flair, "w") as fh:
+        fh.write(flair_was)
     mine = H._load_local(wa) or {}
     with open(local, "w") as fh:
         json.dump(dict(mine, mcp_trusted_servers=["mcp__anything__"]), fh)
@@ -18638,6 +18753,28 @@ def test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch():
                        ["/elsewhere"]), fh)
     eq("...and so does a second write root beside spawn's", H.check_tree(cfg, wa)[0],
        "notes-drifted")
+    # THE LIST SHAPE, from the real porcelain: it appears only when main holds write roots too.
+    main_local = os.path.join(gl, "config.local.json")
+    main_was = open(main_local).read()
+    with open(main_local, "w") as fh:
+        json.dump({"watchdog": {"waiting_probe": "/bin/true"},
+                   "allow_write_roots": ["/main/own/root"]}, fh)
+    with open(local, "w") as fh:
+        json.dump(mine, fh)
+    raw = subprocess.run([binp, "worktree", "--porcelain"], capture_output=True, text=True,
+                         cwd=os.path.dirname(binp))
+    eq("main holding write roots too: game_loop names the key as only_here/only_there",
+       sorted(((json.loads(raw.stdout).get("local_override") or {}).get("keys") or {})
+              .get("allow_write_roots") or {}), ["only_here", "only_there"])
+    eq("...and showrunner reads spawn's entry against main's own roots as clean",
+       H.check_tree(cfg, wa)[0], "clean")
+    with open(local, "w") as fh:
+        json.dump(dict(mine, allow_write_roots=["/elsewhere"] + (mine.get("allow_write_roots")
+                                                                 or [])), fh)
+    eq("...but a second root beside spawn's, in that shape, stays notes-drifted",
+       H.check_tree(cfg, wa)[0], "notes-drifted")
+    with open(main_local, "w") as fh:
+        fh.write(main_was)
     with open(local, "w") as fh:
         json.dump(dict(mine, watchdog={"waiting_probe": "/bin/true"}), fh)
     ok("...and a tree that inherited main's waiting probe beside spawn's root is NOT excused",
@@ -21676,7 +21813,7 @@ def test_never_integrated_leaves_do_not_collide():
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_report_verbs_write_nothing, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_state_change_the_agent_made_itself_does_not_ring, test_an_issue_closed_by_my_own_merge_or_push_does_not_ring, test_the_github_waker_stamps_every_invocation, test_doctor_and_waker_show_state_the_effective_watch, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_a_waker_whose_host_is_gone_stops, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_report_verbs_write_nothing, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_state_change_the_agent_made_itself_does_not_ring, test_an_issue_closed_by_my_own_merge_or_push_does_not_ring, test_the_github_waker_stamps_every_invocation, test_doctor_and_waker_show_state_the_effective_watch, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_a_waker_whose_host_is_gone_stops, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_the_scratch_excuse_reads_game_loops_key_list, test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,
