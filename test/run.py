@@ -17866,6 +17866,75 @@ def test_a_pre_block_job_writing_scratch_does_not_release_a_block():
        (got, why))
 
 
+def test_a_launched_crawler_runs_as_its_own_tree():
+    group("`launch` and `resume` start the Crawler with ITS tree and session in the environment, "
+          "not the orchestrator's")
+    if not have("git"):
+        skip("the crawler-environment group", "git is not installed")
+        return
+    # OBSERVED: a Crawler's Bash inherited CLAUDE_PROJECT_DIR=<main checkout>, so `llm_chat say`
+    # resolved the orchestrator's identity and session state and refused to post. Claude Code
+    # overrides the variable for hooks but keeps an inherited one in Bash, so the only place it
+    # can be right is the environment the process is started with.
+    cfg = make_repo()
+    cfg.data["harness"] = dict(cfg.data.get("harness") or {}, require=False)
+    stub_dir = tempfile.mkdtemp(prefix="sr-env-")
+    env_log = os.path.join(stub_dir, "env")
+    stub = os.path.join(stub_dir, "claude")
+    with open(stub, "w") as fh:
+        fh.write("#!/bin/sh\nprintf 'CPD=%%s SID=%%s\\n' \"$CLAUDE_PROJECT_DIR\" "
+                 "\"$CLAUDE_CODE_SESSION_ID\" >> %s\n" % env_log)
+    os.chmod(stub, 0o755)
+    cfg.data["dispatch"] = dict(cfg.data.get("dispatch") or {}, claude_bin=stub)
+    g = new_graph(cfg)
+    g.add("env leaf", leaf_id="E1")
+    rec = worktree.spawn(cfg, g.show("E1"), actor="a")
+    campaign.record_spawn(cfg, rec, session="S-ENV")
+    wt = os.path.realpath(cfg.abspath(rec["worktree"]))
+
+    def started_lines(n):
+        for _ in range(50):
+            if os.path.exists(env_log) and len(open(env_log).read().splitlines()) >= n:
+                break
+            time.sleep(0.1)
+        return open(env_log).read().splitlines() if os.path.exists(env_log) else []
+
+    def parse(line):
+        cpd, sid = line.split(" SID=", 1)
+        return os.path.realpath(cpd[len("CPD="):]) if cpd != "CPD=" else "", sid
+
+    saved = {k: os.environ.get(k) for k in ("CLAUDE_PROJECT_DIR", "CLAUDE_CODE_SESSION_ID")}
+    # The orchestrator's own values, which is what a Crawler inherits without the fix.
+    os.environ["CLAUDE_PROJECT_DIR"] = cfg.root
+    os.environ["CLAUDE_CODE_SESSION_ID"] = "ORCHESTRATOR-SESSION"
+    try:
+        out = dispatch.launch(cfg, rec, {"rule": "pure-logic", "lane": "headless"}, "brief",
+                              "S-ENV")
+        ok("a launch with chat disabled returns its report instead of raising after the process "
+           "started", out.get("launched") is True and out.get("joined") is False, out)
+        lines = started_lines(1)
+        got = parse(lines[0]) if lines else ("", "")
+        eq("a LAUNCHED Crawler's CLAUDE_PROJECT_DIR is its worktree, not the orchestrator's "
+           "checkout", got[0], wt)
+        eq("...and its CLAUDE_CODE_SESSION_ID is its own session, never the orchestrator's",
+           got[1], "S-ENV")
+        gone = subprocess.Popen(["true"])
+        gone.wait()
+        campaign.set_state(cfg, rec["crawler"], "running", pid=gone.pid, dispatched_at=1)
+        entry = [c for c in campaign.load(cfg)["crawlers"] if c["crawler"] == rec["crawler"]][0]
+        dispatch.resume(cfg, entry, {"rule": "pure-logic", "lane": "headless"}, "carry on")
+        lines = started_lines(2)
+        got = parse(lines[1]) if len(lines) > 1 else ("", "")
+        eq("a RESUMED Crawler's CLAUDE_PROJECT_DIR is its worktree too", got[0], wt)
+        eq("...and it resumes as its recorded session", got[1], "S-ENV")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def test_resume_restarts_a_crawler_in_its_own_tree():
     group("`resume` restarts a stopped Crawler's recorded session in its EXISTING worktree, and "
           "`waiting` sees it (#97)")
@@ -21813,7 +21882,7 @@ def test_never_integrated_leaves_do_not_collide():
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_report_verbs_write_nothing, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_state_change_the_agent_made_itself_does_not_ring, test_an_issue_closed_by_my_own_merge_or_push_does_not_ring, test_the_github_waker_stamps_every_invocation, test_doctor_and_waker_show_state_the_effective_watch, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_a_waker_whose_host_is_gone_stops, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_the_scratch_excuse_reads_game_loops_key_list, test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_report_verbs_write_nothing, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_state_change_the_agent_made_itself_does_not_ring, test_an_issue_closed_by_my_own_merge_or_push_does_not_ring, test_the_github_waker_stamps_every_invocation, test_doctor_and_waker_show_state_the_effective_watch, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_a_waker_whose_host_is_gone_stops, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_the_scratch_excuse_reads_game_loops_key_list, test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_a_launched_crawler_runs_as_its_own_tree, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,
