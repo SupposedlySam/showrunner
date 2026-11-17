@@ -190,6 +190,14 @@ TARGETS = [
     ("joining a Crawler to its own room", "dispatch.join_crawler", "lib/showrunner/dispatch.py",
      r"(def join_crawler\([^)]*\):\n)",
      "    return True, channel\ndef _neutered_join(cfg, record, channel):\n"),
+    # Handing a Crawler the inherited environment restores the defect exactly: its Bash keeps
+    # the orchestrator's CLAUDE_PROJECT_DIR, so `llm_chat say` resolves the main checkout's
+    # identity and refuses, while every hook still looks right because Claude Code overrides
+    # the variable for hooks.
+    ("the environment a Crawler is started in", "dispatch.crawler_env",
+     "lib/showrunner/dispatch.py",
+     r"(def crawler_env\(wt, session\):\n)",
+     "    return dict(os.environ)\n"),
     # Answering `base` unchanged restores the defect EXACTLY, in its safe-looking direction:
     # every caller that passes an explicit base keeps working, every library-level test keeps
     # passing, and only the unset-base path — the default `integrate` — dies, after the merge
