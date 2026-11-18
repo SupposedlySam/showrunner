@@ -348,6 +348,18 @@ showrunner gc                        # remove worktrees whose branch is MERGED a
                                      # it is fingerprinted at spawn and at launch, and counts
                                      # again the moment the Crawler edits it. `status` says when
                                      # worktrees pile past `gc_nudge_at` (default 10)
+                                     # BASE: --base, else origin/HEAD (the remote's default
+                                     # branch), else HEAD. It prints which and why, and a HELD row
+                                     # judged against a non-default base says so. It also notes a
+                                     # local branch ahead of the remote (unpushed integration).
+                                     # INTEGRATED = ancestor of base, OR base carries every byte
+                                     # (squash), OR the tip is an ancestor of another leaf's
+                                     # branch integrated on one of those two (the early leaves of
+                                     # a squashed PR). The reclaim line names the rule. No PR
+                                     # state, no network. A pre-fingerprint tree's settings.json
+                                     # is compared as parsed JSON: added hooks the main checkout
+                                     # registers (either layer), plus a statusLine HEAD lacked that
+                                     # matches a main layer (the harness installer's), are not work
                                      # REMOVAL RE-READS STATUS first, with the same provisioning
                                      # split: work that appeared since it was classified holds the
                                      # tree. It FORCES only when what remains is spawn's

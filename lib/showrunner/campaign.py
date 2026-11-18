@@ -203,6 +203,65 @@ def base_branch(cfg, base=None):
     return (out or "").strip() or "HEAD"
 
 
+def gc_base(cfg, explicit=None):
+    """(base, how, caveat) for `gc`: which ref to judge against, why, and what a HELD row owes.
+
+    THE CHECKOUT'S HEAD IS NOT WHERE WORK LANDS (#116). `gc` defaulted `--base` to HEAD, and the
+    reported main checkout had a developer's feature branch out: 10 trees HELD as "not integrated
+    anywhere", 3 of which `--base origin/main` reclaimed (7 GB). So the default is the remote's
+    default branch, read from `origin/HEAD`, and HEAD only when that does not resolve.
+
+    NEVER GUESSED SILENTLY. `how` is printed on every run, and `caveat` is non-empty whenever the
+    base is not the remote's default branch: every HELD "not integrated" reason carries it, because
+    "not in HEAD" read on a feature branch is a true sentence that answers the wrong question.
+    """
+    rc, out, _ = git(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], cwd=cfg.root)
+    ref = (out or "").strip()
+    default = ref[len("refs/remotes/"):] if rc == 0 and ref.startswith("refs/remotes/") else None
+    default_sha = _commit_of(cfg, default) if default else None
+    if not default_sha:
+        default = None
+    if explicit:
+        if default and _commit_of(cfg, explicit) == default_sha:
+            return explicit, "--base, which is the remote's default branch (%s)" % default, ""
+        return explicit, "--base", (
+            "judged against %s, which is not the remote's default branch (%s)"
+            % (explicit, default or "origin/HEAD does not resolve"))
+    if default:
+        return default, "origin/HEAD, the remote's default branch", ""
+    current = base_branch(cfg)
+    return "HEAD", ("HEAD (%s), because origin/HEAD does not resolve — set it with `git remote "
+                    "set-head origin --auto`, or pass --base" % current), (
+        "judged against HEAD (%s) because origin/HEAD does not resolve; that may not be where "
+        "work lands — pass --base <branch>" % current)
+
+
+def base_lag(cfg, base):
+    """A note when the local branch of the same name holds commits `base` does not, else "".
+
+    `integrate` merges into the LOCAL branch, so until it is pushed, `origin/main` lacks work that
+    landed. That holds trees rather than deleting them, which is the safe direction, but the
+    reason has to be on screen or the HELD list reads as unintegrated work.
+    """
+    if not base or "/" not in base or base.startswith("refs/"):
+        return ""
+    local = base.split("/", 1)[1]
+    rc, out, _ = git(["rev-list", "--count", "%s..refs/heads/%s" % (base, local)], cwd=cfg.root)
+    try:
+        ahead = int((out or "").strip()) if rc == 0 else 0
+    except ValueError:
+        ahead = 0
+    if not ahead:
+        return ""
+    return ("local %s is %d commit(s) ahead of %s: work integrated there and not yet pushed "
+            "reads as not integrated — push, or pass --base %s" % (local, ahead, base, local))
+
+
+def _commit_of(cfg, ref):
+    rc, out, _ = git(["rev-parse", "--verify", "--quiet", "%s^{commit}" % ref], cwd=cfg.root)
+    return (out or "").strip() if rc == 0 else None
+
+
 def is_merged(cfg, branch, base, known=None):
     """True when `base` already contains every commit on `branch`."""
     if not branch_exists(cfg, branch, known):
@@ -434,7 +493,7 @@ def tree_bytes(path):
     return None if failed else total
 
 
-def reclaimable(cfg, graph, base="HEAD"):
+def reclaimable(cfg, graph, base="HEAD", caveat=""):
     """Worktrees that are provably redundant, and — separately — every one held back and why.
 
     NOTHING EVER REMOVED A TREE (#75). `spawn` makes one per leaf, `integrate` leaves it,
@@ -464,7 +523,9 @@ def reclaimable(cfg, graph, base="HEAD"):
     a dirty tree carrying real work announces itself.
     """
     take, held = [], []
-    for f in reconcile(cfg, graph, base):
+    findings = reconcile(cfg, graph, base)
+    _integrated_via_leaf(cfg, findings)
+    for f in findings:
         if not f.get("worktree_exists"):
             continue
         row = {"crawler": f.get("crawler"), "leaf": f.get("leaf"),
@@ -497,7 +558,7 @@ def reclaimable(cfg, graph, base="HEAD"):
                           "unreadable answer must not license a delete. If this persists, `gc` "
                           "is holding everything for a reason you can fix: check `git "
                           "for-each-ref --contains` works in that tree")
-        elif not (f.get("merged") or f.get("content_in_base")):
+        elif not (f.get("merged") or f.get("content_in_base") or f.get("integrated_via")):
             # THE WORDING WAS FALSE FOR EVERY BRANCH-BACKED TREE, and the reporter was right to
             # say so: refs live in the SHARED store, so removing a worktree never removes its
             # branch, and the tree is not "the only remaining copy" of anything committed. A
@@ -508,17 +569,57 @@ def reclaimable(cfg, graph, base="HEAD"):
                           "changed, so the work is not integrated anywhere. The branch itself "
                           "survives removing the tree — refs are shared — but nothing has "
                           "picked this work up" % (base, base))
+            if caveat:
+                row["why"] += " — %s" % caveat
         else:
             # SAY WHICH ANSWER MADE IT REDUNDANT. A squash-merge is reclaimed on a different
             # fact from an ancestry merge, and an operator reading a deletion should be able to
             # tell them apart without re-deriving it.
+            via = f.get("integrated_via")
             row["why"] = ("merged into %s" % base if f.get("merged") else
                           "%s already carries every byte this branch changed (squash-merge)"
-                          % base)
+                          % base if f.get("content_in_base") else
+                          "its tip is an ancestor of %s's branch %s, which is %s"
+                          % (via["crawler"] or "?", via["branch"],
+                             "merged into %s" % base if via.get("merged") else
+                             "carried byte-for-byte by %s (squash-merge)" % base))
             take.append(row)
             continue
         held.append(row)
     return take, held
+
+
+def _integrated_via_leaf(cfg, findings):
+    """Mark each unintegrated finding whose tip is an ancestor of an integrated leaf's branch.
+
+    THE EARLY COMMITS OF A SQUASHED PR (#116). Two leaves each committed once on a PR branch, later
+    leaves committed on top and rewrote the same lines, and the PR was squash-merged. The leaf
+    holding the final tip read as a squash-merge and was reclaimed; the two early ones did not,
+    because main never carries their intermediate bytes. Their work landed all the same: every
+    commit on them is a commit on the integrated branch.
+
+    LEAF TO LEAF, NO NETWORK. The other end must be a branch this pass already judged integrated
+    on its OWN evidence (`merged` or `content_in_base` True), never on this rule, so the judgment
+    cannot chain off itself. A merged PR's head that no leaf holds is not consulted: reading PR
+    state needs `gh`, and `gc` must answer offline. Such a tree stays HELD, which is the safe side.
+
+    An ancestry query that fails answers nothing, and nothing is marked: a failed read never
+    licenses a delete.
+    """
+    anchors = [f for f in findings
+               if f.get("branch") and f.get("branch_exists")
+               and (f.get("merged") or f.get("content_in_base") is True)]
+    for f in findings:
+        if f.get("merged") or f.get("content_in_base") or not f.get("branch_exists"):
+            continue
+        for a in anchors:
+            if a["branch"] == f.get("branch"):
+                continue
+            rc, _, _ = git(["merge-base", "--is-ancestor", f["branch"], a["branch"]], cwd=cfg.root)
+            if rc == 0:
+                f["integrated_via"] = {"crawler": a.get("crawler"), "branch": a["branch"],
+                                       "merged": bool(a.get("merged"))}
+                break
 
 
 def remove_reclaimed(cfg, row):

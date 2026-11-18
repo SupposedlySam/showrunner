@@ -18364,6 +18364,163 @@ def test_resume_restarts_a_crawler_in_its_own_tree():
        "inventing one", q.returncode == 3 and "no recorded session" in q.stderr, q.stderr[-300:])
 
 
+def test_gc_judges_where_work_lands():
+    group("`gc` judges against the remote's default branch, counts the early commits of a squashed "
+          "PR, and excuses the statusLine the harness installer wrote (#116)")
+    if not have("git"):
+        skip("the #116 gc group", "git is not installed")
+        return
+    sr = os.path.join(ROOT, "bin", "showrunner")
+
+    def commit(tree, name, text, msg):
+        with open(os.path.join(tree, name), "w") as fh:
+            fh.write(text)
+        sh(["git", "add", "-A"], tree)
+        sh(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", msg], tree)
+
+    def leaf(cfg, g, title, lid):
+        rec = worktree.spawn(cfg, g.show(g.add(title, leaf_id=lid)), actor=lid)
+        campaign.record_spawn(cfg, rec)
+        return rec, cfg.abspath(rec["worktree"])
+
+    def names(rows):
+        return [r["crawler"] for r in rows]
+
+    # ---- 1. THE BASE. No origin at all: HEAD, said out loud, and every HELD row says so.
+    cfg = make_repo()
+    base, how, caveat = campaign.gc_base(cfg)
+    eq("no origin/HEAD: gc falls back to HEAD", base, "HEAD")
+    ok("...and SAYS why, naming the fix", "origin/HEAD does not resolve" in how, how)
+    ok("...and owes a caveat to every HELD row, because HEAD may not be where work lands",
+       "HEAD (main)" in caveat, caveat)
+    # A dangling origin/HEAD is "cannot resolve", not a base: fail closed to the HEAD fallback.
+    sh(["git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/gone"], cfg.root)
+    eq("an origin/HEAD naming a ref that does not exist is not used",
+       campaign.gc_base(cfg)[0], "HEAD")
+    sh(["git", "update-ref", "refs/remotes/origin/main", "main"], cfg.root)
+    sh(["git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], cfg.root)
+    eq("with origin/HEAD set, the default is the remote's default branch, with no caveat",
+       campaign.gc_base(cfg)[::2], ("origin/main", ""))
+    ok("an explicit --base that is the default branch's commit carries no caveat",
+       campaign.gc_base(cfg, "main")[2] == "")
+
+    # THE REPORTED SHAPE: a feature branch checked out in the main checkout, and a leaf merged into
+    # the remote's main. Judged against HEAD it read "not integrated anywhere".
+    g = new_graph(cfg)
+    rec, wt = leaf(cfg, g, "landed", "ld1")
+    commit(wt, "landed.txt", "landed\n", "landed")
+    sh(["git", "merge", "-q", "--no-edit", rec["branch"]], cfg.root)
+    lag = campaign.base_lag(cfg, "origin/main")
+    ok("local main AHEAD of origin/main is named, because unpushed integration reads as held",
+       "local main is 1 commit(s) ahead of origin/main" in lag, lag)
+    p = subprocess.run([sys.executable, sr, "gc"], capture_output=True, text=True, cwd=cfg.root)
+    ok("...and `gc` prints that note where the operator reads the HELD rows, naming the way out",
+       "ahead of origin/main" in p.stderr and "pass --base main" in p.stderr, p.stdout + p.stderr)
+    sh(["git", "update-ref", "refs/remotes/origin/main", "main"], cfg.root)
+    eq("...and once pushed there is nothing to say", campaign.base_lag(cfg, "origin/main"), "")
+    sh(["git", "checkout", "-q", "-b", "dev-feature", "HEAD~1"], cfg.root)
+    p = subprocess.run([sys.executable, sr, "gc"], capture_output=True, text=True, cwd=cfg.root)
+    ok("`gc` with a feature branch checked out judges against origin/main and says so",
+       "base: origin/main — origin/HEAD" in p.stdout, p.stdout + p.stderr)
+    ok("...so a leaf merged into the remote's main is reclaimable, not HELD against the feature "
+       "branch", any("would remove" in l and rec["crawler"] in l for l in p.stdout.splitlines()),
+       p.stdout + p.stderr)
+    p = subprocess.run([sys.executable, sr, "gc", "--base", "HEAD"], capture_output=True,
+                       text=True, cwd=cfg.root)
+    ok("an explicit non-default base still holds it, and the HELD reason SAYS the base is not the "
+       "default branch", "not the remote's default branch (origin/main)" in p.stderr,
+       p.stdout + p.stderr)
+    sh(["git", "checkout", "-q", "main"], cfg.root)
+    commit(cfg.root, "unpushed.txt", "u\n", "unpushed")
+    p = subprocess.run([sys.executable, sr, "gc", "--apply"], capture_output=True, text=True,
+                       cwd=cfg.root)
+    ok("`gc --apply` carries the same note, with the count of unpushed commits",
+       "local main is 1 commit(s) ahead of origin/main" in p.stderr, p.stdout + p.stderr)
+
+    # ---- 2. THE EARLY COMMITS OF A SQUASHED PR. Early leaf E writes v1; the final leaf F builds on
+    # E's branch, rewrites the same line to v2, and F alone is squash-merged.
+    cfg = make_repo()
+    g = new_graph(cfg)
+    e, e_wt = leaf(cfg, g, "early", "ea1")
+    commit(e_wt, "x.txt", "v1\n", "v1")
+    f, f_wt = leaf(cfg, g, "final", "fi1")
+    sh(["git", "reset", "-q", "--hard", e["branch"]], f_wt)
+    commit(f_wt, "x.txt", "v2\n", "v2")
+    # CONTROLS, each of which must stay HELD:
+    #   D diverged: E's tip PLUS a commit F does not carry, so not every commit of D landed.
+    d, d_wt = leaf(cfg, g, "diverged", "dv1")
+    sh(["git", "reset", "-q", "--hard", e["branch"]], d_wt)
+    commit(d_wt, "y.txt", "only on d\n", "d's own")
+    #   U is an ancestor of W, and W is integrated nowhere.
+    u, u_wt = leaf(cfg, g, "under", "un1")
+    commit(u_wt, "z.txt", "u\n", "u")
+    w, w_wt = leaf(cfg, g, "unintegrated top", "wi1")
+    sh(["git", "reset", "-q", "--hard", u["branch"]], w_wt)
+    commit(w_wt, "z.txt", "w\n", "w")
+    sh(["git", "merge", "--squash", "-q", f["branch"]], cfg.root)
+    sh(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "squash PR"],
+       cfg.root)
+
+    eq("the premise: main does NOT carry the early leaf's bytes, so #79's test misses it",
+       campaign.content_in_base(cfg, e["branch"], "main"), False)
+    take, held = campaign.reclaimable(cfg, new_graph(cfg), base="main")
+    ok("the final leaf reclaims as a squash-merge", f["crawler"] in names(take), names(take))
+    ok("the EARLY leaf reclaims too, because its tip is an ancestor of an integrated leaf's branch",
+       e["crawler"] in names(take), [(h["crawler"], h["why"]) for h in held])
+    why = next((t["why"] for t in take if t["crawler"] == e["crawler"]), "")
+    ok("...and the reclaim line names the evidence: which leaf, which branch",
+       f["crawler"] in why and f["branch"] in why and "ancestor" in why, why)
+    ok("a leaf that DIVERGED from the integrated branch is held — one of its commits landed nowhere",
+       d["crawler"] in names(held), names(take))
+    ok("a leaf that is an ancestor only of an UNINTEGRATED leaf is held — the other end must be "
+       "integrated on its own evidence", u["crawler"] in names(held) and w["crawler"] in names(held),
+       names(take))
+    p = subprocess.run([sys.executable, sr, "gc", "--base", "main", "--apply"],
+                       capture_output=True, text=True, cwd=cfg.root)
+    ok("`gc --apply` removes the early leaf's tree", not os.path.isdir(e_wt), p.stdout + p.stderr)
+    ok("...while the diverged leaf's tree is still on disk, its own commit intact",
+       os.path.isdir(d_wt) and os.path.isfile(os.path.join(d_wt, "y.txt")), p.stdout + p.stderr)
+    # A failed ancestry read marks nothing. Pointing the anchor at a branch that no longer exists
+    # makes git fail rather than answer.
+    findings = [{"branch": e["branch"], "branch_exists": True, "merged": False,
+                 "content_in_base": False},
+                {"branch": "showrunner/no-such", "branch_exists": True, "merged": True}]
+    campaign._integrated_via_leaf(cfg, findings)
+    ok("an ancestry query git cannot answer marks nothing integrated",
+       "integrated_via" not in findings[0], findings[0])
+
+    # ---- 3. THE #99 STRUCTURAL CHECK, against what a real spawn writes.
+    sl = {"type": "command", "command": "TAP", "refreshInterval": 60}
+    hook = {"matcher": "Bash", "hooks": [{"type": "command", "command": "MAIN-HOOK"}]}
+    cfg = make_repo(files={"README.md": "x\n",
+                           ".claude/settings.json": json.dumps({"model": "m"}, indent=2) + "\n"})
+    with open(os.path.join(cfg.root, ".claude", "settings.local.json"), "w") as fh:
+        json.dump({"hooks": {"PreToolUse": [hook]}, "statusLine": sl}, fh)
+    tree = os.path.join(tmpdir("linked"), "t")
+    sh(["git", "worktree", "add", "-q", "-b", "linked-116", tree], cfg.root)
+    tracked = os.path.join(tree, ".claude", "settings.json")
+
+    def settings(dct):
+        with open(tracked, "w") as fh:
+            json.dump(dct, fh)              # no indent, NO trailing newline: what the diff showed
+        return worktree._settings_are_provisioning(cfg, tree)
+
+    ok("hooks from the main checkout's settings.local.json plus the installer's statusLine, with "
+       "the trailing newline lost, is provisioning",
+       settings({"model": "m", "hooks": {"PreToolUse": [hook]}, "statusLine": sl}) is True)
+    ok("a statusLine that differs from every main-checkout layer is not",
+       settings({"model": "m", "statusLine": dict(sl, refreshInterval=5)}) is False)
+    ok("a real foreign edit beside the installer's statusLine still holds",
+       settings({"model": "other", "statusLine": sl}) is False)
+    ok("a key HEAD carries, REMOVED, is not provisioning either",
+       settings({}) is False)
+    settings({"model": "m", "statusLine": dict(sl, command="OLD")})
+    sh(["git", "add", "-A"], tree)
+    sh(["git", "commit", "-q", "-m", "statusLine in HEAD"], tree)
+    ok("a statusLine HEAD already carried, changed to the main checkout's, is the Crawler's edit",
+       settings({"model": "m", "statusLine": sl}) is False)
+
+
 def test_provisioning_and_inert_helpers_directly():
     group("the #98/#99 helpers, asked directly — each decision the integration groups only reach "
           "through one path")
@@ -22188,7 +22345,7 @@ def test_never_integrated_leaves_do_not_collide():
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_report_verbs_write_nothing, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_state_change_the_agent_made_itself_does_not_ring, test_an_issue_closed_by_my_own_merge_or_push_does_not_ring, test_the_github_waker_stamps_every_invocation, test_doctor_and_waker_show_state_the_effective_watch, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_a_waker_whose_host_is_gone_stops, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_the_scratch_excuse_reads_game_loops_key_list, test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_a_launched_crawler_runs_as_its_own_tree, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_report_verbs_write_nothing, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_state_change_the_agent_made_itself_does_not_ring, test_an_issue_closed_by_my_own_merge_or_push_does_not_ring, test_the_github_waker_stamps_every_invocation, test_doctor_and_waker_show_state_the_effective_watch, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_a_waker_whose_host_is_gone_stops, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_the_scratch_excuse_reads_game_loops_key_list, test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_gc_judges_where_work_lands, test_a_launched_crawler_runs_as_its_own_tree, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,
