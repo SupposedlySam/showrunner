@@ -2528,8 +2528,15 @@ def cmd_gc(args):
     cfg = _cfg(args)
     if getattr(args, "idle", None):
         return _gc_idle(cfg, args)
-    take, held = campaign.reclaimable(cfg, _graph(cfg), base=args.base)
+    base, how, caveat = campaign.gc_base(cfg, args.base)
+    take, held = campaign.reclaimable(cfg, _graph(cfg), base=base, caveat=caveat)
     print("%sWorktree reclaim%s%s" % (BOLD, OFF, "" if args.apply else " (dry run — use --apply)"))
+    # SAY WHICH BASE, EVERY RUN (#116): a HELD list judged against the wrong ref reads exactly like
+    # unintegrated work, and the operator cannot tell the two apart from the rows.
+    print("  base: %s — %s" % (base, how))
+    lag = campaign.base_lag(cfg, base)
+    if lag:
+        eprint("  %snote%s %s" % (YEL, OFF, lag))
     if args.apply:
         removed, failed = _remove_reclaimed(cfg, take)
         _report_reclaim(removed, held, True, failed)
@@ -4827,7 +4834,8 @@ def build_parser():
 
     s = sub.add_parser("gc", help="remove worktrees whose branch is merged and whose tree is "
                                   "clean; dry-run by default")
-    s.add_argument("--base", default="HEAD")
+    s.add_argument("--base", help="the ref to judge integration against; defaults to the "
+                                   "remote's default branch (origin/HEAD), else HEAD, and says which")
     s.add_argument("--apply", action="store_true", help="actually remove them")
     s.add_argument("--idle", metavar="DURATION",
                    help="instead: EVERY registered worktree unused for this long (90m, 24h, 2d), "

@@ -333,6 +333,23 @@ into a tree — its hook registrations above all — is fingerprinted when it wr
 counted as uncommitted work, until the Crawler edits it. `status` names `gc` once the worktree
 count passes `gc_nudge_at`.
 
+**What counts as integrated, and against what.** With no `--base`, `gc` judges against the remote's
+default branch (`origin/HEAD`), because the main checkout's HEAD may be a feature branch somebody is
+working on. If `origin/HEAD` does not resolve it uses HEAD. Either way it prints which base it used
+and why, and every tree it holds against a base that is not the default branch says so in its
+reason. It also notes when the local branch of that name is ahead of the remote, because work
+`integrate` merged and nobody pushed reads as held. A branch is integrated when any of three
+things holds. Its commits are ancestors of the base. Or the base already carries every byte it
+changed (a squash-merge). Or its tip is an ancestor of another leaf's branch that is integrated on
+one of the first two grounds, which covers the early leaves of a squash-merged PR whose later
+commits rewrote the same lines. The reclaim line names which rule applied. PR state is never read,
+so `gc` works offline, and an early leaf with no integrated leaf above it stays held. A tree spawned
+before fingerprints existed is checked structurally. Its `.claude/settings.json` is compared as
+parsed JSON, so whitespace and a lost trailing newline are not changes. It may add only hook
+commands registered in the main checkout's `settings.json` or `settings.local.json`, plus a
+`statusLine` that HEAD lacked and that matches one of those layers. That `statusLine` is the one
+the harness installer writes when spawn provisions the tree.
+
 Removal re-reads each tree's status immediately before deleting it, with the same provisioning
 split classification uses, so work that appeared after `gc` looked still holds the tree. It forces
 the removal only when what remains is spawn's provisioning — git's own cleanliness check knows

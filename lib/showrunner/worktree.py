@@ -544,13 +544,25 @@ def _hook_commands(settings):
     return out
 
 
+# Top-level settings keys the harness installer writes into a tree whose HEAD has none (#116).
+INSTALLER_KEYS = ("statusLine",)
+
+
 def _settings_are_provisioning(cfg, tree):
     """Is the ONLY change to this tree's `.claude/settings.json` hooks the main checkout registers?
 
     For trees spawned before fingerprints existed. Structural, not a guess: nothing removed,
-    no key other than `hooks` changed, and every ADDED hook command is one already registered in
-    the main checkout's settings layers — which is exactly what spawn's merge carries across.
-    Anything else, including an edit to an existing entry, is the Crawler's.
+    no key other than `hooks` and `statusLine` changed, and every ADDED hook command is one already
+    registered in the main checkout's settings layers — which is exactly what spawn's merge carries
+    across. Anything else, including an edit to an existing entry, is the Crawler's.
+
+    Parsed JSON on both sides, so whitespace and a lost trailing newline are not changes.
+
+    `statusLine` IS THE HARNESS INSTALLER'S, run by spawn (#116). game_loop's installer sets one
+    (the usage-limit tap, with `refreshInterval`) when the tree's file has none, so every tree
+    whose HEAD carries no statusLine gains one. Excused only when HEAD has none AND the added value
+    equals the statusLine in one of the main checkout's layers, where the same installer put it.
+    A statusLine HEAD already carried, changed, is the Crawler's.
     """
     import json
     try:
@@ -565,16 +577,23 @@ def _settings_are_provisioning(cfg, tree):
         return False
     if not isinstance(cur, dict) or not isinstance(head, dict):
         return False
-    if {k: v for k, v in cur.items() if k != "hooks"} != \
-            {k: v for k, v in head.items() if k != "hooks"}:
-        return False
-    main = set()
+    main, layers = set(), []
     for name in ("settings.json", "settings.local.json"):
         try:
             with open(os.path.join(cfg.root, ".claude", name)) as fh:
-                main |= _hook_commands(json.load(fh))
+                layer = json.load(fh)
         except (OSError, ValueError):
             continue
+        if isinstance(layer, dict):
+            layers.append(layer)
+            main |= _hook_commands(layer)
+    for key in set(cur) | set(head):
+        if key == "hooks" or ((key in cur) == (key in head) and cur.get(key) == head.get(key)):
+            continue
+        if key in INSTALLER_KEYS and key in cur and key not in head \
+                and any(layer.get(key) == cur[key] for layer in layers):
+            continue
+        return False
     head_hooks, cur_hooks = head.get("hooks") or {}, cur.get("hooks") or {}
     for event, entries in head_hooks.items():
         have = [json.dumps(e, sort_keys=True) for e in cur_hooks.get(event) or []]

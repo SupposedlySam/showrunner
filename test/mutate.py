@@ -266,7 +266,23 @@ TARGETS = [
     # working-looking behaviour dies invisibly, which is why this needs a mutant.
     ("worktrees whose work has landed", "campaign.reclaimable", "lib/showrunner/campaign.py",
      r"(def reclaimable\([^)]*\):\n)",
-     "    return [], []\ndef _neutered_reclaimable(cfg, graph, base='HEAD'):\n"),
+     "    return [], []\ndef _neutered_reclaimable(cfg, graph, base='HEAD', caveat=''):\n"),
+    # #116. Answering HEAD with nothing to say restores the reported state exactly: a feature
+    # branch checked out in the main checkout, and every tree judged against it reads "not
+    # integrated anywhere" — 10 HELD, 3 of them integrated, 7 GB — with no line naming the base.
+    ("which base gc judges against", "campaign.gc_base", "lib/showrunner/campaign.py",
+     r"(def gc_base\(cfg, explicit=None\):\n)",
+     "    return explicit or 'HEAD', '', ''\ndef _neutered_gc_base(cfg, explicit=None):\n"),
+    ("saying the local branch is ahead of the base", "campaign.base_lag",
+     "lib/showrunner/campaign.py",
+     r"(def base_lag\(cfg, base\):\n)",
+     "    return ''\ndef _neutered_base_lag(cfg, base):\n"),
+    # #116. Marking nothing restores the reported state: the early leaves of a squashed PR stay
+    # HELD as "not integrated anywhere" while the leaf holding the final tip is reclaimed.
+    ("an early leaf of an integrated branch", "campaign._integrated_via_leaf",
+     "lib/showrunner/campaign.py",
+     r"(def _integrated_via_leaf\(cfg, findings\):\n)",
+     "    return None\ndef _neutered_integrated_via_leaf(cfg, findings):\n"),
     # Answering (True, "") always restores the reported state exactly: every tree `reclaimable`
     # chose is reported removed, the byte total is printed, `gc --apply` exits 0, and every one
     # of them is still on disk. The report is the only thing anybody reads, so nothing errors.
