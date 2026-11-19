@@ -1067,10 +1067,12 @@ showrunner write-guard               # PreToolUse on Write|Edit|MultiEdit|Notebo
 campaign it is on is not helped by a label; the counts are the identity. It reports how many
 leaves exist, how they are split by status, and how many are READY to dispatch right now — and
 when the graph cannot be read it says so, because "no work" and "could not look" are opposite
-facts that both render as silence. It also prints **every** verb, derived from the argparse
-parser rather than a second list that would go stale. Naming only the dispatch verbs would answer
-"how do I dispatch" and nothing else, so an agent needing anything else would have no reason to
-think the tool could do it.
+facts that both render as silence. It also prints the tools index for the session's seat (`guide
+--index`, below), read off the argparse parser rather than a second list that would go stale.
+Naming only the dispatch verbs would answer "how do I dispatch" and nothing else, so an agent
+needing anything else would have no reason to think the tool could do it. When the binary
+`whoami.sh` runs predates `guide --index`, the hook prints `NO TOOLS INDEX` with the re-pin
+command instead of printing nothing.
 
 **`reach` is REGISTERED BY DEFAULT.** Opt-in advice goes unregistered, and an agent that does not
 know the verb exists hand-rolls a worktree wrapper, a dispatch script and a layer guard instead.
@@ -1731,6 +1733,8 @@ records no liveness on a claim, so `reap` cannot work against it and says so rat
 showrunner guide              # every verb: what it is for, when to use it, one example
 showrunner guide lock         # one verb, or every sub-verb of a group, with its flags
 showrunner guide --json       # the same as one object, for a tool to build on
+showrunner guide --index --role worker   # one line per verb a Crawler uses
+showrunner guide --index --role lead     # one line per verb an orchestrator or solo session uses
 ```
 
 Each entry is a verb a shell types, so a group's sub-verbs are entries of their own (`lock run`,
@@ -1740,12 +1744,24 @@ cannot disagree with `--help`. `when` and `example` are written next to each ver
 test fails when any verb lacks either or when an example does not parse. `guide` reads no config
 and writes nothing, so it answers outside an install and outside a repo.
 
+**The index** is what `whoami` prints at every SessionStart, compaction included: one line per
+verb, `verb  purpose`, with the purpose cut at its first clause. A verb only a hook runs has
+`hook: true` and is in no index. `roles` names the indexes a verb is in: the lead index lists every
+verb a person runs, and the worker index lists only the verbs marked for a Crawler where they are
+declared. The audience is the seat, not a roles.json role name, because role names are whatever
+an operator wrote while every session resolves to a seat. `--role` filters the readable and JSON
+forms too. A test holds every index under a ceiling set in `cli.GUIDE_INDEX_CEILING`.
+
 ```json
-{"schema": 1, "version": "<40-hex or null>",
+{"schema": 1, "version": "<40-hex or null>", "index": true,
  "verbs": [{"verb": "lock run", "purpose": "...", "when": "...",
-            "example": "showrunner lock run ...",
+            "example": "showrunner lock run ...", "hook": false, "roles": ["worker", "lead"],
             "flags": [{"flag": "--holder", "help": null, "default": null}]}]}
 ```
+
+`index: true` says this build has `guide --index` and that its `whoami` prints the index. A host
+that prints its own index for an older install should ask the binary the hook actually runs, and
+stop once that binary reports it.
 
 `version` is the commit `--version --json` reports as `sha`, null when no commit names the code.
 A positional appears as `<name>`; `help` is null where the parser gives none; `default` is the

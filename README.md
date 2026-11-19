@@ -88,9 +88,11 @@ against that sha:
 
 `./.showrunner/bin/showrunner guide` lists every verb with what it is for, when to use it and one
 example; `guide <verb>` adds its flags, and `guide --json` prints the same as one object,
-`{"schema": 1, "version": <sha or null>, "verbs": [{"verb", "purpose", "when", "example", "flags":
-[{"flag", "help", "default"}]}]}`. `purpose` and `flags` are read from the parser, so they match
-`--help`. It reads no config and writes nothing. See [Which verb fits?](llms.txt).
+`{"schema": 1, "version": <sha or null>, "index": true, "verbs": [{"verb", "purpose", "when",
+"example", "hook", "roles", "flags": [{"flag", "help", "default"}]}]}`. `purpose` and `flags` are
+read from the parser, so they match `--help`. `guide --index [--role worker|lead]` is one line per
+verb a person runs, with hook-only verbs left out. It reads no config and writes nothing. See
+[Which verb fits?](llms.txt).
 
 ### Upgrading
 
@@ -398,9 +400,12 @@ name, and releases any lock that Crawler held whose holder is proved dead, namin
 it is on and what verbs exist, and stop using the tool at all — doing the work by hand in a repo
 carrying a live campaign. `whoami`, which runs on SessionStart — compaction included — carries the
 campaign's *state* rather than the bare fact that one exists: how many leaves, how they split by
-status, and how many are READY right now. It prints every verb, derived from the argparse parser
-rather than a hand-written list that would go stale, because naming only the dispatch verbs
-answers "how do I dispatch" and nothing else.
+status, and how many are READY right now. It prints `guide --index` for the session's seat, one
+line per verb, read off the argparse parser rather than a hand-written list that would go stale,
+because naming only the dispatch verbs answers "how do I dispatch" and nothing else. A Crawler gets
+the worker index, an orchestrator or solo session the lead index, and a seat that cannot be
+resolved gets every verb and is told so. When the binary the hook runs predates `--index`, the hook
+says so and names the re-pin.
 
 **And `reach` names the mechanism at the moment of reach.** An agent that cannot remember a tool
 does not stop working; it reaches for what it knows — `git worktree add`, a private todo list, a
