@@ -623,17 +623,28 @@ changed there is a note about a likely conflict, not a refusal. Both reach the b
 **An owner agent is woken by GitHub, not by remembering to look.** `worktree register` wires a
 Stop hook with `asyncRewake`, and the same on SessionStart (startup, resume), that, while the
 session is idle, polls the repositories the `waker`
-section of config names — one GraphQL query per poll, because the REST budget is shared by every
-agent on the machine — and wakes the session on a new issue or pull request, a comment, a review
-verdict or inline review comment, and a merge, close or reopen, which arrive as no comment at
-all. `waker.upstream` watches only the items one author opened on somebody else's repository.
+section of config names, through GraphQL because the REST budget is shared by every agent on the
+machine, and wakes the session on a new issue or pull request, a comment, a review verdict or
+inline review comment, and a merge, close or reopen, which arrive as no comment at all.
+`waker.upstream` watches only the items one author opened on somebody else's repository. Each
+poll is a probe and then a fetch. The probe asks every watched item, in every state, only for its
+number, state and `updatedAt`. GitHub charges for the connection sizes a query asks for, not for
+what it returns, so the probe is the cheap part. The fetch is one more query, for the comments
+and reviews of the items that moved since they were last judged: new ones, or ones whose
+`updatedAt` or state changed. A quiet poll sends the probe alone. Every kind of event above moves
+`updatedAt`, as checked against GitHub. A review's move can land seconds after the review itself,
+so an item updated within the last two minutes is fetched once more on the next poll. A moved
+item the fetch does not return is logged `fetch-failed`, not judged, and fetched again on the
+next poll. The probe and the fetch each fail closed: neither ever reports "nothing new" when it
+could not read. A state saved before the probe existed fetches every item once, and the events it
+has already seen keep that fetch from ringing again.
 The agent's own writing is counted and never reported, and it is judged by `waker.signature` alone:
 a comment, review or PR body whose last signature is that one, with or without Claude Code's
 attribution line after it. Not by the account, which the agent shares with its maintainer and
 perhaps with other agents, and not by the attribution line, which every Claude Code agent's PR
 carries — so agents posting under one account must each configure a distinct signature, and with
 none configured nothing counts as own writing and everything rings, saying why. Every decision
-(rang, own, seen, older-than-window) is logged with its reason to
+(rang, own, seen, older-than-window, fetch-failed) is logged with its reason to
 `waker-decisions.jsonl` beside the waker's state, a bounded tail whose path `doctor` prints. Anything
 from outside `waker.trusted_logins`/`trusted_names` is marked as a claim to verify. It never runs
 in a Crawler's worktree, and with nothing configured it exits at once. Each turn-end starts a
