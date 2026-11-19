@@ -682,6 +682,30 @@ def verb_inventory():
     return []
 
 
+# WHICH INDEX EACH SEAT READS. A seat missing here could not be derived, and gets every verb.
+_SEAT_INDEX = {CRAWLER: "worker", ORCHESTRATOR: "lead", SOLO: "lead"}
+
+
+def tools_index(seat, sr="showrunner"):
+    """The `guide --index` lines for `seat`, as whoami prints them. Returns lines, never raises.
+
+    A seat that could not be resolved gets the unfiltered index and is told why, rather than a
+    guess at which half it needs. A failure costs the index and says so; whoami's one forbidden
+    outcome is silence.
+    """
+    try:
+        from .cli import guide_index
+        role = _SEAT_INDEX.get(seat)
+        lines = guide_index(role, sr)
+    except Exception as exc:                                    # noqa: BLE001
+        return ["showrunner: NO TOOLS INDEX — `guide --index` failed (%s: %s). `%s guide` "
+                "lists every verb." % (type(exc).__name__, exc, sr)]
+    if not role:
+        lines.insert(0, "The seat was not resolved, so this is every verb rather than the ones "
+                        "for your seat.")
+    return lines
+
+
 def campaign_state(cfg):
     """WHAT THE CAMPAIGN IS DOING, counted from the graph rather than named.
 
@@ -953,19 +977,8 @@ def whoami(cfg, session=None):
         out.append("  " + line.replace("{sr}", sr))
 
     # THE REST OF THE TOOL, so a compacted agent reaches for it instead of for what it already
-    # knows. Derived from the parser; see verb_inventory.
-    verbs = verb_inventory()
-    if verbs:
-        line, wrapped = "", []
-        for verb in verbs:
-            if len(line) + len(verb) + 1 > 84:
-                wrapped.append(line)
-                line = ""
-            line += (" " if line else "") + verb
-        wrapped.append(line)
-        out.append("  all %d verbs (`%s <verb> --help` for any of them):" % (len(verbs), sr))
-        for chunk in wrapped:
-            out.append("    " + chunk)
+    # knows: one line per verb this seat uses, read off the parser by `guide --index`.
+    out.extend("  " + line for line in tools_index(where, sr))
 
     if r["problems"]:
         out.append("  ROLE DEFINITIONS UNREADABLE: %s" % r["problems"][0])

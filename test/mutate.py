@@ -1643,6 +1643,18 @@ TARGETS = [
     ("a verb's flags in the guide", "cli._guide_flags", "lib/showrunner/cli.py",
      r"(def _guide_flags\(node\):\n)",
      "    return []\ndef _neutered_guide_flags(node):\n"),
+    # [] is an index with no verbs, which a session reads as a tool with nothing to offer.
+    ("the tools index", "cli.guide_index", "lib/showrunner/cli.py",
+     r"(def guide_index\(role=None, sr=\"showrunner\"\):\n)",
+     "    return []\ndef _neutered_guide_index(role=None, sr='showrunner'):\n"),
+    # [] is whoami printing no index at all, which is the silence the index exists to end.
+    ("the index whoami prints", "roles.tools_index", "lib/showrunner/roles.py",
+     r"(def tools_index\(seat, sr=\"showrunner\"\):\n)",
+     "    return []\ndef _neutered_tools_index(seat, sr='showrunner'):\n"),
+    # "" is an index line with the verb and no purpose.
+    ("an index line's purpose", "cli._index_purpose", "lib/showrunner/cli.py",
+     r"(def _index_purpose\(purpose\):\n)",
+     "    return ''\ndef _neutered_index_purpose(purpose):\n"),
 ]
 
 

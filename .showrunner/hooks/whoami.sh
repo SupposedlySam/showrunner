@@ -74,6 +74,14 @@ with \`bin/showrunner self --pin HEAD --dest .showrunner_self\`, and \`showrunne
 how far behind it is."
 elif [ -z "$out" ]; then
   out="showrunner: whoami exited 0 and printed NOTHING, which is the one outcome it is not allowed to have. Check: showrunner doctor"
+elif ! "$SR" guide --index --role worker >/dev/null 2>&1; then
+  # THE TOOLS INDEX IS PRINTED BY whoami ITSELF, so a hook older than the index still gets it
+  # from a new binary. The other way round is this branch: a binary that predates `guide --index`
+  # printed its announcement without one, and a missing index reads the same as having nothing
+  # to use. The probe asks the flag, not the text.
+  out="$out
+
+showrunner: NO TOOLS INDEX — $SR predates \`guide --index\`, so this session was not handed the one-line-per-verb list it reads after every compaction. Re-pin it: \`bin/showrunner self --pin HEAD --dest .showrunner_self\`."
 fi
 
 # A WAKE THAT NEVER BECAME A TURN. Both wakers exit after ringing, and only a turn end starts the

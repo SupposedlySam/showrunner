@@ -2086,6 +2086,9 @@ def cmd_whoami(args):
         print("showrunner: COULD NOT SAY WHAT THIS SESSION IS — %s: %s. That is printed rather "
               "than swallowed: an announcer that fails quietly is indistinguishable from one "
               "that had nothing to say." % (type(exc).__name__, exc))
+        # The index needs no config, so the failure above does not cost it.
+        for line in roles.tools_index(roles.UNKNOWN):
+            print(line)
         return 0
     for line in lines:
         print(line)
@@ -4292,10 +4295,26 @@ def cmd_integration_commit(args):
 # `add_parser` call, where a verb added without them is visible in review and fails the suite.
 GUIDE_SCHEMA = 1
 
+# THE INDEX IS WHAT A SESSION IS HANDED AT EVERY START AND COMPACTION, so it is the guide cut to
+# one line per verb and to the verbs the reader at that moment can use. The audience is the SEAT,
+# not a role name: role names are whatever an operator wrote in roles.json, while every session
+# resolves to a seat. A Crawler reads the worker index; an orchestrator or a solo session, which
+# runs everything itself, reads the lead index. ONE RULE for a verb with no natural owner: the
+# lead index lists every verb a person runs, and the worker index lists only verbs marked
+# `worker=True` where they are declared. A verb registered as a hook and never typed is marked
+# `hook=True` and listed in neither.
+GUIDE_INDEX_ROLES = ("worker", "lead")
+# The ceiling the suite holds every index under, in characters because no tokenizer ships here.
+# English prose with code runs about four characters a token, so this is roughly 1.2k tokens.
+GUIDE_INDEX_CEILING = 4800
 
-def _guide(parser, when, example):
-    """Attach the two guide fields argparse has no slot for. Returns the parser."""
-    parser._sr_guide = {"when": when, "example": example}
+
+def _guide(parser, when, example, hook=False, worker=False):
+    """Attach the guide fields argparse has no slot for. Returns the parser.
+
+    `hook` marks a verb that only a hook runs; `worker` puts a verb in the worker index.
+    """
+    parser._sr_guide = {"when": when, "example": example, "hook": hook, "worker": worker}
     return parser
 
 
@@ -4346,9 +4365,43 @@ def guide_entries(parser):
     entries = []
     for verb, purpose, node in _verb_nodes(parser):
         extra = getattr(node, "_sr_guide", None) or {}
+        hook = bool(extra.get("hook"))
+        roles_ = [] if hook else (["worker", "lead"] if extra.get("worker") else ["lead"])
         entries.append({"verb": verb, "purpose": purpose, "when": extra.get("when"),
-                        "example": extra.get("example"), "flags": _guide_flags(node)})
+                        "example": extra.get("example"), "hook": hook, "roles": roles_,
+                        "flags": _guide_flags(node)})
     return entries
+
+
+def _index_purpose(purpose):
+    """The purpose up to its first clause break: the line names the verb, the guide explains it."""
+    text = purpose or ""
+    cut = len(text)
+    for mark, keep in ((". ", 0), ("; ", 0), (" — ", 0), ("? ", 1)):
+        at = text.find(mark)
+        if at != -1:
+            cut = min(cut, at + keep)
+    return text[:cut]
+
+
+def guide_index(role=None, sr="showrunner"):
+    """The tools index for `role` (None: every verb a person runs), as a list of lines.
+
+    Reads the parser and nothing else, so it needs no config and cannot fail on a broken project.
+    """
+    parser = build_parser()
+    entries = [e for e in guide_entries(parser) if not e["hook"]]
+    if role:
+        entries = [e for e in entries if role in e["roles"]]
+    who = {"worker": "the worker index, for a Crawler",
+           "lead": "the lead index, for an orchestrator or solo session",
+           None: "every verb a person runs"}[role]
+    out = ["showrunner tools — %s (`%s guide <verb>` says when to use one, with an example):"
+           % (who, sr)]
+    width = max(len(e["verb"]) for e in entries)
+    for e in entries:
+        out.append("  %-*s  %s" % (width, e["verb"], _index_purpose(e["purpose"])))
+    return out
 
 
 def cmd_guide(args):
@@ -4357,16 +4410,27 @@ def cmd_guide(args):
     NO CONFIG IS LOADED and nothing is written: the guide describes the CLI, not a project, so it
     answers the same in a repo with no `.showrunner/` and outside any repo at all.
     """
+    want = " ".join(args.verb or [])
+    if args.index:
+        if want or args.json:
+            die("guide: --index lists every verb in one line each; it takes no verb and no "
+                "--json. `showrunner guide --json` has the same entries as data.", code=64)
+        for line in guide_index(args.role):
+            print(line)
+        return 0
     parser, _ = parse(["guide"])
     entries = guide_entries(parser)
-    want = " ".join(args.verb or [])
+    if args.role:
+        entries = [e for e in entries if args.role in e["roles"]]
     if want:
         entries = [e for e in entries if e["verb"] == want or e["verb"].startswith(want + " ")]
         if not entries:
             die("guide: no verb %r. `showrunner guide` lists every verb." % want, code=64)
     if args.json:
+        # `index: true` says this build has `guide --index` and that its `whoami` prints the
+        # index, so a host that prints its own copy for older builds can stop without parsing text.
         print(json.dumps({"schema": GUIDE_SCHEMA, "version": pin.as_json().get("sha"),
-                          "verbs": entries}, indent=2))
+                          "index": True, "verbs": entries}, indent=2))
         return 0
     for e in entries:
         print("%s%s%s — %s" % (BOLD, e["verb"], OFF, e["purpose"]))
@@ -4408,7 +4472,7 @@ def build_parser():
     s = sub.add_parser("status", help="the campaign at a glance")
     _guide(s, "Run to see the campaign at a glance, its leaves by state with their claims and "
               "Crawlers, before deciding what to do next.",
-              "showrunner status")
+              "showrunner status", worker=True)
     s.set_defaults(func=cmd_status)
 
     # graph
@@ -4476,7 +4540,7 @@ def build_parser():
     s = sub.add_parser("show", help="show one leaf")
     _guide(s, "Use to read a leaf in full, including the base its worktree was actually cut from "
               "once it has been spawned.",
-              "showrunner show login-redirect")
+              "showrunner show login-redirect", worker=True)
     s.add_argument("id")
     s.set_defaults(func=cmd_show)
 
@@ -4505,7 +4569,7 @@ def build_parser():
     s = sub.add_parser("release", help="release a claim back to ready")
     _guide(s, "Use to hand a claimed leaf back to ready when you are giving up on it, saying "
               "why.",
-              "showrunner release login-redirect --reason 'blocked on credentials'")
+              "showrunner release login-redirect --reason 'blocked on credentials'", worker=True)
     s.add_argument("id")
     s.add_argument("--reason")
     s.set_defaults(func=cmd_release)
@@ -4513,7 +4577,8 @@ def build_parser():
     s = sub.add_parser("park", help="pause a claim (usage limit) — it survives the reaper")
     _guide(s, "Use to pause a claim you will come back to, such as at a usage limit, so the "
               "reaper does not take it back.",
-              "showrunner park login-redirect --reason 'usage limit; resuming after the reset'")
+              "showrunner park login-redirect --reason 'usage limit; resuming after the reset'",
+              worker=True)
     s.add_argument("id")
     s.add_argument("--reason", required=True)
     s.add_argument("--watcher-pid", type=int,
@@ -4539,7 +4604,7 @@ def build_parser():
               "evidence.",
               "showrunner close login-redirect --proof test/run.py --premise holds "
               "--premise-read lib/auth/redirect.py --reason 'the redirect keeps the query "
-              "string'")
+              "string'", worker=True)
     s.add_argument("id")
     s.add_argument("--proof")
     s.add_argument("--reason")
@@ -4557,7 +4622,7 @@ def build_parser():
     s = sub.add_parser("stop-gate", help="refuse a turn-end while YOUR claimed leaf is open")
     _guide(s, "Wire as a Stop hook so a session cannot end its turn while the leaf it claimed is "
               "still open.",
-              "showrunner stop-gate --leaf login-redirect")
+              "showrunner stop-gate --leaf login-redirect", hook=True)
     s.add_argument("--leaf", help="the leaf this caller holds; exact, and what spawn bakes in")
     s.add_argument("--tree", help="the caller's tree, matched against claim_tree "
                                   "(default: $GAME_LOOP_REPO, then cwd)")
@@ -4569,7 +4634,7 @@ def build_parser():
     t = esub.add_parser("status", help="what holds each worktree, and on what evidence")
     _guide(t, "Use when a tree looks taken, to see which session holds each worktree and the "
               "evidence behind each liveness claim.",
-              "showrunner lease status")
+              "showrunner lease status", worker=True)
     t.add_argument("tree", nargs="?")
     t.set_defaults(func=cmd_lease_status)
 
@@ -4578,7 +4643,7 @@ def build_parser():
     t = wsub.add_parser("enter", help="SessionStart: take this tree's lease, or report who holds it")
     _guide(t, "Wire as a SessionStart hook so a session takes its tree's lease or learns who "
               "holds it; it never blocks startup.",
-              "showrunner worktree enter")
+              "showrunner worktree enter", hook=True)
     t.add_argument("--session", help="the Claude Code session id (hooks supply it on stdin)")
     t.add_argument("--path", help="the tree to consider; defaults to the cwd")
     t.add_argument("--holder", help="a name for the holder; defaults to 'interactive'")
@@ -4587,7 +4652,8 @@ def build_parser():
     t = wsub.add_parser("fork", help="your own tree, off the same base as a held one")
     _guide(t, "Use when another live session holds the tree you are in, to get your own tree cut "
               "from the same base instead of sharing.",
-              "showrunner worktree fork --from .worktrees/crawler-login-redirect --name my-fork")
+              "showrunner worktree fork --from .worktrees/crawler-login-redirect --name my-fork",
+              worker=True)
     t.add_argument("--from", required=True, help="the held worktree to fork from")
     t.add_argument("--session", help="the Claude Code session id")
     t.add_argument("--base", help="override the base commit; refuses rather than guess one")
@@ -4598,7 +4664,7 @@ def build_parser():
                                       "session holds. Exit 2 denies")
     _guide(t, "Wire as a PreToolUse hook so a write into a tree another live session holds is "
               "denied.",
-              "showrunner worktree guard --path lib/app.py --tool Write")
+              "showrunner worktree guard --path lib/app.py --tool Write", hook=True)
     t.add_argument("--session", help="override the session id the payload carries")
     t.add_argument("--path", help="the path being written; defaults to the payload's")
     t.add_argument("--tool", help="the tool name; defaults to the payload's")
@@ -4660,7 +4726,7 @@ def build_parser():
     t = lsub.add_parser("status", help="each resource: FREE, HELD or STALE, and by whom")
     _guide(t, "Use to see whether each configured resource is free, held, or held by a process "
               "that has died.",
-              "showrunner lock status device")
+              "showrunner lock status device", worker=True)
     t.add_argument("resource", nargs="?")
     t.set_defaults(func=cmd_lock_status)
 
@@ -4684,7 +4750,7 @@ def build_parser():
 
     t = lsub.add_parser("guard", help="PreToolUse shape: exit 2 blocks the tool call")
     _guide(t, "Wire as a PreToolUse hook so a command that needs a held resource is blocked.",
-              "showrunner lock guard -- ./deploy.sh")
+              "showrunner lock guard -- ./deploy.sh", hook=True)
     t.add_argument("--session")
     t.add_argument("command", nargs=argparse.REMAINDER)
     t.set_defaults(func=cmd_lock_guard)
@@ -4692,7 +4758,8 @@ def build_parser():
     t = lsub.add_parser("run", help="authoritative: acquire, exec, release — holder is the consumer")
     _guide(t, "Use for any command that needs a single-consumer resource: it acquires, runs and "
               "releases, with the command itself recorded as holder.",
-              "showrunner lock run device --holder crawler-login-redirect -- ./deploy.sh")
+              "showrunner lock run device --holder crawler-login-redirect -- ./deploy.sh",
+              worker=True)
     t.add_argument("resource")
     t.add_argument("--holder", default="run")
     t.add_argument("--session")
@@ -4791,7 +4858,8 @@ def build_parser():
     s = sub.add_parser("brief", help="print a Crawler's brief")
     _guide(s, "Use to reread the brief a spawned Crawler was given, optionally with findings you "
               "want it to confirm or refute.",
-              "showrunner brief login-redirect --finding 'the redirect drops the query string'")
+              "showrunner brief login-redirect --finding 'the redirect drops the query string'",
+              worker=True)
     s.add_argument("id")
     s.add_argument("--finding", action="append")
     s.set_defaults(func=cmd_brief)
@@ -4865,7 +4933,7 @@ def build_parser():
                             "something else. Register on SessionStart, which also fires on compaction")
     _guide(s, "Run at session start and after compaction to learn which seat this session holds "
               "and what it may not do; build hooks on --porcelain.",
-              "showrunner whoami --porcelain")
+              "showrunner whoami --porcelain", worker=True)
     s.add_argument("--session")
     s.add_argument("--porcelain", action="store_true",
                    help="the SAME resolution as data: seat, role, how, and the writes/"
@@ -4892,7 +4960,7 @@ def build_parser():
     t.add_argument("--session", help="bind a session other than this one")
     t = csub.add_parser("show", help="what this session resolves, and what named it")
     _guide(t, "Use to see which campaign this session resolves and what named it.",
-              "showrunner campaign show")
+              "showrunner campaign show", worker=True)
     t.add_argument("--session")
     t = csub.add_parser("clear", help="unbind this session")
     _guide(t, "Use to unbind this session, which then falls back to the checkout's default "
@@ -4946,7 +5014,7 @@ def build_parser():
                                       "denies; every unknown allows and says it went unchecked")
     _guide(d, "Wire as a PreToolUse hook on Bash so a session whose role may not dispatch cannot "
               "start a raw headless claude session.",
-              "showrunner dispatch guard --command 'claude -p hello'")
+              "showrunner dispatch guard --command 'claude -p hello'", hook=True)
     d.add_argument("--session")
     d.add_argument("--command", default=None,
                    help="check this command instead of reading a hook payload — for testing the "
@@ -4972,7 +5040,7 @@ def build_parser():
                             "merge/close changes. One GraphQL query per poll. Inert unconfigured")
     _guide(s, "Wire as a Stop hook so an idle session wakes on new activity in the GitHub repos "
               "the waker config names.",
-              "showrunner waker --show")
+              "showrunner waker --show", hook=True)
     s.description = ("exit codes:\n"
                      "  0  nothing new, nothing configured, or a linked worktree\n"
                      "  1  --once could not look at GitHub (NOT the same as nothing new)\n"
@@ -4996,7 +5064,7 @@ def build_parser():
                             "leaf open, or stalls. Silent in a linked worktree")
     _guide(s, "Wire as a Stop hook on the orchestrator so it wakes when a Crawler stays blocked, "
               "stands down with its leaf open, or stalls.",
-              "showrunner crawler-waker --once")
+              "showrunner crawler-waker --once", hook=True)
     s.description = ("exit codes:\n"
                      "  0  nothing to ring, a linked worktree, or --once (which prints what it "
                      "would ring)\n"
@@ -5014,7 +5082,7 @@ def build_parser():
                             "turns it into the 2 Claude Code blocks on)")
     _guide(s, "Wire as a PreToolUse hook to refuse writes the session's role may not make, "
               "through edit tools or through Bash.",
-              "showrunner write-guard --path lib/app.py --tool Write")
+              "showrunner write-guard --path lib/app.py --tool Write", hook=True)
     s.add_argument("--session")
     s.add_argument("--command", default=None,
                    help="judge this Bash command instead of reading a hook payload")
@@ -5030,7 +5098,7 @@ def build_parser():
                             "ordinary commands")
     _guide(s, "Wire as a PreToolUse hook on Bash so a session starting long work with no mandate "
               "bound is told so.",
-              "showrunner wake-gate --command 'python3 test/run.py'")
+              "showrunner wake-gate --command 'python3 test/run.py'", hook=True)
     s.add_argument("--session")
     s.add_argument("--command", default=None,
                    help="check this command instead of reading a hook payload — for testing the "
@@ -5103,7 +5171,7 @@ def build_parser():
                                      "for; advice only, never refuses")
     _guide(s, "Wire as a PreToolUse hook so a call reaching for something showrunner has a verb "
               "for is told that verb; it never refuses.",
-              "showrunner reach")
+              "showrunner reach", hook=True)
     s.set_defaults(func=cmd_reach)
 
     s = sub.add_parser("baseline", help="record the current check results as the comparison point")
@@ -5134,7 +5202,7 @@ def build_parser():
                        formatter_class=argparse.RawDescriptionHelpFormatter)
     _guide(s, "Use to run the configured checks and learn whether anything newly fails against "
               "the baseline, reading the exit code as the answer.",
-              "showrunner check")
+              "showrunner check", worker=True)
     s.set_defaults(func=cmd_check)
 
     s = sub.add_parser("integrate", help="merge Crawler branches serially, checks after each")
@@ -5163,10 +5231,17 @@ def build_parser():
                                      "example; reads no config and writes nothing")
     _guide(s, "Use to find which verb fits a task and see an example of it; --json gives the "
               "same as data for a tool to build on.",
-              "showrunner guide --json lock run")
+              "showrunner guide --json lock run", worker=True)
     s.add_argument("verb", nargs="*", help="one verb, or a group such as `lock`, to show alone")
     s.add_argument("--json", action="store_true",
-                   help="one object: schema, version (the commit, null when unknown) and verbs")
+                   help="one object: schema, version (the commit, null when unknown), index "
+                        "(true: this build has --index) and verbs")
+    s.add_argument("--index", action="store_true",
+                   help="one line per verb a person runs, hook-only verbs left out; `whoami` "
+                        "prints this at every session start and compaction")
+    s.add_argument("--role", choices=GUIDE_INDEX_ROLES,
+                   help="only the verbs this reader uses: worker for a Crawler, lead for an "
+                        "orchestrator or solo session")
     s.set_defaults(func=cmd_guide)
 
     return p

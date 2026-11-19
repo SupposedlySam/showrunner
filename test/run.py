@@ -14281,8 +14281,8 @@ def test_guide():
             doc = json.loads(p.stdout)
         except ValueError:
             doc = {}
-        eq("...and its top level is exactly schema, version, verbs", sorted(doc),
-           ["schema", "verbs", "version"])
+        eq("...and its top level is exactly schema, version, index, verbs", sorted(doc),
+           ["index", "schema", "verbs", "version"])
         eq("...schema is %d" % cli.GUIDE_SCHEMA, doc.get("schema"), cli.GUIDE_SCHEMA)
         ok("...version is the commit, or null when none names this code",
            doc.get("version") is None or re.fullmatch(r"[0-9a-f]{40}", str(doc.get("version"))),
@@ -14291,7 +14291,8 @@ def test_guide():
         eq("...and lists every verb the parser registers", sorted(v.get("verb") for v in verbs),
            sorted(walked))
         shape = [v["verb"] for v in verbs
-                 if sorted(v) != ["example", "flags", "purpose", "verb", "when"]
+                 if sorted(v) != ["example", "flags", "hook", "purpose", "roles", "verb",
+                                  "when"]
                  or not all(isinstance(v[k], str) for k in ("verb", "purpose", "when", "example"))
                  or not isinstance(v["flags"], list)
                  or any(sorted(f) != ["default", "flag", "help"] or not isinstance(f["flag"], str)
@@ -14312,6 +14313,200 @@ def test_guide():
     eq("`guide <unknown verb>` refuses with the usage code rather than printing nothing",
        p.returncode, 64)
 
+
+
+def test_guide_index():
+    group("`guide --index` is the one-line-per-verb list `whoami` hands every session at start and "
+          "after compaction: filtered by seat, hook verbs hidden on a field, under its ceiling, "
+          "and a binary too old to have it is named rather than left silent")
+    from showrunner import cli
+    from showrunner import roles as R
+    exe = os.path.join(ROOT, "bin", "showrunner")
+    home = tmpdir("index-home")
+    bare_dir = tmpdir("index-norepo")
+    env = dict(os.environ, HOME=home, XDG_CONFIG_HOME=os.path.join(home, ".config"),
+               NO_COLOR="1")
+    env.pop("SHOWRUNNER_CAMPAIGN", None)
+
+    p = subprocess.run([sys.executable, exe, "guide", "--json"], cwd=bare_dir,
+                       capture_output=True, text=True, env=env)
+    doc = json.loads(p.stdout) if p.returncode == 0 else {}
+    eq("`guide --json` says at the top level that this build has the index form, so a host "
+       "printing its own copy can tell without parsing text", doc.get("index"), True)
+    entries = {e["verb"]: e for e in doc.get("verbs") or []}
+    eq("...and every entry carries a boolean `hook` and a `roles` list",
+       [v for v, e in entries.items() if not isinstance(e.get("hook"), bool)
+        or not isinstance(e.get("roles"), list)], [])
+    # THE FIELD IS CHECKED AGAINST WORDING IT DOES NOT READ. Every hook verb's `when` was written
+    # "Wire as ..." before the field existed, so a verb marked by neither, or by only one, is a
+    # mark that was missed rather than a convention that changed.
+    by_wording = sorted(v for v, e in entries.items() if (e.get("when") or "").startswith("Wire as"))
+    by_field = sorted(v for v, e in entries.items() if e.get("hook"))
+    ok("the wording-independent cross-check finds hook verbs at all", len(by_wording) > 5,
+       by_wording)
+    eq("...and `hook: true` marks exactly the verbs whose `when` says to wire them as a hook",
+       by_field, by_wording)
+    eq("a hook verb belongs to no index", [v for v in by_field if entries[v]["roles"]], [])
+    eq("every verb a person runs is in the lead index",
+       [v for v, e in entries.items() if not e["hook"] and "lead" not in e["roles"]], [])
+
+    def index(*extra):
+        p_ = subprocess.run([sys.executable, exe, "guide", "--index"] + list(extra),
+                            cwd=bare_dir, capture_output=True, text=True, env=env)
+        return p_.returncode, p_.stdout, p_.stderr
+
+    def tree(root):
+        return sorted((os.path.relpath(os.path.join(d_, n), root),
+                       os.lstat(os.path.join(d_, n)).st_mtime_ns)
+                      for d_, dirs, files in os.walk(root) for n in dirs + files)
+
+    listed = {}
+    for role in cli.GUIDE_INDEX_ROLES + (None,):
+        before = (tree(bare_dir), tree(home))
+        rc, out, err = index(*(["--role", role] if role else []))
+        eq("...and writes nothing in the directory or under HOME", (tree(bare_dir), tree(home)),
+           before)
+        eq("`guide --index%s` exits 0 outside any repo with an empty HOME"
+           % (" --role %s" % role if role else ""), rc, 0)
+        verbs = []
+        for line in out.splitlines()[1:]:
+            m = re.match(r"  (\S+(?: \S+)?)  +(\S.*)$", line)
+            if m and m.group(1) in entries:
+                verbs.append(m.group(1))
+        listed[role] = verbs
+        want = sorted(v for v, e in entries.items()
+                      if not e["hook"] and (role is None or role in e["roles"]))
+        eq("...lists exactly the %s verbs the guide marks, one line each"
+           % (role or "non-hook"), sorted(verbs), want)
+        eq("...and every line after the header is a verb line", len(out.splitlines()) - 1,
+           len(verbs))
+        ok("...and stays under the ceiling the suite holds it to (%s)" % role,
+           0 < len(out) <= cli.GUIDE_INDEX_CEILING, len(out))
+        ok("...and each line carries a purpose read off the parser",
+           all(cli._index_purpose(entries[v]["purpose"]) in out for v in verbs), out[:300])
+    ok("the worker index is a strict subset of the lead index, so the filter does something",
+       set(listed["worker"]) < set(listed["lead"]), (listed["worker"], listed["lead"]))
+    ok("...a Crawler's verbs are in it (close, lock run, check)",
+       {"close", "lock run", "check"} <= set(listed["worker"]), listed["worker"])
+    ok("...and an orchestrator's are not (spawn, integrate)",
+       not ({"spawn", "integrate"} & set(listed["worker"])), listed["worker"])
+    ok("...and the lead index has them", {"spawn", "integrate"} <= set(listed["lead"]))
+    ok("no index lists a hook verb (write-guard, stop-gate)",
+       not any({"write-guard", "stop-gate"} & set(v) for v in listed.values()))
+    rc, _out, err = index("close")
+    eq("`--index` with a verb refuses with the usage code", rc, 64)
+    p = subprocess.run([sys.executable, exe, "guide", "--json", "--role", "worker"],
+                       cwd=bare_dir, capture_output=True, text=True, env=env)
+    eq("`--role` filters the JSON form too", sorted(v["verb"] for v in json.loads(p.stdout)["verbs"]),
+       sorted(listed["worker"]))
+
+    # THE PURPOSE IS CUT AT ITS FIRST CLAUSE, and the cut is what keeps the lead index short.
+    eq("a purpose is cut at its first sentence", cli._index_purpose("one thing. and more"),
+       "one thing")
+    eq("...or at a dash", cli._index_purpose("one thing — and more"), "one thing")
+    eq("...keeping a question mark", cli._index_purpose("waiting? exit 0"), "waiting?")
+    eq("...and an uncut purpose is left whole", cli._index_purpose("one thing"), "one thing")
+
+    # WHICH INDEX EACH SEAT READS, through the function whoami calls.
+    seat_index = {seat: "\n".join(R.tools_index(seat))
+                  for seat in (R.CRAWLER, R.ORCHESTRATOR, R.SOLO, R.UNKNOWN)}
+    ok("a Crawler is handed the worker index", "worker index" in seat_index[R.CRAWLER]
+       and "spawn " not in seat_index[R.CRAWLER], seat_index[R.CRAWLER][:200])
+    ok("an orchestrator is handed the lead index", "lead index" in seat_index[R.ORCHESTRATOR],
+       seat_index[R.ORCHESTRATOR][:200])
+    ok("a solo session, which runs everything itself, is handed the lead index",
+       "lead index" in seat_index[R.SOLO], seat_index[R.SOLO][:200])
+    ok("a seat that could not be resolved gets every verb and is TOLD the seat was not resolved",
+       "not resolved" in seat_index[R.UNKNOWN] and "spawn" in seat_index[R.UNKNOWN],
+       seat_index[R.UNKNOWN][:200])
+    ok("...a resolved seat is not told that", not any("not resolved" in seat_index[s]
+       for s in (R.CRAWLER, R.ORCHESTRATOR, R.SOLO)))
+    cfg = make_repo()
+    said = "\n".join(R.whoami(cfg))
+    ok("`whoami` prints the index as part of its announcement",
+       "showrunner tools —" in said and "  integrate" in said, said[-600:])
+    ok("...in place of the bare verb list, so the verbs are not printed twice",
+       "all %d verbs" % len(R.verb_inventory()) not in said, said[-600:])
+
+    broken = tmpdir("index-broken")
+    sh(["git", "init", "-q", "-b", "main"], broken)
+    os.makedirs(os.path.join(broken, ".showrunner"))
+    with open(os.path.join(broken, ".showrunner", "config.json"), "w") as fh:
+        fh.write("{not json")
+    p = subprocess.run([sys.executable, exe, "whoami"], cwd=broken, capture_output=True,
+                       text=True, env=env)
+    ok("a `whoami` that cannot read the config still prints the index, which needs none",
+       "COULD NOT SAY" in p.stdout and "showrunner tools —" in p.stdout
+       and "not resolved" in p.stdout, p.stdout[:600])
+
+    # THE HOOK, DRIVEN with the payload SessionStart really sends, on both sources. The repo's
+    # `bin/showrunner` is the shim's binary; here it runs this checkout, or a stub too old to
+    # know `--index`, or the shim itself is the copy from before the index existed.
+    def hook_repo(binary_body, shim_text=None):
+        d = tmpdir("index-hook")
+        sh(["git", "init", "-q", "-b", "main"], d)
+        os.makedirs(os.path.join(d, ".showrunner", "hooks"))
+        os.makedirs(os.path.join(d, "bin"))
+        shim = os.path.join(d, ".showrunner", "hooks", "whoami.sh")
+        if shim_text is None:
+            shutil.copy(os.path.join(ROOT, ".showrunner", "hooks", "whoami.sh"), shim)
+        else:
+            with open(shim, "w") as fh:
+                fh.write(shim_text)
+        b = os.path.join(d, "bin", "showrunner")
+        with open(b, "w") as fh:
+            fh.write(binary_body)
+        os.chmod(b, 0o755)
+        return d, shim
+
+    def fire(d, shim, source):
+        payload = {"session_id": "S-INDEX", "transcript_path": "", "cwd": d,
+                   "hook_event_name": "SessionStart", "source": source}
+        p_ = subprocess.run(["bash", shim], input=json.dumps(payload), capture_output=True,
+                            text=True, cwd=d, env=dict(env, CLAUDE_PROJECT_DIR=d))
+        try:
+            return json.loads(p_.stdout)["hookSpecificOutput"]["additionalContext"]
+        except Exception:                                        # noqa: BLE001
+            return "UNPARSEABLE: %r %r" % (p_.stdout[:300], p_.stderr[:300])
+
+    real = '#!/usr/bin/env bash\nexec %s %s "$@"\n' % (shlex_quote(sys.executable),
+                                                      shlex_quote(exe))
+    d, shim = hook_repo(real)
+    for source in ("startup", "compact"):
+        ctx = fire(d, shim, source)
+        ok("the SessionStart hook hands the session the index on `%s`" % source,
+           "showrunner tools —" in ctx and "  close" in ctx, ctx[-600:])
+        ok("...and says nothing about a binary being too old (%s)" % source,
+           "NO TOOLS INDEX" not in ctx, ctx[-300:])
+
+    old_bin = ('#!/usr/bin/env bash\n'
+               'case "$1" in\n'
+               '  whoami) echo "showrunner: you are the SOLO here." ;;\n'
+               '  guide) for a in "$@"; do [ "$a" = --index ] && '
+               '{ echo "showrunner: error: unrecognized arguments: --index" >&2; exit 2; }; done ;;\n'
+               '  *) exit 0 ;;\n'
+               'esac\n')
+    d, shim = hook_repo(old_bin)
+    for source in ("startup", "compact"):
+        ctx = fire(d, shim, source)
+        ok("a binary too old for `--index` is NAMED on `%s`, not left silent" % source,
+           "NO TOOLS INDEX" in ctx and "predates" in ctx, ctx[-400:])
+        ok("...with the remedy, re-pinning", "self --pin" in ctx, ctx[-400:])
+        ok("...and the announcement it did print is kept", "SOLO" in ctx, ctx[:200])
+
+    old_shim = sh(["git", "show", "683b503:.showrunner/hooks/whoami.sh"], ROOT, check=False).stdout
+    if old_shim.strip():
+        d, shim = hook_repo(real, shim_text=old_shim)
+        ctx = fire(d, shim, "compact")
+        ok("a hook script from BEFORE the index, running this binary, still hands over the "
+           "index, because `whoami` prints it itself", "showrunner tools —" in ctx, ctx[-600:])
+    else:
+        skip("the pre-index hook script against this binary", "commit 683b503 is not in this clone")
+
+
+def shlex_quote(s):
+    import shlex
+    return shlex.quote(s)
 
 def _choices_for(parser, verb):
     """The subparser pseudo-actions that carry `verb`'s help, walked by name."""
@@ -22832,7 +23027,7 @@ def main():
                test_live_claims_are_visible_before_a_commit,
                test_hook_verbs_never_fail_open_in_silence,
                test_retracted_doc_claims,
-               test_guide, test_cli, test_optional):
+               test_guide, test_guide_index, test_cli, test_optional):
         try:
             fn()
         except (Exception, SystemExit) as exc:  # noqa: BLE001
