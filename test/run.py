@@ -153,6 +153,16 @@ for _c in ("reseat-discover-%d" % os.getpid(), "reseat-hook-%d" % os.getpid(),
            "reseat-rename-%d" % os.getpid()):
     atexit.register(_shutil.rmtree, os.path.join(ROOT, ".showrunner", "campaigns", _c), True)
 
+from fake_github import answer as _fake_answer, served as _served  # noqa: E402
+
+
+def _fake_gh_stub(world_file):
+    """A `gh` stub answering the waker's probe and fetch from the world in `world_file`."""
+    return "#!/bin/sh\nFAKE_GH_WORLD='%s' exec '%s' '%s' \"$@\"\n" % (
+        world_file, sys.executable,
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "fake_github.py"))
+
+
 from showrunner import brief, campaign, collide, config, dispatch, gates, graph as G, harness, lanes, lease, locks, pin, reach, roles, util, worktree  # noqa: E402
 from showrunner.util import Refused, boot_token as boot_token_for_test  # noqa: E402
 
@@ -19981,7 +19991,7 @@ def test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch():
 
 
 def test_the_github_waker_rings_and_stays_quiet():
-    group("the shipped GitHub waker: configured, one GraphQL query, rings on reviews and merges, "
+    group("the shipped GitHub waker: configured, one GraphQL probe, rings on reviews and merges, "
           "quiet on its own writing, and never in a Crawler's tree")
     if not have("git"):
         skip("the waker group", "git is not installed")
@@ -20024,13 +20034,13 @@ def test_the_github_waker_rings_and_stays_quiet():
                                            "pullRequests": {"nodes": list(fork_prs)}},
                                     "u0": {"nodes": list(up)}}})
 
-    items = W.look(sp, runner=lambda _q: gql([pr(1)], [pr(5)]))
-    ok("a GraphQL answer becomes items keyed repo#n, upstream included",
-       set(items or {}) == {"me/fork#1", "them/up#5"}, items)
+    looked = W.look(sp, runner=_served(lambda _q: gql([pr(1)], [pr(5)])))
+    ok("a GraphQL answer becomes items keyed repo#n, upstream included, none failed",
+       looked and set(looked[0]) == {"me/fork#1", "them/up#5"} and looked[1] == {}, looked)
     eq("a GraphQL ERROR is a failed look, not an empty one",
-       W.look(sp, runner=lambda _q: json.dumps({"errors": [{"message": "x"}], "data": None})),
+       W.look(sp, runner=_served(lambda _q: json.dumps({"errors": [{"message": "x"}], "data": None}))),
        None)
-    eq("...and so is no answer at all", W.look(sp, runner=lambda _q: None), None)
+    eq("...and so is no answer at all", W.look(sp, runner=_served(lambda _q: None)), None)
 
     seen_world = {"them/up#5": dict(pr(5, comments=[c(1, "boss", "old")]), repo="them/up",
                                     is_pr=True)}
@@ -20139,9 +20149,9 @@ def test_the_github_waker_rings_and_stays_quiet():
     # THE LOOP: seeds silently, then wakes; and never runs in a Crawler's tree.
     answers = [gql([pr(1)], [pr(5, comments=[c(1, "boss", "old")])]),
                gql([pr(1)], [pr(5, comments=[c(1, "boss", "old"), c(2, "boss", "ping")])])]
-    code, text = W.run(cfg, once=True, runner=lambda _q: answers[0])
+    code, text = W.run(cfg, once=True, runner=_served(lambda _q: answers[0]))
     eq("the FIRST look seeds silently instead of replaying the backlog", code, 0)
-    code, text = W.run(cfg, once=True, runner=lambda _q: answers[1])
+    code, text = W.run(cfg, once=True, runner=_served(lambda _q: answers[1]))
     ok("...and the next one wakes (exit 2) with what arrived", code == 2 and "ping" in text,
        (code, text))
     saved = W.load_state(cfg)
@@ -20180,27 +20190,27 @@ def test_the_github_waker_rings_and_stays_quiet():
     with open(state_file, "w") as fh:
         fh.write("not json")
     eq("an unreadable state file reads as no state, not as an empty one", W.load_state(cfg), None)
-    code, text = W.run(cfg, once=True, runner=lambda _q: answers[1])
+    code, text = W.run(cfg, once=True, runner=_served(lambda _q: answers[1]))
     eq("...so the next look seeds silently rather than replaying everything", code, 0)
     if os.path.exists(state_file):
         os.remove(state_file)
     eq("an unreadable look with no state yet, asked once, says it could not look (1)",
-       W.run(cfg, once=True, runner=lambda _q: None)[0], 1)
+       W.run(cfg, once=True, runner=_served(lambda _q: None))[0], 1)
 
     # SEVERAL WAKERS, ONE RING. REPORTED: one close woke a session twice, from two wakers — each
     # turn-end starts one, an earlier one keeps running for its budget, and each compared against
     # the state it loaded at start, so the second never saw the first one's save.
     def said(n, text):
         return gql([pr(1)], [pr(5, comments=[c(1, "boss", "old"), c(n, "boss", text)])])
-    W.run(cfg, once=True, runner=lambda _q: answers[0])
+    W.run(cfg, once=True, runner=_served(lambda _q: answers[0]))
     clock = [1000.0]
     other = {}
 
     def other_records_it_first(_sec):
-        other.setdefault("code", W.run(cfg, once=True, runner=lambda _q: said(30, "dup"))[0])
+        other.setdefault("code", W.run(cfg, once=True, runner=_served(lambda _q: said(30, "dup")))[0])
         clock[0] += W.BUDGET_SEC + 1            # one poll, then past any budget
     code, text = W.run(cfg, sleep=other_records_it_first, now=lambda: clock[0],
-                       runner=lambda _q: said(30, "dup"))
+                       runner=_served(lambda _q: said(30, "dup")))
     ok("another waker that records an event first rings for it...", other.get("code") == 2, other)
     eq("...and a waker started BEFORE it, holding the old state, stays quiet", (code, text), (0, ""))
     looked = []
@@ -20209,21 +20219,21 @@ def test_the_github_waker_rings_and_stays_quiet():
         W._write_owner(cfg, "a-newer-waker")
         clock[0] += W.BUDGET_SEC + 1            # so a waker that ignores it still ends, and fails
     code, _ = W.run(cfg, sleep=a_newer_waker_starts, now=lambda: clock[0],
-                    runner=lambda _q: looked.append(1) or said(31, "late"))
+                    runner=_served(lambda _q: looked.append(1) or said(31, "late")))
     ok("a waker that a NEWER one replaced exits quietly without looking", code == 0 and not looked,
        (code, looked))
     code, text = W.run(cfg, sleep=lambda _sec: clock.__setitem__(0, clock[0] + W.BUDGET_SEC + 1),
-                       now=lambda: clock[0], runner=lambda _q: said(31, "late"))
+                       now=lambda: clock[0], runner=_served(lambda _q: said(31, "late")))
     ok("...while the waker that owns the watch still rings", code == 2 and "late" in text,
        (code, text))
     both = gql([pr(1)], [pr(5, comments=[c(1, "boss", "old"), c(40, "boss", "dup2"),
                                           c(41, "boss", "fresh")])])
 
     def other_rings_for_the_first(_sec):
-        W.run(cfg, once=True, runner=lambda _q: said(40, "dup2"))
+        W.run(cfg, once=True, runner=_served(lambda _q: said(40, "dup2")))
         clock[0] += W.BUDGET_SEC + 1
     code, text = W.run(cfg, sleep=other_rings_for_the_first, now=lambda: clock[0],
-                       runner=lambda _q: both)
+                       runner=_served(lambda _q: both))
     ok("...and when the stale waker DOES ring, it names only what nobody has rung for yet",
        code == 2 and "fresh" in text and "dup2" not in text, (code, text))
     held = {"events": [], "states": {}}
@@ -20254,7 +20264,7 @@ def test_the_github_waker_rings_and_stays_quiet():
         def nap(sec):
             sleeps.append(sec)
             clock[0] += W.BUDGET_SEC + 1
-        return W.run(cfg, sleep=nap, now=lambda: clock[0], runner=runner)
+        return W.run(cfg, sleep=nap, now=lambda: clock[0], runner=_served(runner))
     sleeps, looks = [], []
     code, text = started_with(clock[0] - 10 * poll, said(50, "during the turn"), sleeps, looks)
     ok("an event recorded while no waker ran is rung by the next waker's FIRST look...",
@@ -20272,7 +20282,7 @@ def test_the_github_waker_rings_and_stays_quiet():
             second["slept"] = 1
             clock[0] += W.BUDGET_SEC + 1
         second["run"] = W.run(cfg, sleep=nap, now=lambda: clock[0],
-                              runner=lambda _q: said(51, "once"))
+                              runner=_served(lambda _q: said(51, "once")))
     code, text = started_with(clock[0] - 10 * poll, said(51, "once"), sleeps, looks,
                               before=a_second_waker_starts_too)
     ok("two wakers starting together both look at once, and ONE rings...",
@@ -20293,7 +20303,7 @@ def test_the_github_waker_rings_and_stays_quiet():
     sleeps, looks = [], []
     code, text = W.run(cfg, sleep=lambda s: sleeps.append(s) or clock.__setitem__(
         0, clock[0] + W.BUDGET_SEC + 1), now=lambda: clock[0],
-        runner=lambda _q: looks.append(len(sleeps)) or said(54, "backlog"))
+        runner=_served(lambda _q: looks.append(len(sleeps)) or said(54, "backlog")))
     ok("a FIRST-EVER waker still snapshots silently, then sleeps the whole poll_sec",
        (code, text) == (0, "") and sleeps == [poll] and looks == [0, 1], (code, sleeps, looks))
     tree = os.path.join(cfg.root, ".worktrees", "waker-probe")
@@ -20301,7 +20311,7 @@ def test_the_github_waker_rings_and_stays_quiet():
     from showrunner import config as C
     inside = C.load(start=tree)
     inside.data["waker"] = cfg.data["waker"]
-    code, text = W.run(inside, once=True, runner=lambda _q: answers[1])
+    code, text = W.run(inside, once=True, runner=_served(lambda _q: answers[1]))
     ok("in a LINKED worktree it exits 0 at once — a Crawler is never held by it",
        code == 0 and "linked worktree" in text, (code, text))
     eq("in_linked_worktree is true inside one", W.in_linked_worktree(inside), True)
@@ -20315,7 +20325,7 @@ def test_the_github_waker_rings_and_stays_quiet():
     answer = os.path.join(tempfile.mkdtemp(prefix="sr-gh-"), "answer.json")
     stub = os.path.join(os.path.dirname(answer), "gh")
     with open(stub, "w") as fh:
-        fh.write("#!/bin/sh\ncat '%s'\n" % answer)
+        fh.write(_fake_gh_stub(answer))
     os.chmod(stub, 0o755)
     venv = dict(os.environ, SHOWRUNNER_GH=stub)
 
@@ -20432,6 +20442,210 @@ def test_the_github_waker_rings_and_stays_quiet():
        q.returncode == 0 and "usage" not in q.stderr, (q.returncode, q.stderr))
 
 
+def test_the_waker_probes_then_fetches_only_what_moved():
+    group("the GitHub waker probes every item's updatedAt and fetches only the ones that moved: "
+          "an unmoved item is not read, a moved one rings, a failed fetch is retried")
+    from showrunner import waker as W
+    # REPORTED (showrunner_code#148): a poll cost as much on a repo with nothing open as on a busy
+    # one. MEASURED: GitHub charges for the connection sizes asked for, so a state filter saved
+    # nothing; asking each item only its updatedAt, and the full item only where it moved, does.
+    cfg = make_repo()
+    cfg.data["waker"] = {"repos": ["me/fork"], "signature": "— 🤖 x owner agent"}
+    sp = W.spec(cfg) or {"repos": ["me/fork"], "upstream": [], "trusted_logins": set(),
+                         "trusted_names": set(), "signature": "— 🤖 x owner agent",
+                         "own_state_window_sec": 120, "poll_sec": 300, "budget_sec": 1800}
+    probe_q = W.query(sp)
+    ok("the probe asks every item only its number, state and updatedAt, in every state",
+       "comments(" not in probe_q and "reviews(" not in probe_q and "updatedAt" in probe_q
+       and "states:" not in probe_q and probe_q.count("first: %d" % W.FIRST) == 2, probe_q)
+
+    def it(n, at, state="OPEN", comments=()):
+        return {"number": n, "title": "t%d" % n, "state": state, "updatedAt": at,
+                "author": {"login": "boss"}, "body": "b",
+                "comments": {"nodes": [{"databaseId": i, "author": {"login": "boss"},
+                                        "body": b} for i, b in comments]}}
+
+    def world(*nodes):
+        return json.dumps({"data": {"r0": {"issues": {"nodes": list(nodes)},
+                                           "pullRequests": {"nodes": []}}}})
+    sent = []
+
+    def gh(answer, fail_fetch=None):
+        inner = _served(lambda _q: answer)
+
+        def runner(q):
+            sent.append("fetch" if "issueOrPullRequest" in q else "probe")
+            if "issueOrPullRequest" in q and fail_fetch is not None:
+                return fail_fetch(q)
+            return inner(q)
+        return runner
+
+    def fetched(q_log):
+        return [q for q in q_log if q == "fetch"]
+    old, later = "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"
+    base = world(it(1, old, comments=[(11, "first")]), it(2, old, comments=[(21, "x")]))
+    eq("a first look seeds silently", W.run(cfg, once=True, runner=gh(base))[0], 0)
+    st = W.load_state(cfg) or {}
+    eq("...and stores each item's updatedAt", st.get("updated"),
+       {"me/fork#1": old, "me/fork#2": old})
+    sent.clear()
+    code, text = W.run(cfg, once=True, runner=gh(base))
+    eq("an UNCHANGED updatedAt is not fetched: one probe, no fetch, nothing new",
+       (code, sent), (0, ["probe"]))
+    ok("...and says so out loud", "nothing new" in text, text)
+    # The probe says nothing moved, so the comment hidden in the world must NOT be read: the
+    # waker trusts updatedAt, which was measured to move for every kind of event it rings for.
+    hidden = world(it(1, old, comments=[(11, "first"), (12, "unseen")]),
+                   it(2, old, comments=[(21, "x")]))
+    sent.clear()
+    eq("...even when the full item would hold something new: an unmoved item is never read",
+       (W.run(cfg, once=True, runner=gh(hidden))[0], fetched(sent)), (0, []))
+    moved = world(it(1, later, comments=[(11, "first"), (13, "please rebase")]),
+                  it(2, old, comments=[(21, "x")]))
+    sent.clear()
+    seen_docs = []
+    inner = gh(moved)
+    code, text = W.run(cfg, once=True, runner=lambda q: seen_docs.append(q) or inner(q))
+    ok("a MOVED item is fetched and its new comment rings", code == 2 and "please rebase" in text,
+       (code, text))
+    fetch_doc = next((q for q in seen_docs if "issueOrPullRequest" in q), "")
+    ok("...in one fetch that names only the moved item",
+       fetched(sent) == ["fetch"] and "number: 1)" in fetch_doc and "number: 2)" not in fetch_doc,
+       (sent, fetch_doc[:200]))
+    eq("...and its new updatedAt is stored", (W.load_state(cfg) or {}).get("updated", {})
+       .get("me/fork#1"), later)
+    closed = world(it(1, later, comments=[(11, "first"), (13, "please rebase")]),
+                   it(2, "2026-01-03T00:00:00Z", state="CLOSED", comments=[(21, "x")]))
+    code, text = W.run(cfg, once=True, runner=gh(closed))
+    ok("a CLOSE rings on the same poll that sees it", code == 2 and "me/fork#2 CLOSED" in text,
+       (code, text))
+
+    # A FAILED FETCH: the item moved, the fetch did not return it. Not judged, not advanced.
+    def decisions():
+        try:
+            with open(W.decisions_path(cfg)) as fh:
+                return [json.loads(l) for l in fh.read().splitlines()]
+        except OSError:
+            return []
+    moved2 = world(it(1, "2026-01-04T00:00:00Z",
+                      comments=[(11, "first"), (13, "please rebase"), (14, "ping?")]),
+                   it(2, "2026-01-03T00:00:00Z", state="CLOSED", comments=[(21, "x")]))
+    code, text = W.run(cfg, once=True, runner=gh(moved2, fail_fetch=lambda _q: None))
+    ok("a FAILED fetch is not 'nothing new': exit 1, naming the item", code == 1
+       and "me/fork#1" in text and text.startswith("could not fetch"), (code, text))
+    eq("...the stored updatedAt is left as it was", (W.load_state(cfg) or {}).get("updated", {})
+       .get("me/fork#1"), later)
+    ok("...and the miss is in the decision log", any(
+        d.get("item") == "me/fork#1" and d.get("verdict") == "fetch-failed"
+        for d in decisions()), decisions()[-3:])
+    code, text = W.run(cfg, once=True, runner=gh(moved2, fail_fetch=lambda _q: json.dumps(
+        {"data": {"r0_1": None}, "errors": [{"message": "Something went wrong"}]})))
+    ok("...as is an answer whose alias for the item is null", code == 1 and "me/fork#1" in text,
+       (code, text))
+    ok("...whose miss carries GitHub's own error, so the log says WHY it was not judged", any(
+        d.get("verdict") == "fetch-failed" and "Something went wrong" in d.get("reason", "")
+        for d in decisions()), decisions()[-3:])
+    sent.clear()
+    code, text = W.run(cfg, once=True, runner=gh(moved2))
+    ok("...and the NEXT poll fetches it again, and rings for what the failed one missed",
+       code == 2 and "ping?" in text and fetched(sent) == ["fetch"], (code, text, sent))
+
+    # A PARTIAL ANSWER stores only what it judged.
+    both = world(it(1, "2026-01-05T00:00:00Z", comments=[(11, "first"), (13, "please rebase"),
+                                                         (14, "ping?"), (15, "one")]),
+                 it(2, "2026-01-05T00:00:00Z", state="CLOSED",
+                    comments=[(21, "x"), (22, "two")]))
+
+    def only_the_first(q):
+        full = json.loads(_fake_answer(both, q))
+        full["data"]["r0_2"] = None
+        return json.dumps(full)
+    code, text = W.run(cfg, once=True, runner=gh(both, fail_fetch=only_the_first))
+    st = W.load_state(cfg) or {}
+    ok("a PARTIAL fetch: the item it returned rings and advances; the one it lost does not",
+       code == 2 and "one" in text and "two" not in text
+       and st.get("updated", {}).get("me/fork#1") == "2026-01-05T00:00:00Z"
+       and st.get("updated", {}).get("me/fork#2") == "2026-01-03T00:00:00Z", (code, text, st))
+    code, text = W.run(cfg, once=True, runner=gh(both))
+    ok("...and the lost one rings on the next poll, the other not again", code == 2
+       and "two" in text and "me/fork#1" not in text, (code, text))
+
+    # THE UNREADABLE PROBE: nothing stored, nothing called quiet.
+    before = W.load_state(cfg)
+    sent.clear()
+    eq("an UNREADABLE probe is exit 1 'could not look', never 'nothing new'...",
+       W.run(cfg, once=True, runner=gh(None))[:1], (1,))
+    eq("...it asks no fetch, and stores nothing", (sent, W.load_state(cfg) == before),
+       (["probe"], True))
+    eq("...and a probe with any GraphQL error is unreadable too, partial data or not",
+       W.probe(sp, lambda _q: json.dumps({"data": {"r0": {"issues": {"nodes": []},
+                                                         "pullRequests": {"nodes": []}}},
+                                          "errors": [{"message": "x"}]})), None)
+    partial = json.loads(both)
+    partial["errors"] = [{"message": "Something went wrong while executing your query."}]
+    sent.clear()
+    eq("...so a poll whose probe came back PARTIAL is exit 1, fetches nothing and stores nothing:"
+       " the items it lost would otherwise read as unmoved",
+       (W.run(cfg, once=True, runner=gh(json.dumps(partial)))[0], sent,
+        W.load_state(cfg) == before), (1, ["probe"], True))
+
+    # THE MIGRATION: a state written before the probe existed has no updatedAt at all.
+    legacy = {"events": list((W.load_state(cfg) or {}).get("events") or []),
+              "states": dict((W.load_state(cfg) or {}).get("states") or {}), "looked_at": 1}
+    W.save_state(cfg, legacy)
+    sent.clear()
+    judged_before = len(decisions())
+    code, text = W.run(cfg, once=True, runner=gh(both))
+    eq("a state with no updatedAt fetches every item once, and the seen events keep it QUIET",
+       (code, fetched(sent)), (0, ["fetch"]))
+    eq("...judging nothing as rang", [d["verdict"] for d in decisions()[judged_before:]
+                                     if d["verdict"] == "rang"], [])
+    eq("...then stores the updatedAt it read", sorted((W.load_state(cfg) or {})
+                                                     .get("updated", {}).items()),
+       [("me/fork#1", "2026-01-05T00:00:00Z"), ("me/fork#2", "2026-01-05T00:00:00Z")])
+    sent.clear()
+    eq("...so the poll after it fetches nothing", (W.run(cfg, once=True, runner=gh(both))[0],
+                                                   fetched(sent)), (0, []))
+
+    # A SEED with an item unfetched is no seed: that item would ring as NEW, backlog and all.
+    os.remove(os.path.join(cfg.state_dir, "waker-state.json"))
+    eq("a first look whose fetch fails seeds NOTHING, and says it could not look",
+       (W.run(cfg, once=True, runner=gh(both, fail_fetch=lambda _q: None))[0],
+        W.load_state(cfg)), (1, None))
+
+    # SETTLE: a stamp has one-second resolution, and a review's move was measured to land
+    # seconds after the review; an item updated just now is read once more next poll.
+    now_ts = time.time()
+    fresh = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now_ts - 5))
+    eq("settled: an item updated within SETTLE_SEC stores no stamp, an older one its stamp, an "
+       "unreadable one none", W.settled({"a": {"updatedAt": fresh}, "b": {"updatedAt": old},
+                                         "c": {"updatedAt": "garbage"}, "d": {}}, now_ts),
+       {"a": None, "b": old, "c": None, "d": None})
+    just_now = json.loads(both)
+    just_now["data"]["r0"]["issues"]["nodes"][0]["updatedAt"] = fresh
+    just_now = json.dumps(just_now)
+    W.run(cfg, once=True, runner=gh(both))
+    W.run(cfg, once=True, runner=gh(just_now))
+    sent.clear()
+    eq("...so an item a poll read moments after it moved is FETCHED AGAIN by the next poll, "
+       "which rings nothing it already rang", (W.run(cfg, once=True, runner=gh(just_now))[0],
+                                              fetched(sent)), (0, ["fetch"]))
+    os.remove(os.path.join(cfg.state_dir, "waker-state.json"))
+    W.run(cfg, once=True, runner=gh(just_now))
+    eq("...and a SEED holds back the same way: no stamp for the item that moved just now, the "
+       "stamp for the one that did not", (W.load_state(cfg) or {}).get("updated"),
+       {"me/fork#1": None, "me/fork#2": "2026-01-05T00:00:00Z"})
+    eq("moved: new, stamp moved, state moved, or no stamp stored — and only those",
+       W.moved({"k#1": {"updatedAt": old, "state": "OPEN"},
+                "k#2": {"updatedAt": later, "state": "OPEN"},
+                "k#3": {"updatedAt": old, "state": "CLOSED"},
+                "k#4": {"updatedAt": old, "state": "OPEN"},
+                "k#5": {"updatedAt": old, "state": "OPEN"}},
+               {"updated": {"k#1": old, "k#2": old, "k#3": old, "k#4": None},
+                "states": {"k#1": "OPEN", "k#2": "OPEN", "k#3": "OPEN", "k#4": "OPEN"}}),
+       ["k#2", "k#3", "k#4", "k#5"])
+
+
 def test_a_state_change_the_agent_made_itself_does_not_ring():
     group("a close, merge or reopen the agent made itself does not ring: its own transcript "
           "first, an own-signed comment beside the change second, and a ring without either")
@@ -20443,8 +20657,10 @@ def test_a_state_change_the_agent_made_itself_does_not_ring():
           "signature": sig, "own_state_window_sec": 120, "poll_sec": 300, "budget_sec": 1800}
     eq("the window defaults to 120 s", (W.spec(make_repo({"waker": {"repos": ["a/b"]}})) or {})
        .get("own_state_window_sec"), 120)
-    q = W.query(sp)
-    ok("the one query asks for the change times and every comment's and review's time",
+    q = W.fetch_query({"me/fork#1": {"repo": "me/fork", "number": 1, "alias": "r0_1"}},
+                      ["me/fork#1"])
+    ok("the fetch of a moved item asks for the change times and every comment's and review's "
+       "time",
        "mergedAt" in W._PR and "closedAt" in W._THREAD and W._PR.count("createdAt") == 3
        and "mergedAt" in q, q)
 
@@ -20688,8 +20904,8 @@ def test_a_state_change_the_agent_made_itself_does_not_ring():
         n.update({k: iso(v)[:19] + "Z" for k, v in times.items()})
         return json.dumps({"data": {"r0": {"issues": {"nodes": []},
                                            "pullRequests": {"nodes": [n]}}}})
-    W.run(cfg, once=True, runner=lambda _q: gql("OPEN"))
-    code, text = W.run(cfg, once=True, runner=lambda _q: gql("MERGED", mergedAt=T),
+    W.run(cfg, once=True, runner=_served(lambda _q: gql("OPEN")))
+    code, text = W.run(cfg, once=True, runner=_served(lambda _q: gql("MERGED", mergedAt=T)),
                        transcript=transcript(merge_mcp(T - 2)))
     eq("run(): my own merge is nothing new", code, 0)
     rows = []
@@ -20710,8 +20926,11 @@ def test_an_issue_closed_by_my_own_merge_or_push_does_not_ring():
     sig = "— 🤖 x owner agent"
     sp = {"repos": ["me/fork"], "upstream": [], "trusted_logins": {"me"}, "trusted_names": set(),
           "signature": sig, "own_state_window_sec": 120, "poll_sec": 300, "budget_sec": 1800}
-    q = W.query(dict(sp, upstream=[{"repo": "them/up", "author": "me"}]))
-    ok("the one query asks every issue for its closing event's PR or commit closer",
+    q = W.fetch_query({"me/fork#1": {"repo": "me/fork", "number": 1, "alias": "r0_1"},
+                       "them/up#2": {"repo": "them/up", "number": 2, "alias": "u0_2"}},
+                      ["me/fork#1", "them/up#2"])
+    ok("the fetch asks every moved issue, upstream too, for its closing event's PR or commit "
+       "closer",
        q.count("timelineItems(itemTypes: [CLOSED_EVENT], last: 1)") == 2
        and "... on PullRequest {" in q and "associatedPullRequests" in q
        and "timelineItems" not in W._PR, q)
@@ -21301,7 +21520,7 @@ def test_doctor_and_waker_show_state_the_effective_watch():
                "pullRequests": {"nodes": []}},
         "u0": {"nodes": []}}})
     eq("a look against a quiet world seeds, and says nothing new",
-       W.run(loaded, once=True, runner=lambda _q: world)[0], 0)
+       W.run(loaded, once=True, runner=_served(lambda _q: world))[0], 0)
     ok("(a seed of a world with no events judges nothing, so it writes no log)",
        not os.path.exists(W.decisions_path(loaded)))
     out = cli(repo, "doctor")[1]
@@ -21316,7 +21535,7 @@ def test_doctor_and_waker_show_state_the_effective_watch():
                                                              "author": {"login": "x"}}]}}]},
                "pullRequests": {"nodes": []}},
         "u0": {"nodes": []}}})
-    W.run(loaded, once=True, runner=lambda _q: ringing)
+    W.run(loaded, once=True, runner=_served(lambda _q: ringing))
     written = W.decisions_path(loaded)
     ok("(the waker wrote its log under the campaign dir)",
        os.path.exists(written) and os.sep + os.path.join("campaigns", "c1") + os.sep in written,
@@ -21707,9 +21926,9 @@ def _lost_ring_cases(W, L, CW, hb):
     def ring(runner):
         def nap(_s):
             clock[0] += 10
-        return stopped(W.run, cfg, sleep=nap, now=lambda: clock[0], runner=runner)
+        return stopped(W.run, cfg, sleep=nap, now=lambda: clock[0], runner=_served(runner))
 
-    eq("seeded silently on the first look", W.run(cfg, once=True, runner=world(31))[0], 0)
+    eq("seeded silently on the first look", W.run(cfg, once=True, runner=_served(world(31)))[0], 0)
     stamp("github-waker", clock[0])                     # the turn end that started the waker
     code, text = ring(world(31, 32))
     ok("the waker rings for new PR #32 (exit 2)", code == 2 and "me/fork#32" in text,
@@ -21721,14 +21940,14 @@ def _lost_ring_cases(W, L, CW, hb):
     rang_at = int(clock[0])
 
     clock[0] += 3600
-    lines = L.session_start(cfg, now=lambda: clock[0], runner=world(31, 32, 33, 34))
+    lines = L.session_start(cfg, now=lambda: clock[0], runner=_served(world(31, 32, 33, 34)))
     said = "\n".join(lines)
     ok("a SessionStart with a ring NEWER than the last turn end reports it, with its time and "
        "text", "rang at %s but no turn followed" % L._when(rang_at) in said
        and "me/fork#32" in said, said)
     ok("...and the catch-up look reports what arrived AFTER the lost ring, in the same block",
        "me/fork#33" in said and "me/fork#34" in said and "one look at this start" in said, said)
-    said2 = "\n".join(L.session_start(cfg, now=lambda: clock[0], runner=world(31, 32, 33, 34)))
+    said2 = "\n".join(L.session_start(cfg, now=lambda: clock[0], runner=_served(world(31, 32, 33, 34))))
     ok("a SECOND start does not repeat the ring, and the look it caught up on is not re-reported",
        "rang at" not in said2 and "me/fork#33" not in said2 and "nothing new" in said2, said2)
     ok("...because the ring is marked surfaced in the state",
@@ -21739,7 +21958,7 @@ def _lost_ring_cases(W, L, CW, hb):
     ok("a second ring, for #35", code == 2 and "me/fork#35" in text, (code, text))
     stamp("github-waker", clock[0] + 30)                # ...whose turn ended: it landed
     said3 = "\n".join(L.session_start(cfg, now=lambda: clock[0] + 60,
-                                      runner=world(31, 32, 33, 34, 35)))
+                                      runner=_served(world(31, 32, 33, 34, 35))))
     ok("a ring FOLLOWED by a turn end is not reported", "rang at" not in said3, said3)
     eq("...and is marked delivered, so what stays unmarked is only what is still in doubt",
        [r.get("delivered") for r in (W.load_state(cfg) or {}).get("rings") or []], [None, True])
@@ -21754,7 +21973,7 @@ def _lost_ring_cases(W, L, CW, hb):
     stamp("github-waker", clock[0])
     code, text = ring(world(31, 32, 33, 34, 35, 36))
     t = time.time()
-    said4 = "\n".join(L.session_start(cfg, now=lambda: clock[0] + 60, runner=lambda _q: None))
+    said4 = "\n".join(L.session_start(cfg, now=lambda: clock[0] + 60, runner=_served(lambda _q: None)))
     ok("a FAILED catch-up look says so, and is never reported as nothing new",
        "FAILED" in said4 and "unknown, not absent" in said4
        and "one look at this start: nothing new" not in said4,
@@ -21785,12 +22004,12 @@ def _lost_ring_cases(W, L, CW, hb):
         {"at": int(clock[0]) + 100, "text": "A Crawler needs you: W9 BLOCKED", "events": ["k"]},
         {"at": int(clock[0]) - 100, "text": "old and landed", "events": ["j"]}]})
     stamp("crawler-waker", clock[0])
-    said6 = "\n".join(L.session_start(cfg, now=lambda: clock[0] + 200, runner=world()))
+    said6 = "\n".join(L.session_start(cfg, now=lambda: clock[0] + 200, runner=_served(world())))
     ok("a Crawler-waker ring no turn end followed is reported too, and one that landed is not",
        "The Crawler waker rang at" in said6 and "W9 BLOCKED" in said6
        and "old and landed" not in said6, said6)
     ok("...once", "W9" not in "\n".join(L.session_start(cfg, now=lambda: clock[0] + 300,
-                                                        runner=world())))
+                                                        runner=_served(world()))))
 
     # THE VERB AND THE HOOK, end to end: `whoami.sh` is what SessionStart actually runs.
     repo = make_repo()
@@ -21806,7 +22025,7 @@ def _lost_ring_cases(W, L, CW, hb):
         fh.write(world(31, 32, 33)(None))
     gh = os.path.join(os.path.dirname(answer), "gh")
     with open(gh, "w") as fh:
-        fh.write("#!/bin/sh\ncat '%s'\n" % answer)
+        fh.write(_fake_gh_stub(answer))
     os.chmod(gh, 0o755)
     # The hook's FIRST candidate, since a scratch repo may carry another one it would reach first.
     os.makedirs(os.path.join(repo.root, ".showrunner_self", "bin"), exist_ok=True)
@@ -21835,7 +22054,7 @@ def _lost_ring_cases(W, L, CW, hb):
     sh(["git", "worktree", "add", "-q", "-b", "lost-probe", tree], repo.root)
     from showrunner import config as C
     eq("in a LINKED worktree it says nothing, as the wakers do",
-       L.session_start(C.load(start=tree), runner=world(31, 32, 33, 99)), [])
+       L.session_start(C.load(start=tree), runner=_served(world(31, 32, 33, 99))), [])
 
 
 def test_the_wakers_cover_each_others_dropped_ring():
@@ -21895,7 +22114,7 @@ def _cover_cases(hb):
             return []
 
     clock = [1_800_000_000.0]
-    eq("seeded silently on the first look", W.run(cfg, once=True, runner=world(38))[0], 0)
+    eq("seeded silently on the first look", W.run(cfg, once=True, runner=_served(world(38)))[0], 0)
     stamp("github-waker", clock[0])
     stamp("crawler-waker", clock[0])                    # the turn end that started both
     gh = {}
@@ -21906,7 +22125,7 @@ def _cover_cases(hb):
         sleeps.append(sec)
         if "ring" not in gh:
             gh["ring"] = stopped(W.run, cfg, sleep=lambda _s: None, now=lambda: clock[0],
-                                 runner=world(38, 39))
+                                 runner=_served(world(38, 39)))
         clock[0] += sec
     started = clock[0]
     code, text = CW.run(cfg, sleep=crawler_nap, now=lambda: clock[0], ask=lambda _c: {})
@@ -21932,7 +22151,7 @@ def _cover_cases(hb):
 
     again = CV.Cover(cfg, "github-waker", "crawler-waker", started)
     eq("a COVERED ring is not covered again, however late", again.check(clock[0] + 3600), None)
-    said = "\n".join(L.session_start(cfg, now=lambda: clock[0], runner=world(38, 39)))
+    said = "\n".join(L.session_start(cfg, now=lambda: clock[0], runner=_served(world(38, 39))))
     ok("...nor reported again at SessionStart as a GitHub ring; the dropped cover is",
        "GitHub activity rang at" not in said and "The Crawler waker rang at" in said
        and "me/fork#39" in said, said)
@@ -21940,7 +22159,7 @@ def _cover_cases(hb):
     # THE WINDOW, at its edge, and a ring a turn DID follow.
     def gh_ring_at(t, n):
         stopped(W.run, cfg, sleep=lambda _s: None, now=lambda: t,
-                runner=world(*range(38, n + 1)))
+                runner=_served(world(*range(38, n + 1))))
         return gh_rings()[-1]
     clock[0] += 1000
     stamp("github-waker", clock[0])
@@ -22010,7 +22229,7 @@ def _cover_cases(hb):
     os.environ["SHOWRUNNER_HEARTBEAT"] = hb            # its clock is real time, not the fake one
     stamp("github-waker", t0)
     stamp("crawler-waker", t0)
-    eq("the second repo's GitHub watch is seeded", W.run(ccfg, once=True, runner=world(38))[0], 0)
+    eq("the second repo's GitHub watch is seeded", W.run(ccfg, once=True, runner=_served(world(38)))[0], 0)
     cw = {}
 
     def gh_nap(sec):
@@ -22021,7 +22240,7 @@ def _cover_cases(hb):
     st = W.load_state(ccfg) or {"events": [], "states": {}}
     st["looked_at"] = cclock[0]
     W.save_state(ccfg, st)
-    code, text = stopped(W.run, ccfg, sleep=gh_nap, now=lambda: cclock[0], runner=world(38))
+    code, text = stopped(W.run, ccfg, sleep=gh_nap, now=lambda: cclock[0], runner=_served(world(38)))
     crang = (CW.load_state(ccfg).get("rings") or [{}])[0]
     ok("the Crawler waker rang for the block, and no turn followed",
        cw.get("ring", (0,))[0] == 2 and c in cw["ring"][1], cw)
@@ -22191,7 +22410,7 @@ def _host_gone_cases(hb):
                 also.append(1)
             clock[0] += sec
         return nap
-    eq("seeded silently on the first look", W.run(cfg, once=True, runner=world(38))[0], 0)
+    eq("seeded silently on the first look", W.run(cfg, once=True, runner=_served(world(38)))[0], 0)
     before = W.load_state(cfg)
     looks = []
 
@@ -22200,7 +22419,7 @@ def _host_gone_cases(hb):
         return lambda q: looks.append(1) or inner(q)
 
     # DEAD AT START: a real dead pid.
-    code = W.run(cfg, sleep=tick(), now=lambda: clock[0], runner=counting(38, 39),
+    code = W.run(cfg, sleep=tick(), now=lambda: clock[0], runner=_served(counting(38, 39)),
                  host={"pid": dead.pid, "started": None})
     eq("a GitHub waker whose host is already dead exits 0, silent", code, (0, ""))
     ok("...without looking, ringing or advancing: #39 is not seen and no ring is recorded",
@@ -22212,20 +22431,20 @@ def _host_gone_cases(hb):
        and "at start" in gl[0].get("reason", ""), gl)
 
     # A REUSED PID counts as dead too, end to end.
-    code = W.run(cfg, sleep=tick(), now=lambda: clock[0], runner=counting(38, 39),
+    code = W.run(cfg, sleep=tick(), now=lambda: clock[0], runner=_served(counting(38, 39)),
                  host={"pid": me, "started": born - 1000})
     ok("a host pid now held by a process started at another time: the waker exits, rings "
        "nothing", code == (0, "") and not looks and W.load_state(cfg) == before, code)
 
     # THE COMPANION: a live host rings, records its host, and advances.
-    code, text = W.run(cfg, sleep=tick(), now=lambda: clock[0], runner=world(38, 39),
+    code, text = W.run(cfg, sleep=tick(), now=lambda: clock[0], runner=_served(world(38, 39)),
                        host={"pid": me, "started": born})
     rang = ((W.load_state(cfg) or {}).get("rings") or [{}])[-1]
     ok("with its host alive the same look RINGS for #39", code == 2 and "me/fork#39" in text,
        (code, text))
     ok("...and the ring records its host and the waker's start",
        rang.get("host", {}).get("pid") == me and rang.get("waker_started") == clock[0], rang)
-    code, _t = W.run(cfg, sleep=tick(), now=lambda: clock[0], runner=world(38, 39, 40))
+    code, _t = W.run(cfg, sleep=tick(), now=lambda: clock[0], runner=_served(world(38, 39, 40)))
     rang = ((W.load_state(cfg) or {}).get("rings") or [{}])[-1]
     ok("a waker given no host resolves its own and records it",
        code == 2 and rang.get("host", {}).get("pid") == U.session_pid()[0], rang)
@@ -22242,7 +22461,7 @@ def _host_gone_cases(hb):
     W.save_state(cfg, dict(before or {"events": [], "states": {}}, looked_at=clock[0]))
     before = W.load_state(cfg)
     code = W.run(cfg, sleep=tick(flag), now=lambda: clock[0],
-                 runner=counting(38, 39, 40, 41), host={"pid": 424242, "started": 1.0})
+                 runner=_served(counting(38, 39, 40, 41)), host={"pid": 424242, "started": 1.0})
     ok("a host that dies while the waker sleeps is caught at the poll: no look, no ring",
        code == (0, "") and not looks and W.load_state(cfg) == before, (code, looks))
     ok("...and the watch it held is given up", W._read_owner(cfg) is None, W._read_owner(cfg))
@@ -22255,7 +22474,7 @@ def _host_gone_cases(hb):
     def dying(q):
         flag.append(1)
         return world(38, 39, 40, 41)(q)
-    code = W.run(cfg, sleep=tick(), now=lambda: clock[0], runner=dying,
+    code = W.run(cfg, sleep=tick(), now=lambda: clock[0], runner=_served(dying),
                  host={"pid": 424242, "started": 1.0})
     st = W.load_state(cfg)
     ok("a host gone between the look and the ring: nothing rings and #41 is NOT marked seen",
@@ -22263,7 +22482,7 @@ def _host_gone_cases(hb):
     ok("...logged as checked before ringing",
        "before ringing" in (gone_lines(cfg) or [{}])[-1].get("reason", ""), gone_lines(cfg)[-1:])
     U.host_gone = real_gone
-    code, text = W.run(cfg, sleep=tick(), now=lambda: clock[0], runner=world(38, 39, 40, 41),
+    code, text = W.run(cfg, sleep=tick(), now=lambda: clock[0], runner=_served(world(38, 39, 40, 41)),
                        host={"pid": me, "started": born})
     ok("...so the next waker under a live host still rings for #41", code == 2
        and "me/fork#41" in text, (code, text))
@@ -22326,7 +22545,7 @@ def _host_gone_cases(hb):
             fh.write(json.dumps({"hook": hook, "ts": int(ts)}) + "\n")
     t = clock[0] + 10_000
     stamp("github-waker", t - 5)
-    stopped(W.run, cfg, sleep=tick(), now=lambda: t, runner=world(38, 39, 40, 41, 42),
+    stopped(W.run, cfg, sleep=tick(), now=lambda: t, runner=_served(world(38, 39, 40, 41, 42)),
             host={"pid": me, "started": born})
     r = ((W.load_state(cfg) or {}).get("rings") or [{}])[-1]
     orphan = CV.Cover(cfg, "github-waker", "crawler-waker", t - 5, alive=lambda: False)
@@ -22374,7 +22593,7 @@ def _host_gone_cases(hb):
                     {"type": "user", "timestamp": _iso(T + 50_000),
                      "message": {"content": "quoting \"hookName\":\"SessionStart:resume\""}},
                     entry(T + 100_200, kind="user")])
-    said = "\n".join(L.session_start(scfg, now=lambda: T + 200_000, runner=world(49),
+    said = "\n".join(L.session_start(scfg, now=lambda: T + 200_000, runner=_served(world(49)),
                                      transcript=tx))
     ok("SessionStart reports the #49 ring as rung under a host that had already gone, though it "
        "was marked covered and a turn end came after it",
@@ -22384,7 +22603,7 @@ def _host_gone_cases(hb):
     ok("...and does not repeat the orphaned cover ring that quoted it",
        said.count("under a host that had already gone") == 1
        and "The Crawler waker rang" not in said, said)
-    said2 = "\n".join(L.session_start(scfg, now=lambda: T + 200_001, runner=world(49),
+    said2 = "\n".join(L.session_start(scfg, now=lambda: T + 200_001, runner=_served(world(49)),
                                       transcript=tx))
     ok("...once: the next start says nothing of it", "under a host" not in said2, said2)
     eq("a SessionStart line quoting the hook name is not read as a host start",
@@ -22403,7 +22622,7 @@ def _host_gone_cases(hb):
         W.save_state(c2, {"events": [], "states": {}, "looked_at": T, "rings": rings})
         p2 = os.path.join(tmpdir("host-tx2"), "s.jsonl")
         _append_tx(p2, tx_recs)
-        return "\n".join(L.session_start(c2, now=lambda: T + 200_000, runner=world(),
+        return "\n".join(L.session_start(c2, now=lambda: T + 200_000, runner=_served(world()),
                                          transcript=p2))
     ring49 = {"at": T + 100_000, "at_f": T + 100_000.0, "text": "NEW PR me/fork#49",
               "events": ["me/fork#49 new"]}
@@ -22478,7 +22697,7 @@ def _host_gone_cases(hb):
     eq("...nor a cover too far from when that ring was covered",
        skip({"at": T + 80, "events": ["cover"]}), False)
     eq("...nor a ring that is no cover", skip({"at": T + 70, "events": ["x"]}), False)
-    missing = "\n".join(L.session_start(scfg, now=lambda: T + 200_002, runner=world(49),
+    missing = "\n".join(L.session_start(scfg, now=lambda: T + 200_002, runner=_served(world(49)),
                                         transcript=os.path.join(tmpdir("host-none"), "no.jsonl")))
     ok("an unreadable transcript is said, not read as no host change",
        "could not read this session's transcript" in missing, missing)
@@ -22962,7 +23181,7 @@ def test_never_integrated_leaves_do_not_collide():
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_report_verbs_write_nothing, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_state_change_the_agent_made_itself_does_not_ring, test_an_issue_closed_by_my_own_merge_or_push_does_not_ring, test_the_github_waker_stamps_every_invocation, test_doctor_and_waker_show_state_the_effective_watch, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_a_waker_whose_host_is_gone_stops, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_the_scratch_excuse_reads_game_loops_key_list, test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_gc_judges_where_work_lands, test_gc_online_proves_a_squash_merged_pr_no_leaf_holds, test_a_launched_crawler_runs_as_its_own_tree, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_report_verbs_write_nothing, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_the_waker_probes_then_fetches_only_what_moved, test_a_state_change_the_agent_made_itself_does_not_ring, test_an_issue_closed_by_my_own_merge_or_push_does_not_ring, test_the_github_waker_stamps_every_invocation, test_doctor_and_waker_show_state_the_effective_watch, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_a_waker_whose_host_is_gone_stops, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_the_scratch_excuse_reads_game_loops_key_list, test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_gc_judges_where_work_lands, test_gc_online_proves_a_squash_merged_pr_no_leaf_holds, test_a_launched_crawler_runs_as_its_own_tree, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

@@ -64,10 +64,22 @@ at every poll, and again under the lock before it rings or covers. With the host
 having rung nothing, advanced nothing and given up the watch, and logs one `host-gone` line.
 Every ring records `host` and `waker_started`, which `lostring` reads.
 
-ONE GRAPHQL QUERY PER POLL, never a REST call per item: the 5,000/hour REST limit is shared by
-every agent on a machine and was measured exhausted. A failed look is never "nothing new" — it
-returns None, and the first look after an unreadable state seeds silently instead of replaying
-the backlog. A LINKED WORKTREE exits at once: a Crawler inherits the tree's hooks, and a waker
+A PROBE, THEN A FETCH OF WHAT MOVED, never a REST call per item: the 5,000/hour REST limit is
+shared by every agent on a machine and was measured exhausted. Every poll sends one GraphQL probe
+asking each watched item, in every state, only its number, state and `updatedAt`. GitHub charges
+for the connection sizes a document asks for, not for what comes back, so the probe is cheap and
+the nested comments and reviews are asked only of the items that moved: new, or whose
+`updatedAt` or state differs from the one stored when the item was last judged. Those go in one
+more document, an alias per item, through the same judging as before. A comment, review, inline
+comment or reply, label, close, merge or reopen each moves `updatedAt`, measured live; a review's
+or reply's move was seen to land seconds after the review itself, so an item updated within
+SETTLE_SEC of a look is fetched once more on the next. An unmoved item is not re-judged and keeps
+its stored state. A failed look is never "nothing new": an unreadable probe returns None, and a
+moved item the fetch did not return is logged `fetch-failed`, keeps its stored `updatedAt`, and
+is fetched again next poll. A state written before the probe existed has every item moved once,
+and the seen events keep that one full fetch from ringing again. The first look after an
+unreadable state seeds silently instead of replaying the backlog, and only when every item was
+fetched. A LINKED WORKTREE exits at once: a Crawler inherits the tree's hooks, and a waker
 there would hold every Crawler at its turn-end for half an hour.
 """
 import json
@@ -209,8 +221,18 @@ def watch_lines(wt, shown_path=lambda p: p):
                                      i["why"]) for i in wt["ignored"]]
 
 
+_PROBE = "number state updatedAt"
+# An item updated this recently is fetched again on the next poll whatever its `updatedAt` says:
+# the stamp has one-second resolution, so a comment landing in the same second as the look that
+# stored it would leave the stamp unmoved, and that comment unread.
+SETTLE_SEC = 120
+
+
 def query(sp):
-    """ONE GraphQL document for everything watched: an alias per repo and per upstream search."""
+    """THE PROBE, one GraphQL document for everything watched: an alias per repo and per upstream
+    search, asking each item only its number, state and `updatedAt`. All states, so a close and a
+    comment on a closed item are seen. GitHub charges for the connection sizes asked for, so the
+    nested comments and reviews are asked only of the items `fetch_query` names."""
     parts = []
     for i, repo in enumerate(sp["repos"]):
         owner, name = repo.split("/")
@@ -219,12 +241,27 @@ def query(sp):
                      '{ nodes { %s } }\n'
                      '  pullRequests(first: %d, orderBy: {field: UPDATED_AT, direction: DESC}) '
                      '{ nodes { %s } }\n}'
-                     % (i, json.dumps(owner), json.dumps(name), FIRST, _ISSUE, FIRST, _PR))
+                     % (i, json.dumps(owner), json.dumps(name), FIRST, _PROBE, FIRST, _PROBE))
     for i, up in enumerate(sp["upstream"]):
         parts.append('u%d: search(query: %s, type: ISSUE, first: %d) {\n'
                      '  nodes { ... on PullRequest { %s } ... on Issue { %s } }\n}'
                      % (i, json.dumps("repo:%s author:%s" % (up["repo"], up["author"])),
-                        FIRST, _PR, _ISSUE))
+                        FIRST, _PROBE, _PROBE))
+    return "query {\n%s\n}" % "\n".join(parts)
+
+
+def fetch_query(probed, keys):
+    """ONE GraphQL document reading the full item for each of `keys`, an alias per item named for
+    the probe alias it came from and its number (`r0_12`), so the answer maps back to its key."""
+    parts = []
+    for key in keys:
+        p = probed[key]
+        owner, name = p["repo"].split("/")
+        parts.append('%s: repository(owner: %s, name: %s) {\n'
+                     '  issueOrPullRequest(number: %d) { ... on PullRequest { %s } '
+                     '... on Issue { %s } }\n}'
+                     % (p["alias"], json.dumps(owner), json.dumps(name), p["number"], _PR,
+                        _ISSUE))
     return "query {\n%s\n}" % "\n".join(parts)
 
 
@@ -262,35 +299,107 @@ def gh_runner(timeout=60):
     return runner
 
 
-def look(sp, runner=None):
-    """Every watched item as {"repo#n": item}, or None when GitHub could not be read."""
-    if runner is None:
-        runner = gh_runner()
-        if runner is None:
-            return None
-    raw = runner(query(sp))
+def _answer(runner, q):
+    """The `data` of one GraphQL answer, the `errors` beside it, or (None, None) unreadable."""
+    raw = runner(q)
     if not raw or not raw.strip():
-        return None
+        return None, None
     try:
         body = json.loads(raw)
-        data = body.get("data")
-        if body.get("errors") or not data:
-            return None
-        items = {}
+    except ValueError:
+        return None, None
+    return (body.get("data"), body.get("errors")) if isinstance(body, dict) else (None, None)
+
+
+def probe(sp, runner):
+    """{"repo#n": {repo, number, state, updatedAt, alias}} for every watched item, or None when
+    the probe could not be read. A probe with any error is unreadable: a partial list would read
+    every item it lost as one that did not move."""
+    data, errors = _answer(runner, query(sp))
+    if errors or not data:
+        return None
+    out = {}
+    try:
         for i, repo in enumerate(sp["repos"]):
             node = data["r%d" % i]
             for n in (node["issues"]["nodes"] or []) + (node["pullRequests"]["nodes"] or []):
                 if n and "number" in n:
-                    items["%s#%s" % (repo, n["number"])] = dict(n, repo=repo,
-                                                                is_pr="reviews" in n)
+                    out.setdefault("%s#%s" % (repo, n["number"]), dict(
+                        n, repo=repo, alias="r%d_%d" % (i, int(n["number"]))))
         for i, up in enumerate(sp["upstream"]):
             for n in data["u%d" % i]["nodes"] or []:
                 if n and "number" in n:
-                    items["%s#%s" % (up["repo"], n["number"])] = dict(n, repo=up["repo"],
-                                                                      is_pr="reviews" in n)
-        return items
-    except (ValueError, KeyError, TypeError):
+                    out.setdefault("%s#%s" % (up["repo"], n["number"]), dict(
+                        n, repo=up["repo"], alias="u%d_%d" % (i, int(n["number"]))))
+    except (KeyError, TypeError, ValueError):
         return None
+    return out
+
+
+def moved(probed, state):
+    """The keys to fetch: new to the state, or whose `updatedAt` or state differs from the one
+    stored when it was last judged. A state with no `updated` map (written before the probe
+    existed) has every item moved, once."""
+    updated = (state or {}).get("updated") or {}
+    states = (state or {}).get("states") or {}
+    return sorted(k for k, p in probed.items()
+                  if updated.get(k) is None or updated.get(k) != p.get("updatedAt")
+                  or states.get(k) != p.get("state"))
+
+
+def look(sp, runner=None, state=None):
+    """(items, failed) for one poll, or None when GitHub could not be read.
+
+    The probe lists every watched item; only those `moved` against `state` are fetched, in one
+    more document, and returned as {"repo#n": item}. `failed` is {"repo#n": why} for each moved
+    item the fetch did not return: it is not judged, so its stored `updatedAt` stays and it is
+    fetched again next poll. No moved item asks nothing more of GitHub."""
+    if runner is None:
+        runner = gh_runner()
+        if runner is None:
+            return None
+    probed = probe(sp, runner)
+    if probed is None:
+        return None
+    keys = moved(probed, state)
+    if not keys:
+        return {}, {}
+    data, errors = _answer(runner, fetch_query(probed, keys))
+    if not data:
+        why = "fetch unreadable" + (": %s" % _errors_text(errors) if errors else "")
+        return {}, {k: why for k in keys}
+    items, failed = {}, {}
+    for key in keys:
+        n = (data.get(probed[key]["alias"]) or {}).get("issueOrPullRequest") \
+            if isinstance(data.get(probed[key]["alias"]), dict) else None
+        if not isinstance(n, dict) or "number" not in n:
+            failed[key] = "fetch returned no item" + (
+                ": %s" % _errors_text(errors) if errors else "")
+            continue
+        items[key] = dict(n, repo=probed[key]["repo"], is_pr="reviews" in n)
+    return items, failed
+
+
+def _errors_text(errors):
+    try:
+        return "; ".join(str(e.get("message") or e) for e in errors)[:200]
+    except (AttributeError, TypeError):
+        return str(errors)[:200]
+
+
+def settled(items, now_ts):
+    """{"repo#n": updatedAt} to store for the items judged: None for one updated within
+    SETTLE_SEC of `now_ts` (or with no readable stamp), so it is fetched once more next poll."""
+    import calendar
+    out = {}
+    for key, it in items.items():
+        stamp = it.get("updatedAt")
+        try:
+            at = calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
+        except (TypeError, ValueError):
+            at = None
+        out[key] = stamp if at is not None and now_ts - at >= SETTLE_SEC else None
+    return out
 
 
 def _who(node):
@@ -345,15 +454,22 @@ def snapshot(items):
     return ids, {k: it.get("state") for k, it in items.items()}
 
 
-def poll(sp, state, items, log=None, transcript=None):
-    """(wake_text or None, new_state). `items` is one look's result; None means could not look.
-    Every event judged is appended to `log`, when given, as a decision record. `transcript` is
-    the session's, read only when a state changed, for evidence the change was its own."""
+def poll(sp, state, items, log=None, transcript=None, failed=None, now_ts=None):
+    """(wake_text or None, new_state). `items` is the items one look fetched; None means could
+    not look. An item not in `items` is not judged and keeps what is stored for it. Every event
+    judged is appended to `log`, when given, as a decision record, and so is each item in
+    `failed` (key -> why), whose stored `updatedAt` is left alone so the next poll fetches it
+    again. `transcript` is the session's, read only when a state changed, for evidence the
+    change was its own. `now_ts` dates the `updatedAt` stored (`settled`)."""
     from . import ownstate
     if items is None:
         return None, None
     log = [] if log is None else log
     seen, states = set(state["events"]), dict(state["states"])
+    for key in sorted(failed or {}):
+        log.append({"item": key, "event": "fetch", "author": "?", "verdict": "fetch-failed",
+                    "reason": "moved, but %s: not judged, fetched again next poll"
+                              % failed[key]})
     lines, own, untrusted = [], 0, False
     found = None    # the transcript's state-changing calls, read on the first state change
 
@@ -406,10 +522,12 @@ def poll(sp, state, items, log=None, transcript=None):
             decide(key, "before-window", "?", "older-than-window",
                    "all %d comments read are new, so any earlier ones were never seen" % LAST)
     ids, new_states = snapshot(items)
-    new_state = {"events": sorted(seen | ids)[-5000:], "states": {**states, **new_states}}
+    new_state = {"events": sorted(seen | ids)[-5000:], "states": {**states, **new_states},
+                 "updated": {**(state.get("updated") or {}),
+                             **settled(items, time.time() if now_ts is None else now_ts)}}
     if not lines:
         return None, new_state
-    head = "GitHub activity (%d item(s) watched): %d new" % (len(items), len(lines))
+    head = "GitHub activity (%d item(s) changed): %d new" % (len(items), len(lines))
     if own:
         head += ", %d of my own (not shown)" % own
     text = [head, ""] + lines
@@ -559,10 +677,9 @@ def first_wait(sp, state, now_ts):
 
     The host ends a pending waker when a turn starts, so every event that arrived during a turn
     waited a full `poll_sec` after it, measured at 180 s on a consumer. Looking whenever a waker
-    starts would cost a query per turn-end instead: a one-repo, one-upstream watch costs 14
-    GraphQL points, so an hour of 30-second turns would spend a third of the 5,000 the machine
-    shares, against 168 at one look per 300 s. Counting from the last look keeps it at one per
-    `poll_sec`, however often turns end. A state with no stamp, or one from the future, is never
+    starts would cost a look per turn-end instead, and the GraphQL points the machine shares are
+    spent per look. Counting from the last look keeps it at one per `poll_sec`, however often
+    turns end. A state with no stamp, or one from the future, is never
     read as recent: the first waits nothing, the second the whole interval."""
     try:
         age = now_ts - float(state.get("looked_at"))
@@ -613,12 +730,16 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, runner=None, transcrip
             return host_gone(cfg, host, "github-waker", "at start", now())
     state = load_state(cfg)
     if state is None:
-        items = look(sp, runner)
-        if items is None:
+        looked = look(sp, runner)
+        # A seed with any item unfetched is no seed: that item would ring as NEW next poll,
+        # backlog and all. Nothing is stored, as for a look that could not be read at all.
+        if looked is None or looked[1]:
             return (1, "could not look at GitHub (not the same as nothing new)") if once else \
                 (0, "")
+        items = looked[0]
         ids, states = snapshot(items)
-        state = {"events": sorted(ids), "states": states, "looked_at": now()}
+        state = {"events": sorted(ids), "states": states, "updated": settled(items, now()),
+                 "looked_at": now()}
         save_state(cfg, state)
         log_decisions(cfg, seeded(items), now())
     # Every turn-end starts a looping waker, and one that has not fired keeps running for its
@@ -646,13 +767,14 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, runner=None, transcrip
                 return host_gone(cfg, host, "github-waker", "before a cover ring", now(), owner)
             if text:
                 return 2, _ring_cover(cfg, now(), text, host, started)
-        items = look(sp, runner)
+        looked = look(sp, runner, _current(cfg, state))
+        items, failed = looked if looked is not None else (None, None)
         # Compare against the state ON DISK, under a lock: another waker may have recorded this
         # same event since we last looked, and the first to record it is the only one to ring.
         with file_lock(_state_path(cfg)):
             state = _current(cfg, state)
             judged = []
-            wake, new_state = poll(sp, state, items, judged, transcript)
+            wake, new_state = poll(sp, state, items, judged, transcript, failed, now())
             if wake and not once and gone(host):
                 # The look found something to ring, and nobody is left to hear it. Recording it
                 # as seen would hide it from the session that resumes: leave the state alone.
@@ -678,6 +800,9 @@ def run(cfg, once=False, sleep=time.sleep, now=time.time, runner=None, transcrip
         if once:
             return ((1, "could not look at GitHub (not the same as nothing new)")
                     if new_state is None else
+                    (1, "could not fetch %d moved item(s): %s (not the same as nothing new; "
+                        "fetched again next look)" % (len(failed), ", ".join(sorted(failed))))
+                    if failed else
                     (0, "nothing new across %d watched item(s)" % len(state["states"])))
         if now() >= deadline:
             return 0, ""
