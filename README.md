@@ -86,6 +86,12 @@ against that sha:
 `unknown`; `dirty` is null when nothing looked; `refs` is null when nothing recorded them. It exits
 0 whenever it can answer, `unknown` included.
 
+`./.showrunner/bin/showrunner guide` lists every verb with what it is for, when to use it and one
+example; `guide <verb>` adds its flags, and `guide --json` prints the same as one object,
+`{"schema": 1, "version": <sha or null>, "verbs": [{"verb", "purpose", "when", "example", "flags":
+[{"flag", "help", "default"}]}]}`. `purpose` and `flags` are read from the parser, so they match
+`--help`. It reads no config and writes nothing. See [Which verb fits?](llms.txt).
+
 ### Upgrading
 
 ```bash

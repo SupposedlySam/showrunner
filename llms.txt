@@ -1725,6 +1725,32 @@ Everything else in showrunner talks to one interface and never learns which it g
 records no liveness on a claim, so `reap` cannot work against it and says so rather than reporting
 "nothing is stale".
 
+## Which verb fits?
+
+```
+showrunner guide              # every verb: what it is for, when to use it, one example
+showrunner guide lock         # one verb, or every sub-verb of a group, with its flags
+showrunner guide --json       # the same as one object, for a tool to build on
+```
+
+Each entry is a verb a shell types, so a group's sub-verbs are entries of their own (`lock run`,
+`role claim`) and the group itself is not. `purpose` is the verb's `--help` line and `flags` are
+the options and positionals its parser declares, both read from the parser at run time, so they
+cannot disagree with `--help`. `when` and `example` are written next to each verb's parser, and a
+test fails when any verb lacks either or when an example does not parse. `guide` reads no config
+and writes nothing, so it answers outside an install and outside a repo.
+
+```json
+{"schema": 1, "version": "<40-hex or null>",
+ "verbs": [{"verb": "lock run", "purpose": "...", "when": "...",
+            "example": "showrunner lock run ...",
+            "flags": [{"flag": "--holder", "help": null, "default": null}]}]}
+```
+
+`version` is the commit `--version --json` reports as `sha`, null when no commit names the code.
+A positional appears as `<name>`; `help` is null where the parser gives none; `default` is the
+parser's default, null when it has none. A verb `guide` does not know exits 64.
+
 ## Which code am I running?
 
 ```
