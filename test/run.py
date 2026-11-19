@@ -17867,7 +17867,13 @@ def test_gc_does_not_count_spawns_own_provisioning_as_work():
 
     # A change that lands AFTER classification still holds the tree: asked directly, with a row
     # classified while the tree held only provisioning.
-    row = next(t for t in campaign.reclaimable(cfg, g)[0] if t["crawler"] == p1["crawler"])
+    # A DEFAULT, so a `reclaimable` mutant that drops P1 fails here by assertion instead of
+    # crashing the group with StopIteration and taking every assertion below down unreported.
+    row = next((t for t in campaign.reclaimable(cfg, g)[0] if t["crawler"] == p1["crawler"]), None)
+    ok("P1, merged and holding only provisioning, is still classified reclaimable after the merges",
+       row is not None, p1["crawler"])
+    if row is None:
+        return
 
     def late_change(rel, mode):
         """(gone, why, still_there) for a write made after classification. FAILS rather than
@@ -18362,6 +18368,228 @@ def test_resume_restarts_a_crawler_in_its_own_tree():
                        cwd=cfg.root, stdin=subprocess.DEVNULL)
     ok("a Crawler spawned without --launch has no session, and resume refuses rather than "
        "inventing one", q.returncode == 3 and "no recorded session" in q.stderr, q.stderr[-300:])
+
+
+def test_gc_online_proves_a_squash_merged_pr_no_leaf_holds():
+    group("`gc --online` reclaims the leaves of a squash-merged PR whose head no leaf holds, only on "
+          "all three proofs, and fails closed saying why; offline it makes no call (#116)")
+    if not have("git"):
+        skip("the gc --online group", "git is not installed")
+        return
+    sr = os.path.join(ROOT, "bin", "showrunner")
+    url = "https://github.com/acme/widget.git"
+
+    def commit(tree, name, text, msg):
+        with open(os.path.join(tree, name), "w") as fh:
+            fh.write(text)
+        sh(["git", "add", "-A"], tree)
+        sh(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", msg], tree)
+
+    def rev(tree, ref):
+        return sh(["git", "rev-parse", ref], tree).stdout.strip()
+
+    # THE REPORTED SHAPE. A GitHub-named remote whose fetches go to a local bare repo, so the
+    # suite never touches the network: `insteadOf` rewrites the transport, and gc reads the URL
+    # from config, which keeps the GitHub name.
+    cfg = make_repo()
+    bare = os.path.join(tmpdir("pr-bare"), "widget.git")
+    sh(["git", "init", "-q", "--bare", bare], cfg.root)
+    sh(["git", "config", "url.%s.insteadOf" % bare, url], cfg.root)
+    sh(["git", "remote", "add", "origin", url], cfg.root)
+    sh(["git", "push", "-q", "-u", "origin", "main"], cfg.root)
+    sh(["git", "remote", "set-head", "origin", "main"], cfg.root)
+    g = new_graph(cfg)
+
+    def leaf(lid):
+        rec = worktree.spawn(cfg, g.show(g.add("leaf " + lid, leaf_id=lid)), actor=lid)
+        campaign.record_spawn(cfg, rec)
+        return rec, cfg.abspath(rec["worktree"])
+
+    # A and B push to one PR branch, B stacked on A. S sits under A and was pushed nowhere. D
+    # diverged from A and tracks the same PR branch. U is unrelated and unpushed.
+    a, a_wt = leaf("pa1")
+    commit(a_wt, "x.txt", "v1\n", "a")
+    sh(["git", "push", "-q", "-u", "origin", "%s:pr-1" % a["branch"]], a_wt)
+    s, s_wt = leaf("ps1")
+    sh(["git", "reset", "-q", "--hard", a["branch"]], s_wt)
+    sh(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty",
+        "-m", "s"], s_wt)
+    sh(["git", "reset", "-q", "--hard", "HEAD~1"], s_wt)     # S's tip is A's: an ancestor of A
+    b, b_wt = leaf("pb1")
+    sh(["git", "reset", "-q", "--hard", a["branch"]], b_wt)
+    commit(b_wt, "x.txt", "v2\n", "b")
+    sh(["git", "push", "-q", "-u", "origin", "%s:pr-1" % b["branch"]], b_wt)
+    d, d_wt = leaf("pd1")
+    sh(["git", "reset", "-q", "--hard", a["branch"]], d_wt)
+    commit(d_wt, "d.txt", "only on d\n", "d's own")
+    sh(["git", "config", "branch.%s.remote" % d["branch"], "origin"], cfg.root)
+    sh(["git", "config", "branch.%s.merge" % d["branch"], "refs/heads/pr-1"], cfg.root)
+    u, u_wt = leaf("pu1")
+    commit(u_wt, "u.txt", "u\n", "u")
+    # The FINAL head is pushed from elsewhere, so no leaf holds it; GitHub squash-merges, keeps
+    # refs/pull/1/head, and deletes the branch.
+    other = os.path.join(tmpdir("pr-other"), "w")
+    sh(["git", "clone", "-q", bare, other], cfg.root)
+    sh(["git", "checkout", "-q", "pr-1"], other)
+    commit(other, "x.txt", "v3\n", "final")
+    head = rev(other, "HEAD")
+    sh(["git", "push", "-q", "origin", "pr-1", "pr-1:refs/pull/1/head"], other)
+    sh(["git", "checkout", "-q", "main"], other)
+    sh(["git", "merge", "--squash", "-q", "pr-1"], other)
+    sh(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "PR #1 (squash)"],
+       other)
+    merge = rev(other, "HEAD")
+    sh(["git", "push", "-q", "origin", "main", ":pr-1"], other)
+    sh(["git", "fetch", "-q", "--prune", "origin"], cfg.root)
+    eq("the premise: the final head is NOT in this clone", sh(
+        ["git", "cat-file", "-e", head + "^{commit}"], cfg.root, check=False).returncode != 0, True)
+
+    stub_dir = tmpdir("pr-gh")
+    log = os.path.join(stub_dir, "calls")
+    answer = os.path.join(stub_dir, "answer.json")
+    stub = os.path.join(stub_dir, "gh")
+    with open(stub, "w") as fh:
+        fh.write("#!/bin/sh\necho \"$*\" >> '%s'\n"
+                 "if [ -f '%s.fail' ]; then echo 'HTTP 401: Bad credentials' >&2; exit 1; fi\n"
+                 "case \"$*\" in *head=acme:pr-1*) cat '%s' ;; *) echo '[]' ;; esac\n"
+                 % (log, answer, answer))
+    os.chmod(stub, 0o755)
+
+    def answer_with(**pr):
+        p = {"number": 1, "merged_at": "2026-11-01T00:00:00Z", "merge_commit_sha": merge,
+             "head": {"ref": "pr-1", "sha": head}}
+        p.update(pr)
+        with open(answer, "w") as fh:
+            json.dump([p], fh)
+
+    def gc(*extra, gh=stub):
+        if os.path.exists(log):
+            os.remove(log)
+        env = dict(os.environ, SHOWRUNNER_GH=gh)
+        p = subprocess.run([sys.executable, sr, "gc"] + list(extra), capture_output=True,
+                           text=True, cwd=cfg.root, env=env, stdin=subprocess.DEVNULL)
+        calls = open(log).read().splitlines() if os.path.exists(log) else []
+        rows = {}
+        for line in (p.stdout + p.stderr).splitlines():
+            for r in (a, s, b, d, u):
+                if r["crawler"] in line:
+                    rows[r["crawler"]] = line
+        return p, rows, calls
+
+    def held(rows, r):
+        return "HELD" in rows.get(r["crawler"], "")
+
+    def taken(rows, r):
+        return "would remove" in rows.get(r["crawler"], "") or "removed" in rows.get(
+            r["crawler"], "")
+
+    answer_with()
+    # ---- OFFLINE: no call at all, and the hint where the upstream is pruned as gone.
+    p, rows, calls = gc()
+    eq("without --online gc makes NO gh call — the recording stub saw nothing", calls, [])
+    ok("...and every PR leaf is HELD offline", all(held(rows, r) for r in (a, b, d)), rows)
+    ok("a held tree whose upstream is pruned as gone says 'possibly squash-merged; re-run with "
+       "--online'", "possibly squash-merged; re-run with --online" in rows.get(a["crawler"], "")
+       and "origin/pr-1" in rows.get(a["crawler"], ""), rows.get(a["crawler"]))
+    ok("...and so does the stacked leaf that pushed to the same PR branch",
+       "possibly squash-merged; re-run with --online" in rows.get(b["crawler"], ""),
+       rows.get(b["crawler"]))
+    ok("...and the hint, asked directly, names the gone upstream",
+       "origin/pr-1 is gone" in campaign._gone_hint(cfg, a["branch"]),
+       campaign._gone_hint(cfg, a["branch"]))
+    ok("...but a tree with NO upstream keeps today's reason, with no hint",
+       held(rows, u) and "possibly squash-merged" not in rows.get(u["crawler"], ""),
+       rows.get(u["crawler"]))
+    eq("the hint reads no network: no gh call, and the final head is still not fetched",
+       sh(["git", "cat-file", "-e", head + "^{commit}"], cfg.root, check=False).returncode != 0,
+       True)
+
+    # ---- FAIL CLOSED. Each says why, and none reads as "not merged".
+    p, rows, calls = gc("--online", gh=os.path.join(stub_dir, "no-such-gh"))
+    ok("gh ABSENT holds every PR leaf and says gh is not installed",
+       all(held(rows, r) and "gh is not installed" in rows[r["crawler"]] for r in (a, b)), rows)
+    open(answer + ".fail", "w").close()
+    p, rows, calls = gc("--online")
+    os.remove(answer + ".fail")
+    ok("gh FAILING (not authenticated) holds them, quoting gh's error, as UNKNOWN",
+       all(held(rows, r) and "gh api failed" in rows[r["crawler"]] and "Bad credentials"
+           in rows[r["crawler"]] and "UNKNOWN" in rows[r["crawler"]] for r in (a, b)), rows)
+    sh(["git", "config", "remote.origin.url", "https://gitlab.com/acme/widget.git"], cfg.root)
+    p, rows, calls = gc("--online")
+    sh(["git", "config", "remote.origin.url", url], cfg.root)
+    ok("a remote NOT ON GITHUB holds them and says so, and asks gh nothing",
+       all(held(rows, r) and "not on GitHub" in rows[r["crawler"]] for r in (a, b))
+       and calls == [], (rows, calls))
+    answer_with(merged_at=None)
+    p, rows, calls = gc("--online")
+    ok("a PR closed WITHOUT merging holds them",
+       all(held(rows, r) and "closed without merging" in rows[r["crawler"]] for r in (a, b)), rows)
+    answer_with(merge_commit_sha=rev(cfg.root, d["branch"]))
+    p, rows, calls = gc("--online")
+    ok("a merge commit NOT REACHABLE from the base holds them — GitHub's 'merged' is not enough",
+       all(held(rows, r) and "not reachable from origin/main" in rows[r["crawler"]]
+           for r in (a, b)), rows)
+    ok("...and nothing is offered for removal on that PR — not even the leaf stacked under it",
+       not any(taken(rows, r) for r in (a, b, s)), rows)
+    prev_gh = os.environ.get("SHOWRUNNER_GH")
+    os.environ["SHOWRUNNER_GH"] = stub
+    try:
+        take_nb, _held_nb = campaign.reclaimable(cfg, g, base="origin/main", online=True)
+    finally:
+        if prev_gh is None:
+            os.environ.pop("SHOWRUNNER_GH", None)
+        else:
+            os.environ["SHOWRUNNER_GH"] = prev_gh
+    eq("...and `reclaimable` itself marks none of them PR-proved", sorted(
+        t["crawler"] for t in take_nb if t["crawler"] in (a["crawler"], b["crawler"],
+                                                          s["crawler"])), [])
+    sh(["git", "update-ref", "-d", "refs/pull/1/head"], bare)
+    answer_with()
+    p, rows, calls = gc("--online")
+    ok("a head that CANNOT BE FETCHED holds them, naming refs/pull/1/head",
+       all(held(rows, r) and "could not be fetched from refs/pull/1/head" in rows[r["crawler"]]
+           for r in (a, b)), rows)
+    sh(["git", "update-ref", "refs/pull/1/head", head], bare)
+
+    # ---- THE PROOF.
+    p, rows, calls = gc("--online")
+    ok("--online RECLAIMS the early and the stacked leaf of the squash-merged PR",
+       taken(rows, a) and taken(rows, b), (rows, p.stderr[-400:]))
+    line = rows.get(b["crawler"], "")
+    ok("...and the reclaim line names the PR and both SHAs", "PR #1" in line and head[:12] in line
+       and merge[:12] in line, line)
+    eq("ONE call for the PR branch the three leaves share, not one per leaf",
+       len([c for c in calls if "head=acme:pr-1" in c]), 1)
+    ok("a leaf whose tip is NOT an ancestor of the head stays HELD, saying so",
+       held(rows, d) and "not an ancestor of PR #1's head" in rows[d["crawler"]], rows)
+    ok("a leaf pushed nowhere, under a PR-PROVED leaf, reclaims through it (the leaf rule still "
+       "anchors on PR evidence)", taken(rows, s) and "PR #1" in rows.get(s["crawler"], ""), rows)
+    ok("...while an unrelated unpushed leaf stays HELD", held(rows, u)
+       and "no closed PR has head" in rows[u["crawler"]], rows.get(u["crawler"]))
+    p, rows, calls = gc("--online", "--apply")
+    ok("`gc --online --apply` removes the proved trees", not os.path.isdir(a_wt)
+       and not os.path.isdir(b_wt), p.stdout + p.stderr)
+    ok("...and the diverged tree is still on disk, its own commit intact",
+       os.path.isfile(os.path.join(d_wt, "d.txt")), p.stdout + p.stderr)
+    # A dirty tree is never asked about: no call is spent on a tree held for another reason.
+    # FAILS rather than raises when an accepting mutant already removed D's tree.
+    if not os.path.isdir(d_wt):
+        ok("the diverged tree is still there to make dirty", False, d_wt)
+        return
+    with open(os.path.join(d_wt, "wip.txt"), "w") as fh:
+        fh.write("wip\n")
+    p, rows, calls = gc("--online")
+    ok("a DIRTY tree is held for its changes and costs no gh call", held(rows, d)
+       and "uncommitted" in rows[d["crawler"]]
+       and not [c for c in calls if "head=acme:pr-1" in c], (rows, calls))
+    # COMPANIONS, asked directly: which findings would gc --online spend a call on.
+    found = {f.get("crawler"): f for f in campaign.reconcile(cfg, g, "origin/main")}
+    eq("a DIRTY tree is not a PR candidate", bool(campaign._held_only_unintegrated(
+        cfg, found.get(d["crawler"]) or {})), False)
+    eq("a tree already REMOVED is not a PR candidate", bool(campaign._held_only_unintegrated(
+        cfg, found.get(a["crawler"]) or {})), False)
+    eq("...while a clean, unintegrated, present tree is one", bool(
+        campaign._held_only_unintegrated(cfg, found.get(u["crawler"]) or {})), True)
 
 
 def test_gc_judges_where_work_lands():
@@ -22345,7 +22573,7 @@ def test_never_integrated_leaves_do_not_collide():
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_report_verbs_write_nothing, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_state_change_the_agent_made_itself_does_not_ring, test_an_issue_closed_by_my_own_merge_or_push_does_not_ring, test_the_github_waker_stamps_every_invocation, test_doctor_and_waker_show_state_the_effective_watch, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_a_waker_whose_host_is_gone_stops, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_the_scratch_excuse_reads_game_loops_key_list, test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_gc_judges_where_work_lands, test_a_launched_crawler_runs_as_its_own_tree, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_report_verbs_write_nothing, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_a_state_change_the_agent_made_itself_does_not_ring, test_an_issue_closed_by_my_own_merge_or_push_does_not_ring, test_the_github_waker_stamps_every_invocation, test_doctor_and_waker_show_state_the_effective_watch, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_a_waker_whose_host_is_gone_stops, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_the_scratch_excuse_reads_game_loops_key_list, test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_gc_judges_where_work_lands, test_gc_online_proves_a_squash_merged_pr_no_leaf_holds, test_a_launched_crawler_runs_as_its_own_tree, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

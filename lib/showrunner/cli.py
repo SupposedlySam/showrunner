@@ -2482,8 +2482,11 @@ def _report_reclaim(take, held, applied, failed=()):
     for r in held:
         eprint("  %sHELD%s %-22s %s" % (YEL, OFF, r["crawler"] or "?", r["why"]))
     for r in take:
-        print("  %s %-22s %s (%s)" % ("removed" if applied else "would remove",
-                                      r["crawler"] or "?", r["worktree"], _human(r["bytes"])))
+        # THE EVIDENCE IS PRINTED, not only computed: a tree reclaimed on a PR GitHub reported is a
+        # different claim from one merged by ancestry, and the operator reads this line, not the row.
+        print("  %s %-22s %s (%s)%s" % ("removed" if applied else "would remove",
+                                        r["crawler"] or "?", r["worktree"], _human(r["bytes"]),
+                                        " — %s" % r["why"] if r.get("why") else ""))
     if take:
         print("  %s %d tree(s), %s%s" % ("reclaimed" if applied else "would reclaim",
                                          len(take), _human(total),
@@ -2529,7 +2532,8 @@ def cmd_gc(args):
     if getattr(args, "idle", None):
         return _gc_idle(cfg, args)
     base, how, caveat = campaign.gc_base(cfg, args.base)
-    take, held = campaign.reclaimable(cfg, _graph(cfg), base=base, caveat=caveat)
+    take, held = campaign.reclaimable(cfg, _graph(cfg), base=base, caveat=caveat,
+                                      online=bool(getattr(args, "online", False)))
     print("%sWorktree reclaim%s%s" % (BOLD, OFF, "" if args.apply else " (dry run — use --apply)"))
     # SAY WHICH BASE, EVERY RUN (#116): a HELD list judged against the wrong ref reads exactly like
     # unintegrated work, and the operator cannot tell the two apart from the rows.
@@ -4837,6 +4841,10 @@ def build_parser():
     s.add_argument("--base", help="the ref to judge integration against; defaults to the "
                                    "remote's default branch (origin/HEAD), else HEAD, and says which")
     s.add_argument("--apply", action="store_true", help="actually remove them")
+    s.add_argument("--online", action="store_true",
+                   help="also ask GitHub (via gh) whether a held tree's branch was a merged PR: "
+                        "reclaimed only when the PR merged, its merge commit is in the base, and "
+                        "the tip is an ancestor of its head; without this gc makes no network call")
     s.add_argument("--idle", metavar="DURATION",
                    help="instead: EVERY registered worktree unused for this long (90m, 24h, 2d), "
                         "campaign or not — archived (patch, untracked files, pinned HEAD) before "

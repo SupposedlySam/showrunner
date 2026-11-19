@@ -266,7 +266,8 @@ TARGETS = [
     # working-looking behaviour dies invisibly, which is why this needs a mutant.
     ("worktrees whose work has landed", "campaign.reclaimable", "lib/showrunner/campaign.py",
      r"(def reclaimable\([^)]*\):\n)",
-     "    return [], []\ndef _neutered_reclaimable(cfg, graph, base='HEAD', caveat=''):\n"),
+     "    return [], []\ndef _neutered_reclaimable(cfg, graph, base='HEAD', caveat='', "
+     "online=False):\n"),
     # #116. Answering HEAD with nothing to say restores the reported state exactly: a feature
     # branch checked out in the main checkout, and every tree judged against it reads "not
     # integrated anywhere" — 10 HELD, 3 of them integrated, 7 GB — with no line naming the base.
@@ -283,6 +284,40 @@ TARGETS = [
      "lib/showrunner/campaign.py",
      r"(def _integrated_via_leaf\(cfg, findings\):\n)",
      "    return None\ndef _neutered_integrated_via_leaf(cfg, findings):\n"),
+    # #116, `gc --online`. Marking nothing restores the reported state: four trees of a
+    # squash-merged PR whose head no leaf holds stay HELD as "not in origin/main".
+    ("a held tree proved by its merged PR", "prproof.prove", "lib/showrunner/prproof.py",
+     r"(def prove\(cfg, findings, base\):\n)",
+     "    return None\ndef _neutered_prove(cfg, findings, base):\n"),
+    # NOT STUBS — each drops one of the three proofs and accepts. Only a control that must stay
+    # HELD can kill these: a tree reclaimed on GitHub's word alone, or on a PR it is not part of.
+    ("a PR merge commit the base does not carry", "prproof._judge", "lib/showrunner/prproof.py",
+     r"(        merge = p\.get\(\"merge_commit_sha\"\) or \"\"\n)",
+     "        base = merge or base\n"),
+    ("a tip that is not an ancestor of the PR head", "prproof._judge",
+     "lib/showrunner/prproof.py",
+     r"(        rc = git\(\[\"merge-base\", \"--is-ancestor\", tip, head\], cwd=cfg\.root\)\[0\]\n)",
+     "        rc = 0\n"),
+    # No gh found: every PR leaf stays HELD as "gh is not installed" and nothing is reclaimed.
+    ("locating gh for gc --online", "prproof.gh_bin", "lib/showrunner/prproof.py",
+     r"(def gh_bin\(\):\n)",
+     "    return None\ndef _neutered_gh_bin():\n"),
+    # No upstream read: leaves that pushed to a differently named PR branch are looked up by
+    # their own branch name, find no PR, and the offline [gone] hint is never printed.
+    ("a branch's upstream PR ref", "prproof.upstream", "lib/showrunner/prproof.py",
+     r"(def upstream\(cfg, branch\):\n)",
+     "    return None, None, False\ndef _neutered_upstream(cfg, branch):\n"),
+    # Asking about every tree spends a gh call on a dirty or live one, which is held anyway.
+    ("which trees gc --online asks GitHub about", "campaign._held_only_unintegrated",
+     "lib/showrunner/campaign.py",
+     r"(def _held_only_unintegrated\(cfg, f\):\n)",
+     "    return True\ndef _neutered_held_only_unintegrated(cfg, f):\n"),
+    # Answering "" restores the pre-hint reason: a squash-merged PR's leaves read as work nobody
+    # picked up, with nothing saying --online would settle it.
+    ("the offline possibly-squash-merged hint", "campaign._gone_hint",
+     "lib/showrunner/campaign.py",
+     r"(def _gone_hint\(cfg, branch\):\n)",
+     "    return ''\ndef _neutered_gone_hint(cfg, branch):\n"),
     # Answering (True, "") always restores the reported state exactly: every tree `reclaimable`
     # chose is reported removed, the byte total is printed, `gc --apply` exits 0, and every one
     # of them is still on disk. The report is the only thing anybody reads, so nothing errors.

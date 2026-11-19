@@ -493,7 +493,7 @@ def tree_bytes(path):
     return None if failed else total
 
 
-def reclaimable(cfg, graph, base="HEAD", caveat=""):
+def reclaimable(cfg, graph, base="HEAD", caveat="", online=False):
     """Worktrees that are provably redundant, and — separately — every one held back and why.
 
     NOTHING EVER REMOVED A TREE (#75). `spawn` makes one per leaf, `integrate` leaves it,
@@ -521,10 +521,19 @@ def reclaimable(cfg, graph, base="HEAD", caveat=""):
     Returns (reclaimable, held_back). BOTH, because a gc that lists only what it will remove
     invites the reading that everything else is gone already — and the held-back list is where
     a dirty tree carrying real work announces itself.
+
+    `online` adds a fourth kind of integration evidence, a merged PR on GitHub (prproof.py). It is
+    asked only about trees that nothing else would hold, so a dirty or live tree spends no call.
     """
     take, held = [], []
     findings = reconcile(cfg, graph, base)
     _integrated_via_leaf(cfg, findings)
+    if online:
+        from . import prproof
+        prproof.prove(cfg, [f for f in findings if _held_only_unintegrated(cfg, f)], base)
+        # A PR-proved leaf is an anchor in its own right: an earlier leaf stacked under it, pushed
+        # nowhere, is integrated through it exactly as through a merged leaf.
+        _integrated_via_leaf(cfg, findings)
     for f in findings:
         if not f.get("worktree_exists"):
             continue
@@ -558,7 +567,8 @@ def reclaimable(cfg, graph, base="HEAD", caveat=""):
                           "unreadable answer must not license a delete. If this persists, `gc` "
                           "is holding everything for a reason you can fix: check `git "
                           "for-each-ref --contains` works in that tree")
-        elif not (f.get("merged") or f.get("content_in_base") or f.get("integrated_via")):
+        elif not (f.get("merged") or f.get("content_in_base") or f.get("integrated_via")
+                  or f.get("integrated_pr")):
             # THE WORDING WAS FALSE FOR EVERY BRANCH-BACKED TREE, and the reporter was right to
             # say so: refs live in the SHARED store, so removing a worktree never removes its
             # branch, and the tree is not "the only remaining copy" of anything committed. A
@@ -571,17 +581,25 @@ def reclaimable(cfg, graph, base="HEAD", caveat=""):
                           "picked this work up" % (base, base))
             if caveat:
                 row["why"] += " — %s" % caveat
+            if online:
+                row["why"] += " — online: %s" % (f.get("pr_why") or "no PR was looked up")
+            else:
+                hint = _gone_hint(cfg, f.get("branch"))
+                if hint:
+                    row["why"] += " — %s" % hint
         else:
             # SAY WHICH ANSWER MADE IT REDUNDANT. A squash-merge is reclaimed on a different
             # fact from an ancestry merge, and an operator reading a deletion should be able to
             # tell them apart without re-deriving it.
-            via = f.get("integrated_via")
+            via, pr = f.get("integrated_via"), f.get("integrated_pr")
             row["why"] = ("merged into %s" % base if f.get("merged") else
                           "%s already carries every byte this branch changed (squash-merge)"
                           % base if f.get("content_in_base") else
+                          _pr_line(pr, base) if pr else
                           "its tip is an ancestor of %s's branch %s, which is %s"
                           % (via["crawler"] or "?", via["branch"],
                              "merged into %s" % base if via.get("merged") else
+                             _pr_line(via["pr"], base) if via.get("pr") else
                              "carried byte-for-byte by %s (squash-merge)" % base))
             take.append(row)
             continue
@@ -599,18 +617,19 @@ def _integrated_via_leaf(cfg, findings):
     commit on them is a commit on the integrated branch.
 
     LEAF TO LEAF, NO NETWORK. The other end must be a branch this pass already judged integrated
-    on its OWN evidence (`merged` or `content_in_base` True), never on this rule, so the judgment
-    cannot chain off itself. A merged PR's head that no leaf holds is not consulted: reading PR
-    state needs `gh`, and `gc` must answer offline. Such a tree stays HELD, which is the safe side.
+    on its OWN evidence (`merged`, `content_in_base` True, or a merged PR `gc --online` proved),
+    never on this rule, so the judgment cannot chain off itself. A merged PR's head that no leaf
+    holds is consulted only under `--online` (prproof.py); offline such a tree stays HELD.
 
     An ancestry query that fails answers nothing, and nothing is marked: a failed read never
     licenses a delete.
     """
     anchors = [f for f in findings
                if f.get("branch") and f.get("branch_exists")
-               and (f.get("merged") or f.get("content_in_base") is True)]
+               and (f.get("merged") or f.get("content_in_base") is True or f.get("integrated_pr"))]
     for f in findings:
-        if f.get("merged") or f.get("content_in_base") or not f.get("branch_exists"):
+        if (f.get("merged") or f.get("content_in_base") or f.get("integrated_via")
+                or f.get("integrated_pr") or not f.get("branch_exists")):
             continue
         for a in anchors:
             if a["branch"] == f.get("branch"):
@@ -618,8 +637,34 @@ def _integrated_via_leaf(cfg, findings):
             rc, _, _ = git(["merge-base", "--is-ancestor", f["branch"], a["branch"]], cwd=cfg.root)
             if rc == 0:
                 f["integrated_via"] = {"crawler": a.get("crawler"), "branch": a["branch"],
-                                       "merged": bool(a.get("merged"))}
+                                       "merged": bool(a.get("merged")),
+                                       "pr": a.get("integrated_pr")}
                 break
+
+
+def _held_only_unintegrated(cfg, f):
+    """Would `reclaimable` hold this finding for no reason but not being integrated?"""
+    return (f.get("worktree_exists") and not f.get("alive") and not f.get("orphans")
+            and f.get("tree") == "clean"
+            and not (f.get("merged") or f.get("content_in_base") or f.get("integrated_via"))
+            and head_in_no_ref(cfg, cfg.abspath(f.get("worktree"))) is False)
+
+
+def _pr_line(pr, base):
+    return ("squash-merged as PR #%s (head %s, merge %s in %s), and its tip %s is an ancestor of "
+            "that head" % (pr["number"], pr["head"][:12], pr["merge"][:12], base, pr["tip"][:12]))
+
+
+def _gone_hint(cfg, branch):
+    """The offline hint: the branch's upstream is pruned as gone, so it may be a squash-merged PR."""
+    if not branch:
+        return ""
+    from . import prproof
+    remote, ref, gone = prproof.upstream(cfg, branch)
+    if not gone:
+        return ""
+    return ("its upstream %s/%s is gone, so it is possibly squash-merged; re-run with --online"
+            % (remote, ref))
 
 
 def remove_reclaimed(cfg, row):

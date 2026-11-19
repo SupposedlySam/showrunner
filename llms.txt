@@ -356,7 +356,10 @@ showrunner gc                        # remove worktrees whose branch is MERGED a
                                      # (squash), OR the tip is an ancestor of another leaf's
                                      # branch integrated on one of those two (the early leaves of
                                      # a squashed PR). The reclaim line names the rule. No PR
-                                     # state, no network. A pre-fingerprint tree's settings.json
+                                     # state, no network: a HELD tree whose upstream is pruned
+                                     # `[gone]` says "possibly squash-merged; re-run with --online"
+                                     # (shown only after a `fetch --prune`). A pre-fingerprint
+                                     # tree's settings.json
                                      # is compared as parsed JSON: added hooks the main checkout
                                      # registers (either layer), plus a statusLine HEAD lacked that
                                      # matches a main layer (the harness installer's), are not work
@@ -368,6 +371,16 @@ showrunner gc                        # remove worktrees whose branch is MERGED a
                                      # that is still on disk, prints FAILED with the reason, is
                                      # left out of the total, and `gc --apply` exits 1. `integrate`
                                      # removes the same way and prints the same FAILED line
+showrunner gc --online               # also asks GitHub (gh) about a tree held ONLY for not being
+                                     # integrated: one call per head ref (the upstream branch,
+                                     # else the branch name). INTEGRATED when the PR is merged AND
+                                     # its merge commit is reachable from the base AND the tip is
+                                     # an ancestor of its head (fetched from refs/pull/<n>/head if
+                                     # missing). Owner/repo from the base remote's configured URL.
+                                     # FAILS CLOSED, saying which: gh missing or failing, remote
+                                     # not GitHub, head unfetchable, ancestry false. A PR-proved
+                                     # leaf anchors the leaf-ancestor rule too. The reclaim line
+                                     # names the PR number and its head and merge SHAs
 showrunner gc --idle 24h             # EVERY registered worktree unused that long — campaign or not,
                                      # merged or not, dirty or not. KEPT, with the reason: locked,
                                      # `--keep <tree>`, a live Crawler, an in-progress claim, a held
