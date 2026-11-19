@@ -14148,6 +14148,182 @@ def test_retracted_doc_claims():
        quoted, [flat(p)[:40] for p, _, _, _ in retracted])
 
 
+def test_guide():
+    group("`guide` is read off the parser: every verb has a when and an example that parses, the "
+          "JSON holds its shape, and it reads no config and writes nothing")
+    import contextlib
+    import io
+    import shlex
+    from showrunner import cli
+    parser, _ = cli.parse(["guide"])
+
+    # THE VERB LIST IS DERIVED HERE TOO, by a walk that shares no code with `_verb_nodes`, so a
+    # producer that drops verbs cannot also shrink the list it is checked against.
+    def leaves(node, path=()):
+        found = {}
+        for a in node._actions:
+            if isinstance(a, argparse._SubParsersAction):
+                for name, sub in a.choices.items():
+                    if any(isinstance(x, argparse._SubParsersAction) for x in sub._actions):
+                        found.update(leaves(sub, path + (name,)))
+                    else:
+                        found[" ".join(path + (name,))] = sub
+        return found
+
+    walked = leaves(parser)
+    ok("the independent walk finds nested sub-verbs, so the comparison below is not vacuous",
+       {"lock run", "role claim", "campaign use", "dispatch guard"} <= set(walked),
+       sorted(walked))
+    entries = cli.guide_entries(parser)
+    eq("the guide lists exactly the verbs the parser registers, sub-verbs included",
+       sorted(e["verb"] for e in entries), sorted(walked))
+
+    # ONE ASSERTION PER PROPERTY, naming the verbs that break it, so a verb added later fails
+    # under the property it missed rather than adding lines that say the same thing again.
+    spelled = re.compile(r"\b(two|three|four|five|six|seven|eight|nine|ten|dozen|hundred)\b", re.I)
+    bad = {k: [] for k in ("purpose", "when", "example", "sentence", "names", "parses", "flags")}
+    errors = {}
+    for e in entries:
+        v = e["verb"]
+        if not e["purpose"] or e["purpose"] != next(c.help for c in _choices_for(parser, v)):
+            bad["purpose"].append(v)
+        when = e["when"] if isinstance(e["when"], str) else ""
+        if not when.strip():
+            bad["when"].append(v)
+        if not (isinstance(e["example"], str) and e["example"].strip()):
+            bad["example"].append(v)
+        if not (when.endswith(".") and ". " not in when and not re.search(r"\d", when)
+                and not spelled.search(when)):
+            bad["sentence"].append(v)
+        words = shlex.split(e["example"] or "")
+        if words[:1] != ["showrunner"] or words[1:1 + len(v.split())] != v.split():
+            bad["names"].append(v)
+        err = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err):
+                _p, args = cli.parse(words[1:])
+            if getattr(args, "func", None) is None:
+                bad["parses"].append(v)
+        except SystemExit:
+            bad["parses"].append(v)
+            errors[v] = err.getvalue().strip().splitlines()[-1:]
+        declared = {o for a in walked[v]._actions for o in a.option_strings} - {"-h", "--help"}
+        listed = {o for f in e["flags"] for o in f["flag"].split(", ") if o.startswith("-")}
+        if listed != declared:
+            bad["flags"].append(v)
+    eq("every verb's purpose is the parser's own help, and none is empty", bad["purpose"], [])
+    eq("every verb has a non-empty `when`", bad["when"], [])
+    eq("every verb has a non-empty `example`", bad["example"], [])
+    eq("every `when` is one sentence with no numbers in it", bad["sentence"], [])
+    eq("every example invokes the verb it documents", bad["names"], [])
+    ok("every example parses with the real parser, trailing command and prose twins included "
+       "(parsed, never run)", not bad["parses"], errors)
+    eq("every verb's flags in the guide are the flags its parser declares", bad["flags"], [])
+
+    # PAIRED: the completeness check above fires on a verb that skipped `_guide`, and the parse
+    # check fires on an example that does not parse. Without these the loop's PASSes could be
+    # what a guide that never read the field returns.
+    bare = argparse.ArgumentParser(prog="x")
+    bare.add_subparsers().add_parser("nothing", help="h")
+    got = cli.guide_entries(bare)
+    eq("a verb registered without `_guide` comes back with no `when` and no `example`",
+       [(g["verb"], g["when"], g["example"]) for g in got], [("nothing", None, None)])
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            cli.parse(["close"])
+        refused = False
+    except SystemExit:
+        refused = True
+    ok("an example missing a required positional does fail the parse", refused)
+
+    # Defaults, so a guide that lost the verb or its flags FAILS here rather than raising.
+    close = next((e for e in entries if e["verb"] == "close"), {"flags": []})
+    ok("flags come from the parser after the prose twins are added (`close --reason-file`)",
+       any(f["flag"] == "--reason-file" for f in close["flags"]), close["flags"])
+    watch = next((e for e in entries if e["verb"] == "watch"), {"flags": []})
+    eq("a flag's default is the parser's default (`watch --interval`)",
+       next((f["default"] for f in watch["flags"] if f["flag"] == "--interval"), None), 0.5)
+
+    exe = os.path.join(ROOT, "bin", "showrunner")
+    home = tmpdir("guide-home")
+    repo = tmpdir("guide-repo")
+    sh(["git", "init", "-q", "-b", "main"], repo)
+    bare_dir = tmpdir("guide-norepo")
+
+    def tree(root):
+        out = {}
+        for d, dirs, files in os.walk(root):
+            for n in dirs + files:
+                pth = os.path.join(d, n)
+                st = os.lstat(pth)
+                out[os.path.relpath(pth, root)] = (st.st_mtime_ns, st.st_size)
+        return out
+
+    probe = tmpdir("guide-probe")
+    seen = tree(probe)
+    with open(os.path.join(probe, "written"), "w") as fh:
+        fh.write("x")
+    ok("the tree comparison below does see a file being written", tree(probe) != seen)
+
+    env = dict(os.environ, HOME=home, XDG_CONFIG_HOME=os.path.join(home, ".config"),
+               NO_COLOR="1")
+    env.pop("SHOWRUNNER_CAMPAIGN", None)
+    for where, label in ((repo, "a git repo with no .showrunner/"), (bare_dir, "no repo at all")):
+        before, home_before = tree(where), tree(home)
+        p = subprocess.run([sys.executable, exe, "guide", "--json"], cwd=where,
+                           capture_output=True, text=True, env=env, stdin=subprocess.DEVNULL)
+        eq("`guide --json` exits 0 in %s" % label, p.returncode, 0)
+        ok("...and writes nothing there (no .showrunner/ appears)",
+           tree(where) == before and not os.path.exists(os.path.join(where, ".showrunner")),
+           sorted(set(tree(where)) ^ set(before)))
+        eq("...and nothing under HOME", tree(home), home_before)
+        try:
+            doc = json.loads(p.stdout)
+        except ValueError:
+            doc = {}
+        eq("...and its top level is exactly schema, version, verbs", sorted(doc),
+           ["schema", "verbs", "version"])
+        eq("...schema is %d" % cli.GUIDE_SCHEMA, doc.get("schema"), cli.GUIDE_SCHEMA)
+        ok("...version is the commit, or null when none names this code",
+           doc.get("version") is None or re.fullmatch(r"[0-9a-f]{40}", str(doc.get("version"))),
+           doc.get("version"))
+        verbs = doc.get("verbs") or []
+        eq("...and lists every verb the parser registers", sorted(v.get("verb") for v in verbs),
+           sorted(walked))
+        shape = [v["verb"] for v in verbs
+                 if sorted(v) != ["example", "flags", "purpose", "verb", "when"]
+                 or not all(isinstance(v[k], str) for k in ("verb", "purpose", "when", "example"))
+                 or not isinstance(v["flags"], list)
+                 or any(sorted(f) != ["default", "flag", "help"] or not isinstance(f["flag"], str)
+                        or not isinstance(f["help"], (str, type(None))) for f in v["flags"])]
+        eq("...and every entry holds the stated shape", shape, [])
+
+    p = subprocess.run([sys.executable, exe, "guide", "lock"], cwd=bare_dir, capture_output=True,
+                       text=True, env=env)
+    shown = re.findall(r"^(\S.*?) — ", p.stdout, re.M)
+    eq("`guide lock` shows the lock sub-verbs and nothing else", sorted(shown),
+       sorted(v for v in walked if v.startswith("lock ")))
+    p = subprocess.run([sys.executable, exe, "guide"], cwd=bare_dir, capture_output=True,
+                       text=True, env=env)
+    eq("`guide` with no verb shows every verb in its readable form",
+       sorted(re.findall(r"^(\S.*?) — ", p.stdout, re.M)), sorted(walked))
+    p = subprocess.run([sys.executable, exe, "guide", "no-such-verb"], cwd=bare_dir,
+                       capture_output=True, text=True, env=env)
+    eq("`guide <unknown verb>` refuses with the usage code rather than printing nothing",
+       p.returncode, 64)
+
+
+def _choices_for(parser, verb):
+    """The subparser pseudo-actions that carry `verb`'s help, walked by name."""
+    node, words = parser, verb.split()
+    for i, w in enumerate(words):
+        subs = next(a for a in node._actions if isinstance(a, argparse._SubParsersAction))
+        if i == len(words) - 1:
+            return [c for c in subs._choices_actions if c.dest == w]
+        node = subs.choices[w]
+    return []
+
+
 def test_cli():
     group("CLI surface")
     exe = os.path.join(ROOT, "bin", "showrunner")
@@ -14345,6 +14521,10 @@ def test_cli():
         for block in re.findall(r"```[a-z]*\n(.*?)```", text, re.S):
             spans.extend(block.splitlines())
         spans.extend(re.findall(r"^ {2,}(%s [a-z].*)$" % BINARY, text, re.M))
+        # A `guide` example is a whole command with no backticks, because `guide` prints it
+        # bare; it is the last argument of `_guide(parser, when, example)`.
+        spans.extend(re.findall(r'_guide\(\w+,\s*"[^"]*",\s*"(%s [a-z][^"]*)"\)' % BINARY,
+                                text))
         return spans
 
     def commands_in(text):
@@ -14579,6 +14759,13 @@ def test_cli():
     ok("...including when the string is SPLIT across source lines, because Python joins them "
        "and the reader gets one command — the span patterns all stopped at a newline the "
        "interpreter never sees", ("worktree", "takeover") in split, sorted(split))
+    guide_ghost = set(commands_in('_guide(s, "Use it.",\n'
+                                  '       "showrunner worktree teleport --now")'))
+    ok("a `guide` example, printed bare, is extracted by its place in `_guide(...)`, and a ghost "
+       "written there is CAUGHT", ("worktree", "teleport") in guide_ghost, sorted(guide_ghost))
+    ok("...while the same command bare in any other string is not, so the rule is the position "
+       "and not every string that opens with the binary",
+       not list(commands_in('print("showrunner worktree teleport --now")')))
     ok("...and joining does not invent commands out of ordinary adjacent strings",
        not list(commands_in('    "nothing here"\n    "or here"')))
     # Pure observation passes by finding nothing, which is also what a broken regex returns.
@@ -14604,9 +14791,16 @@ def test_cli():
         with open(os.path.join(ROOT, rel_path)) as fh:
             src = fh.read()
         visible = set()
-        for node in ast.walk(ast.parse(src)):
+        tree = ast.parse(src)
+        # The scan reads a `_guide` example by its position in the call, so the same position
+        # makes it visible here.
+        examples = set(id(n.args[2]) for n in ast.walk(tree)
+                       if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "_guide"
+                       and len(n.args) == 3)
+        for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                seen_here = set(w for w, _ in commands_in(node.value))
+                seen_here = set(w for w, _ in commands_in(
+                    '_guide(s, "", "%s")' % node.value if id(node) in examples else node.value))
                 # NOT preceded by a path character. A rendered ABSOLUTE PATH whose directory
                 # happens to be named showrunner (this repo's own checkout, for one) is a file
                 # location, not the CLI being invoked -- `/dev/showrunner/.../llm_chat join`
@@ -22638,7 +22832,7 @@ def main():
                test_live_claims_are_visible_before_a_commit,
                test_hook_verbs_never_fail_open_in_silence,
                test_retracted_doc_claims,
-               test_cli, test_optional):
+               test_guide, test_cli, test_optional):
         try:
             fn()
         except (Exception, SystemExit) as exc:  # noqa: BLE001

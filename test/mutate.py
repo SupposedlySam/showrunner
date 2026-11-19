@@ -1630,6 +1630,19 @@ TARGETS = [
     ("shared-state audit", "worktree.audit_shared", "lib/showrunner/worktree.py",
      r"(def audit_shared\(cfg\):\n)",
      "    return []\ndef _neutered_audit(cfg):\n"),
+    # [] is a guide that lists no verbs, and a consumer that falls back to `--help` when the guide
+    # says nothing would read that as "this tool has no guide" rather than as a broken one.
+    ("the guide's entries", "cli.guide_entries", "lib/showrunner/cli.py",
+     r"(def guide_entries\(parser\):\n)",
+     "    return []\ndef _neutered_guide_entries(parser):\n"),
+    ("every verb the guide walks", "cli._verb_nodes", "lib/showrunner/cli.py",
+     r"(def _verb_nodes\(parser\):\n)",
+     "    return []\ndef _neutered_verb_nodes(parser):\n"),
+    # [] is a verb that takes no flags, which is the honest answer for `doctor` and so is exactly
+    # the answer a reader would not question for any other verb.
+    ("a verb's flags in the guide", "cli._guide_flags", "lib/showrunner/cli.py",
+     r"(def _guide_flags\(node\):\n)",
+     "    return []\ndef _neutered_guide_flags(node):\n"),
 ]
 
 
