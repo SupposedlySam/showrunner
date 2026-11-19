@@ -342,8 +342,19 @@ reason. It also notes when the local branch of that name is ahead of the remote,
 things holds. Its commits are ancestors of the base. Or the base already carries every byte it
 changed (a squash-merge). Or its tip is an ancestor of another leaf's branch that is integrated on
 one of the first two grounds, which covers the early leaves of a squash-merged PR whose later
-commits rewrote the same lines. The reclaim line names which rule applied. PR state is never read,
-so `gc` works offline, and an early leaf with no integrated leaf above it stays held. A tree spawned
+commits rewrote the same lines. The reclaim line names which rule applied. Without `--online`, `gc`
+reads no PR state and makes no network call. A tree it holds whose branch's upstream git has pruned
+as `[gone]` says "possibly squash-merged; re-run with --online". `[gone]` appears only after a fetch
+with `--prune`, so a clone that never prunes shows no hint. `gc --online` adds a fourth ground for a
+tree held only for not being integrated: a merged GitHub PR. It looks the PR up by head ref, which is
+the branch's upstream branch when one is configured and its own name otherwise. That is one `gh` call
+per head ref, shared by every leaf that pushed to it. The tree counts as integrated only when the PR is
+merged, its merge commit is reachable from the base, and the tip is an ancestor of the PR's head. The
+head is fetched from `refs/pull/<n>/head` when the deleted branch left no local copy. The owner and
+repo come from the base remote's configured URL. If any step cannot be done, the tree stays held and
+its reason says which step: `gh` is missing or fails, the remote is not on GitHub, the head cannot be
+fetched, or the ancestry check fails. A PR-proved leaf also anchors the third ground, so a leaf stacked
+under it reclaims through it. The reclaim line names the PR and its head and merge SHAs. A tree spawned
 before fingerprints existed is checked structurally. Its `.claude/settings.json` is compared as
 parsed JSON, so whitespace and a lost trailing newline are not changes. It may add only hook
 commands registered in the main checkout's `settings.json` or `settings.local.json`, plus a
