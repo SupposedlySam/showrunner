@@ -968,6 +968,18 @@ TARGETS = [
     ("the waker's configured watch", "waker.spec", "lib/showrunner/waker.py",
      r"(def spec\(cfg\):\n)",
      "    return None\ndef _neutered_spec(cfg):\n"),
+    # Answering True trusts every author, which is the wrong ACCEPT this file usually cannot see:
+    # a stranger's comment loses "a claim to verify" and reads as a brief. Swept in that
+    # direction on purpose, since a constant False would only add a caveat.
+    ("who the waker trusts", "waker.trusted", "lib/showrunner/waker.py",
+     r"(def trusted\(sp, login\):\n)",
+     "    return True\ndef _neutered_trusted(sp, login):\n"),
+    # A retired key dropped from `ignored` is a config that still names `trusted_names` and is
+    # told nothing: its author believes names are trusted, and nothing says they are not.
+    ("a retired waker key reported as ignored", "waker.watch",
+     "lib/showrunner/waker.py",
+     r"(                for k, why in sorted\(RETIRED_KEYS.items\(\)\) if w.get\(k\)\]\n)",
+     "    ignored = [i for i in ignored if i[\"key\"][len(\"waker.\"):] not in RETIRED_KEYS]\n"),
     ("a probe, then one fetch of what moved", "waker.look", "lib/showrunner/waker.py",
      r"(def look\(sp, runner=None, state=None\):\n)",
      "    return {}, {}\ndef _neutered_look(sp, runner=None, state=None):\n"),

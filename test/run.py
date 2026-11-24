@@ -10418,16 +10418,17 @@ def test_issue_waker():
     w = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(w)
 
-    # THE TRUST RULE IS THE SECURITY-RELEVANT HALF, and it is matched on BOTH login and display
-    # name on purpose: a work bot posts under its own login carrying its owner's name, and either
-    # half identifies it. Everything else is a claim from a stranger — read, verified, not built
-    # from. Both directions asserted, because a rule that trusts everyone and one that trusts the
+    # THE TRUST RULE IS THE SECURITY-RELEVANT HALF, and it is matched on login ONLY: a display
+    # name is whatever its owner typed, so a stranger can carry a trusted person's name.
+    # Everything else is a claim from a stranger — read, verified, not built from. Both directions asserted, because a rule that trusts everyone and one that trusts the
     # right people are the same observation from inside a single passing case.
     for author, want, why in (
             ({"login": "SupposedlySam", "name": "Jonah Walker"}, True, "the maintainer"),
             ({"login": "mrgnhnt96", "name": "Morgan Hunt"}, True, "a named collaborator by login"),
-            ({"login": "some-work-bot", "name": "Morgan Hunt"}, True,
-             "a work BOT posting under a trusted NAME — the login is unknown and the name is not"),
+            ({"login": "some-work-bot", "name": "Morgan Hunt"}, False,
+             "an unknown login carrying a trusted person's DISPLAY NAME"),
+            ({"login": "mrgnhnt96", "name": "Somebody Else"}, True,
+             "a trusted login under a different display name"),
             ({"login": "SUPPOSEDLYSAM", "name": None}, True, "a login differing only in case"),
             ({"login": "driveby", "name": "A Stranger"}, False, "a stranger"),
             ({"login": "morganhunt-fan", "name": "Not Morgan"}, False,
@@ -20104,17 +20105,20 @@ def test_the_github_waker_rings_and_stays_quiet():
     eq("unconfigured, there is nothing to watch", W.spec(cfg), None)
     eq("...and the hook exits 0 at once", W.run(cfg, once=True)[0], 0)
     cfg.data["waker"] = {"repos": ["me/fork"], "upstream": [{"repo": "them/up", "author": "me"}],
-                         "trusted_logins": ["me", "boss"], "trusted_names": ["The Boss"],
+                         "trusted_logins": ["me", "Boss"], "trusted_names": ["The Boss"],
                          "signature": "— 🤖 x owner agent"}
     sp = W.spec(cfg)
-    ok("a configured watch is read whole: repos, upstream, both trust sets, the signature",
+    ok("a configured watch is read whole: repos, upstream, the trusted logins lowercased, the "
+       "signature",
        sp and sp["repos"] == ["me/fork"] and sp["upstream"][0]["author"] == "me"
-       and sp["trusted_logins"] == {"me", "boss"} and sp["trusted_names"] == {"the boss"}
+       and sp["trusted_logins"] == {"me", "boss"}
        and sp["signature"] == "— 🤖 x owner agent", sp)
+    ok("...and a retired `trusted_names` is not part of what the waker acts on",
+       sp is not None and "trusted_names" not in sp, sp)
     # The rest is measured against the intended spec even if `spec` itself is broken, so one
     # neutered function fails its own assertions rather than crashing every later one.
     sp = sp or {"repos": ["me/fork"], "upstream": [{"repo": "them/up", "author": "me"}],
-                "trusted_logins": {"me", "boss"}, "trusted_names": {"the boss"},
+                "trusted_logins": {"me", "boss"},
                 "signature": "— 🤖 x owner agent", "poll_sec": 300, "budget_sec": 1800}
     q = W.query(sp)
     ok("ONE query names every repo and the upstream author search",
@@ -20179,11 +20183,29 @@ def test_the_github_waker_rings_and_stays_quiet():
     wake, _ = W.poll(sp, st, {**seen_world, **stranger})
     ok("a stranger's PR rings, marked as a claim to verify",
        wake and "rando" in wake and "claim to verify" in wake, wake)
+    # TRUST IS BY LOGIN ONLY. A display name is whatever its owner typed, so a stranger who
+    # names themself after a trusted person must still read as a stranger.
     named = {"me/fork#9": dict(pr(9, who="bot"), repo="me/fork", is_pr=True,
                                author={"login": "bot", "name": "The Boss"})}
     wake, _ = W.poll(sp, st, {**seen_world, **named})
-    ok("...but an author trusted by DISPLAY NAME is not flagged",
-       wake and "claim to verify" not in wake, wake)
+    ok("an author carrying a formerly trusted DISPLAY NAME under an unknown login is a claim to "
+       "verify",
+       wake and "claim to verify" in wake, wake)
+    named_c = {"them/up#5": dict(seen_world["them/up#5"], comments={"nodes": [
+        c(1, "boss", "old"), c(990, "bot", "trust me", name="The Boss")]})}
+    wake, _ = W.poll(sp, st, {**seen_world, **named_c})
+    ok("...and so is a COMMENT by one", wake and "trust me" in wake and "claim to verify" in wake,
+       wake)
+    for login, name in (("Boss", ""), ("BOSS", "Somebody Else"), ("boss", None)):
+        boss = {"me/fork#10": dict(pr(10, who=login), repo="me/fork", is_pr=True,
+                                   author={"login": login, "name": name})}
+        wake, _ = W.poll(sp, st, {**seen_world, **boss})
+        ok("a trusted LOGIN (%r, name %r) is trusted whatever its name, ignoring case"
+           % (login, name), wake and "#10" in wake and "claim to verify" not in wake, wake)
+    for login, name, want in (("boss", "", True), ("BoSs", "x", True), ("bot", "The Boss", False),
+                              ("bot", "the boss", False), ("bossy", "Boss", False),
+                              (None, None, False), ("", "boss", False)):
+        eq("trusted(login=%r, name=%r)" % (login, name), W.trusted(sp, login), want)
     eq("a failed look returns no new state — never 'nothing new'", W.poll(sp, st, None),
        (None, None))
     for label, text, want in (
@@ -20348,7 +20370,8 @@ def test_the_github_waker_rings_and_stays_quiet():
     # A WAKER STARTED AT A TURN END LOOKS BEFORE IT SLEEPS. MEASURED on a consumer: a PR opened
     # during a long turn, whose waker the host had ended, rang a full poll_sec after the turn,
     # because the next waker slept before its first look.
-    poll = W.spec(cfg)["poll_sec"]
+    # `or {}`: a neutered `spec` must fail these assertions, not crash the group past them.
+    poll = (W.spec(cfg) or {}).get("poll_sec", 300)
 
     def started_with(looked_at, answer, sleeps, looks, before=None):
         st = W.load_state(cfg) or {"events": [], "states": {}}
@@ -20730,7 +20753,9 @@ def test_the_waker_probes_then_fetches_only_what_moved():
     eq("...so an item a poll read moments after it moved is FETCHED AGAIN by the next poll, "
        "which rings nothing it already rang", (W.run(cfg, once=True, runner=gh(just_now))[0],
                                               fetched(sent)), (0, ["fetch"]))
-    os.remove(os.path.join(cfg.state_dir, "waker-state.json"))
+    # Absent when a broken waker never wrote it; the next assertions then fail rather than crash.
+    if os.path.exists(os.path.join(cfg.state_dir, "waker-state.json")):
+        os.remove(os.path.join(cfg.state_dir, "waker-state.json"))
     W.run(cfg, once=True, runner=gh(just_now))
     eq("...and a SEED holds back the same way: no stamp for the item that moved just now, the "
        "stamp for the one that did not", (W.load_state(cfg) or {}).get("updated"),
@@ -21534,12 +21559,11 @@ def test_doctor_and_waker_show_state_the_effective_watch():
     eq("THE SCHEMA, pinned: these keys and no others, so a host parsing it breaks loudly here "
        "rather than quietly in SRCode",
        sorted(wt), sorted(["schema", "state", "inert_reason", "repos", "upstream", "signature",
-                           "signature_note", "trusted_logins", "trusted_names", "poll_sec",
+                           "signature_note", "trusted_logins", "poll_sec",
                            "budget_sec", "ignored", "source", "state_dir", "decisions_log"]))
     eq("...with a versioned schema name", wt.get("schema"), "showrunner.waker-watch/1")
     eq("...and `source` names every watch key", sorted(wt.get("source") or {}),
-       sorted(["repos", "upstream", "signature", "trusted_logins", "trusted_names", "poll_sec",
-               "budget_sec"]))
+       sorted(["repos", "upstream", "signature", "trusted_logins", "poll_sec", "budget_sec"]))
     eq("unconfigured, the waker is INERT and says why",
        (wt.get("state"), wt.get("inert_reason"), wt.get("repos"), wt.get("poll_sec")),
        ("inert", "no waker config", [], None))
@@ -21564,7 +21588,7 @@ def test_doctor_and_waker_show_state_the_effective_watch():
     eq("every value names the layer that won the merge — local over project, user beneath both, "
        "built-in where nothing set it",
        src, {"repos": "local", "upstream": "user", "signature": "project",
-             "trusted_logins": "project", "trusted_names": "user", "poll_sec": "default",
+             "trusted_logins": "project", "poll_sec": "default",
              "budget_sec": "user"})
     eq("...and the file it came from, absolutely",
        os.path.realpath(((wt.get("source") or {}).get("repos") or {}).get("path") or "-"),
@@ -21576,11 +21600,14 @@ def test_doctor_and_waker_show_state_the_effective_watch():
        ("watching", ["acme/widgets"], [{"repo": "them/up", "author": "me"}], 300, 999))
     eq("the signature is shown as the waker compares it, whitespace collapsed",
        (wt.get("signature"), wt.get("signature_note")), ("— 🤖 me", None))
-    eq("trust sets as the waker matches them, lowercased",
-       (wt.get("trusted_logins"), wt.get("trusted_names")), (["boss"], ["the boss"]))
-    eq("an entry the waker drops is listed as IGNORED, not shown as watched",
+    eq("trusted logins as the waker matches them, lowercased", wt.get("trusted_logins"), ["boss"])
+    eq("an entry the waker drops is listed as IGNORED, not shown as watched, and so is the "
+       "retired `trusted_names`, which loads without failing",
        [(i.get("key"), i.get("value")) for i in wt.get("ignored") or []],
-       [("waker.repos", "not-a-repo")])
+       [("waker.repos", "not-a-repo"), ("waker.trusted_names", ["The Boss"])])
+    ok("...with the reason: names are set by anyone, trust goes by login",
+       any(i.get("key") == "waker.trusted_names" and "set by anyone" in (i.get("why") or "")
+           and "login" in (i.get("why") or "") for i in wt.get("ignored") or []), wt)
     ok("the decision log is named under the CAMPAIGN's state dir, which is where the waker "
        "writes it",
        (wt.get("decisions_log") or "").endswith(
@@ -21598,6 +21625,12 @@ def test_doctor_and_waker_show_state_the_effective_watch():
        and "signature   \"— 🤖 me\"  [project .showrunner/config.json]" in out, out[-3000:])
     ok("...and warns about the ignored entry", "waker.repos has an entry the waker IGNORES" in out,
        out[-3000:])
+    ok("...and about the retired `trusted_names`, with its reason",
+       "waker.trusted_names has an entry the waker IGNORES (display names can be set by anyone"
+       in out, out[-3000:])
+    ok("...and `waker --show` lists it as ignored in words",
+       'ignored     waker.trusted_names ["The Boss"]: display names' in
+       cli(repo, "waker", "--show")[1], cli(repo, "waker", "--show")[1])
 
     # NO SIGNATURE.
     nosig = make_repo({"waker": {"repos": ["a/b"]}})

@@ -9,8 +9,7 @@ running in the background after a turn ends and turns an exit 2 with stderr into
     "waker": {
       "repos":           ["owner/name", ...],      # every issue and PR on these
       "upstream":        [{"repo": "o/n", "author": "me"}],  # only items `author` opened there
-      "trusted_logins":  ["login", ...],
-      "trusted_names":   ["Display Name", ...],
+      "trusted_logins":  ["login", ...],                 # trust is by login, never by name
       "signature":       "— 🤖 <name> owner agent",
       "own_state_window_sec": 120,
       "poll_sec": 300, "budget_sec": 604740
@@ -140,7 +139,6 @@ def spec(cfg):
         "repos": repos,
         "upstream": upstream,
         "trusted_logins": {str(x).lower() for x in (w.get("trusted_logins") or [])},
-        "trusted_names": {str(x).lower() for x in (w.get("trusted_names") or [])},
         "signature": w.get("signature") or "",
         "own_state_window_sec": int(w.get("own_state_window_sec") or OWN_STATE_WINDOW_SEC),
         "poll_sec": int(w.get("poll_sec") or 300),
@@ -149,8 +147,13 @@ def spec(cfg):
 
 
 WATCH_SCHEMA = "showrunner.waker-watch/1"
-WATCH_KEYS = ("repos", "upstream", "signature", "trusted_logins", "trusted_names", "poll_sec",
-              "budget_sec")
+WATCH_KEYS = ("repos", "upstream", "signature", "trusted_logins", "poll_sec", "budget_sec")
+# A key the waker once read and no longer does, with why. Still loaded, never acted on, and
+# listed under `ignored` so a config that sets it is told rather than silently weaker or broken.
+RETIRED_KEYS = {
+    "trusted_names": "display names can be set by anyone; trust goes by login "
+                     "(`waker.trusted_logins`)",
+}
 NO_SIGNATURE = "none: everything rings, and the wake text says so"
 
 
@@ -172,6 +175,8 @@ def watch(cfg, source):
                 for u in (w.get("upstream") or [])
                 if not (isinstance(u, dict) and str(u.get("repo", "")).count("/") == 1
                         and u.get("author"))]
+    ignored += [{"key": "waker." + k, "value": w[k], "why": why}
+                for k, why in sorted(RETIRED_KEYS.items()) if w.get(k)]
     sources = {}
     for k in WATCH_KEYS:
         layer, path = source("waker." + k)
@@ -183,7 +188,7 @@ def watch(cfg, source):
     out = {"schema": WATCH_SCHEMA, "state": "inert" if sp is None else "watching",
            "inert_reason": "no waker config" if sp is None else None,
            "repos": [], "upstream": [], "signature": None, "signature_note": None,
-           "trusted_logins": [], "trusted_names": [], "poll_sec": None, "budget_sec": None,
+           "trusted_logins": [], "poll_sec": None, "budget_sec": None,
            "ignored": ignored, "source": sources,
            "state_dir": cfg.state_dir, "decisions_log": decisions_path(cfg)}
     if sp is not None:
@@ -193,7 +198,6 @@ def watch(cfg, source):
                                  for u in sp["upstream"]],
                     "signature": sig or None, "signature_note": None if sig else NO_SIGNATURE,
                     "trusted_logins": sorted(sp["trusted_logins"]),
-                    "trusted_names": sorted(sp["trusted_names"]),
                     "poll_sec": sp["poll_sec"], "budget_sec": sp["budget_sec"]})
     return out
 
@@ -203,22 +207,21 @@ def watch_lines(wt, shown_path=lambda p: p):
     def src(k):
         s = wt["source"][k]
         return "[%s%s]" % (s["layer"], " " + shown_path(s["path"]) if s["path"] else "")
+    ignored = ["ignored     %s %s: %s" % (i["key"], json.dumps(i["value"], ensure_ascii=False),
+                                          i["why"]) for i in wt["ignored"]]
     if wt["state"] == "inert":
         return ["inert: no waker config (no `waker.repos` or `waker.upstream` in any layer; "
-                "repos %s, upstream %s)" % (src("repos"), src("upstream"))]
+                "repos %s, upstream %s)" % (src("repos"), src("upstream"))] + ignored
     up = ", ".join("%s by %s" % (u["repo"], u["author"]) for u in wt["upstream"]) or "none"
     return [
         "repos       %s  %s" % (", ".join(wt["repos"]) or "none", src("repos")),
         "upstream    %s  %s" % (up, src("upstream")),
         "signature   %s  %s" % (json.dumps(wt["signature"], ensure_ascii=False)
                                 if wt["signature"] else wt["signature_note"], src("signature")),
-        "trusted     %d login(s) %s, %d name(s) %s" % (
-            len(wt["trusted_logins"]), src("trusted_logins"), len(wt["trusted_names"]),
-            src("trusted_names")),
+        "trusted     %d login(s) %s" % (len(wt["trusted_logins"]), src("trusted_logins")),
         "poll_sec    %d  %s" % (wt["poll_sec"], src("poll_sec")),
         "budget_sec  %d  %s" % (wt["budget_sec"], src("budget_sec")),
-    ] + ["ignored     %s %s: %s" % (i["key"], json.dumps(i["value"], ensure_ascii=False),
-                                     i["why"]) for i in wt["ignored"]]
+    ] + ignored
 
 
 _PROBE = "number state updatedAt"
@@ -444,9 +447,10 @@ def mine(sp, text):
     return judge(sp, text)[0]
 
 
-def trusted(sp, login, name):
-    return (login or "").lower() in sp["trusted_logins"] or \
-        (name or "").lower() in sp["trusted_names"]
+def trusted(sp, login):
+    """By login alone. A profile display name is whatever its owner typed, so a stranger can carry
+    a trusted person's name; it may appear in the wake text and never changes this verdict."""
+    return (login or "").lower() in sp["trusted_logins"]
 
 
 def snapshot(items):
@@ -488,7 +492,7 @@ def poll(sp, state, items, log=None, transcript=None, failed=None, now_ts=None):
                 own += 1
                 decide(key, "new", login, "own", "body " + why)
             else:
-                untrusted |= not trusted(sp, login, name)
+                untrusted |= not trusted(sp, login)
                 lines.append("  NEW %s %s by %s: %s"
                              % (kind, key, login, (it.get("title") or "")[:70]))
                 decide(key, "new", login, "rang", "new %s; body %s" % (kind, why))
@@ -514,7 +518,7 @@ def poll(sp, state, items, log=None, transcript=None, failed=None, now_ts=None):
                 own += 1
                 decide(key, eid, login, "own", what + " " + why)
                 continue
-            untrusted |= not trusted(sp, login, name)
+            untrusted |= not trusted(sp, login)
             lines.append("  %s on %s by %s: %s"
                          % (what, key, login, " ".join(text.split())[:90]))
             decide(key, eid, login, "rang", what + " " + why)

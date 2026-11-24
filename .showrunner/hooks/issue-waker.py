@@ -24,8 +24,8 @@ mechanism on this machine proved to do it.
 
 TRUST IS DECIDED HERE AND STATED IN THE WAKE, because the first thing a woken agent needs to know
 is whether it may act. A trusted author's issue is work; anyone else's is a claim from a stranger
-that gets read and verified before anything is built. Matched on BOTH login and display name — a
-work bot posts under its own login with its owner's name, and either half identifies it.
+that gets read and verified before anything is built. Matched on login ONLY: a display name is
+whatever its owner typed, so anybody can carry a trusted person's name. It is still printed.
 
 WHAT THIS CANNOT DO, stated because the failure is silent: if the harness stops honouring
 asyncRewake, the poll still runs and the wake never lands. Nothing here would notice. The symptom
@@ -40,7 +40,6 @@ import time
 
 REPO = "SupposedlySam/showrunner"
 TRUSTED_LOGINS = {"supposedlysam", "mrgnhnt96"}
-TRUSTED_NAMES = {"jonah walker", "morgan hunt"}
 # HOW THIS SESSION RECOGNISES ITS OWN WRITING. The agent comments under the maintainer's GitHub
 # account, so author is not a discriminator — the signature is the only thing that separates "I
 # wrote this" from "the person I exist to hear from wrote this". Overridable so that changing the
@@ -183,9 +182,7 @@ def _utcnow():
 
 
 def trusted(author):
-    login = (author.get("login") or "").strip().lower()
-    name = (author.get("name") or "").strip().lower()
-    return login in TRUSTED_LOGINS or name in TRUSTED_NAMES
+    return (author.get("login") or "").strip().lower() in TRUSTED_LOGINS
 
 
 def _chat_cli():
