@@ -646,7 +646,9 @@ carries — so agents posting under one account must each configure a distinct s
 none configured nothing counts as own writing and everything rings, saying why. Every decision
 (rang, own, seen, older-than-window, fetch-failed) is logged with its reason to
 `waker-decisions.jsonl` beside the waker's state, a bounded tail whose path `doctor` prints. Anything
-from outside `waker.trusted_logins`/`trusted_names` is marked as a claim to verify. It never runs
+whose author's login is not in `waker.trusted_logins` (compared ignoring case) is marked as a
+claim to verify. Trust goes by login only, because a profile display name can be set by anyone; a
+`waker.trusted_names` still in config loads, is not used, and is listed under `ignored`. It never runs
 in a Crawler's worktree, and with nothing configured it exits at once. Each turn-end starts a
 waker, so several can be alive at once; each event still rings once, because the newest waker owns
 the watch and every poll compares against the saved state under a lock. A new waker sleeps only
@@ -685,8 +687,8 @@ that look was: only a judged event is logged, so a waker watching a quiet repo w
 `waker --show --json` prints it as JSON for a host to parse. The schema is
 `showrunner.waker-watch/1`, and every key is always present: `schema`, `state`
 (`watching`|`inert`), `inert_reason`, `repos`, `upstream` (`[{repo, author}]`), `signature`,
-`signature_note`, `trusted_logins`, `trusted_names`, `poll_sec`, `budget_sec`,
-`ignored` (`[{key, value, why}]`), `source` (`{<key>: {layer, path}}` for the seven watch keys,
+`signature_note`, `trusted_logins`, `poll_sec`, `budget_sec`,
+`ignored` (`[{key, value, why}]`), `source` (`{<key>: {layer, path}}` for the six watch keys,
 layer one of `user`|`project`|`local`|`default`), `state_dir` and `decisions_log`. `--show` never
 looks at GitHub.
 

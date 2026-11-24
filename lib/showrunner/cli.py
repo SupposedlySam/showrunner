@@ -892,10 +892,10 @@ def cmd_doctor(args):
               "last layer to set a value wins):" % (GRN + "ok   " + OFF))
         for _l in _gw_lines:
             print("          %s" % _l)
-        for _i in _gw_wt["ignored"]:
-            print("  %s %s has an entry the waker IGNORES (%s): %s"
-                  % (YEL + "warn " + OFF, _i["key"], _i["why"],
-                     json.dumps(_i["value"], ensure_ascii=False)))
+    for _i in _gw_wt["ignored"]:
+        print("  %s %s has an entry the waker IGNORES (%s): %s"
+              % (YEL + "warn " + OFF, _i["key"], _i["why"],
+                 json.dumps(_i["value"], ensure_ascii=False)))
     if _gw_sp is not None:
         _gw_path = _gw.decisions_path(cfg)
         try:

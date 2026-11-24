@@ -131,7 +131,7 @@ DEFAULTS = {
     # job plus slack; a self-declared deadline with no bound silences the watchdog at will.
     "park": {"until_max_sec": 26 * 3600},
     # The GitHub waker: what to watch. Empty means the hook exits at once (see waker.py).
-    "waker": {"repos": [], "upstream": [], "trusted_logins": [], "trusted_names": [],
+    "waker": {"repos": [], "upstream": [], "trusted_logins": [],
               "signature": "", "poll_sec": 300, "budget_sec": 604740,
               "own_state_window_sec": 120},
 }
