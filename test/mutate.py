@@ -606,15 +606,37 @@ TARGETS = [
      "    return None\ndef _neutered_live_collision(*a, **k):\n"),
     ("prose-only evidence does not block when firm evidence exists", "collide.estimate",
      "lib/showrunner/collide.py",
-     r"(    blocking = \(firm if firm else grepped_bare\) - shared\n)",
+     r"(    blocking = \(firm if firm else grepped_bare \| house\) - shared\n)",
      "    blocking = all_paths - shared\n"),
+    # ARRIVED WITH BOILERPLATE PATHS (#119). Each neutered form answers in the direction a
+    # reader cannot see: every shared house path blocks again, a `--path` glob names nothing and
+    # the leaf goes blind, or a blind leaf is refused without saying why.
+    ("a prose path most briefs share is loose", "collide.estimate",
+     "lib/showrunner/collide.py",
+     r"(    house = \(prose - named\) & \(boilerplate or set\(\)\)\n)",
+     "    house = set()\n"),
+    ("which prose paths are campaign boilerplate", "collide.boilerplate_paths",
+     "lib/showrunner/collide.py",
+     r"(def boilerplate_paths\(cfg, leaves, files=None\):\n)",
+     "    return set()\ndef _neutered_boilerplate_paths(cfg, leaves, files=None):\n"),
+    ("paths a leaf names, by the evidence that named them", "collide._path_kinds",
+     "lib/showrunner/collide.py",
+     r"(def _path_kinds\(leaf, root, files\):\n)",
+     "    return set(), set(), [], []\ndef _neutered_path_kinds(leaf, root, files):\n"),
+    ("a --path glob expands against the tracked files", "collide._path_kinds",
+     "lib/showrunner/collide.py",
+     r"(_GLOB_CHARS = re\.compile\(r\"\[\*\?\\\[\]\"\)\n)",
+     "_GLOB_CHARS = re.compile(r\"(?!x)x\")\n"),
+    ("why a blind leaf is blind", "collide.blind_reasons", "lib/showrunner/collide.py",
+     r"(def blind_reasons\(est\):\n)",
+     "    return []\ndef _neutered_blind_reasons(est):\n"),
     ("backticked vs bare symbols in a brief", "collide._symbol_kinds",
      "lib/showrunner/collide.py",
      r"(def _symbol_kinds\(leaf\):\n)",
      "    return set(), set()\ndef _neutered_symbol_kinds(leaf):\n"),
     ("collisions against a LIVE Crawler", "collide.live_conflicts", "lib/showrunner/collide.py",
-     r"(def live_conflicts\(cfg, leaf, live, files=None\):\n)",
-     "    return []\ndef _neutered_live_conflicts(cfg, leaf, live, files=None):\n"),
+     r"(def live_conflicts\(cfg, leaf, live, files=None, population=None\):\n)",
+     "    return []\ndef _neutered_live_conflicts(cfg, leaf, live, files=None, population=None):\n"),
     ("a dotted key present in a config layer", "config._dotted", "lib/showrunner/config.py",
      r"(def _dotted\(data, key\):\n)",
      "    return False, None\ndef _neutered_dotted(data, key):\n"),
@@ -1443,10 +1465,10 @@ TARGETS = [
      "                     'resource': None, 'rule': None, 'why': '', 'matched': True,\n"
      "                     'ts': 0})\ndef _neutered_route(cfg, leaf):\n"),
     ("collision prediction", "collide.plan_waves", "lib/showrunner/collide.py",
-     r"(def plan_waves\(cfg, leaves, files=None\):\n)",
+     r"(def plan_waves\(cfg, leaves, files=None, population=None\):\n)",
      "    return [[l['id'] for l in leaves]], {l['id']: {'paths': set(), 'exclusive': set(),\n"
      "            'shared': set(), 'symbols': set(), 'basis': '', 'estimable': True}\n"
-     "            for l in leaves}, []\ndef _neutered_plan(cfg, leaves, files=None):\n"),
+     "            for l in leaves}, []\ndef _neutered_plan(cfg, leaves, files=None, population=None):\n"),
     # ACCEPTED AS THIN, declared rather than inflated. The integrate-refusal test STUBS
     # check_tree deliberately, to isolate integrate's decision from the detector's — so the
     # sweep correctly gives it no credit here. The two assertions that do cover it exercise

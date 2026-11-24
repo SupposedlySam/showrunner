@@ -18008,6 +18008,106 @@ def test_shared_brief_boilerplate_does_not_make_every_pair_collide():
        and set(waves[0]) == {"B1", "B2"}, waves)
 
 
+def test_boilerplate_paths_globs_and_why_blind():
+    group("a path most briefs name in prose is REPORTED, not blocking; `--path` globs expand; a "
+          "blind leaf says what it declared and why it matched nothing (#119)")
+    if not have("git"):
+        skip("the boilerplate-path group", "git is not installed")
+        return
+    # REPORTED: every brief ended `Follow .claude/builder-rules.md`, so every pair "both
+    # estimate .claude/builder-rules.md" and one Crawler ran at a time for a day. With the line
+    # reworded away, `--path 'mobile/**'` matched nothing and the leaves went blind, unexplained.
+    cfg = make_repo({}, files={
+        "README.md": "seed\n", ".claude/builder-rules.md": "house rules\n",
+        "app/a.dart": "a\n", "app/b.dart": "b\n", "app/shared.dart": "shared\n",
+        "mobile/app/manager/main.dart": "m\n", "mobile/app/other.dart": "o\n",
+        "web/site.ts": "w\n"})
+    g = new_graph(cfg)
+    house = " Follow .claude/builder-rules.md."
+    g.add("a", leaf_id="H1", labels=["backend"], body="Fix app/a.dart." + house)
+    g.add("b", leaf_id="H2", labels=["backend"], body="Fix app/b.dart." + house)
+    files = collide.tracked_files(cfg.root)
+
+    found = collide.live_conflicts(cfg, g.show("H2"), [g.show("H1")], files)
+    ok("two leaves sharing only a boilerplate PATH, with disjoint real paths, do NOT block",
+       found and not found[0]["blocks"], found)
+    ok("...and the shared path is reported as loose, naming it",
+       found and ".claude/builder-rules.md" in found[0]["loose"], found)
+    pop = [g.show("H1"), g.show("H2")]
+    est = collide.estimate(cfg, g.show("H2"), files,
+                           boilerplate=collide.boilerplate_paths(cfg, pop, files))
+    ok("...still IN the estimate, only out of what blocks",
+       ".claude/builder-rules.md" in est["paths"]
+       and ".claude/builder-rules.md" not in est["blocking"], est)
+    alone = collide.estimate(cfg, g.show("H2"), files)
+    ok("with nothing to compare against, a prose path blocks exactly as before",
+       ".claude/builder-rules.md" in alone["blocking"], sorted(alone["blocking"]))
+
+    # THE PAIRS. Without them every assertion above passes against a check that never blocks.
+    g.add("p", leaf_id="P1", labels=["backend"], paths=["app/shared.dart"], body="x." + house)
+    g.add("q", leaf_id="P2", labels=["backend"], paths=["app/shared.dart"], body="y." + house)
+    hit = collide.live_conflicts(cfg, g.show("P2"), [g.show("P1")], files)
+    ok("two leaves that DECLARE the same file with --path still block — --path is always firm",
+       hit and hit[0]["blocks"] and "app/shared.dart" in hit[0]["files"], hit)
+    g.add("m", leaf_id="M1", labels=["backend"], paths=["app/a.dart"])
+    mine = collide.live_conflicts(cfg, g.show("H1"), [g.show("M1")], files)
+    ok("a prose path only ONE leaf names is firm, and blocks against a leaf touching that file",
+       mine and mine[0]["blocks"] and "app/a.dart" in mine[0]["files"], mine)
+    many = [g.show(i) for i in ("H1", "H2", "P1", "P2", "M1")]
+    ok("...and the house line, named in prose by 4 of 5 leaves, is the one counted boilerplate",
+       collide.boilerplate_paths(cfg, many, files) == {".claude/builder-rules.md"},
+       collide.boilerplate_paths(cfg, many, files))
+    g.add("rules", leaf_id="R1", labels=["backend"], body="Edit .claude/builder-rules.md.")
+    g.add("rules too", leaf_id="R2", labels=["backend"], body="Reword .claude/builder-rules.md.")
+    both = collide.live_conflicts(cfg, g.show("R2"), [g.show("R1")], files)
+    ok("a leaf whose ONLY path is boilerplate has nothing firm left, so it still blocks on it",
+       both and both[0]["blocks"] and ".claude/builder-rules.md" in both[0]["files"], both)
+
+    # GLOBS IN --path.
+    g.add("mobile", leaf_id="G1", labels=["backend"], paths=["mobile/**"])
+    g.add("under mobile", leaf_id="G2", labels=["backend"], paths=["mobile/app/other.dart"])
+    g.add("web", leaf_id="G3", labels=["backend"], paths=["web/site.ts"])
+    glob_est = collide.estimate(cfg, g.show("G1"), files)
+    ok("`--path 'mobile/**'` expands against the tracked files, and is estimable",
+       glob_est["estimable"] and "mobile/app/manager/main.dart" in glob_est["blocking"],
+       glob_est)
+    under = collide.live_conflicts(cfg, g.show("G2"), [g.show("G1")], files)
+    ok("...blocks against a leaf touching a file under mobile/",
+       under and under[0]["blocks"] and "mobile/app/other.dart" in under[0]["files"], under)
+    eq("...and passes against a disjoint one",
+       collide.live_conflicts(cfg, g.show("G3"), [g.show("G1")], files), [])
+
+    # BLIND SAYS WHY.
+    g.add("nowhere", leaf_id="N1", labels=["backend"], paths=["nowhere/**"],
+          body="Rework mobile/app/manager.")
+    blind = collide.estimate(cfg, g.show("N1"), files)
+    ok("a glob that matches nothing leaves the leaf blind", blind["estimable"] is False, blind)
+    ok("...and the estimate carries what was declared and matched nothing, as data",
+       {"candidate": "nowhere/**", "source": "path"} in blind["unmatched"], blind["unmatched"])
+    ok("...and the directory named in prose without backticks, which never became a candidate",
+       blind["unbackticked_dirs"] == ["mobile/app/manager"], blind["unbackticked_dirs"])
+    eq("a leaf that IS estimable reports nothing unmatched from --path",
+       [u for u in glob_est["unmatched"] if u["source"] == "path"], [])
+    waves, _, notes = collide.plan_waves(cfg, [g.show("N1")], files)
+    ok("`plan` names the glob and why it matched nothing",
+       any("N1" in n and "nowhere/**" in n and "matched no tracked file" in n for n in notes),
+       notes)
+    ok("...and that a directory in prose counts only when backticked",
+       any("mobile/app/manager" in n and "backtick" in n for n in notes), notes)
+
+    exe = os.path.join(ROOT, "bin", "showrunner")
+    env = dict(os.environ, NO_COLOR="1")
+    sh(["git", "branch", "showrunner/G3"], cfg.root)
+    g.claim("G3", "briefroom", pid=os.getpid(), tree=cfg.root, session="s-live")
+    ref = subprocess.run([sys.executable, exe, "spawn", "N1", "--no-claim"], cwd=cfg.root,
+                         capture_output=True, text=True, env=env)
+    eq("`spawn` refuses the blind leaf against a live one (exit 3)", ref.returncode, 3)
+    ok("...and the refusal names the glob and why it matched nothing, not just 'blind'",
+       "nowhere/**" in ref.stderr and "matched no tracked file" in ref.stderr, ref.stderr[-600:])
+    ok("...and says a directory in prose counts only when backticked",
+       "mobile/app/manager" in ref.stderr and "backtick" in ref.stderr, ref.stderr[-600:])
+
+
 def test_a_roles_writes_are_enforced_on_bash_too():
     group("showrunner's write guard enforces a role's `writes` on the edit tools AND Bash — the "
           "heredoc route around an Edit refusal is the same write (#95)")
@@ -23181,7 +23281,7 @@ def test_never_integrated_leaves_do_not_collide():
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_report_verbs_write_nothing, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_the_waker_probes_then_fetches_only_what_moved, test_a_state_change_the_agent_made_itself_does_not_ring, test_an_issue_closed_by_my_own_merge_or_push_does_not_ring, test_the_github_waker_stamps_every_invocation, test_doctor_and_waker_show_state_the_effective_watch, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_a_waker_whose_host_is_gone_stops, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_the_scratch_excuse_reads_game_loops_key_list, test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_gc_judges_where_work_lands, test_gc_online_proves_a_squash_merged_pr_no_leaf_holds, test_a_launched_crawler_runs_as_its_own_tree, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_report_verbs_write_nothing, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_the_waker_probes_then_fetches_only_what_moved, test_a_state_change_the_agent_made_itself_does_not_ring, test_an_issue_closed_by_my_own_merge_or_push_does_not_ring, test_the_github_waker_stamps_every_invocation, test_doctor_and_waker_show_state_the_effective_watch, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_a_waker_whose_host_is_gone_stops, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_the_scratch_excuse_reads_game_loops_key_list, test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_gc_judges_where_work_lands, test_gc_online_proves_a_squash_merged_pr_no_leaf_holds, test_a_launched_crawler_runs_as_its_own_tree, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_boilerplate_paths_globs_and_why_blind, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

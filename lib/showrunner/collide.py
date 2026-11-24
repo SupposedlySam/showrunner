@@ -155,28 +155,100 @@ def _text_of(leaf):
     return "\n".join([str(leaf.get("title") or ""), "".join(out)])
 
 
-def _declared_paths(leaf, root, files):
-    """Paths the leaf names outright, kept only when they exist in the repo."""
-    found = set()
+_GLOB_CHARS = re.compile(r"[*?\[]")
+# A slash-separated word with no extension: what an author writes for a directory. `_PATHISH`
+# needs an extension, so these are never candidates unless backticked, and a blind leaf says so.
+_BARE_DIR = re.compile(r"(?<![`\w./\-])([A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]+)+)/?(?![\w`/])")
+
+
+def _resolve(cand, root, files, fileset):
+    """Tracked files one candidate names: itself, everything under a directory, or nothing."""
+    if cand in fileset:
+        return {cand}
+    # A directory named in the issue implicates everything under it.
+    if os.path.isdir(os.path.join(root, cand)):
+        prefix = cand.rstrip("/") + "/"
+        return {f for f in files if f.startswith(prefix)}
+    return set()
+
+
+def _path_kinds(leaf, root, files):
+    """(declared, prose, unmatched, unbackticked_dirs) — paths by the evidence that named them.
+
+    DECLARED is what `--path` says, globs expanded against the tracked files the way
+    `extra_globs` is: the author stating the radius, so it is always firm. PROSE is what the
+    body mentions, by `_PATHISH` or a backtick. That is weaker evidence, because a line every
+    brief shares names the same file in every brief (#119). UNMATCHED lists each candidate that
+    named no tracked file, and UNBACKTICKED_DIRS each existing directory the prose names bare,
+    which never became a candidate. Together they are why a blind leaf is blind.
+    """
     fileset = set(files)
     text = _text_of(leaf)
-    candidates = set(_PATHISH.findall(text))
+    prose_cands = set(_PATHISH.findall(text))
     for m in _BACKTICKED.findall(text):
-        candidates.add(m.strip())
+        prose_cands.add(m.strip())
+    declared, prose, unmatched = set(), set(), []
     for p in (leaf.paths_list if hasattr(leaf, "paths_list") else []):
-        candidates.add(p)
-    for cand in candidates:
+        cand = p.strip()
+        if not cand:
+            continue
+        hits = ({f for f in files if fnmatch.fnmatch(f, cand)} if _GLOB_CHARS.search(cand)
+                else _resolve(cand, root, files, fileset))
+        declared |= hits
+        if not hits:
+            unmatched.append({"candidate": cand, "source": "path"})
+    named = set()
+    for cand in prose_cands:
         cand = cand.strip().strip("`'\"(),;:")
         if not cand:
             continue
-        if cand in fileset:
-            found.add(cand)
-            continue
-        # A directory named in the issue implicates everything under it.
-        if os.path.isdir(os.path.join(root, cand)):
-            prefix = cand.rstrip("/") + "/"
-            found.update(f for f in files if f.startswith(prefix))
-    return found
+        named.add(cand.rstrip("/"))
+        hits = _resolve(cand, root, files, fileset)
+        prose |= hits
+        if not hits:
+            unmatched.append({"candidate": cand, "source": "prose"})
+    bare_dirs = sorted({d for d in (m.rstrip(".") for m in _BARE_DIR.findall(text))
+                        if d not in named and os.path.isdir(os.path.join(root, d))})
+    return declared, prose, sorted(unmatched, key=lambda u: (u["source"], u["candidate"])), \
+        bare_dirs
+
+
+def boilerplate_paths(cfg, leaves, files=None):
+    """Files that more than half of `leaves` name in PROSE, and at least two of them (#119).
+
+    A path in a line every brief carries ("Follow .claude/builder-rules.md") is a fact about
+    the campaign's house style, not about any one leaf's radius. #96 made boilerplate WORDS
+    loose; this does the same for boilerplate PATHS, by the only evidence one brief cannot
+    show: how many of its siblings say the same thing. `--path` is never counted, because a
+    declaration is the author stating the radius, however many leaves share it.
+
+    One leaf alone has nothing to compare against, so nothing is boilerplate and the estimate
+    is what it was before.
+    """
+    files = tracked_files(cfg.root) if files is None else files
+    counts = {}
+    for leaf in leaves:
+        _, prose, _, _ = _path_kinds(leaf, cfg.root, files)
+        for f in prose:
+            counts[f] = counts.get(f, 0) + 1
+    return {f for f, n in counts.items() if n >= 2 and n * 2 > len(leaves)}
+
+
+def blind_reasons(est):
+    """Why a non-estimable estimate matched nothing, one line per cause, from its data."""
+    out = []
+    for u in est.get("unmatched") or []:
+        if u["source"] == "path":
+            out.append("declared path %s matched no tracked file" % u["candidate"])
+        else:
+            out.append("the brief names %s, which is not a tracked file or directory"
+                       % u["candidate"])
+    for d in est.get("unbackticked_dirs") or []:
+        out.append("the brief names directory %s in prose; a directory in prose counts only "
+                   "when it is backticked" % d)
+    if not out:
+        out.append("it declares no --path and its brief names no path or findable symbol")
+    return out
 
 
 def _symbols(leaf):
@@ -224,11 +296,17 @@ def _grep_symbols(root, files, symbols, limit_files=4000):
     return hits
 
 
-def estimate(cfg, leaf, files=None):
-    """Return {'paths': set, 'shared': set, 'symbols': set, 'basis': str}."""
+def estimate(cfg, leaf, files=None, boilerplate=None):
+    """Return {'paths': set, 'shared': set, 'symbols': set, 'basis': str}.
+
+    `boilerplate` is `boilerplate_paths` over the leaves being compared. One leaf cannot see
+    its siblings, so the caller that holds them all passes it in.
+    """
     root = cfg.root
     files = tracked_files(root) if files is None else files
-    declared = _declared_paths(leaf, root, files)
+    named, prose, unmatched, bare_dirs = _path_kinds(leaf, root, files)
+    house = (prose - named) & (boilerplate or set())
+    declared = named | prose
     marked, bare = _symbol_kinds(leaf)
     symbols = marked | bare
     grepped_marked = _grep_symbols(root, files, marked) if marked else set()
@@ -248,8 +326,10 @@ def estimate(cfg, leaf, files=None):
     # that fires on every pair trains `--despite-live` into a reflex, which is exactly when a
     # real collision gets waved through. A leaf with NOTHING firm still blocks on its bare
     # matches, because they are all the estimate it has, and an unknown radius is not a free one.
-    firm = declared | grepped_marked | extra
-    blocking = (firm if firm else grepped_bare) - shared
+    # A path most briefs name in prose is the same kind of evidence (#119): loose, unless the leaf
+    # names it some firmer way too. `--path` is never loose.
+    firm = (declared - house) | grepped_marked | extra
+    blocking = (firm if firm else grepped_bare | house) - shared
 
     if declared and grepped:
         basis = "%d path(s) named in the issue + %d file(s) mentioning %d symbol(s)" % (
@@ -270,18 +350,26 @@ def estimate(cfg, leaf, files=None):
         "symbols": symbols,
         "basis": basis,
         "estimable": bool(all_paths),
+        # Data, not prose, so a caller can say WHY a blind leaf is blind (#119).
+        "unmatched": unmatched,
+        "unbackticked_dirs": bare_dirs,
     }
 
 
-def plan_waves(cfg, leaves, files=None):
+def plan_waves(cfg, leaves, files=None, population=None):
     """Greedy wave assignment. Returns (waves, estimates, notes).
 
     `waves` is a list of lists of leaf ids; every leaf in one wave is pairwise
     non-overlapping on its *exclusive* paths. Non-estimable leaves get a wave to
     themselves — an unknown radius cannot be shown disjoint from anything.
+
+    `population` is the set of briefs boilerplate is counted over (`boilerplate_paths`); it
+    defaults to `leaves`. A wider one, such as every leaf of the campaign, tells a house line
+    from a file two leaves really share better than the handful being placed can.
     """
     files = tracked_files(cfg.root) if files is None else files
-    estimates = {leaf["id"]: estimate(cfg, leaf, files) for leaf in leaves}
+    house = boilerplate_paths(cfg, leaves if population is None else population, files)
+    estimates = {leaf["id"]: estimate(cfg, leaf, files, house) for leaf in leaves}
     notes = []
     waves, wave_paths = [], []
     solo = []
@@ -299,10 +387,10 @@ def plan_waves(cfg, leaves, files=None):
         if not est["estimable"]:
             solo.append(leaf["id"])
             notes.append(
-                "%s cannot be parallelised: %s. Treating an unknown blast radius as "
+                "%s cannot be parallelised: %s (%s). Treating an unknown blast radius as "
                 "colliding with everything — a false collision costs one wave, a missed "
                 "one costs a merge conflict nobody is watching."
-                % (leaf["id"], est["basis"]))
+                % (leaf["id"], est["basis"], "; ".join(blind_reasons(est))))
             continue
         placed = False
         for i, taken in enumerate(wave_paths):
@@ -381,7 +469,7 @@ def live_claims(graph):
     return [l for l in claimed if l["id"] not in stale], None
 
 
-def live_conflicts(cfg, leaf, live, files=None):
+def live_conflicts(cfg, leaf, live, files=None, population=None):
     """Would starting `leaf` now put it in files a LIVE Crawler is already in?
 
     Returns a list of findings, one per live claim that collides, each with the exclusive
@@ -396,16 +484,21 @@ def live_conflicts(cfg, leaf, live, files=None):
     THIS IS AN ESTIMATE, from declared paths and grepped symbols, and every caller must print
     it as one. `overlap` measures; this guesses, and it guesses about work that has produced
     nothing measurable yet.
+
+    `population` is what boilerplate paths are counted over, as in `plan_waves`; it defaults
+    to this leaf and the live ones.
     """
     files = tracked_files(cfg.root) if files is None else files
     if never_integrated(leaf):
         return []                       # its branch never meets anything at integration
-    mine = estimate(cfg, leaf, files)
+    house = boilerplate_paths(cfg, [leaf] + list(live) if population is None else population,
+                              files)
+    mine = estimate(cfg, leaf, files, house)
     out = []
     for other in live:
         if other["id"] == leaf["id"] or never_integrated(other):
             continue
-        theirs = estimate(cfg, other, files)
+        theirs = estimate(cfg, other, files, house)
         clash = mine["blocking"] & theirs["blocking"]
         # Overlap on prose-only evidence: printed beside the decision, never a refusal (#96).
         loose = (mine["exclusive"] & theirs["exclusive"]) - clash
@@ -427,6 +520,9 @@ def live_conflicts(cfg, leaf, live, files=None):
             "shared": sorted(shared),
             "basis": theirs["basis"],
             "blind": blind,
+            # Which side is blind, and why, from the estimate's data (#119).
+            "blind_reasons": {e["leaf"]: blind_reasons(e) for e in (mine, theirs)
+                              if not e["estimable"]},
             # SHARED-ONLY IS NOT A BLOCK. Recorded so a caller can print the surface without
             # refusing over it, which is what keeps the refusal worth obeying.
             "blocks": bool(clash) or blind,

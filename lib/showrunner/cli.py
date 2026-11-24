@@ -2839,7 +2839,10 @@ def cmd_plan(args):
     headless = [l for l in ready if decisions[l["id"]]["lane"] == lanes.HEADLESS]
     serialized = [l for l in ready if decisions[l["id"]]["lane"] != lanes.HEADLESS]
 
-    waves, estimates, notes = collide.plan_waves(cfg, headless)
+    # Boilerplate paths are counted over every brief in the graph, not only the ready ones: a
+    # house line is in all of them, and a file two leaves really share is not (#119).
+    population = [l for l in g.list() if not l.is_epic]
+    waves, estimates, notes = collide.plan_waves(cfg, headless, population=population)
     print("%sheadless lane%s — %d ready leaf/leaves in %d wave(s)" % (BOLD, OFF, len(headless), len(waves)))
     for i, wave in enumerate(waves, 1):
         print("  wave %d: %s" % (i, ", ".join(wave)))
@@ -2868,7 +2871,7 @@ def cmd_plan(args):
     if live:
         files = collide.tracked_files(cfg.root)
         for leaf in headless:
-            found = collide.live_conflicts(cfg, leaf, live, files)
+            found = collide.live_conflicts(cfg, leaf, live, files, population=population)
             if found:
                 conflicts[leaf["id"]] = found
     if live:
@@ -2895,6 +2898,9 @@ def cmd_plan(args):
             if c["blind"]:
                 print("      one of the two has NO estimable blast radius — treated as "
                       "colliding with everything")
+                for who, why in sorted(c["blind_reasons"].items()):
+                    for line in why[:6]:
+                        print("        %s: %s" % (who, line))
             for f in c["shared"][:8]:
                 print("      %sshared surface, owed to serialised integration, not blocking: "
                       "%s%s" % (DIM, f, OFF))
@@ -2978,7 +2984,8 @@ def _live_collision_check(cfg, g, leaf, despite, rehearsing=False):
     live, caveat = collide.live_claims(g)
     if not live:
         return []
-    found = collide.live_conflicts(cfg, leaf, live)
+    population = [l for l in g.list() if not l.is_epic]
+    found = collide.live_conflicts(cfg, leaf, live, population=population)
     blocking = [c for c in found if c["blocks"]]
     for c in found:
         if not c["blocks"] and c["shared"]:
@@ -3002,6 +3009,9 @@ def _live_collision_check(cfg, g, leaf, despite, rehearsing=False):
                         "colliding with everything" if c["blind"] else ""))
         for f in c["files"][:8]:
             lines.append("      both estimate %s" % f)
+        for who, why in sorted(c["blind_reasons"].items()):
+            for line in why[:6]:
+                lines.append("      %s is blind: %s" % (who, line))
     detail = "\n".join(lines)
     if unmatched:
         die("--despite-live named %s, which is not colliding with %s right now.\n"
