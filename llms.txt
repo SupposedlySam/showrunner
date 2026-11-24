@@ -298,8 +298,13 @@ showrunner integrate                 # serial merge, checks re-run on each MERGE
 # configured globs — that evidence blocks. Files reached only through a bare snake_case or
 # camelCase word in its prose are printed as "prose-only overlap" and never block when the leaf
 # has anything firmer, because briefs share boilerplate and that made every pair collide. A
-# leaf with nothing firmer blocks on them, as its only estimate. `plan` groups waves the same
-# way. `showrunner spawn <leaf> --despite-live <leaf>` accepts a named collision.
+# path that most of the campaign's briefs name in PROSE (a house line naming a rules file) is
+# loose the same way; a `--path` declaration never is, and a `--path` glob ('mobile/**')
+# expands against the tracked files. A leaf with nothing firmer blocks on them, as its only
+# estimate. A leaf with NO estimate collides with everything, and the refusal and `plan` say
+# why: each declared path that matched no tracked file, and each directory named in prose
+# without backticks (a bare directory in prose is never a candidate). `plan` groups waves the
+# same way. `showrunner spawn <leaf> --despite-live <leaf>` accepts a named collision.
 #
 # A LEAF WHOSE BRANCH IS NEVER INTEGRATED — an A/B evaluation arm — cannot collide, because a
 # collision costs something only where two branches meet at merge. Mark it once:
@@ -1727,7 +1732,8 @@ back: `add` refuses an existing id, and the only exit would be to close the leaf
 proof-of-done gate on a decision that never happened. It refuses on a leaf that is not open, so it
 cannot rewrite the instructions under a Crawler already working from them. Fix the body *before*
 you spawn. `edit --path` REPLACES the leaf's paths with every one it is given; on both verbs,
-repeat the flag or separate paths with commas.
+repeat the flag or separate paths with commas. A path may be a glob (`--path 'mobile/**'`), matched
+against the tracked files for the collision estimate.
 
 Backend is `auto`: an existing `br` graph is used when present, otherwise a vendored `sqlite3` graph.
 Everything else in showrunner talks to one interface and never learns which it got. Note that `br`

@@ -558,8 +558,13 @@ is printed: `overlap` measures, this guesses about work that has produced nothin
 Only firm evidence blocks — a path the brief names or declares, a file carrying a symbol it
 backticks, a configured glob. A file reached only because it mentions a bare identifier from the
 brief's prose is reported as prose-only overlap, because briefs in one campaign share boilerplate,
-and a refusal that fires on every pair turns `--despite-live` into a reflex. A leaf with nothing
-firmer still blocks on those matches, since they are its whole estimate.
+and a refusal that fires on every pair turns `--despite-live` into a reflex. The same holds for a
+path most of the campaign's briefs name in prose, like a house line pointing at a rules file: it is
+reported, not blocking. A path declared with `--path` always blocks, and a `--path` glob such as
+`'mobile/**'` expands against the tracked files. A leaf with nothing firmer still blocks on those
+matches, since they are its whole estimate. A leaf with no estimate at all collides with everything,
+and the refusal says why: the declared path that matched no tracked file, or a directory its prose
+names without backticks, which never counts.
 
 **A leaf whose branch is never integrated cannot collide.** An A/B evaluation runs one task twice,
 each arm on its own branch, and compares them; the briefs are near-identical by design, so every
