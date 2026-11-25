@@ -284,6 +284,28 @@ TARGETS = [
      "lib/showrunner/campaign.py",
      r"(def _integrated_via_leaf\(cfg, findings\):\n)",
      "    return None\ndef _neutered_integrated_via_leaf(cfg, findings):\n"),
+    # #120. A snapshot row that drops a merge-state key restores the reported state: a viewer
+    # cannot tell merged work from work waiting on review without calling `reconcile`, which
+    # records. Each stub overrides one key with null (a later duplicate key wins in a dict
+    # literal); the last one skips the offline ancestry pass, so no row is integrated via a leaf.
+    ("snapshot row: merged", "cli.cmd_snapshot", "lib/showrunner/cli.py",
+     r'(                      "merged": f\.get\("merged"\),\n)',
+     '                      "merged": None,\n'),
+    ("snapshot row: content_in_base", "cli.cmd_snapshot", "lib/showrunner/cli.py",
+     r'(                      "content_in_base": f\.get\("content_in_base"\),\n)',
+     '                      "content_in_base": None,\n'),
+    ("snapshot row: branch_exists", "cli.cmd_snapshot", "lib/showrunner/cli.py",
+     r'(                      "branch_exists": f\.get\("branch_exists"\),\n)',
+     '                      "branch_exists": None,\n'),
+    ("snapshot row: integrated_via", "cli.cmd_snapshot", "lib/showrunner/cli.py",
+     r'(                      "integrated_via": f\.get\("integrated_via"\),\n)',
+     '                      "integrated_via": None,\n'),
+    ("snapshot row: leaf_status", "cli.cmd_snapshot", "lib/showrunner/cli.py",
+     r'(                      "leaf_status": f\.get\("leaf_status"\),\n)',
+     '                      "leaf_status": None,\n'),
+    ("snapshot: integrated via a later leaf", "cli.cmd_snapshot", "lib/showrunner/cli.py",
+     r"(    campaign\._integrated_via_leaf\(cfg, findings\)\n)",
+     "    [x.pop('integrated_via', None) for x in findings]\n"),
     # #116, `gc --online`. Marking nothing restores the reported state: four trees of a
     # squash-merged PR whose head no leaf holds stay HELD as "not in origin/main".
     ("a held tree proved by its merged PR", "prproof.prove", "lib/showrunner/prproof.py",

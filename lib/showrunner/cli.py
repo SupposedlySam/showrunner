@@ -3945,6 +3945,12 @@ def cmd_snapshot(args):
     ready = g.ready()
     in_prog = [x for x in g.list(status=G.IN_PROGRESS) if not x.is_epic]
     findings = campaign.reconcile(cfg, g, base=args.base, record=False)
+    # THE SAME OFFLINE RULE `gc` USES, so a leaf whose work landed through a later leaf's branch
+    # reads as integrated here too. Ancestry reads only: one `merge-base --is-ancestor` per pair
+    # of (finding not yet integrated, finding integrated on its own evidence). A merged PR no
+    # leaf holds is `gc --online`'s question and costs a network call, so `integrated_pr` is
+    # always null in a snapshot.
+    campaign._integrated_via_leaf(cfg, findings)
     # NOT RECORDED: a viewer's picture is not a verdict the watchdog acted on.
     is_waiting, waiting_detail = campaign.waiting(cfg, g, base=args.base, record=False)
     _, _, unreadable = events.read(cfg, limit=1)
@@ -3974,9 +3980,23 @@ def cmd_snapshot(args):
                    "lane": lanes.route(cfg, x)["lane"]} for x in ready],
         "in_progress": [{"id": x["id"], "actor": x.get("actor"),
                          "parked": bool(x.get("parked"))} for x in in_prog],
+        # MERGE STATE, so a viewer can tell work that landed from work waiting on review without
+        # calling `reconcile`, which records. Leaves close and their PRs merge on GitHub with
+        # nobody running `integrate`, so the verdict alone calls long-merged work unintegrated.
+        # null is "could not tell" and never "no": `merged` is null when the branch is gone,
+        # `content_in_base` (squash-merge detection) is null when git could not answer or the
+        # branch changed nothing, and `integrated_via` is null when no integrated leaf's branch
+        # carries this one's tip.
         "crawlers": [{"crawler": f["crawler"], "leaf": f["leaf"], "branch": f["branch"],
                       "verdict": f["verdict"], "alive": f["alive"], "blocked": f["blocked"],
-                      "harness": f["harness"]} for f in findings],
+                      "harness": f["harness"],
+                      "merged": f.get("merged"),
+                      "content_in_base": f.get("content_in_base"),
+                      "branch_exists": f.get("branch_exists"),
+                      "integrated_via": f.get("integrated_via"),
+                      "integrated_pr": f.get("integrated_pr"),
+                      "leaf_status": f.get("leaf_status"),
+                      } for f in findings],
         "resources": resources,
         # Same finding, machine-readable. A viewer showing a quiet campaign over two sessions
         # still polling is the exact picture #29 describes.
