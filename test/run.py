@@ -21326,6 +21326,135 @@ def test_the_github_waker_stamps_every_invocation():
        and "`github-waker` has NEVER" not in out, out[-1500:])
 
 
+def test_snapshot_carries_each_crawlers_merge_state():
+    group("`snapshot` carries each Crawler's merge state, so a viewer can tell landed work from "
+          "work waiting on review without calling `reconcile`, which records (#120)")
+    if not have("git"):
+        skip("the snapshot merge-state group", "git is not installed")
+        return
+    from showrunner import events as EV
+    exe = os.path.join(ROOT, "bin", "showrunner")
+    home = tmpdir("snap-home")
+
+    def commit(tree, name, text, msg):
+        with open(os.path.join(tree, name), "w") as fh:
+            fh.write(text)
+        sh(["git", "add", "-A"], tree)
+        sh(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", msg], tree)
+
+    def leaf(title, lid):
+        rec = worktree.spawn(cfg, g.show(g.add(title, leaf_id=lid)), actor=lid)
+        campaign.record_spawn(cfg, rec)
+        return rec, cfg.abspath(rec["worktree"])
+
+    cfg = make_repo()
+    g = new_graph(cfg)
+    m, m_wt = leaf("merged", "mg1")
+    commit(m_wt, "m.txt", "m\n", "m")
+    sq, sq_wt = leaf("squashed", "sq1")
+    commit(sq_wt, "s.txt", "s\n", "s")
+    gone, gone_wt = leaf("deleted branch", "dl1")
+    commit(gone_wt, "d.txt", "d\n", "d")
+    # E is the early leaf of a squashed PR: F builds on E and rewrites E's line, and only F lands.
+    e, e_wt = leaf("early", "ea1")
+    commit(e_wt, "x.txt", "v1\n", "v1")
+    f, f_wt = leaf("final", "fi1")
+    sh(["git", "reset", "-q", "--hard", e["branch"]], f_wt)
+    commit(f_wt, "x.txt", "v2\n", "v2")
+    u, u_wt = leaf("unmerged", "un1")
+    commit(u_wt, "u.txt", "u\n", "u")
+    sh(["git", "merge", "-q", "--no-ff", "--no-edit", m["branch"]], cfg.root)
+    for b in (sq["branch"], f["branch"]):
+        sh(["git", "merge", "--squash", "-q", b], cfg.root)
+        sh(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "squash " + b],
+           cfg.root)
+    sh(["git", "worktree", "remove", "--force", gone_wt], cfg.root)
+    sh(["git", "branch", "-D", gone["branch"]], cfg.root)
+    # The control is CLAIMED, so its status differs from its siblings' and a row copying another
+    # row's status cannot pass.
+    g.claim("un1", "un", pid=os.getpid(), tree=cfg.root)
+    statuses = {lid: g.show(lid)["status"] for lid in ("mg1", "sq1", "dl1", "ea1", "fi1", "un1")}
+    g.db.close()
+
+    def state():
+        """Every byte and mtime under .showrunner/, every ref, and the journal's length."""
+        out = {}
+        root = os.path.join(cfg.root, ".showrunner")
+        for d, dirs, files in os.walk(root):
+            for n in dirs + files:
+                pth = os.path.join(d, n)
+                st = os.lstat(pth)
+                digest = None
+                if os.path.isfile(pth) and not os.path.islink(pth):
+                    with open(pth, "rb") as fh:
+                        digest = hashlib.sha1(fh.read()).hexdigest()
+                out[os.path.relpath(pth, root)] = (st.st_mtime_ns, digest)
+        out["<refs>"] = sh(["git", "for-each-ref"], cfg.root).stdout
+        out["<journal>"] = len(EV.read(cfg)[0])
+        return out
+
+    before = state()
+    env = dict(os.environ, HOME=home)
+    env.pop("SHOWRUNNER_CAMPAIGN", None)
+    p = subprocess.run([sys.executable, exe, "snapshot", "--base", "main"], cwd=cfg.root,
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL, env=env)
+    after = state()
+    eq("`snapshot` exits 0 (%s)" % (p.stderr or "").strip()[-80:], p.returncode, 0)
+    # Guarded: an unparseable stdout would crash the group, which the sweep cannot score.
+    try:
+        rows = {r.get("leaf"): r for r in json.loads(p.stdout).get("crawlers") or []}
+    except ValueError:
+        rows = {}
+    row = lambda lid: rows.get(lid) or {}
+    eq("one row per Crawler", sorted(rows), sorted(statuses))
+
+    eq("a merged branch reads merged", row("mg1").get("merged"), True)
+    eq("...and its content is in base", row("mg1").get("content_in_base"), True)
+    eq("a squash-merged branch is NOT merged by ancestry", row("sq1").get("merged"), False)
+    eq("...while its content IS in base, which is the fact a viewer counting merged refs misses",
+       row("sq1").get("content_in_base"), True)
+    eq("a deleted branch reads branch_exists false", row("dl1").get("branch_exists"), False)
+    ok("...and merged is null, not false: 'could not tell' must not read as 'not merged'",
+       "merged" in row("dl1") and row("dl1")["merged"] is None, row("dl1"))
+    ok("...and content_in_base is null for the same reason",
+       "content_in_base" in row("dl1") and row("dl1")["content_in_base"] is None, row("dl1"))
+    via = row("ea1").get("integrated_via") or {}
+    eq("the early leaf of a squashed PR is integrated via the later leaf that landed",
+       (via.get("crawler"), via.get("branch")), (f["crawler"], f["branch"]))
+    # COMPANIONS: each reads a different part of the via record, so one wrong field is named.
+    eq("...the via record says the anchor landed by squash, not by ancestry", via.get("merged"),
+       False)
+    ok("...and carries no PR, since no PR was proved", "pr" in via and via["pr"] is None, via)
+    eq("...while the early leaf has no evidence of its own: via is the only reason it reads "
+       "integrated", (row("ea1").get("merged"), row("ea1").get("content_in_base")), (False, False))
+    eq("...the later leaf itself is integrated on its own evidence, not via anything",
+       (row("fi1").get("content_in_base"), row("fi1").get("integrated_via")), (True, None))
+    eq("the unmerged control: not merged, content not in base, branch present, no via",
+       tuple(row("un1").get(k) for k in ("merged", "content_in_base", "branch_exists",
+                                          "integrated_via")), (False, False, True, None))
+    eq("...and reports its leaf's status", row("un1").get("leaf_status"), "in_progress")
+    eq("every row reports its leaf's status as the graph holds it",
+       {lid: row(lid).get("leaf_status") for lid in statuses}, statuses)
+    for lid in ("mg1", "sq1", "ea1", "fi1"):
+        eq("...%s reads %s, not the control's status" % (lid, statuses[lid]),
+           row(lid).get("leaf_status"), statuses[lid])
+        eq("...and its branch still exists, so branch_exists is true rather than null",
+           row(lid).get("branch_exists"), True)
+    ok("integrated_pr is present and null on every row: proving a merged PR is `gc --online`'s "
+       "network call, and a snapshot makes none",
+       all("integrated_pr" in r and r["integrated_pr"] is None for r in rows.values()) and rows,
+       [r.get("integrated_pr") for r in rows.values()])
+
+    # NO WRITES, on the world that exercises the ancestry pass: `_integrated_via_leaf` ran a real
+    # query here (the early leaf's row above proves it), so this is not the vacuous no-op case.
+    eq("`snapshot` changed nothing: no byte or mtime under .showrunner/, no ref, no journal event",
+       sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k)), [])
+    # THE PAIR: the same comparison sees a write when one happens.
+    sh(["git", "update-ref", "refs/heads/snap-probe", "main"], cfg.root)
+    ok("...and the comparison sees a write when one happens",
+       state()["<refs>"] != after["<refs>"])
+
+
 def test_report_verbs_write_nothing():
     group("the report verbs leave .showrunner/ byte-identical, mtimes included; only `waiting` "
           "records, and `waiting --no-record` does not")
@@ -23314,7 +23443,7 @@ def test_never_integrated_leaves_do_not_collide():
 
 def main():
     print("showrunner test harness — CORE needs only Python 3 + git; OPTIONAL skips loudly.")
-    for fn in (test_locks, test_report_verbs_write_nothing, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_the_waker_probes_then_fetches_only_what_moved, test_a_state_change_the_agent_made_itself_does_not_ring, test_an_issue_closed_by_my_own_merge_or_push_does_not_ring, test_the_github_waker_stamps_every_invocation, test_doctor_and_waker_show_state_the_effective_watch, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_a_waker_whose_host_is_gone_stops, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_the_scratch_excuse_reads_game_loops_key_list, test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_gc_judges_where_work_lands, test_gc_online_proves_a_squash_merged_pr_no_leaf_holds, test_a_launched_crawler_runs_as_its_own_tree, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_boilerplate_paths_globs_and_why_blind, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
+    for fn in (test_locks, test_snapshot_carries_each_crawlers_merge_state, test_report_verbs_write_nothing, test_never_integrated_leaves_do_not_collide, test_hook_gaps_checks_the_file_a_hook_runs, test_gc_idle_reclaims_any_idle_tree_and_archives_first, test_the_github_waker_rings_and_stays_quiet, test_the_waker_probes_then_fetches_only_what_moved, test_a_state_change_the_agent_made_itself_does_not_ring, test_an_issue_closed_by_my_own_merge_or_push_does_not_ring, test_the_github_waker_stamps_every_invocation, test_doctor_and_waker_show_state_the_effective_watch, test_a_ring_no_turn_followed_is_reported_once, test_the_wakers_cover_each_others_dropped_ring, test_a_waker_whose_host_is_gone_stops, test_the_harness_echo_is_not_work, test_the_journal_says_what_waiting_concluded, test_a_stand_down_on_an_open_leaf_needs_the_lead, test_the_crawler_waker, test_a_crawler_can_write_the_scratch_spawn_gave_it, test_the_scratch_excuse_reads_game_loops_key_list, test_game_loop_lets_a_crawler_write_a_nested_repo_in_its_own_scratch, test_a_drifted_body_file_is_caught_before_spawn, test_an_implicit_base_behind_its_upstream_is_refused, test_waiting_rings_for_a_stall_and_orphans_are_found, test_the_write_guard_is_never_wired_by_default, test_provisioning_and_inert_helpers_directly, test_gc_judges_where_work_lands, test_gc_online_proves_a_squash_merged_pr_no_leaf_holds, test_a_launched_crawler_runs_as_its_own_tree, test_resume_restarts_a_crawler_in_its_own_tree, test_a_crawler_running_tests_is_not_inert, test_a_pre_block_job_writing_scratch_does_not_release_a_block, test_gc_does_not_count_spawns_own_provisioning_as_work, test_integrate_removes_a_provisioned_tree_and_reports_a_refusal, test_lock_run_keeps_the_callers_directory, test_a_roles_writes_are_enforced_on_bash_too, test_shared_brief_boilerplate_does_not_make_every_pair_collide, test_boilerplate_paths_globs_and_why_blind, test_a_crawler_cannot_shell_delete_scratch_it_does_not_own, test_a_refused_spawn_never_points_at_a_live_crawlers_tree, test_spawn_refuses_paths_the_default_branch_deleted, test_a_crawler_tree_can_be_sparse_without_losing_its_rails, test_a_crawler_can_close_without_writing_into_the_main_checkout, test_an_absent_session_id_matches_nothing, test_a_recycled_pid_is_not_a_lingering_crawler, test_a_required_prose_option_can_be_supplied_by_file, test_a_session_is_told_before_it_goes_unattended, test_spawn_session_names_the_caller_not_the_child, test_spawn_binds_the_crawler_to_its_campaign, test_the_watcher_sees_more_than_new_issues, test_many_agents_one_monorepo, test_a_campaign_seat_is_visible_to_a_hook, test_install_local_reaches_nobody, test_reconcile_quotes_the_questions_a_crawler_could_not_ask, test_a_message_that_admits_skipped_research_is_refused, test_add_and_edit_take_every_path_they_are_given, test_a_hook_registered_in_both_layers_is_reported, test_gc_sees_a_squash_merge, test_a_dependency_can_be_removed, test_doctor_does_not_promise_a_refusal_that_never_comes, test_a_stale_self_pin_says_so_where_it_is_read, test_the_issue_waker_does_not_hold_a_crawler, test_the_stall_detector_can_actually_measure_under_a_campaign, test_a_crawler_is_joined_to_its_own_room, test_guard_anchor_phrase_is_live, test_reclaim_survives_an_unset_base, test_config_refusals, test_user_config_layer, test_config_layer_shadow_report, test_every_rule_can_fail, test_graph, test_lifecycle, test_stalled_sessions, test_close_gate,
                test_stop_gate, test_baseline, test_routing, test_collision, test_spawn,
                test_harness_provisioning, test_attribution, test_harness_gap,
                test_future_tense_gate, test_post_checkout_hook_failure,

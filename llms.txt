@@ -427,6 +427,23 @@ ready leaves, in-progress leaves, every Crawler with its verdict, every resource
 holder, and the waiting verdict. Assembling that from `status` + `reconcile` + `waiting` + `plan`
 costs four round trips and hands you a composite of instants that never co-existed.
 
+**Each `crawlers` row carries its merge state**, so a viewer can tell work that landed from work
+waiting on review without calling `reconcile`, which records. Leaves close and their PRs merge
+on GitHub with nobody running `integrate`, so the verdict alone calls long-merged work
+unintegrated. A null means "could not tell", never "no":
+
+- `merged`: the branch is an ancestor of the base. null when the branch is gone.
+- `content_in_base`: the base already holds every byte the branch changed, which is how a
+  squash-merge shows up (`merged` stays false). true when `merged` is. null when git could not
+  answer, the branch is gone, or it changed nothing.
+- `branch_exists`: the recorded branch still exists locally.
+- `integrated_via`: `{crawler, branch, merged, pr}` of a leaf integrated on its own evidence
+  whose branch carries this one's tip (the early commits of a squashed PR), else null. The
+  same offline ancestry rule `gc` uses.
+- `integrated_pr`: always null here. Proving a merged PR no leaf holds is `gc --online`'s
+  network call, and `snapshot` makes none.
+- `leaf_status`: the leaf's status in the graph, or `"unknown"` when the graph has no such leaf.
+
 The two join on `cursor`. `snapshot`'s cursor names the last event it could have seen, so
 `watch --since <that>` gives you exactly what is not already reflected — no overlap to
 de-duplicate and no gap to guess at. It is **not** a transaction: nothing freezes the graph, so

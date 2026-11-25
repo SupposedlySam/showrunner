@@ -1083,7 +1083,10 @@ The two are a pair. An event saying `leaf.closed` is a **delta against a picture
 needs the picture first — and building it from `status` + `reconcile` + `waiting` + `plan` costs
 four round trips and returns a composite of instants that never co-existed. They join on a
 `cursor`: `snapshot`'s names the last event it could have seen, so `watch --since <that>` gives
-exactly what is not already reflected, with no overlap and no gap.
+exactly what is not already reflected, with no overlap and no gap. Each Crawler row carries its
+merge state (`merged`, `content_in_base` for squash-merges, `branch_exists`, `integrated_via`,
+`leaf_status`), so a viewer can tell landed work from work waiting on review; llms.txt says what
+each value means.
 
 **A host that must not change the repo has a fixed set of verbs that write nothing**, `snapshot`,
 `status` and `doctor` among them; llms.txt lists them under "Read-only verbs". `waiting` is the
